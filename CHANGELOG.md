@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(discord)* Allowlist bounds history search even with an explicit channel
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.14
 ## [0.10.13] - 2026-09-08
 
 ### 🚀 Features
