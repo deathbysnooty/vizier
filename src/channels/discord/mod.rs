@@ -180,6 +180,10 @@ impl EventHandler for Handler {
         let admin_only = CreateCommand::new("adminonly")
             .description("admin only: toggle whether the bot answers admins and nobody else");
         let _ = Command::create_global_command(ctx.http.clone(), admin_only).await;
+
+        // Upstream handles /help but never registers it, so it never appears.
+        let help = CreateCommand::new("help").description("what I do and how to use me");
+        let _ = Command::create_global_command(ctx.http.clone(), help).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -203,7 +207,8 @@ impl EventHandler for Handler {
 
                 // Authorisation is on the Discord-supplied user id, not on anything
                 // the caller can put in a message, so it cannot be talked around.
-                let reply = if !admin_ids().contains(&caller) {
+                let is_admin = admin_ids().contains(&caller);
+                let reply = if !is_admin {
                     tracing::warn!(
                         "rejected /{} from non-admin {} ({})",
                         command.data.name,
@@ -240,11 +245,15 @@ impl EventHandler for Handler {
                     }
                 };
 
+                // Refusals go only to the caller, so a non-admin poking at this
+                // cannot spam the channel.
                 let _ = command
                     .create_response(
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(reply),
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(!is_admin)
+                                .content(reply),
                         ),
                     )
                     .await;
@@ -252,8 +261,9 @@ impl EventHandler for Handler {
 
             if command.data.name == "adminonly" {
                 let caller = command.user.id.get();
+                let is_admin = admin_ids().contains(&caller);
 
-                let reply = if !admin_ids().contains(&caller) {
+                let reply = if !is_admin {
                     tracing::warn!(
                         "rejected /adminonly from non-admin {} ({})",
                         command.user.name,
@@ -293,7 +303,9 @@ impl EventHandler for Handler {
                     .create_response(
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(reply),
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(!is_admin)
+                                .content(reply),
                         ),
                     )
                     .await;
@@ -439,19 +451,28 @@ impl EventHandler for Handler {
                     .create_response(
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(
-                                r#"
-Just mention me when you need to summon me.
-I will only read the chat otherwise.
-If I am halucinating, feel free to `/lobotomy` me
+                            CreateInteractionResponseMessage::new().ephemeral(true).content(
+                                r#"**Loduchand** — MLCI ka apna bot.
 
-**Commands:**
-• `/checkpoint` — Save checkpoint with handover summary
-• `/lobotomy` — Save checkpoint without handover (clean break)
-• `/abort` — Abort current thinking
-• `/new` — Create new session
-• `/session` — List or switch sessions
-                            "#,
+Mujhe @mention karo ya DM bhejo, tabhi reply karunga. Baaki time bas padhta rehta hoon.
+
+**Commands**
+• `/help` — yehi message
+• `/new` — nayi baat, purani bhool jaunga
+• `/session` — purani conversations dekho ya switch karo
+• `/abort` — bahut der laga raha hoon toh rok do
+• `/checkpoint` — ab tak ka summary save karo
+• `/lobotomy` — sab bhula ke clean start
+• `/thinking` — meri soch dikhaun ya nahi
+• `/tool_calls` — background actions dikhaun ya nahi
+
+**Sirf admins ke liye**
+• `/stop` — mujhe chup kara do
+• `/resume` — wapas online
+• `/adminonly` — sirf admins se baat karun
+
+Main galat bhi ho sakta hoon — check kar lena. Web browse nahi kar sakta, links nahi khol sakta, images nahi dekh sakta.
+Ye message sirf tumhe dikh raha hai."#,
                             ),
                         ),
                     )
