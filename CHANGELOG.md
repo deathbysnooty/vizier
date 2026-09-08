@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.17] - 2026-09-08
+
+### 🚀 Features
+
+- *(discord)* Kalesh detection with E-lafda ping
 ## [0.10.16] - 2026-09-08
 
 ### 🚀 Features
 
 - *(discord)* Admin-only records everyone, replies only to admins
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.16
 ## [0.10.15] - 2026-09-08
 
 ### ⚙️ Miscellaneous Tasks
