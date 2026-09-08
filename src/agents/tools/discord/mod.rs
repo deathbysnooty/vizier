@@ -250,14 +250,25 @@ impl VizierTool for SearchDiscordHistory {
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let user_filter = args.user.as_ref().map(|u| u.trim().to_lowercase());
 
-        let channels: Vec<u64> = match args.channel_id {
-            Some(c) => vec![c],
-            None => searchable_channels(),
-        };
-        if channels.is_empty() {
+        // An explicit channel_id narrows the search; it never widens it. History
+        // from channels outside the allowlist stays unreadable even though it is
+        // still on disk from before the allowlist existed.
+        let allowed = searchable_channels();
+        if allowed.is_empty() {
             return Ok("No monitored channels are configured, so there is nothing to search."
                 .to_string());
         }
+        let channels: Vec<u64> = match args.channel_id {
+            Some(c) if allowed.contains(&c) => vec![c],
+            Some(_) => {
+                return Ok(
+                    "That channel is not one of the monitored channels, so its history \
+                     cannot be searched."
+                        .to_string(),
+                );
+            }
+            None => allowed,
+        };
 
         let mut hits: Vec<(chrono::DateTime<Utc>, String)> = vec![];
 
