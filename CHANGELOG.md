@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.14] - 2026-09-08
+
+### 🐛 Bug Fixes
+
+- *(discord)* Allowlist bounds history search even with an explicit channel
 ## [0.10.13] - 2026-09-08
 
 ### 🚀 Features
 
 - *(discord)* History search tool, channel allowlist, quoted-message text
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.13
 ## [0.10.12] - 2026-09-08
 
 ### ⚙️ Miscellaneous Tasks
