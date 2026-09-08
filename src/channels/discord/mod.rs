@@ -86,6 +86,40 @@ struct ChannelState {
     show_tool_calls: bool,
 }
 
+/// Discord user IDs allowed to run `/stop` and `/resume`.
+///
+/// Override at runtime with `VIZIER_DISCORD_ADMIN_IDS` (comma-separated) so the
+/// admin list can change without rebuilding the binary.
+const DEFAULT_ADMIN_IDS: &[u64] = &[
+    1417834414368362596,
+    1378616145929703497,
+    280982228228505600,
+];
+
+fn admin_ids() -> Vec<u64> {
+    match std::env::var("VIZIER_DISCORD_ADMIN_IDS") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u64>().ok())
+            .collect(),
+        _ => DEFAULT_ADMIN_IDS.to_vec(),
+    }
+}
+
+/// State key holding the agent-wide pause flag (applies across every channel).
+fn paused_key(agent_id: &str) -> String {
+    format!("{}__paused", agent_id)
+}
+
+/// Whether the agent is currently paused. Defaults to running on any error, so
+/// a storage failure can never leave the bot silently dead.
+async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str) -> bool {
+    matches!(
+        storage.get_state(paused_key(agent_id)).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -121,6 +155,14 @@ impl EventHandler for Handler {
 
         let tool_calls = CreateCommand::new("tool_calls").description("toggle showing tool call details");
         let _ = Command::create_global_command(ctx.http.clone(), tool_calls).await;
+
+        let stop = CreateCommand::new("stop")
+            .description("admin only: silence the bot everywhere until /resume");
+        let _ = Command::create_global_command(ctx.http.clone(), stop).await;
+
+        let resume =
+            CreateCommand::new("resume").description("admin only: bring the bot back after /stop");
+        let _ = Command::create_global_command(ctx.http.clone(), resume).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -133,6 +175,59 @@ impl EventHandler for Handler {
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new().content("Pong!"),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "stop" || command.data.name == "resume" {
+                let pause = command.data.name == "stop";
+                let caller = command.user.id.get();
+
+                // Authorisation is on the Discord-supplied user id, not on anything
+                // the caller can put in a message, so it cannot be talked around.
+                let reply = if !admin_ids().contains(&caller) {
+                    tracing::warn!(
+                        "rejected /{} from non-admin {} ({})",
+                        command.data.name,
+                        command.user.name,
+                        caller
+                    );
+                    "Only server admins can use this.".to_string()
+                } else {
+                    match self
+                        .1
+                        .storage
+                        .save_state(paused_key(&agent_id), serde_json::Value::Bool(pause))
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                "agent '{}' {} by admin {} ({})",
+                                agent_id,
+                                if pause { "paused" } else { "resumed" },
+                                command.user.name,
+                                caller
+                            );
+                            if pause {
+                                "Paused. I'll ignore everyone until an admin runs `/resume`."
+                                    .to_string()
+                            } else {
+                                "Back online.".to_string()
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("failed to persist pause flag: {:?}", err);
+                            "Couldn't save that — try again.".to_string()
+                        }
+                    }
+                };
+
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().content(reply),
                         ),
                     )
                     .await;
@@ -582,6 +677,13 @@ If I am halucinating, feel free to `/lobotomy` me
 
     async fn message(&self, ctx: Context, msg: Message) {
         let agent_id = self.0.clone();
+
+        // Paused by an admin: read nothing, store nothing, spend nothing.
+        // Slash commands still work, so /resume can lift it.
+        if is_paused(&self.1.storage, &agent_id).await {
+            return;
+        }
+
         let channel = VizierChannelId::DiscordChanel(msg.channel_id.get());
 
         let key = format!("{}__{}", agent_id, channel.to_slug());
