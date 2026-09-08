@@ -86,6 +86,53 @@ struct ChannelState {
     show_tool_calls: bool,
 }
 
+/// Discord user IDs allowed to run `/stop` and `/resume`.
+///
+/// Override at runtime with `VIZIER_DISCORD_ADMIN_IDS` (comma-separated) so the
+/// admin list can change without rebuilding the binary.
+const DEFAULT_ADMIN_IDS: &[u64] = &[
+    1417834414368362596,
+    1378616145929703497,
+    280982228228505600,
+];
+
+fn admin_ids() -> Vec<u64> {
+    match std::env::var("VIZIER_DISCORD_ADMIN_IDS") {
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u64>().ok())
+            .collect(),
+        _ => DEFAULT_ADMIN_IDS.to_vec(),
+    }
+}
+
+/// State key holding the agent-wide pause flag (applies across every channel).
+fn paused_key(agent_id: &str) -> String {
+    format!("{}__paused", agent_id)
+}
+
+/// Whether the agent is currently paused. Defaults to running on any error, so
+/// a storage failure can never leave the bot silently dead.
+async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str) -> bool {
+    matches!(
+        storage.get_state(paused_key(agent_id)).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
+}
+
+/// State key holding the agent-wide admin-only flag.
+fn admin_only_key(agent_id: &str) -> String {
+    format!("{}__admin_only", agent_id)
+}
+
+/// Whether the agent is restricted to admins. Fails open like `is_paused`.
+async fn is_admin_only(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str) -> bool {
+    matches!(
+        storage.get_state(admin_only_key(agent_id)).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -121,6 +168,22 @@ impl EventHandler for Handler {
 
         let tool_calls = CreateCommand::new("tool_calls").description("toggle showing tool call details");
         let _ = Command::create_global_command(ctx.http.clone(), tool_calls).await;
+
+        let stop = CreateCommand::new("stop")
+            .description("admin only: silence the bot everywhere until /resume");
+        let _ = Command::create_global_command(ctx.http.clone(), stop).await;
+
+        let resume =
+            CreateCommand::new("resume").description("admin only: bring the bot back after /stop");
+        let _ = Command::create_global_command(ctx.http.clone(), resume).await;
+
+        let admin_only = CreateCommand::new("adminonly")
+            .description("admin only: toggle whether the bot answers admins and nobody else");
+        let _ = Command::create_global_command(ctx.http.clone(), admin_only).await;
+
+        // Upstream handles /help but never registers it, so it never appears.
+        let help = CreateCommand::new("help").description("what I do and how to use me");
+        let _ = Command::create_global_command(ctx.http.clone(), help).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -133,6 +196,116 @@ impl EventHandler for Handler {
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new().content("Pong!"),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "stop" || command.data.name == "resume" {
+                let pause = command.data.name == "stop";
+                let caller = command.user.id.get();
+
+                // Authorisation is on the Discord-supplied user id, not on anything
+                // the caller can put in a message, so it cannot be talked around.
+                let is_admin = admin_ids().contains(&caller);
+                let reply = if !is_admin {
+                    tracing::warn!(
+                        "rejected /{} from non-admin {} ({})",
+                        command.data.name,
+                        command.user.name,
+                        caller
+                    );
+                    "Only server admins can use this.".to_string()
+                } else {
+                    match self
+                        .1
+                        .storage
+                        .save_state(paused_key(&agent_id), serde_json::Value::Bool(pause))
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                "agent '{}' {} by admin {} ({})",
+                                agent_id,
+                                if pause { "paused" } else { "resumed" },
+                                command.user.name,
+                                caller
+                            );
+                            if pause {
+                                "Paused. I'll ignore everyone until an admin runs `/resume`."
+                                    .to_string()
+                            } else {
+                                "Back online.".to_string()
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("failed to persist pause flag: {:?}", err);
+                            "Couldn't save that — try again.".to_string()
+                        }
+                    }
+                };
+
+                // Refusals go only to the caller, so a non-admin poking at this
+                // cannot spam the channel.
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(!is_admin)
+                                .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "adminonly" {
+                let caller = command.user.id.get();
+                let is_admin = admin_ids().contains(&caller);
+
+                let reply = if !is_admin {
+                    tracing::warn!(
+                        "rejected /adminonly from non-admin {} ({})",
+                        command.user.name,
+                        caller
+                    );
+                    "Only server admins can use this.".to_string()
+                } else {
+                    let enable = !is_admin_only(&self.1.storage, &agent_id).await;
+                    match self
+                        .1
+                        .storage
+                        .save_state(admin_only_key(&agent_id), serde_json::Value::Bool(enable))
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                "agent '{}' admin-only mode {} by admin {} ({})",
+                                agent_id,
+                                if enable { "enabled" } else { "disabled" },
+                                command.user.name,
+                                caller
+                            );
+                            if enable {
+                                "Admin-only mode **on**. I'll only answer admins — everyone else gets nothing.".to_string()
+                            } else {
+                                "Admin-only mode **off**. Back to answering everyone.".to_string()
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("failed to persist admin-only flag: {:?}", err);
+                            "Couldn't save that — try again.".to_string()
+                        }
+                    }
+                };
+
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(!is_admin)
+                                .content(reply),
                         ),
                     )
                     .await;
@@ -278,19 +451,29 @@ impl EventHandler for Handler {
                     .create_response(
                         ctx.http.clone(),
                         serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(
-                                r#"
-Just mention me when you need to summon me.
-I will only read the chat otherwise.
-If I am halucinating, feel free to `/lobotomy` me
+                            CreateInteractionResponseMessage::new().ephemeral(true).content(
+                                r#"**Loduchand** — MLCI ka apna bot.
 
-**Commands:**
-• `/checkpoint` — Save checkpoint with handover summary
-• `/lobotomy` — Save checkpoint without handover (clean break)
-• `/abort` — Abort current thinking
-• `/new` — Create new session
-• `/session` — List or switch sessions
-                            "#,
+Mujhe channel mein @mention karo, tabhi reply karunga. Baaki time bas padhta rehta hoon.
+DM ka jawab nahi deta — sab kuch yahin server mein.
+
+**Commands**
+• `/help` — yehi message
+• `/new` — nayi baat, purani bhool jaunga
+• `/session` — purani conversations dekho ya switch karo
+• `/abort` — bahut der laga raha hoon toh rok do
+• `/checkpoint` — ab tak ka summary save karo
+• `/lobotomy` — sab bhula ke clean start
+• `/thinking` — meri soch dikhaun ya nahi
+• `/tool_calls` — background actions dikhaun ya nahi
+
+**Sirf admins ke liye**
+• `/stop` — mujhe chup kara do
+• `/resume` — wapas online
+• `/adminonly` — sirf admins se baat karun
+
+Main galat bhi ho sakta hoon — check kar lena. Web browse nahi kar sakta, links nahi khol sakta, images nahi dekh sakta.
+Ye message sirf tumhe dikh raha hai."#,
                             ),
                         ),
                     )
@@ -582,6 +765,30 @@ If I am halucinating, feel free to `/lobotomy` me
 
     async fn message(&self, ctx: Context, msg: Message) {
         let agent_id = self.0.clone();
+
+        // Direct messages are ignored outright. Anyone sharing a server with the
+        // bot can DM it, and there is no per-user rate limit, so an open DM inbox
+        // is an unbounded way for one member to spend tokens. Checked first
+        // because it costs no storage read.
+        if msg.guild_id.is_none() {
+            return;
+        }
+
+        // Paused by an admin: read nothing, store nothing, spend nothing.
+        // Slash commands still work, so /resume can lift it.
+        if is_paused(&self.1.storage, &agent_id).await {
+            return;
+        }
+
+        // Admin-only mode: ignore everyone but the admins. Dropped before any
+        // storage write, so non-admin chatter is not ingested or billed while
+        // this is on.
+        if is_admin_only(&self.1.storage, &agent_id).await
+            && !admin_ids().contains(&msg.author.id.get())
+        {
+            return;
+        }
+
         let channel = VizierChannelId::DiscordChanel(msg.channel_id.get());
 
         let key = format!("{}__{}", agent_id, channel.to_slug());
