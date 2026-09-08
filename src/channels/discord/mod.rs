@@ -1228,6 +1228,19 @@ Ye message sirf tumhe dikh raha hai."#,
                 topic_id,
             );
 
+            // Put the quoted message inline, ahead of the request. It is also in
+            // the metadata, but a weaker model does not reliably connect a
+            // frontmatter field to the word "this" in "factcheck this".
+            let readable = match (&replied_author, &replied_content) {
+                (Some(a), Some(c)) if !c.trim().is_empty() => format!(
+                    "[replying to @{}: \"{}\"]\n{}",
+                    a,
+                    c.replace('\n', " ").chars().take(1500).collect::<String>(),
+                    readable
+                ),
+                _ => readable,
+            };
+
             // Names, not ids - both for what we answer and for what we record,
             // so the stored history is searchable by name later too.
             let (content, request_content) = if silence_this_author || (!is_mention && !is_dm) {
