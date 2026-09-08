@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.16] - 2026-09-08
+
+### 🚀 Features
+
+- *(discord)* Admin-only records everyone, replies only to admins
+## [0.10.15] - 2026-09-08
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.15
 ## [0.10.14] - 2026-09-08
 
 ### 🐛 Bug Fixes
