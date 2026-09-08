@@ -248,25 +248,21 @@ impl VizierTool for SearchDiscordHistory {
         args: Self::Input,
         _ctx: &ToolContext,
     ) -> anyhow::Result<Self::Output, VizierError> {
-        let needle = args
-            .query
-            .as_deref()
-            .map(|q| q.trim().to_lowercase())
-            .filter(|q| !q.is_empty());
         let user_given = args
             .user
             .as_deref()
             .map(|u| !u.trim().is_empty())
             .unwrap_or(false);
-        if needle.is_none() && !user_given {
+        let query_given = args
+            .query
+            .as_deref()
+            .map(|q| !q.trim().is_empty())
+            .unwrap_or(false);
+        if !user_given && !query_given {
             return Ok("Give either something to search for, or a person to search by.".to_string());
         }
-        let limit = args.limit.unwrap_or(10).clamp(1, 50);
-        let user_filter = args.user.as_ref().map(|u| u.trim().to_lowercase());
 
-        // An explicit channel_id narrows the search; it never widens it. History
-        // from channels outside the allowlist stays unreadable even though it is
-        // still on disk from before the allowlist existed.
+        // An explicit channel narrows the search; it never widens it.
         let allowed = searchable_channels();
         if allowed.is_empty() {
             return Ok("No monitored channels are configured, so there is nothing to search."
@@ -283,64 +279,28 @@ impl VizierTool for SearchDiscordHistory {
             }
             None => allowed,
         };
+        let slugs: Vec<String> = channels
+            .iter()
+            .map(|c| VizierChannelId::DiscordChanel(*c).to_slug())
+            .collect();
 
-        let mut hits: Vec<(chrono::DateTime<Utc>, String)> = vec![];
+        let limit = args.limit.unwrap_or(15).clamp(1, 50);
+        let rows = self
+            .storage
+            .search_user_messages(
+                &self.agent_id,
+                &slugs,
+                args.query.as_deref(),
+                args.user.as_deref(),
+                limit,
+            )
+            .await
+            .map_err(|e| VizierError(e.to_string()))?;
 
-        for channel_id in channels {
-            let session = VizierSession(
-                self.agent_id.clone(),
-                VizierChannelId::DiscordChanel(channel_id),
-                None,
-            );
-            let entries = match self
-                .storage
-                .list_session_history(session, None, Some(5000))
-                .await
-            {
-                Ok(e) => e,
-                Err(err) => {
-                    tracing::warn!("history search failed for channel {}: {:?}", channel_id, err);
-                    continue;
-                }
-            };
-
-            for entry in entries {
-                let crate::schema::SessionHistoryContent::Request(req) = entry.content else {
-                    continue;
-                };
-                let text = req.content.to_string();
-                if let Some(ref n) = needle {
-                    if !text.to_lowercase().contains(n) {
-                        continue;
-                    }
-                }
-                if let Some(ref want) = user_filter {
-                    if !req.user.to_lowercase().contains(want) {
-                        continue;
-                    }
-                }
-                let msg_id = match req.platform_message_id {
-                    Some(crate::schema::PlatformMessageId::Discord(id)) => id.to_string(),
-                    _ => "-".to_string(),
-                };
-                hits.push((
-                    entry.timestamp,
-                    format!(
-                        "[{}] {} in <#{}> (msg {}): {}",
-                        entry.timestamp.format("%Y-%m-%d %H:%M UTC"),
-                        req.user,
-                        channel_id,
-                        msg_id,
-                        text.replace('\n', " ")
-                    ),
-                ));
-            }
-        }
-
-        if hits.is_empty() {
+        if rows.is_empty() {
             return Ok(format!(
                 "No messages found for {}. Say so plainly - do not guess at what was said.",
-                match (&needle, &args.user) {
+                match (&args.query, &args.user) {
                     (Some(q), Some(u)) => format!("\"{}\" from {}", q, u),
                     (Some(q), None) => format!("\"{}\"", q),
                     (None, Some(u)) => format!("messages by {}", u),
@@ -349,16 +309,28 @@ impl VizierTool for SearchDiscordHistory {
             ));
         }
 
-        // Newest first, so the most recent mention leads.
-        hits.sort_by(|a, b| b.0.cmp(&a.0));
-        let total = hits.len();
-        let shown: Vec<String> = hits.into_iter().take(limit).map(|(_, s)| s).collect();
+        let total = rows.len();
+        let mut lines: Vec<String> = rows
+            .into_iter()
+            .map(|(ts, channel, user, text, mid)| {
+                let when = chrono::DateTime::from_timestamp_millis(ts)
+                    .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|| ts.to_string());
+                let cid = channel.trim_start_matches("discord__");
+                format!(
+                    "[{}] {} in <#{}> (msg {}): {}",
+                    when,
+                    user,
+                    cid,
+                    if mid.is_empty() { "-" } else { &mid },
+                    text.replace('\n', " ")
+                )
+            })
+            .collect();
+        // Oldest first reads better once the model relays it.
+        lines.reverse();
 
-        Ok(format!(
-            "{} match(es), showing {}:\n{}",
-            total,
-            shown.len(),
-            shown.join("\n")
-        ))
+        Ok(format!("{} message(s) found:\n{}", total, lines.join("\n")))
     }
+
 }

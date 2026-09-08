@@ -546,4 +546,73 @@ impl HistoryStorage for SqliteStorage {
         )?;
         Ok(entry)
     }
+
+    async fn search_user_messages(
+        &self,
+        agent_id: &str,
+        channels: &[String],
+        query: Option<&str>,
+        user: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String, String, String)>> {
+        if channels.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock();
+
+        // Deliberately ignores `topic`: a person's messages are spread across
+        // every topic the channel has ever had, and callers want the person,
+        // not one conversation slice.
+        let placeholders = channels
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut sql = format!(
+            "SELECT timestamp, channel, \
+                    COALESCE(json_extract(data,'$.content.Request.user'),'') AS usr, \
+                    COALESCE(json_extract(data,'$.content.Request.content.chat'), \
+                             json_extract(data,'$.content.Request.content.silent_read'),'') AS txt, \
+                    COALESCE(json_extract(data,'$.content.Request.platform_message_id.Discord'),'') AS mid \
+             FROM session_history \
+             WHERE agent_id = ?1 AND content_type = 'Request' AND channel IN ({}) \
+               AND txt <> ''",
+            placeholders
+        );
+
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(agent_id.to_string())];
+        for c in channels {
+            params.push(Box::new(c.clone()));
+        }
+        let mut idx = channels.len() + 2;
+        if let Some(u) = user.filter(|u| !u.trim().is_empty()) {
+            sql.push_str(&format!(" AND lower(usr) LIKE ?{}", idx));
+            params.push(Box::new(format!("%{}%", u.trim().to_lowercase())));
+            idx += 1;
+        }
+        if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+            sql.push_str(&format!(" AND lower(txt) LIKE ?{}", idx));
+            params.push(Box::new(format!("%{}%", q.trim().to_lowercase())));
+        }
+        sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT {}", limit.clamp(1, 200)));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<(i64, String, String, String, String)> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4).unwrap_or_default(),
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
 }

@@ -406,6 +406,18 @@ impl HistoryStorage for FileSystemStorage {
 
         Ok(entry)
     }
+    async fn search_user_messages(
+        &self,
+        _agent_id: &str,
+        _channels: &[String],
+        _query: Option<&str>,
+        _user: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<(i64, String, String, String, String)>> {
+        // No queryable index on the filesystem backend; sqlite is the supported
+        // backend for message search.
+        Ok(vec![])
+    }
 }
 
 fn is_non_user_channel(channel_slug: &str) -> bool {

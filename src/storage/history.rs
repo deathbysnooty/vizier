@@ -60,6 +60,18 @@ pub trait HistoryStorage {
         session: VizierSession,
         handover: Option<String>,
     ) -> Result<SessionHistory>;
+
+    /// Search recorded user messages by author and/or text, across channels and
+    /// regardless of topic. Session-scoped listing cannot answer "what has this
+    /// person been saying", because it is pinned to one topic at a time.
+    async fn search_user_messages(
+        &self,
+        agent_id: &str,
+        channels: &[String],
+        query: Option<&str>,
+        user: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String, String, String)>>;
 }
 
 #[async_trait::async_trait]
@@ -139,5 +151,18 @@ impl HistoryStorage for VizierStorage {
         handover: Option<String>,
     ) -> Result<SessionHistory> {
         self.0.save_checkpoint(session, handover).await
+    }
+
+    async fn search_user_messages(
+        &self,
+        agent_id: &str,
+        channels: &[String],
+        query: Option<&str>,
+        user: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String, String, String)>> {
+        self.0
+            .search_user_messages(agent_id, channels, query, user, limit)
+            .await
     }
 }
