@@ -489,10 +489,21 @@ impl HistoryStorage for SqliteStorage {
             hist_sql.push_str(&format!(" AND timestamp < ?{}", param_idx));
             hist_params.push(Box::new(before_dt.timestamp_millis()));
         }
-        hist_sql.push_str(" ORDER BY timestamp ASC");
+        // Take the most recent N and reverse, rather than everything since the
+        // checkpoint. Unbounded, this grows until the request is too large to
+        // send, and the checkpoint that is supposed to relieve it has to
+        // summarise the whole pile in one call - which is exactly when it
+        // stalls. Bounding here keeps the agent usable whether or not
+        // checkpointing succeeds.
+        let limit: usize = std::env::var("VIZIER_MAX_HISTORY")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(150);
+        hist_sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT {}", limit));
 
         let mut stmt = conn.prepare(&hist_sql)?;
-        let history: Vec<SessionHistory> = stmt
+        let mut history: Vec<SessionHistory> = stmt
             .query_map(rusqlite::params_from_iter(hist_params.iter()), |row| {
                 let data: String = row.get(0)?;
                 Ok(data)
@@ -500,6 +511,7 @@ impl HistoryStorage for SqliteStorage {
             .filter_map(|r| r.ok())
             .filter_map(|data| serde_json::from_str::<SessionHistory>(&data).ok())
             .collect();
+        history.reverse();
 
         Ok((history, handover))
     }
