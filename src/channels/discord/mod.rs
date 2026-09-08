@@ -415,6 +415,39 @@ async fn fetch_embedded_media(link: &str) -> Option<(String, Vec<u8>)> {
     Some((filename_for(&media_url), bytes.to_vec()))
 }
 
+/// Discord puts mentions on the wire as raw ids - `<@123>` for a person,
+/// `<#123>` for a channel - so the model never sees who or what was tagged and
+/// ends up quoting numbers back at people. Rewrite them into readable names
+/// before anything downstream touches the text.
+fn humanise_mentions(msg: &Message, bot_id: u64) -> String {
+    let mut out = msg.content.clone();
+
+    // Strip our own mention first: it carries nothing, and doing it before the
+    // name substitutions stops the bot being renamed into its own prompt.
+    for pat in [format!("<@{}>", bot_id), format!("<@!{}>", bot_id)] {
+        out = out.replace(&pat, " ");
+    }
+
+    for user in &msg.mentions {
+        if user.id.get() == bot_id {
+            continue;
+        }
+        let name = format!("@{}", user.display_name());
+        for pat in [
+            format!("<@{}>", user.id.get()),
+            format!("<@!{}>", user.id.get()),
+        ] {
+            out = out.replace(&pat, &name);
+        }
+    }
+
+    for ch in &msg.mention_channels {
+        out = out.replace(&format!("<#{}>", ch.id.get()), &format!("#{}", ch.name));
+    }
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -1157,6 +1190,9 @@ Ye message sirf tumhe dikh raha hai."#,
             let transport = self.1.transport.clone();
             let file_manager = self.1.file_manager.clone();
             let http = ctx.http.clone();
+            let bot_user_id = ctx.cache.current_user().id.get();
+            // Must happen before `referenced_message` is moved out of `msg`.
+            let readable = humanise_mentions(&msg, bot_user_id);
             let current_user = ctx.cache.current_user().discriminator;
             if msg.author.discriminator == current_user {
                 return;
@@ -1192,21 +1228,15 @@ Ye message sirf tumhe dikh raha hai."#,
                 topic_id,
             );
 
+            // Names, not ids - both for what we answer and for what we record,
+            // so the stored history is searchable by name later too.
             let (content, request_content) = if silence_this_author || (!is_mention && !is_dm) {
                 (
-                    msg.content.clone(),
-                    VizierRequestContent::SilentRead(msg.content),
+                    readable.clone(),
+                    VizierRequestContent::SilentRead(readable),
                 )
             } else {
-                let cleaned = if is_mention {
-                    msg.content
-                        .replace(&format!("@{}", bot_name), "")
-                        .trim()
-                        .to_string()
-                } else {
-                    msg.content.clone()
-                };
-                (cleaned.clone(), VizierRequestContent::Chat(cleaned))
+                (readable.clone(), VizierRequestContent::Chat(readable))
             };
 
             let request = VizierRequest {
