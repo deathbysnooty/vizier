@@ -454,7 +454,8 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new().ephemeral(true).content(
                                 r#"**Loduchand** — MLCI ka apna bot.
 
-Mujhe @mention karo ya DM bhejo, tabhi reply karunga. Baaki time bas padhta rehta hoon.
+Mujhe channel mein @mention karo, tabhi reply karunga. Baaki time bas padhta rehta hoon.
+DM ka jawab nahi deta — sab kuch yahin server mein.
 
 **Commands**
 • `/help` — yehi message
@@ -765,15 +766,23 @@ Ye message sirf tumhe dikh raha hai."#,
     async fn message(&self, ctx: Context, msg: Message) {
         let agent_id = self.0.clone();
 
+        // Direct messages are ignored outright. Anyone sharing a server with the
+        // bot can DM it, and there is no per-user rate limit, so an open DM inbox
+        // is an unbounded way for one member to spend tokens. Checked first
+        // because it costs no storage read.
+        if msg.guild_id.is_none() {
+            return;
+        }
+
         // Paused by an admin: read nothing, store nothing, spend nothing.
         // Slash commands still work, so /resume can lift it.
         if is_paused(&self.1.storage, &agent_id).await {
             return;
         }
 
-        // Admin-only mode: ignore everyone but the admins, in channels and DMs
-        // alike. Dropped before any storage write, so non-admin chatter is not
-        // ingested or billed while this is on.
+        // Admin-only mode: ignore everyone but the admins. Dropped before any
+        // storage write, so non-admin chatter is not ingested or billed while
+        // this is on.
         if is_admin_only(&self.1.storage, &agent_id).await
             && !admin_ids().contains(&msg.author.id.get())
         {
