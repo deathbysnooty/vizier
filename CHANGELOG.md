@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.23] - 2026-09-08
+
+### 🚀 Features
+
+- *(storage)* Index-backed per-user message search
 ## [0.10.22] - 2026-09-08
 
 ### 🐛 Bug Fixes
 
 - *(storage)* Bound history loaded per request
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.22
 ## [0.10.21] - 2026-09-08
 
 ### 🐛 Bug Fixes
