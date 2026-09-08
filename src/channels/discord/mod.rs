@@ -120,6 +120,19 @@ async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str)
     )
 }
 
+/// State key holding the agent-wide admin-only flag.
+fn admin_only_key(agent_id: &str) -> String {
+    format!("{}__admin_only", agent_id)
+}
+
+/// Whether the agent is restricted to admins. Fails open like `is_paused`.
+async fn is_admin_only(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str) -> bool {
+    matches!(
+        storage.get_state(admin_only_key(agent_id)).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -163,6 +176,10 @@ impl EventHandler for Handler {
         let resume =
             CreateCommand::new("resume").description("admin only: bring the bot back after /stop");
         let _ = Command::create_global_command(ctx.http.clone(), resume).await;
+
+        let admin_only = CreateCommand::new("adminonly")
+            .description("admin only: toggle whether the bot answers admins and nobody else");
+        let _ = Command::create_global_command(ctx.http.clone(), admin_only).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -218,6 +235,55 @@ impl EventHandler for Handler {
                         }
                         Err(err) => {
                             tracing::error!("failed to persist pause flag: {:?}", err);
+                            "Couldn't save that — try again.".to_string()
+                        }
+                    }
+                };
+
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "adminonly" {
+                let caller = command.user.id.get();
+
+                let reply = if !admin_ids().contains(&caller) {
+                    tracing::warn!(
+                        "rejected /adminonly from non-admin {} ({})",
+                        command.user.name,
+                        caller
+                    );
+                    "Only server admins can use this.".to_string()
+                } else {
+                    let enable = !is_admin_only(&self.1.storage, &agent_id).await;
+                    match self
+                        .1
+                        .storage
+                        .save_state(admin_only_key(&agent_id), serde_json::Value::Bool(enable))
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                "agent '{}' admin-only mode {} by admin {} ({})",
+                                agent_id,
+                                if enable { "enabled" } else { "disabled" },
+                                command.user.name,
+                                caller
+                            );
+                            if enable {
+                                "Admin-only mode **on**. I'll only answer admins — everyone else gets nothing, mention or DM.".to_string()
+                            } else {
+                                "Admin-only mode **off**. Back to answering everyone.".to_string()
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("failed to persist admin-only flag: {:?}", err);
                             "Couldn't save that — try again.".to_string()
                         }
                     }
@@ -681,6 +747,15 @@ If I am halucinating, feel free to `/lobotomy` me
         // Paused by an admin: read nothing, store nothing, spend nothing.
         // Slash commands still work, so /resume can lift it.
         if is_paused(&self.1.storage, &agent_id).await {
+            return;
+        }
+
+        // Admin-only mode: ignore everyone but the admins, in channels and DMs
+        // alike. Dropped before any storage write, so non-admin chatter is not
+        // ingested or billed while this is on.
+        if is_admin_only(&self.1.storage, &agent_id).await
+            && !admin_ids().contains(&msg.author.id.get())
+        {
             return;
         }
 
