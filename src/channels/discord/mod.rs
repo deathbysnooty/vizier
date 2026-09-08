@@ -147,6 +147,172 @@ async fn is_admin_only(storage: &Arc<crate::storage::VizierStorage>, agent_id: &
     )
 }
 
+// ---------------------------------------------------------------------------
+// Kalesh detection
+//
+// Two stages, so the model is not run on every message. Stage one is a free
+// heuristic over a rolling in-memory window: a burst of messages from only a
+// few people, heavy on replies, looks like an argument. Stage two asks a model
+// whether it actually is one, because on a bakchodi server that shape is also
+// exactly what excited banter looks like. Only stage two can trigger a ping.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct SeenMessage {
+    at: std::time::Instant,
+    author: u64,
+    author_name: String,
+    text: String,
+    is_reply: bool,
+}
+
+#[derive(Default)]
+struct ChannelWindow {
+    messages: Vec<SeenMessage>,
+    last_alert: Option<std::time::Instant>,
+}
+
+static KALESH_STATE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, ChannelWindow>>,
+> = std::sync::OnceLock::new();
+
+fn kalesh_state() -> &'static std::sync::Mutex<HashMap<u64, ChannelWindow>> {
+    KALESH_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+fn kalesh_role_id() -> Option<u64> {
+    std::env::var("VIZIER_KALESH_ROLE_ID").ok()?.trim().parse().ok()
+}
+
+/// Channels to watch for kalesh. Unset means the feature is off entirely.
+fn kalesh_channels() -> Vec<u64> {
+    std::env::var("VIZIER_KALESH_CHANNELS")
+        .ok()
+        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Record a message and report the recent window if it looks like a fight.
+/// Returns None when the shape is unremarkable, the channel is not watched, or
+/// the cooldown is still running.
+fn note_message_and_check(msg: &Message) -> Option<Vec<SeenMessage>> {
+    let channel = msg.channel_id.get();
+    if !kalesh_channels().contains(&channel) {
+        return None;
+    }
+
+    let window_secs = env_u64("VIZIER_KALESH_WINDOW_SECS", 90);
+    let min_msgs = env_u64("VIZIER_KALESH_MIN_MSGS", 10) as usize;
+    let max_authors = env_u64("VIZIER_KALESH_MAX_AUTHORS", 4) as usize;
+    let min_replies = env_u64("VIZIER_KALESH_MIN_REPLIES", 4) as usize;
+    let cooldown_secs = env_u64("VIZIER_KALESH_COOLDOWN_SECS", 900);
+
+    let now = std::time::Instant::now();
+    let mut guard = kalesh_state().lock().ok()?;
+    let entry = guard.entry(channel).or_default();
+
+    entry.messages.push(SeenMessage {
+        at: now,
+        author: msg.author.id.get(),
+        author_name: msg.author.display_name().to_string(),
+        text: msg.content.clone(),
+        is_reply: msg.referenced_message.is_some(),
+    });
+    entry
+        .messages
+        .retain(|m| now.duration_since(m.at).as_secs() <= window_secs);
+    // Keep the buffer bounded even in a very fast channel.
+    if entry.messages.len() > 80 {
+        let cut = entry.messages.len() - 80;
+        entry.messages.drain(0..cut);
+    }
+
+    if let Some(last) = entry.last_alert {
+        if now.duration_since(last).as_secs() < cooldown_secs {
+            return None;
+        }
+    }
+
+    if entry.messages.len() < min_msgs {
+        return None;
+    }
+    let authors: std::collections::HashSet<u64> =
+        entry.messages.iter().map(|m| m.author).collect();
+    if authors.len() > max_authors {
+        return None;
+    }
+    let replies = entry.messages.iter().filter(|m| m.is_reply).count();
+    if replies < min_replies {
+        return None;
+    }
+
+    // Stage one passed. Claim the cooldown now so a burst cannot queue several
+    // model calls before the first one answers.
+    entry.last_alert = Some(now);
+    Some(entry.messages.clone())
+}
+
+/// Ask a model whether the window is a real fight, and for a line to announce
+/// it with. Returns the line only when it says yes.
+async fn classify_kalesh(window: &[SeenMessage]) -> Option<String> {
+    let api_key = std::env::var("OPENROUTER_API_KEY").ok()?;
+    let model = std::env::var("VIZIER_KALESH_MODEL")
+        .unwrap_or_else(|_| "google/gemini-2.5-flash-lite".to_string());
+
+    let transcript = window
+        .iter()
+        .map(|m| format!("{}: {}", m.author_name, m.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "You watch an Indian Discord server where people banter constantly (bakchodi). \
+         Below is a burst of recent messages from one channel.\n\n\
+         Decide whether this is a real fight - people genuinely angry at each other, \
+         personal attacks, someone upset - or just loud banter, roasting between friends, \
+         hype, or an animated discussion.\n\n\
+         Loud is not a fight. Swearing is not a fight. Friends roasting each other is not \
+         a fight. Only say yes if someone actually seems angry or hurt.\n\n\
+         Reply with JSON only: {{\"kalesh\": true|false, \"line\": \"...\"}}\n\
+         If kalesh is true, `line` is one short playful Hinglish line announcing the drama, \
+         popcorn energy, taking nobody's side and naming no winner. If false, `line` is \"\".\n\n\
+         Messages:\n{}",
+        transcript
+    );
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 300,
+        "response_format": {"type": "json_object"}
+    });
+
+    let resp = reqwest::Client::new()
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let content = json["choices"][0]["message"]["content"].as_str()?;
+    let parsed: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+
+    if parsed["kalesh"].as_bool() != Some(true) {
+        return None;
+    }
+    let line = parsed["line"].as_str().unwrap_or("").trim().to_string();
+    Some(if line.is_empty() {
+        "Kalesh detected 🍿".to_string()
+    } else {
+        line
+    })
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -800,6 +966,28 @@ Ye message sirf tumhe dikh raha hai."#,
         // Slash commands still work, so /resume can lift it.
         if is_paused(&self.1.storage, &agent_id).await {
             return;
+        }
+
+        // Kalesh watch. Runs on every message in the watched channels, before the
+        // admin-only demotion, so it works while the bot is otherwise silent.
+        // Stage one is free; only a burst that looks like a fight reaches the
+        // model, and the cooldown is claimed before the call is made.
+        if let Some(window) = note_message_and_check(&msg) {
+            if let Some(role_id) = kalesh_role_id() {
+                let http = ctx.http.clone();
+                let channel_id = msg.channel_id;
+                tokio::spawn(async move {
+                    if let Some(line) = classify_kalesh(&window).await {
+                        tracing::info!("kalesh detected in channel {}", channel_id.get());
+                        let _ = crate::utils::discord::send_message(
+                            http,
+                            &channel_id,
+                            format!("<@&{}> {}", role_id, line),
+                        )
+                        .await;
+                    }
+                });
+            }
         }
 
         // Admin-only mode: keep reading and recording every monitored channel,
