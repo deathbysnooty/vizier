@@ -802,14 +802,12 @@ Ye message sirf tumhe dikh raha hai."#,
             return;
         }
 
-        // Admin-only mode: ignore everyone but the admins. Dropped before any
-        // storage write, so non-admin chatter is not ingested or billed while
-        // this is on.
-        if is_admin_only(&self.1.storage, &agent_id).await
-            && !admin_ids().contains(&msg.author.id.get())
-        {
-            return;
-        }
+        // Admin-only mode: keep reading and recording every monitored channel,
+        // but answer nobody except the admins. Non-admin messages are demoted to
+        // a silent read further down rather than dropped, so the moderator
+        // history keeps building while the bot stays quiet to members.
+        let silence_this_author = is_admin_only(&self.1.storage, &agent_id).await
+            && !admin_ids().contains(&msg.author.id.get());
 
         let channel = VizierChannelId::DiscordChanel(msg.channel_id.get());
 
@@ -888,7 +886,7 @@ Ye message sirf tumhe dikh raha hai."#,
                 topic_id,
             );
 
-            let (content, request_content) = if !is_mention && !is_dm {
+            let (content, request_content) = if silence_this_author || (!is_mention && !is_dm) {
                 (
                     msg.content.clone(),
                     VizierRequestContent::SilentRead(msg.content),
