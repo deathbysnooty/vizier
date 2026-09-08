@@ -120,6 +120,20 @@ async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str)
     )
 }
 
+/// Channels the bot is allowed to see, from `VIZIER_DISCORD_CHANNELS`
+/// (comma-separated ids). Empty or unset means every channel it can view,
+/// which is the upstream behaviour.
+fn allowed_channels() -> Vec<u64> {
+    std::env::var("VIZIER_DISCORD_CHANNELS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect::<Vec<u64>>()
+        })
+        .unwrap_or_default()
+}
+
 /// State key holding the agent-wide admin-only flag.
 fn admin_only_key(agent_id: &str) -> String {
     format!("{}__admin_only", agent_id)
@@ -774,6 +788,14 @@ Ye message sirf tumhe dikh raha hai."#,
             return;
         }
 
+        // Only listen in channels we were told to monitor. Dropped before any
+        // storage read so an unmonitored channel costs nothing and leaves no
+        // trace, even though Discord still delivers its messages to us.
+        let allowed = allowed_channels();
+        if !allowed.is_empty() && !allowed.contains(&msg.channel_id.get()) {
+            return;
+        }
+
         // Paused by an admin: read nothing, store nothing, spend nothing.
         // Slash commands still work, so /resume can lift it.
         if is_paused(&self.1.storage, &agent_id).await {
@@ -837,15 +859,24 @@ Ye message sirf tumhe dikh raha hai."#,
             }
             let bot_name = ctx.cache.current_user().name.clone();
 
-            let replied_to = match msg.referenced_message {
-                None => None,
-                Some(message) => Some(message.id.to_string()),
+            // Carry the quoted message's text, not just its id. Without this a
+            // "@bot factcheck this" reply gives the model an id it would have to
+            // go and fetch, and it usually just guesses instead.
+            let (replied_to, replied_author, replied_content) = match msg.referenced_message {
+                None => (None, None, None),
+                Some(message) => (
+                    Some(message.id.to_string()),
+                    Some(message.author.display_name().to_string()),
+                    Some(message.content.clone()),
+                ),
             };
 
             let metadata = json!({
                 "sent_at": Utc::now().to_string(),
                 "is_reply_message": replied_to.is_some(),
                 "replied_message_id": replied_to,
+                "replied_message_author": replied_author,
+                "replied_message_content": replied_content,
                 "message_id": msg.id.to_string(),
                 "discord_channel_id": msg.channel_id.to_string(),
                 "is_dm": is_dm,

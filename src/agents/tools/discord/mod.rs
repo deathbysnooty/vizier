@@ -18,13 +18,14 @@ pub fn new_discord_tools(
     discord_token: String,
     agent_id: AgentId,
     storage: Arc<VizierStorage>,
-) -> (SendDiscordMessage, ReactDiscordMessage, GetDiscordMessage) {
+) -> (SendDiscordMessage, ReactDiscordMessage, GetDiscordMessage, SearchDiscordHistory) {
     let http = Arc::new(Http::new(&discord_token));
 
     (
         SendDiscordMessage { http: http.clone(), agent_id: agent_id.clone(), storage: storage.clone() },
         ReactDiscordMessage { http: http.clone() },
         GetDiscordMessage { http: http.clone() },
+        SearchDiscordHistory { agent_id: agent_id.clone(), storage: storage.clone() },
     )
 }
 
@@ -179,5 +180,153 @@ impl VizierTool for GetDiscordMessage {
             )),
             Err(err) => throw_vizier_error("discord_react_message ", err),
         }
+    }
+}
+
+/// Channels the history search is allowed to look at.
+///
+/// Mirrors `VIZIER_DISCORD_CHANNELS` (comma-separated ids), the same allowlist
+/// that gates ingestion, so the tool can never surface a channel the bot was
+/// not asked to monitor.
+fn searchable_channels() -> Vec<u64> {
+    std::env::var("VIZIER_DISCORD_CHANNELS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub struct SearchDiscordHistory {
+    agent_id: AgentId,
+    storage: Arc<VizierStorage>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct SearchDiscordHistoryArgs {
+    #[schemars(description = "text to look for, matched case-insensitively anywhere in a message")]
+    query: String,
+
+    #[schemars(description = "optional: restrict to one discord channel id")]
+    channel_id: Option<u64>,
+
+    #[schemars(
+        description = "optional: only messages from this person, matched against their discord display name or user id"
+    )]
+    user: Option<String>,
+
+    #[schemars(description = "optional: maximum number of matches to return, default 10, max 50")]
+    limit: Option<usize>,
+}
+
+#[async_trait::async_trait]
+impl VizierTool for SearchDiscordHistory {
+    type Input = SearchDiscordHistoryArgs;
+    type Output = String;
+
+    fn name() -> String {
+        "discord_search_history".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Search past discord messages this bot has seen, across the channels it monitors. \
+         Use it when asked what someone said before, or to check whether a topic came up earlier. \
+         Returns real quotes with author, channel, timestamp and message id. \
+         Returns nothing when there is no match - never invent a quote instead."
+            .into()
+    }
+
+    async fn call(
+        &self,
+        args: Self::Input,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<Self::Output, VizierError> {
+        let needle = args.query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok("Empty query - nothing to search for.".to_string());
+        }
+        let limit = args.limit.unwrap_or(10).clamp(1, 50);
+        let user_filter = args.user.as_ref().map(|u| u.trim().to_lowercase());
+
+        let channels: Vec<u64> = match args.channel_id {
+            Some(c) => vec![c],
+            None => searchable_channels(),
+        };
+        if channels.is_empty() {
+            return Ok("No monitored channels are configured, so there is nothing to search."
+                .to_string());
+        }
+
+        let mut hits: Vec<(chrono::DateTime<Utc>, String)> = vec![];
+
+        for channel_id in channels {
+            let session = VizierSession(
+                self.agent_id.clone(),
+                VizierChannelId::DiscordChanel(channel_id),
+                None,
+            );
+            let entries = match self
+                .storage
+                .list_session_history(session, None, Some(5000))
+                .await
+            {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!("history search failed for channel {}: {:?}", channel_id, err);
+                    continue;
+                }
+            };
+
+            for entry in entries {
+                let crate::schema::SessionHistoryContent::Request(req) = entry.content else {
+                    continue;
+                };
+                let text = req.content.to_string();
+                if !text.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                if let Some(ref want) = user_filter {
+                    if !req.user.to_lowercase().contains(want) {
+                        continue;
+                    }
+                }
+                let msg_id = match req.platform_message_id {
+                    Some(crate::schema::PlatformMessageId::Discord(id)) => id.to_string(),
+                    _ => "-".to_string(),
+                };
+                hits.push((
+                    entry.timestamp,
+                    format!(
+                        "[{}] {} in <#{}> (msg {}): {}",
+                        entry.timestamp.format("%Y-%m-%d %H:%M UTC"),
+                        req.user,
+                        channel_id,
+                        msg_id,
+                        text.replace('\n', " ")
+                    ),
+                ));
+            }
+        }
+
+        if hits.is_empty() {
+            return Ok(format!(
+                "No messages found matching \"{}\". Say so plainly - do not guess at what was said.",
+                args.query
+            ));
+        }
+
+        // Newest first, so the most recent mention leads.
+        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        let total = hits.len();
+        let shown: Vec<String> = hits.into_iter().take(limit).map(|(_, s)| s).collect();
+
+        Ok(format!(
+            "{} match(es), showing {}:\n{}",
+            total,
+            shown.len(),
+            shown.join("\n")
+        ))
     }
 }
