@@ -313,6 +313,108 @@ async fn classify_kalesh(window: &[SeenMessage]) -> Option<String> {
     })
 }
 
+/// Largest embedded GIF we will pull in. Animated GIFs get big, and the whole
+/// thing is base64'd into the prompt, so this is a hard stop rather than a hint.
+const MAX_EMBED_BYTES: usize = 3 * 1024 * 1024;
+
+/// Pull the sharable URLs out of a message body.
+///
+/// Tenor and Giphy links are not Discord attachments - the message contains
+/// only a link and Discord renders the preview itself - so the bot sees nothing
+/// unless we go and resolve them.
+fn embedded_media_links(content: &str) -> Vec<String> {
+    content
+        .split_whitespace()
+        .filter(|w| w.starts_with("http://") || w.starts_with("https://"))
+        .filter(|w| {
+            let l = w.to_lowercase();
+            l.contains("tenor.com") || l.contains("giphy.com")
+        })
+        .map(|w| w.trim_end_matches(&[',', '.', ')', ']', '>'][..]).to_string())
+        // One per message. Base64 inflates by a third and the provider caps
+        // total request size, so two large GIFs would blow the limit.
+        .take(1)
+        .collect()
+}
+
+/// Find the media URL a share page points at, via its OpenGraph tags.
+fn extract_og_media(html: &str) -> Option<String> {
+    for tag in ["og:image", "twitter:image", "og:video"] {
+        if let Some(i) = html.find(&format!("property=\"{}\"", tag))
+            .or_else(|| html.find(&format!("name=\"{}\"", tag)))
+        {
+            let rest = &html[i..];
+            if let Some(c) = rest.find("content=\"") {
+                let after = &rest[c + 9..];
+                if let Some(end) = after.find('"') {
+                    let url = &after[..end];
+                    if url.starts_with("http") {
+                        return Some(url.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn filename_for(url: &str) -> String {
+    let clean = url.split('?').next().unwrap_or(url);
+    let ext = [".gif", ".png", ".jpg", ".jpeg", ".webp"]
+        .iter()
+        .find(|e| clean.to_lowercase().ends_with(*e))
+        .map(|e| e.trim_start_matches('.'))
+        .unwrap_or("gif");
+    format!("embedded.{}", ext)
+}
+
+/// Resolve one Tenor/Giphy link to real image bytes, or None if anything is off.
+async fn fetch_embedded_media(link: &str) -> Option<(String, Vec<u8>)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    // A direct media link needs no page lookup.
+    // Direct media links (media1.tenor.com/..., media.giphy.com/..., or any
+    // plain image URL) need no page lookup. Note the numbered Tenor CDN hosts.
+    let lower = link.to_lowercase();
+    let is_direct = lower.contains("tenor.com/m/")
+        || lower.contains("media.giphy.com")
+        || lower.contains("giphy.com/media/")
+        || [".gif", ".png", ".jpg", ".jpeg", ".webp"]
+            .iter()
+            .any(|e| lower.split('?').next().unwrap_or(&lower).ends_with(e));
+    let media_url = if is_direct {
+        link.to_string()
+    } else {
+        let html = client
+            .get(link)
+            .header("User-Agent", "Mozilla/5.0 (compatible; vizier-bot)")
+            .send()
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        extract_og_media(&html)?
+    };
+
+    let resp = client.get(&media_url).send().await.ok()?;
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_EMBED_BYTES {
+            tracing::debug!("skipping embedded media, {} bytes is over the cap", len);
+            return None;
+        }
+    }
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.len() > MAX_EMBED_BYTES {
+        tracing::debug!("skipping embedded media, {} bytes is over the cap", bytes.len());
+        return None;
+    }
+    Some((filename_for(&media_url), bytes.to_vec()))
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -1029,6 +1131,22 @@ Ye message sirf tumhe dikh raha hai."#,
                     {
                         attachments.push(VizierAttachment {
                             filename: attachment.filename.clone(),
+                            content: VizierAttachmentContent::Local(file_record.url),
+                        });
+                    }
+                }
+            }
+
+            // Tenor/Giphy links are not attachments, so resolve them to real
+            // image bytes and feed them in as if they had been uploaded.
+            for link in embedded_media_links(&msg.content) {
+                if let Some((filename, bytes)) = fetch_embedded_media(&link).await {
+                    if let Ok(file_record) =
+                        self.1.transport.send_file_upload(filename.clone(), bytes).await
+                    {
+                        tracing::debug!("resolved embedded media from {}", link);
+                        attachments.push(VizierAttachment {
+                            filename,
                             content: VizierAttachmentContent::Local(file_record.url),
                         });
                     }
