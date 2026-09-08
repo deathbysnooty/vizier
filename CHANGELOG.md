@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.19] - 2026-09-08
+
+### 🚀 Features
+
+- *(discord)* Resolve Tenor and Giphy links into real images
 ## [0.10.18] - 2026-09-08
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Allow author-only history search
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.18
 ## [0.10.17] - 2026-09-08
 
 ### 🚀 Features
