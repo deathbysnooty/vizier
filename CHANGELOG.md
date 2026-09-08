@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.22] - 2026-09-08
+
+### 🐛 Bug Fixes
+
+- *(storage)* Bound history loaded per request
 ## [0.10.21] - 2026-09-08
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Put the quoted message inline instead of only in metadata
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.21
 ## [0.10.20] - 2026-09-08
 
 ### 🐛 Bug Fixes
