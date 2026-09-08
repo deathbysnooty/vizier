@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.13] - 2026-09-08
+
+### 🚀 Features
+
+- *(discord)* History search tool, channel allowlist, quoted-message text
+## [0.10.12] - 2026-09-08
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.12
 ## [0.10.11-mlci.1] - 2026-09-08
 
 ### 🚀 Features
