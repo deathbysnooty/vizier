@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(discord)* Drop stale DM mention from admin-only reply
+- Bump version to 0.10.11-mlci.1
 ## [0.10.11] - 2026-07-02
 
 ### 🚀 Features
