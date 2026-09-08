@@ -206,8 +206,10 @@ pub struct SearchDiscordHistory {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SearchDiscordHistoryArgs {
-    #[schemars(description = "text to look for, matched case-insensitively anywhere in a message")]
-    query: String,
+    #[schemars(
+        description = "optional: text to look for, matched case-insensitively anywhere in a message. Omit to fetch everything by a person."
+    )]
+    query: Option<String>,
 
     #[schemars(description = "optional: restrict to one discord channel id")]
     channel_id: Option<u64>,
@@ -231,10 +233,13 @@ impl VizierTool for SearchDiscordHistory {
     }
 
     fn description(&self) -> String {
-        "Search past discord messages this bot has seen, across the channels it monitors. \
-         Use it when asked what someone said before, or to check whether a topic came up earlier. \
-         Returns real quotes with author, channel, timestamp and message id. \
-         Returns nothing when there is no match - never invent a quote instead."
+        "Search what people actually said in this discord server, across the channels this bot \
+         monitors. This is the ONLY way to find out what someone said - use it for any question \
+         about what a person has been saying, what they said earlier, or whether a topic came up. \
+         Pass `user` alone to get everything from one person, `query` alone to search text, or \
+         both. Returns real quotes with author, channel, timestamp and message id, and returns \
+         nothing when there is no match - never invent a quote instead. Do not use memory tools \
+         for this; memory holds only your own notes, not what members said."
             .into()
     }
 
@@ -243,9 +248,18 @@ impl VizierTool for SearchDiscordHistory {
         args: Self::Input,
         _ctx: &ToolContext,
     ) -> anyhow::Result<Self::Output, VizierError> {
-        let needle = args.query.trim().to_lowercase();
-        if needle.is_empty() {
-            return Ok("Empty query - nothing to search for.".to_string());
+        let needle = args
+            .query
+            .as_deref()
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty());
+        let user_given = args
+            .user
+            .as_deref()
+            .map(|u| !u.trim().is_empty())
+            .unwrap_or(false);
+        if needle.is_none() && !user_given {
+            return Ok("Give either something to search for, or a person to search by.".to_string());
         }
         let limit = args.limit.unwrap_or(10).clamp(1, 50);
         let user_filter = args.user.as_ref().map(|u| u.trim().to_lowercase());
@@ -295,8 +309,10 @@ impl VizierTool for SearchDiscordHistory {
                     continue;
                 };
                 let text = req.content.to_string();
-                if !text.to_lowercase().contains(&needle) {
-                    continue;
+                if let Some(ref n) = needle {
+                    if !text.to_lowercase().contains(n) {
+                        continue;
+                    }
                 }
                 if let Some(ref want) = user_filter {
                     if !req.user.to_lowercase().contains(want) {
@@ -323,8 +339,13 @@ impl VizierTool for SearchDiscordHistory {
 
         if hits.is_empty() {
             return Ok(format!(
-                "No messages found matching \"{}\". Say so plainly - do not guess at what was said.",
-                args.query
+                "No messages found for {}. Say so plainly - do not guess at what was said.",
+                match (&needle, &args.user) {
+                    (Some(q), Some(u)) => format!("\"{}\" from {}", q, u),
+                    (Some(q), None) => format!("\"{}\"", q),
+                    (None, Some(u)) => format!("messages by {}", u),
+                    (None, None) => "that search".to_string(),
+                }
             ));
         }
 
