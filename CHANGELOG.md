@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.21] - 2026-09-08
+
+### 🐛 Bug Fixes
+
+- *(discord)* Put the quoted message inline instead of only in metadata
 ## [0.10.20] - 2026-09-08
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Show names instead of raw ids for mentions
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.20
 ## [0.10.19] - 2026-09-08
 
 ### 🚀 Features
