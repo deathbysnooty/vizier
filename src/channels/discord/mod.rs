@@ -287,7 +287,7 @@ impl EventHandler for Handler {
                                 caller
                             );
                             if enable {
-                                "Admin-only mode **on**. I'll only answer admins — everyone else gets nothing, mention or DM.".to_string()
+                                "Admin-only mode **on**. I'll only answer admins — everyone else gets nothing.".to_string()
                             } else {
                                 "Admin-only mode **off**. Back to answering everyone.".to_string()
                             }
