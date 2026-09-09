@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.40] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Moderator log for letters
 ## [0.10.39] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Announce replies in the channel again
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.39
 ## [0.10.38] - 2026-09-09
 
 ### 🐛 Bug Fixes
