@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.33] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Announce replies exactly like first letters
 ## [0.10.32] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* /letterbox for unopened letters
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.32
 ## [0.10.31] - 2026-09-09
 
 ### 🐛 Bug Fixes
