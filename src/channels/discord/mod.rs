@@ -448,6 +448,28 @@ fn humanise_mentions(msg: &Message, bot_id: u64) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Role names for whoever sent a message, resolved through the guild cache.
+///
+/// Discord puts only role ids on the message, so without this the model cannot
+/// tell a moderator from anyone else and treats the whole server identically.
+fn author_role_names(ctx: &Context, msg: &Message) -> Vec<String> {
+    let Some(guild_id) = msg.guild_id else {
+        return vec![];
+    };
+    let Some(member) = msg.member.as_ref() else {
+        return vec![];
+    };
+    let Some(guild) = ctx.cache.guild(guild_id) else {
+        return vec![];
+    };
+    member
+        .roles
+        .iter()
+        .filter_map(|rid| guild.roles.get(rid).map(|r| r.name.clone()))
+        .filter(|n| n != "@everyone")
+        .collect()
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -1081,20 +1103,24 @@ Ye message sirf tumhe dikh raha hai."#,
     async fn message(&self, ctx: Context, msg: Message) {
         let agent_id = self.0.clone();
 
-        // Direct messages are ignored outright. Anyone sharing a server with the
-        // bot can DM it, and there is no per-user rate limit, so an open DM inbox
-        // is an unbounded way for one member to spend tokens. Checked first
-        // because it costs no storage read.
-        if msg.guild_id.is_none() {
+        let is_dm = msg.guild_id.is_none();
+        let author_is_admin = admin_ids().contains(&msg.author.id.get());
+
+        // DMs are for admins only. Anyone sharing a server with the bot can DM
+        // it and there is no per-user rate limit, so an open inbox is an
+        // unbounded way for one member to spend tokens - but admins need a
+        // private channel to brief it without the whole server reading along.
+        if is_dm && !author_is_admin {
             return;
         }
 
-        // Only listen in channels we were told to monitor. Dropped before any
-        // storage read so an unmonitored channel costs nothing and leaves no
-        // trace, even though Discord still delivers its messages to us.
-        let allowed = allowed_channels();
-        if !allowed.is_empty() && !allowed.contains(&msg.channel_id.get()) {
-            return;
+        // The channel allowlist governs server channels. A DM has no place on
+        // that list, so it must not be filtered by it.
+        if !is_dm {
+            let allowed = allowed_channels();
+            if !allowed.is_empty() && !allowed.contains(&msg.channel_id.get()) {
+                return;
+            }
         }
 
         // Paused by an admin: read nothing, store nothing, spend nothing.
@@ -1145,8 +1171,6 @@ Ye message sirf tumhe dikh raha hai."#,
             (None, false, false)
         };
 
-        let is_dm = msg.guild_id.is_none();
-
         if let Ok(is_mention) = msg.mentions_me(&ctx.http).await {
             let mut attachments = vec![];
             for attachment in &msg.attachments {
@@ -1191,8 +1215,9 @@ Ye message sirf tumhe dikh raha hai."#,
             let file_manager = self.1.file_manager.clone();
             let http = ctx.http.clone();
             let bot_user_id = ctx.cache.current_user().id.get();
-            // Must happen before `referenced_message` is moved out of `msg`.
+            // Both must happen before `referenced_message` is moved out of `msg`.
             let readable = humanise_mentions(&msg, bot_user_id);
+            let roles = author_role_names(&ctx, &msg);
             let current_user = ctx.cache.current_user().discriminator;
             if msg.author.discriminator == current_user {
                 return;
@@ -1212,6 +1237,7 @@ Ye message sirf tumhe dikh raha hai."#,
             };
 
             let metadata = json!({
+                "sender_roles": roles,
                 "sent_at": Utc::now().to_string(),
                 "is_reply_message": replied_to.is_some(),
                 "replied_message_id": replied_to,
