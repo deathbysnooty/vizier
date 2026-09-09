@@ -574,10 +574,13 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
     pool[n % pool.len()]
 }
 
+/// Replies name nobody. Receiving a reply means you sent a letter, so naming
+/// the recipient would out them as a sender - the one thing the feature is
+/// supposed to hide. Only the right person can open it, so no ping is needed.
 const REPLY_SHOUTS: &[&str] = &[
-    "📬 <@{}>, teri chitthi ka jawab aa gaya. Himmat hai toh khol.",
-    "Oye <@{}>, jisko tune likha tha usne jawab bhej diya hai 👀",
-    "<@{}> ki gumnaam chitthi ka reply aaya hai. Kahani aage badhi.",
+    "📬 Kisi ki gumnaam chitthi ka jawab aaya hai. Agar tumhari thi, kholo.",
+    "Ek jawab aaya hai. Jiski chitthi thi, wahi khol paayega 👀",
+    "Kisi ko uske letter ka reply mila hai. Kahani aage badhi.",
 ];
 
 /// Post the "you have a letter" notice with its Open button.
@@ -591,6 +594,7 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
     // consecutive letters vary.
     let idx = letter.id.bytes().map(|b| b as usize).sum::<usize>() % pool.len();
     let shout = pool[idx].replace("{}", &letter.to_id.to_string());
+    let is_reply = letter.in_reply_to.is_some();
 
     let embed = serenity::all::CreateEmbed::new()
         .description("Only they can open it, and it opens once.")
@@ -607,6 +611,25 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
 
     if let Err(err) = ChannelId::new(channel).send_message(&http, msg).await {
         tracing::error!("failed to post letter notice: {:?}", err);
+    }
+
+    // A reply names nobody in the channel, so nudge the person privately or
+    // they will never know it is theirs. Best effort: plenty of people have DMs
+    // from server members turned off, and that is not an error worth surfacing.
+    if is_reply {
+        let uid = serenity::all::UserId::new(letter.to_id);
+        if let Ok(dm) = uid.create_dm_channel(&http).await {
+            let _ = dm
+                .id
+                .send_message(
+                    &http,
+                    CreateMessage::new().content(format!(
+                        "Tumhari gumnaam chitthi ka jawab aa gaya hai. <#{}> mein jaake kholo.",
+                        channel
+                    )),
+                )
+                .await;
+        }
     }
 }
 
@@ -786,13 +809,27 @@ impl EventHandler for Handler {
                     Some(mut l) => {
                         l.opened = true;
                         save_letter(&self.1.storage, &l).await;
-                        (
-                            format!(
-                                "**Anonymous letter**\n\n{}\n\n-# id `{}` - this will not open again",
-                                l.body, l.id
-                            ),
-                            true,
-                        )
+
+                        // On a reply, show what they wrote first - without it the
+                        // answer arrives with no idea which letter it belongs to.
+                        let mut text = String::new();
+                        if let Some(ref orig_id) = l.in_reply_to {
+                            if let Some(orig) = load_letter(&self.1.storage, orig_id).await {
+                                text.push_str(&format!(
+                                    "**Tumne likha tha:**\n> {}\n\n",
+                                    orig.body.replace('\n', "\n> ")
+                                ));
+                            }
+                            text.push_str("**Jawab:**\n");
+                        } else {
+                            text.push_str("**Gumnaam chitthi**\n\n");
+                        }
+                        text.push_str(&l.body);
+                        text.push_str(&format!(
+                            "\n\n-# id `{}` - dobara nahi khulegi",
+                            l.id
+                        ));
+                        (text, true)
                     }
                 };
 
