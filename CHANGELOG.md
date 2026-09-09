@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.48] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Point the reply DM at the thread
 ## [0.10.47] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Keep the notice alive so replies can thread off it
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.47
 ## [0.10.46] - 2026-09-09
 
 ### 🚀 Features
