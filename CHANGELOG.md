@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.42] - 2026-09-09
+
+### 🚀 Features
+
+- *(dream)* Reuse the dream cycle to build member profiles
 ## [0.10.41] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(consult)* Bound the wait and handle non-message replies
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.41
 ## [0.10.40] - 2026-09-09
 
 ### 🚀 Features
