@@ -820,8 +820,10 @@ impl EventHandler for Handler {
             .description("check your unopened anonymous letters (only you see this)");
         let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
 
-        let toggle = CreateCommand::new("letters")
-            .description("turn anonymous letters to you on or off");
+        // Deliberately not "letters": one character from "letter" meant people
+        // could mute themselves while trying to send one.
+        let toggle = CreateCommand::new("nochitthi")
+            .description("stop or resume anonymous letters coming to you");
         let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
 
         let trace = CreateCommand::new("letter_trace")
@@ -1085,7 +1087,7 @@ impl EventHandler for Handler {
                     .await;
             }
 
-            if command.data.name == "letters" {
+            if command.data.name == "nochitthi" {
                 let me = command.user.id.get();
                 let now_off = !letters_off(&self.1.storage, me).await;
                 let _ = self
@@ -1094,7 +1096,7 @@ impl EventHandler for Handler {
                     .save_state(optout_key(me), serde_json::Value::Bool(now_off))
                     .await;
                 let text = if now_off {
-                    "Ab tumhe koi gumnaam chitthi nahi aayegi. Wapas chalu karne ke liye phir se `/letters` likho."
+                    "Ab tumhe koi gumnaam chitthi nahi aayegi. Wapas chalu karne ke liye phir se `/nochitthi` likho."
                 } else {
                     "Gumnaam chitthiyan wapas chalu. Ab log tumhe likh sakte hain."
                 };
