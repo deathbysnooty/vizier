@@ -592,9 +592,29 @@ impl HistoryStorage for SqliteStorage {
             params.push(Box::new(format!("%{}%", u.trim().to_lowercase())));
             idx += 1;
         }
+        // Models write search syntax - `a OR "b"`, `a, b` - but this is a
+        // substring match, so a raw LIKE on that string finds nothing. Split on
+        // the usual separators and match any term instead.
         if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
-            sql.push_str(&format!(" AND lower(txt) LIKE ?{}", idx));
-            params.push(Box::new(format!("%{}%", q.trim().to_lowercase())));
+            let terms: Vec<String> = q
+                .split(|c| c == ',' || c == '|')
+                .flat_map(|part| part.split(" OR "))
+                .flat_map(|part| part.split(" or "))
+                .map(|t| t.trim().trim_matches(['"', '\'', '(', ')']).trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+
+            if !terms.is_empty() {
+                let clauses: Vec<String> = terms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("lower(txt) LIKE ?{}", idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
+                for t in &terms {
+                    params.push(Box::new(format!("%{}%", t)));
+                }
+            }
         }
         sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT {}", limit.clamp(1, 200)));
 

@@ -207,7 +207,7 @@ pub struct SearchDiscordHistory {
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SearchDiscordHistoryArgs {
     #[schemars(
-        description = "optional: text to look for, matched case-insensitively anywhere in a message. Omit to fetch everything by a person."
+        description = "optional: words to look for, matched case-insensitively anywhere in a message. Plain words only - no quotes or boolean syntax. Separate alternatives with commas and a message matching any of them is returned. Omit to fetch everything by a person."
     )]
     query: Option<String>,
 
