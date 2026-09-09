@@ -510,6 +510,18 @@ fn inbox_key(user_id: u64) -> String {
     format!("letterbox__{}", user_id)
 }
 
+/// Members who have turned letters off for themselves.
+fn optout_key(user_id: u64) -> String {
+    format!("letteroff__{}", user_id)
+}
+
+async fn letters_off(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> bool {
+    matches!(
+        storage.get_state(optout_key(user_id)).await,
+        Ok(Some(serde_json::Value::Bool(true)))
+    )
+}
+
 async fn inbox_ids(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> Vec<String> {
     match storage.get_state(inbox_key(user_id)).await {
         Ok(Some(v)) => serde_json::from_value(v).unwrap_or_default(),
@@ -694,6 +706,11 @@ async fn handle_letter_command(
     if to_id.get() == ctx.cache.current_user().id.get() {
         return "Mujhe letter bhej ke kya milega? Kisi insaan ko bhej.".to_string();
     }
+    if letters_off(storage, to_id.get()).await {
+        // Said plainly on purpose: the sender needs to know it will not arrive,
+        // and it reveals nothing beyond a preference they set themselves.
+        return "Unhone gumnaam chitthiyan band kar rakhi hain. Kuch nahi jaayega.".to_string();
+    }
     if !letter_rate_ok(from_id) {
         return "Bas kar bhai, postman thak gaya. Ek ghante baad aana.".to_string();
     }
@@ -802,6 +819,10 @@ impl EventHandler for Handler {
         let inbox = CreateCommand::new("letterbox")
             .description("check your unopened anonymous letters (only you see this)");
         let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
+
+        let toggle = CreateCommand::new("letters")
+            .description("turn anonymous letters to you on or off");
+        let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
 
         let trace = CreateCommand::new("letter_trace")
             .description("admin only: who sent a letter")
@@ -1059,6 +1080,31 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "letters" {
+                let me = command.user.id.get();
+                let now_off = !letters_off(&self.1.storage, me).await;
+                let _ = self
+                    .1
+                    .storage
+                    .save_state(optout_key(me), serde_json::Value::Bool(now_off))
+                    .await;
+                let text = if now_off {
+                    "Ab tumhe koi gumnaam chitthi nahi aayegi. Wapas chalu karne ke liye phir se `/letters` likho."
+                } else {
+                    "Gumnaam chitthiyan wapas chalu. Ab log tumhe likh sakte hain."
+                };
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(true)
+                                .content(text),
                         ),
                     )
                     .await;
