@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.35] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Let /letterbox reply to already-read letters
 ## [0.10.34] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Keep replies out of the channel entirely
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.34
 ## [0.10.33] - 2026-09-09
 
 ### 🐛 Bug Fixes
