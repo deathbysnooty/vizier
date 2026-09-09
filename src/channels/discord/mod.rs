@@ -729,6 +729,7 @@ async fn post_reply_in_thread(
         .ok()?;
 
     // The unnamed party gets told privately, since the thread cannot name them.
+    // A thread id is a channel id, so <#id> renders as a link straight to it.
     if reply.to_id != root.to_id {
         let uid = serenity::all::UserId::new(reply.to_id);
         if let Ok(dm) = uid.create_dm_channel(&http).await {
@@ -736,9 +737,12 @@ async fn post_reply_in_thread(
                 .id
                 .send_message(
                     &http,
-                    CreateMessage::new().content(
-                        "Tumhari gumnaam chitthi ka jawab aa gaya hai. `/letterbox` likh ke kholo.",
-                    ),
+                    CreateMessage::new().content(format!(
+                        "Tumhari gumnaam chitthi ka jawab aa gaya hai.\n\
+                         Jaake kholo: <#{}> (<#{}> ke andar)\n\
+                         Ya kahin bhi `/letterbox` likh do.",
+                        thread_id, channel
+                    )),
                 )
                 .await;
         }
