@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(discord)* Stop announcing replies again
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.43
 ## [0.10.42] - 2026-09-09
 
 ### 🚀 Features
