@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.28] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Anonymous letters
 ## [0.10.27] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Accept multi-term search queries
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.27
 ## [0.10.26] - 2026-09-09
 
 ### 🐛 Bug Fixes
