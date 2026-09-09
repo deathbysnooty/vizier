@@ -79,19 +79,61 @@ impl VizierTool for ConsultAgent {
             .await
             .map_err(|err| VizierError(err.to_string()))?;
 
-        loop {
-            let response = response_rx
-                .recv_async()
-                .await
-                .map_err(|err| VizierError(err.to_string()))?;
+        // Bounded wait. Without this the tool blocks until the caller's own
+        // prompt timeout, which is an hour by default - the person asking sees
+        // nothing at all in the meantime and assumes the bot is broken.
+        let wait = std::time::Duration::from_secs(
+            std::env::var("VIZIER_CONSULT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(120),
+        );
+        let deadline = tokio::time::Instant::now() + wait;
 
-            if let VizierResponse {
-                content: VizierResponseContent::Message { content, stats: _ },
-                timestamp: _,
-                attachments: _,
-            } = response
-            {
-                return Ok(content);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(format!(
+                    "{} did not answer in time. Answer it yourself instead of waiting.",
+                    args.agent_id
+                ));
+            }
+
+            let received = match tokio::time::timeout(remaining, response_rx.recv_async()).await {
+                Err(_) => {
+                    return Ok(format!(
+                        "{} did not answer in time. Answer it yourself instead of waiting.",
+                        args.agent_id
+                    ));
+                }
+                Ok(Err(err)) => {
+                    // Channel closed: the other agent went away mid-request.
+                    return Ok(format!(
+                        "{} could not be reached ({}). Answer it yourself.",
+                        args.agent_id, err
+                    ));
+                }
+                Ok(Ok(r)) => r,
+            };
+
+            match received.content {
+                VizierResponseContent::Message { content, .. } => return Ok(content),
+                // Anything terminal that is not a message would otherwise spin
+                // here until the deadline for no reason.
+                VizierResponseContent::Error { kind, message } => {
+                    return Ok(format!(
+                        "{} failed ({:?}: {}). Answer it yourself.",
+                        args.agent_id, kind, message
+                    ));
+                }
+                VizierResponseContent::Empty => {
+                    return Ok(format!(
+                        "{} returned nothing. Answer it yourself.",
+                        args.agent_id
+                    ));
+                }
+                // Thinking/tool-progress frames: keep waiting.
+                _ => continue,
             }
         }
     }
