@@ -600,27 +600,18 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
     pool[n % pool.len()]
 }
 
-/// Replies name nobody. Receiving a reply means you sent a letter, so naming
-/// the recipient would out them as a sender - the one thing the feature is
-/// supposed to hide. Only the right person can open it, so no ping is needed.
-const REPLY_SHOUTS: &[&str] = &[
-    "📬 Kisi ki gumnaam chitthi ka jawab aaya hai. Agar tumhari thi, kholo.",
-    "Ek jawab aaya hai. Jiski chitthi thi, wahi khol paayega 👀",
-    "Kisi ko uske letter ka reply mila hai. Kahani aage badhi.",
-];
-
 /// Post the "you have a letter" notice with its Open button.
 async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
-    let pool = if letter.in_reply_to.is_some() {
-        REPLY_SHOUTS
-    } else {
-        LETTER_SHOUTS
-    };
+    // Replies are announced exactly like first letters, mention and all. Saying
+    // "this is a reply" would out the recipient as someone who sent one; making
+    // them indistinguishable means the mention reveals nothing that a normal
+    // letter notice does not already reveal, and the recipient can still tell
+    // which notice is theirs.
+    let pool = LETTER_SHOUTS;
     // Keyed off the letter id so a given letter always reads the same, while
     // consecutive letters vary.
     let idx = letter.id.bytes().map(|b| b as usize).sum::<usize>() % pool.len();
     let shout = pool[idx].replace("{}", &letter.to_id.to_string());
-    let is_reply = letter.in_reply_to.is_some();
 
     let embed = serenity::all::CreateEmbed::new()
         .description("Only they can open it, and it opens once.")
@@ -639,24 +630,6 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
         tracing::error!("failed to post letter notice: {:?}", err);
     }
 
-    // A reply names nobody in the channel, so nudge the person privately or
-    // they will never know it is theirs. Best effort: plenty of people have DMs
-    // from server members turned off, and that is not an error worth surfacing.
-    if is_reply {
-        let uid = serenity::all::UserId::new(letter.to_id);
-        if let Ok(dm) = uid.create_dm_channel(&http).await {
-            let _ = dm
-                .id
-                .send_message(
-                    &http,
-                    CreateMessage::new().content(format!(
-                        "Tumhari gumnaam chitthi ka jawab aa gaya hai. <#{}> mein jaake kholo.",
-                        channel
-                    )),
-                )
-                .await;
-        }
-    }
 }
 
 /// Validate and dispatch a `/letter`. Returns the private reply for the sender.
