@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.41] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(consult)* Bound the wait and handle non-message replies
 ## [0.10.40] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Moderator log for letters
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.40
 ## [0.10.39] - 2026-09-09
 
 ### 🚀 Features
