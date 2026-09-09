@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.50] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Count the cleanup delay from the last read, not the first
 ## [0.10.49] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* DM both sides of a letter thread
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.49
 ## [0.10.48] - 2026-09-09
 
 ### 🚀 Features
