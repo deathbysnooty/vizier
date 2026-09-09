@@ -615,6 +615,40 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
     pool[n % pool.len()]
 }
 
+fn letter_log_channel() -> Option<u64> {
+    std::env::var("VIZIER_LETTER_LOG_CHANNEL").ok()?.trim().parse().ok()
+}
+
+/// Write a letter to the moderator log, if one is configured.
+///
+/// Senders are already recoverable through /letter_trace, so this changes how
+/// convenient that is rather than what is knowable. Keep the channel private to
+/// moderators: it names both ends of every letter.
+async fn log_letter(http: Arc<Http>, letter: &Letter) {
+    let Some(channel) = letter_log_channel() else {
+        return;
+    };
+    let kind = if letter.in_reply_to.is_some() {
+        "Reply"
+    } else {
+        "Letter"
+    };
+    let embed = serenity::all::CreateEmbed::new()
+        .title(format!("{} `{}`", kind, letter.id))
+        .description(letter.body.chars().take(1500).collect::<String>())
+        .field("From", format!("<@{}> ({})", letter.from_id, letter.from_name), true)
+        .field("To", format!("<@{}> ({})", letter.to_id, letter.to_name), true)
+        .field("Sent", letter.sent_at.clone(), false)
+        .colour(serenity::all::Colour::new(0x607D8B));
+
+    if let Err(err) = ChannelId::new(channel)
+        .send_message(&http, CreateMessage::new().embed(embed))
+        .await
+    {
+        tracing::error!("failed to write letter log: {:?}", err);
+    }
+}
+
 /// Post the "you have a letter" notice with its Open button, returning the
 /// message id so it can be removed once the letter is read.
 async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> Option<u64> {
@@ -721,6 +755,7 @@ async fn handle_letter_command(
     letter.notice_msg = post_letter_notice(ctx.http.clone(), channel, &letter).await;
     save_letter(storage, &letter).await;
     inbox_push(storage, letter.to_id, &letter.id).await;
+    log_letter(ctx.http.clone(), &letter).await;
 
     format!(
         "Sent. They will see a notice in <#{}> and only they can open it.\nYour name is not shown. Letter id `{}`.",
@@ -967,6 +1002,7 @@ impl EventHandler for Handler {
                                 post_letter_notice(ctx.http.clone(), channel, &reply).await;
                             save_letter(&self.1.storage, &reply).await;
                             inbox_push(&self.1.storage, reply.to_id, &reply.id).await;
+                            log_letter(ctx.http.clone(), &reply).await;
                             format!("Reply sent. They will see a notice in <#{}>.", channel)
                         }
                     }
