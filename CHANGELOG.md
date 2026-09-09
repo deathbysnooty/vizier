@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.32] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* /letterbox for unopened letters
 ## [0.10.31] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Reply notices name nobody, and carry the thread
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.31
 ## [0.10.30] - 2026-09-09
 
 ### 🚀 Features
