@@ -505,6 +505,10 @@ struct Letter {
     /// Thread hanging off the root notice, created with the first reply.
     #[serde(default)]
     thread_id: Option<u64>,
+    /// Unix seconds when anything in this exchange was last opened. Held on the
+    /// root so the cleanup can tell a stale timer from the newest one.
+    #[serde(default)]
+    last_read_at: Option<u64>,
 }
 
 fn letter_key(id: &str) -> String {
@@ -850,6 +854,7 @@ async fn handle_letter_command(
         notice_msg: None,
         root_id: None,
         thread_id: None,
+        last_read_at: None,
     };
     let mut letter = letter;
     letter.notice_msg = post_letter_notice(ctx.http.clone(), channel, &letter).await;
@@ -992,15 +997,29 @@ impl EventHandler for Handler {
                         // reading, short enough that the channel does not become
                         // a record of who talks to whom.
                         if let Some(ch) = letters_channel() {
-                            let root = root_of(&self.1.storage, &l)
+                            let mut root = root_of(&self.1.storage, &l)
                                 .await
                                 .unwrap_or_else(|| l.clone());
+                            let opened_at = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            root.last_read_at = Some(opened_at);
+                            save_letter(&self.1.storage, &root).await;
                             let storage = self.1.storage.clone();
                             let http = ctx.http.clone();
                             let this_id = l.id.clone();
                             tokio::spawn(async move {
                                 let delay = env_u64("VIZIER_LETTER_CLEANUP_SECS", 120);
                                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+
+                                // A later open restamps the root, which makes this
+                                // timer stale - the newer one will do the work.
+                                if let Some(fresh) = load_letter(&storage, &root.id).await {
+                                    if fresh.last_read_at.unwrap_or(0) > opened_at {
+                                        return;
+                                    }
+                                }
 
                                 // Anything still unread means the exchange is live.
                                 let ids = inbox_ids(&storage, root.to_id).await;
@@ -1137,6 +1156,7 @@ impl EventHandler for Handler {
                                 notice_msg: None,
                                 root_id: orig.root_id.clone().or(Some(orig.id.clone())),
                                 thread_id: None,
+                                last_read_at: None,
                             };
                             let mut reply = reply;
                             reply.notice_msg = post_reply_in_thread(
