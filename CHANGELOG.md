@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.30] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Letter rejections speak in the bot's voice
 ## [0.10.29] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Loud public shout on the letter notice
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.29
 ## [0.10.28] - 2026-09-09
 
 ### 🚀 Features
