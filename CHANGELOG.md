@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.25] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Do not skip messages when mentions_me fails
 ## [0.10.24] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Allow admins to DM the bot
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.24
 ## [0.10.23] - 2026-09-08
 
 ### 🚀 Features
