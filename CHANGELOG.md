@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.26] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Drop the guessable channel_id from history search
 ## [0.10.25] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Do not skip messages when mentions_me fails
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.25
 ## [0.10.24] - 2026-09-09
 
 ### 🚀 Features
