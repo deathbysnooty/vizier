@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.38] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Rename /letters to /nochitthi
 ## [0.10.37] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* /letters opts a member out of receiving letters
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.37
 ## [0.10.36] - 2026-09-09
 
 ### 🚀 Features
