@@ -1171,7 +1171,18 @@ Ye message sirf tumhe dikh raha hai."#,
             (None, false, false)
         };
 
-        if let Ok(is_mention) = msg.mentions_me(&ctx.http).await {
+        // Never gate the whole handler on this call succeeding. It resolves the
+        // bot's own user, over HTTP when the cache is cold, and an Err used to
+        // skip every message silently - no reply, nothing logged. A DM is
+        // addressed to us by definition, so it counts as a mention regardless.
+        let is_mention = match msg.mentions_me(&ctx.http).await {
+            Ok(m) => m || is_dm,
+            Err(err) => {
+                tracing::warn!("mentions_me failed, assuming {}: {:?}", is_dm, err);
+                is_dm
+            }
+        };
+        {
             let mut attachments = vec![];
             for attachment in &msg.attachments {
                 let bytes_result = async {
