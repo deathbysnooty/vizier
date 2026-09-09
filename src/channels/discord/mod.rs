@@ -691,7 +691,14 @@ async fn post_reply_in_thread(
                 .create_thread_from_message(
                     &http,
                     serenity::all::MessageId::new(parent_msg),
-                    serenity::all::CreateThread::new("chitthi ka silsila"),
+                    // Names only the person the parent notice already named.
+                    // Discord caps thread names at 100 characters.
+                    serenity::all::CreateThread::new(
+                        format!("{} & unknown sender", root.to_name)
+                            .chars()
+                            .take(100)
+                            .collect::<String>(),
+                    ),
                 )
                 .await
                 .ok()?;
