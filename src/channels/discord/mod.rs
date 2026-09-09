@@ -543,24 +543,47 @@ async fn save_letter(storage: &Arc<crate::storage::VizierStorage>, letter: &Lett
     }
 }
 
+/// Public announcements. The shout is loud on purpose - the whole fun is the
+/// channel knowing somebody got one - while the letter itself stays private.
+const LETTER_SHOUTS: &[&str] = &[
+    "Oye Lodu <@{}>, tere naam ki gumnaam chitthi aayi hai 📬",
+    "📬 <@{}> ko kisi ne anonymous letter bheja hai. Kaun? Pata nahi. Suspense.",
+    "Breaking news: <@{}> ke naam ek gumnaam chitthi. Popcorn nikaalo 🍿",
+    "Postman aaya hai <@{}> ke liye. Sender ka naam nahi likha 👀",
+    "<@{}>, koi tumhe yaad kar raha hai... anonymously.",
+    "Kisi ne <@{}> ko dil ki baat likhi hai. Ya gaali. Khol ke pata karo.",
+    "<@{}> tere liye kuch aaya hai. Sirf tu padh sakta hai, baaki sab tadapenge.",
+    "Attention <@{}>: gumnaam chitthi mili hai. Ab raat bhar sochna kaun tha.",
+];
+
+const REPLY_SHOUTS: &[&str] = &[
+    "📬 <@{}>, teri chitthi ka jawab aa gaya. Himmat hai toh khol.",
+    "Oye <@{}>, jisko tune likha tha usne jawab bhej diya hai 👀",
+    "<@{}> ki gumnaam chitthi ka reply aaya hai. Kahani aage badhi.",
+];
+
 /// Post the "you have a letter" notice with its Open button.
 async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
-    let heading = if letter.in_reply_to.is_some() {
-        "You have a reply to your anonymous letter"
+    let pool = if letter.in_reply_to.is_some() {
+        REPLY_SHOUTS
     } else {
-        "You have an anonymous letter"
+        LETTER_SHOUTS
     };
+    // Keyed off the letter id so a given letter always reads the same, while
+    // consecutive letters vary.
+    let idx = letter.id.bytes().map(|b| b as usize).sum::<usize>() % pool.len();
+    let shout = pool[idx].replace("{}", &letter.to_id.to_string());
+
     let embed = serenity::all::CreateEmbed::new()
-        .title("Anonymous letter")
-        .description(format!("<@{}>, {}.\n\nOnly you can open it, and it opens once.", letter.to_id, heading))
+        .description("Only they can open it, and it opens once.")
         .colour(serenity::all::Colour::new(0x9B59B6));
 
     let button = serenity::all::CreateButton::new(format!("lopen:{}", letter.id))
-        .label("Open")
+        .label("Kholo")
         .style(serenity::all::ButtonStyle::Primary);
 
     let msg = CreateMessage::new()
-        .content(format!("<@{}>", letter.to_id))
+        .content(shout)
         .embed(embed)
         .components(vec![serenity::all::CreateActionRow::Buttons(vec![button])]);
 
