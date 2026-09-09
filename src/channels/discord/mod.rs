@@ -470,6 +470,175 @@ fn author_role_names(ctx: &Context, msg: &Message) -> Vec<String> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Anonymous letters
+//
+// /letter picks a recipient and writes to them. The bot posts a notice in the
+// letters channel; only the named recipient can open it, they see it privately,
+// and it opens once. They can reply, and the reply travels back the same way.
+//
+// No model is involved anywhere in this, so it costs nothing per letter and is
+// open to every member even while the AI side is admin-only.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Letter {
+    id: String,
+    from_id: u64,
+    from_name: String,
+    to_id: u64,
+    to_name: String,
+    body: String,
+    sent_at: String,
+    #[serde(default)]
+    opened: bool,
+    /// Set when this letter is itself a reply, so the notice can say so.
+    #[serde(default)]
+    in_reply_to: Option<String>,
+}
+
+fn letter_key(id: &str) -> String {
+    format!("letter__{}", id)
+}
+
+fn letters_channel() -> Option<u64> {
+    std::env::var("VIZIER_LETTERS_CHANNEL").ok()?.trim().parse().ok()
+}
+
+/// Per-sender send times, for the rate limit. In memory on purpose: a restart
+/// clearing it is harmless, and it keeps letters out of the write path.
+static LETTER_RL: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, Vec<std::time::Instant>>>> =
+    std::sync::OnceLock::new();
+
+/// True when the sender is within their allowance, recording the send if so.
+fn letter_rate_ok(user: u64) -> bool {
+    let max = env_u64("VIZIER_LETTERS_PER_HOUR", 5) as usize;
+    let now = std::time::Instant::now();
+    let Ok(mut guard) = LETTER_RL
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+    else {
+        return true; // never block on a poisoned lock
+    };
+    let sends = guard.entry(user).or_default();
+    sends.retain(|t| now.duration_since(*t).as_secs() < 3600);
+    if sends.len() >= max {
+        return false;
+    }
+    sends.push(now);
+    true
+}
+
+async fn load_letter(
+    storage: &Arc<crate::storage::VizierStorage>,
+    id: &str,
+) -> Option<Letter> {
+    let v = storage.get_state(letter_key(id)).await.ok()??;
+    serde_json::from_value(v).ok()
+}
+
+async fn save_letter(storage: &Arc<crate::storage::VizierStorage>, letter: &Letter) {
+    if let Ok(v) = serde_json::to_value(letter) {
+        let _ = storage.save_state(letter_key(&letter.id), v).await;
+    }
+}
+
+/// Post the "you have a letter" notice with its Open button.
+async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
+    let heading = if letter.in_reply_to.is_some() {
+        "You have a reply to your anonymous letter"
+    } else {
+        "You have an anonymous letter"
+    };
+    let embed = serenity::all::CreateEmbed::new()
+        .title("Anonymous letter")
+        .description(format!("<@{}>, {}.\n\nOnly you can open it, and it opens once.", letter.to_id, heading))
+        .colour(serenity::all::Colour::new(0x9B59B6));
+
+    let button = serenity::all::CreateButton::new(format!("lopen:{}", letter.id))
+        .label("Open")
+        .style(serenity::all::ButtonStyle::Primary);
+
+    let msg = CreateMessage::new()
+        .content(format!("<@{}>", letter.to_id))
+        .embed(embed)
+        .components(vec![serenity::all::CreateActionRow::Buttons(vec![button])]);
+
+    if let Err(err) = ChannelId::new(channel).send_message(&http, msg).await {
+        tracing::error!("failed to post letter notice: {:?}", err);
+    }
+}
+
+/// Validate and dispatch a `/letter`. Returns the private reply for the sender.
+async fn handle_letter_command(
+    ctx: &Context,
+    command: &serenity::all::CommandInteraction,
+    storage: &Arc<crate::storage::VizierStorage>,
+) -> String {
+    let Some(channel) = letters_channel() else {
+        return "Anonymous letters are not set up on this server yet.".to_string();
+    };
+
+    let recipient = command.data.options.iter().find(|o| o.name == "recipient").and_then(|o| {
+        match &o.value {
+            serenity::all::CommandDataOptionValue::User(id) => Some(*id),
+            _ => None,
+        }
+    });
+    let body = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "message")
+        .and_then(|o| o.value.as_str().map(|s| s.trim().to_string()))
+        .unwrap_or_default();
+
+    let Some(to_id) = recipient else {
+        return "Pick someone to send it to.".to_string();
+    };
+    if body.is_empty() {
+        return "Write something first.".to_string();
+    }
+    if body.chars().count() > 1500 {
+        return "That is too long - keep it under 1500 characters.".to_string();
+    }
+    let from_id = command.user.id.get();
+    if to_id.get() == from_id {
+        return "You cannot send yourself a letter.".to_string();
+    }
+    if to_id.get() == ctx.cache.current_user().id.get() {
+        return "I cannot read letters. Send it to a person.".to_string();
+    }
+    if !letter_rate_ok(from_id) {
+        return "You have sent too many letters this hour. Try again later.".to_string();
+    }
+
+    let to_name = to_id
+        .to_user(&ctx.http)
+        .await
+        .map(|u| u.display_name().to_string())
+        .unwrap_or_else(|_| "someone".to_string());
+
+    let letter = Letter {
+        id: nanoid::nanoid!(8),
+        from_id,
+        from_name: command.user.name.clone(),
+        to_id: to_id.get(),
+        to_name,
+        body,
+        sent_at: Utc::now().to_rfc3339(),
+        opened: false,
+        in_reply_to: None,
+    };
+    save_letter(storage, &letter).await;
+    post_letter_notice(ctx.http.clone(), channel, &letter).await;
+
+    format!(
+        "Sent. They will see a notice in <#{}> and only they can open it.\nYour name is not shown. Letter id `{}`.",
+        channel, letter.id
+    )
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -521,9 +690,169 @@ impl EventHandler for Handler {
         // Upstream handles /help but never registers it, so it never appears.
         let help = CreateCommand::new("help").description("what I do and how to use me");
         let _ = Command::create_global_command(ctx.http.clone(), help).await;
+
+        let letter = CreateCommand::new("letter")
+            .description("send someone an anonymous letter")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::User,
+                    "recipient",
+                    "who it is for",
+                )
+                .required(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::String,
+                    "message",
+                    "what you want to say",
+                )
+                .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), letter).await;
+
+        let trace = CreateCommand::new("letter_trace")
+            .description("admin only: who sent a letter")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::String,
+                    "letter_id",
+                    "the id shown at the bottom of the letter",
+                )
+                .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), trace).await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        // Letter buttons: open, and the reply box.
+        if let Interaction::Component(ref component) = interaction {
+            let id = component.data.custom_id.clone();
+            if let Some(letter_id) = id.strip_prefix("lopen:") {
+                let clicker = component.user.id.get();
+                let letter = load_letter(&self.1.storage, letter_id).await;
+
+                let (text, offer_reply) = match letter {
+                    None => ("That letter has gone missing.".to_string(), false),
+                    Some(l) if l.to_id != clicker => {
+                        // Say nothing about who it is for beyond that it is not them.
+                        ("This letter is not addressed to you.".to_string(), false)
+                    }
+                    Some(l) if l.opened => (
+                        "You have already opened this one. Letters open once.".to_string(),
+                        false,
+                    ),
+                    Some(mut l) => {
+                        l.opened = true;
+                        save_letter(&self.1.storage, &l).await;
+                        (
+                            format!(
+                                "**Anonymous letter**\n\n{}\n\n-# id `{}` - this will not open again",
+                                l.body, l.id
+                            ),
+                            true,
+                        )
+                    }
+                };
+
+                let mut resp = CreateInteractionResponseMessage::new()
+                    .ephemeral(true)
+                    .content(text);
+                if offer_reply {
+                    resp = resp.components(vec![serenity::all::CreateActionRow::Buttons(vec![
+                        serenity::all::CreateButton::new(format!("lreply:{}", letter_id))
+                            .label("Reply anonymously")
+                            .style(serenity::all::ButtonStyle::Secondary),
+                    ])]);
+                }
+                let _ = component
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(resp),
+                    )
+                    .await;
+                return;
+            }
+
+            if let Some(letter_id) = id.strip_prefix("lreply:") {
+                let modal = serenity::all::CreateModal::new(
+                    format!("lrmodal:{}", letter_id),
+                    "Reply anonymously",
+                )
+                .components(vec![serenity::all::CreateActionRow::InputText(
+                    serenity::all::CreateInputText::new(
+                        serenity::all::InputTextStyle::Paragraph,
+                        "Your reply",
+                        "reply_body",
+                    )
+                    .required(true),
+                )]);
+                let _ = component
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Modal(modal),
+                    )
+                    .await;
+                return;
+            }
+        }
+
+        // Reply modal submitted: send it back the way it came.
+        if let Interaction::Modal(ref modal) = interaction {
+            if let Some(orig_id) = modal.data.custom_id.strip_prefix("lrmodal:") {
+                let body = modal
+                    .data
+                    .components
+                    .iter()
+                    .flat_map(|row| row.components.iter())
+                    .find_map(|c| match c {
+                        serenity::all::ActionRowComponent::InputText(t) => t.value.clone(),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+
+                let sender = modal.user.id.get();
+                let text = match (letters_channel(), load_letter(&self.1.storage, orig_id).await) {
+                    (None, _) => "Anonymous letters are not set up on this server.".to_string(),
+                    (_, None) => "That letter has gone missing.".to_string(),
+                    (Some(channel), Some(orig)) => {
+                        if orig.to_id != sender {
+                            "You cannot reply to a letter that was not yours.".to_string()
+                        } else if body.trim().is_empty() {
+                            "Empty reply, nothing sent.".to_string()
+                        } else if !letter_rate_ok(sender) {
+                            "You have sent too many letters this hour.".to_string()
+                        } else {
+                            let reply = Letter {
+                                id: nanoid::nanoid!(8),
+                                from_id: sender,
+                                from_name: modal.user.name.clone(),
+                                // Back to whoever wrote the original.
+                                to_id: orig.from_id,
+                                to_name: orig.from_name.clone(),
+                                body: body.chars().take(1500).collect(),
+                                sent_at: Utc::now().to_rfc3339(),
+                                opened: false,
+                                in_reply_to: Some(orig.id.clone()),
+                            };
+                            save_letter(&self.1.storage, &reply).await;
+                            post_letter_notice(ctx.http.clone(), channel, &reply).await;
+                            format!("Reply sent. They will see a notice in <#{}>.", channel)
+                        }
+                    }
+                };
+                let _ = modal
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().ephemeral(true).content(text),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        }
+
         if let Interaction::Command(command) = interaction {
             let agent_id = self.0.clone();
 
@@ -590,6 +919,62 @@ impl EventHandler for Handler {
                         serenity::all::CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(!is_admin)
+                                .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "letter" {
+                let reply = handle_letter_command(&ctx, &command, &self.1.storage).await;
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            // Always private: the whole point is that the channel
+                            // shows a notice, not who sent what.
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(true)
+                                .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "letter_trace" {
+                let caller = command.user.id.get();
+                let reply = if !admin_ids().contains(&caller) {
+                    "Only server admins can use this.".to_string()
+                } else {
+                    let id = command
+                        .data
+                        .options
+                        .iter()
+                        .find(|o| o.name == "letter_id")
+                        .and_then(|o| o.value.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    match load_letter(&self.1.storage, id.trim()).await {
+                        Some(l) => {
+                            tracing::info!(
+                                "letter {} traced by admin {} ({})",
+                                l.id,
+                                command.user.name,
+                                caller
+                            );
+                            format!(
+                                "Letter `{}`\nFrom: {} (<@{}>)\nTo: {} (<@{}>)\nSent: {}\nOpened: {}\n\n{}",
+                                l.id, l.from_name, l.from_id, l.to_name, l.to_id, l.sent_at, l.opened, l.body
+                            )
+                        }
+                        None => format!("No letter found with id `{}`.", id.trim()),
+                    }
+                };
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .ephemeral(true)
                                 .content(reply),
                         ),
                     )
