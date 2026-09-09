@@ -1043,19 +1043,38 @@ impl EventHandler for Handler {
                 let me = command.user.id.get();
                 let ids = inbox_ids(&self.1.storage, me).await;
                 let mut unopened: Vec<Letter> = vec![];
+                // Already-read letters stay listed so they can still be replied
+                // to. Dismissing the ephemeral message used to lose the reply
+                // button for good, and there is no other route back to it.
+                let mut read: Vec<Letter> = vec![];
                 for id in ids.iter().rev() {
                     if let Some(l) = load_letter(&self.1.storage, id).await {
-                        if !l.opened && l.to_id == me {
+                        if l.to_id != me {
+                            continue;
+                        }
+                        if l.opened {
+                            if read.len() < 5 {
+                                read.push(l);
+                            }
+                        } else if unopened.len() < 5 {
                             unopened.push(l);
                         }
                     }
-                    if unopened.len() >= 5 {
+                    if unopened.len() >= 5 && read.len() >= 5 {
                         break;
                     }
                 }
 
-                let (text, buttons) = if unopened.is_empty() {
-                    ("Koi nayi chitthi nahi hai. Sannata hai.".to_string(), vec![])
+                let (text, buttons) = if unopened.is_empty() && read.is_empty() {
+                    ("Koi chitthi nahi hai. Sannata hai.".to_string(), vec![])
+                } else if unopened.is_empty() {
+                    (
+                        format!(
+                            "Koi nayi chitthi nahi hai.\n\n**Padhi hui {} — jawab de sakte ho:**",
+                            read.len()
+                        ),
+                        vec![],
+                    )
                 } else {
                     let lines: Vec<String> = unopened
                         .iter()
@@ -1089,11 +1108,27 @@ impl EventHandler for Handler {
                     )
                 };
 
+                let mut rows = vec![];
+                if !buttons.is_empty() {
+                    rows.push(serenity::all::CreateActionRow::Buttons(buttons));
+                }
+                if !read.is_empty() {
+                    rows.push(serenity::all::CreateActionRow::Buttons(
+                        read.iter()
+                            .map(|l| {
+                                serenity::all::CreateButton::new(format!("lreply:{}", l.id))
+                                    .label(format!("Jawab do ({})", l.id))
+                                    .style(serenity::all::ButtonStyle::Secondary)
+                            })
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+
                 let mut resp = CreateInteractionResponseMessage::new()
                     .ephemeral(true)
                     .content(text);
-                if !buttons.is_empty() {
-                    resp = resp.components(vec![serenity::all::CreateActionRow::Buttons(buttons)]);
+                if !rows.is_empty() {
+                    resp = resp.components(rows);
                 }
                 let _ = command
                     .create_response(
