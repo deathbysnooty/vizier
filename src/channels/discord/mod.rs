@@ -495,6 +495,9 @@ struct Letter {
     /// Set when this letter is itself a reply, so the notice can say so.
     #[serde(default)]
     in_reply_to: Option<String>,
+    /// The public notice announcing this letter, removed once it is read.
+    #[serde(default)]
+    notice_msg: Option<u64>,
 }
 
 fn letter_key(id: &str) -> String {
@@ -600,8 +603,9 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
     pool[n % pool.len()]
 }
 
-/// Post the "you have a letter" notice with its Open button.
-async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
+/// Post the "you have a letter" notice with its Open button, returning the
+/// message id so it can be removed once the letter is read.
+async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> Option<u64> {
     // Replies are never posted to the channel. Naming both parties on every
     // exchange draws an obvious A, B, A, B pattern that identifies a pair of
     // correspondents to anyone reading, no matter what any single notice says.
@@ -619,7 +623,7 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
                 )
                 .await;
         }
-        return;
+        return None;
     }
 
     let pool = LETTER_SHOUTS;
@@ -641,10 +645,13 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
         .embed(embed)
         .components(vec![serenity::all::CreateActionRow::Buttons(vec![button])]);
 
-    if let Err(err) = ChannelId::new(channel).send_message(&http, msg).await {
-        tracing::error!("failed to post letter notice: {:?}", err);
+    match ChannelId::new(channel).send_message(&http, msg).await {
+        Ok(sent) => Some(sent.id.get()),
+        Err(err) => {
+            tracing::error!("failed to post letter notice: {:?}", err);
+            None
+        }
     }
-
 }
 
 /// Validate and dispatch a `/letter`. Returns the private reply for the sender.
@@ -707,10 +714,12 @@ async fn handle_letter_command(
         sent_at: Utc::now().to_rfc3339(),
         opened: false,
         in_reply_to: None,
+        notice_msg: None,
     };
+    let mut letter = letter;
+    letter.notice_msg = post_letter_notice(ctx.http.clone(), channel, &letter).await;
     save_letter(storage, &letter).await;
     inbox_push(storage, letter.to_id, &letter.id).await;
-    post_letter_notice(ctx.http.clone(), channel, &letter).await;
 
     format!(
         "Sent. They will see a notice in <#{}> and only they can open it.\nYour name is not shown. Letter id `{}`.",
@@ -827,6 +836,19 @@ impl EventHandler for Handler {
                     ),
                     Some(mut l) => {
                         l.opened = true;
+
+                        // Take the notice down. Leaving it up keeps a public
+                        // record of who receives letters, and a notice that
+                        // lingers marks its letter as still unread.
+                        if let (Some(mid), Some(ch)) = (l.notice_msg, letters_channel()) {
+                            let http = ctx.http.clone();
+                            tokio::spawn(async move {
+                                let _ = ChannelId::new(ch)
+                                    .delete_message(&http, serenity::all::MessageId::new(mid))
+                                    .await;
+                            });
+                        }
+                        l.notice_msg = None;
                         save_letter(&self.1.storage, &l).await;
 
                         // On a reply, show what they wrote first - without it the
@@ -931,10 +953,13 @@ impl EventHandler for Handler {
                                 sent_at: Utc::now().to_rfc3339(),
                                 opened: false,
                                 in_reply_to: Some(orig.id.clone()),
+                                notice_msg: None,
                             };
+                            let mut reply = reply;
+                            reply.notice_msg =
+                                post_letter_notice(ctx.http.clone(), channel, &reply).await;
                             save_letter(&self.1.storage, &reply).await;
                             inbox_push(&self.1.storage, reply.to_id, &reply.id).await;
-                            post_letter_notice(ctx.http.clone(), channel, &reply).await;
                             format!("Reply sent. They will see a notice in <#{}>.", channel)
                         }
                     }
