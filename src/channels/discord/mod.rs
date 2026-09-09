@@ -652,10 +652,27 @@ async fn log_letter(http: Arc<Http>, letter: &Letter) {
 /// Post the "you have a letter" notice with its Open button, returning the
 /// message id so it can be removed once the letter is read.
 async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> Option<u64> {
-    // Replies are announced exactly like first letters, mention and all, and the
-    // channel never says which is which. An A, B, A, B pattern would out a pair
-    // of correspondents if the notices stayed up - but each one is deleted the
-    // moment it is read, so nothing accumulates to correlate.
+    // Replies are never announced. A reply's recipient is by definition whoever
+    // wrote the original, so any notice naming them identifies both ends of the
+    // exchange - and deleting notices on read does not help while people are
+    // watching the pings arrive. The reply reaches its recipient by DM and
+    // through /letterbox instead.
+    if letter.in_reply_to.is_some() {
+        let uid = serenity::all::UserId::new(letter.to_id);
+        if let Ok(dm) = uid.create_dm_channel(&http).await {
+            let _ = dm
+                .id
+                .send_message(
+                    &http,
+                    CreateMessage::new().content(
+                        "Tumhari gumnaam chitthi ka jawab aa gaya hai. `/letterbox` likh ke kholo.",
+                    ),
+                )
+                .await;
+        }
+        return None;
+    }
+
     let pool = LETTER_SHOUTS;
     // Keyed off the letter id so a given letter always reads the same, while
     // consecutive letters vary.
