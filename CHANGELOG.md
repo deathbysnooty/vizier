@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.43] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Stop announcing replies again
 ## [0.10.42] - 2026-09-09
 
 ### 🚀 Features
 
 - *(dream)* Reuse the dream cycle to build member profiles
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.42
 ## [0.10.41] - 2026-09-09
 
 ### 🐛 Bug Fixes
