@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.27] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Accept multi-term search queries
 ## [0.10.26] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Drop the guessable channel_id from history search
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.26
 ## [0.10.25] - 2026-09-09
 
 ### 🐛 Bug Fixes
