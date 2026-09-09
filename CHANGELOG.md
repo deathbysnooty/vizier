@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.36] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Remove the notice once its letter is read
 ## [0.10.35] - 2026-09-09
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Let /letterbox reply to already-read letters
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.35
 ## [0.10.34] - 2026-09-09
 
 ### 🐛 Bug Fixes
