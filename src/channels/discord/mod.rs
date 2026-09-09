@@ -974,7 +974,12 @@ impl EventHandler for Handler {
                     Some(mut l) => {
                         l.opened = true;
 
-                        l.notice_msg = None;
+                        // The notice is deliberately NOT deleted here. A reply
+                        // hangs its thread off that message, and a letter is
+                        // always opened before it is answered - clearing it on
+                        // open meant a thread could never be created. The
+                        // delayed cleanup below removes the notice and the
+                        // thread together once nothing is left unread.
                         save_letter(&self.1.storage, &l).await;
 
                         // Once nothing in this exchange is unread, take the whole
