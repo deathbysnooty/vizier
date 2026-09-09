@@ -556,6 +556,24 @@ const LETTER_SHOUTS: &[&str] = &[
     "Attention <@{}>: gumnaam chitthi mili hai. Ab raat bhar sochna kaun tha.",
 ];
 
+/// Rejections in the bot's own voice - it is the same character here as
+/// anywhere else, and a flat error reads like a different bot.
+const SELF_LETTER_LINES: &[&str] = &[
+    "Kya bhai? Itna self obsessed mat ho, BC.",
+    "Khud ko letter? Bhai therapy sasti hai isse.",
+    "Apne aap ko chitthi bhej raha hai? Sach me itne akele ho?",
+    "Nahi. Khud se pyaar ghar pe kar, yahan nahi.",
+    "Bhai kam se kam ek dost bana le pehle.",
+];
+
+fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    pool[n % pool.len()]
+}
+
 const REPLY_SHOUTS: &[&str] = &[
     "📬 <@{}>, teri chitthi ka jawab aa gaya. Himmat hai toh khol.",
     "Oye <@{}>, jisko tune likha tha usne jawab bhej diya hai 👀",
@@ -617,23 +635,23 @@ async fn handle_letter_command(
         .unwrap_or_default();
 
     let Some(to_id) = recipient else {
-        return "Pick someone to send it to.".to_string();
+        return "Kisko bhejna hai? Naam toh bata.".to_string();
     };
     if body.is_empty() {
-        return "Write something first.".to_string();
+        return "Khaali chitthi? Kuch likh toh sahi.".to_string();
     }
     if body.chars().count() > 1500 {
-        return "That is too long - keep it under 1500 characters.".to_string();
+        return "Novel likh raha hai kya? 1500 characters se kam mein nipta.".to_string();
     }
     let from_id = command.user.id.get();
     if to_id.get() == from_id {
-        return "You cannot send yourself a letter.".to_string();
+        return pick(SELF_LETTER_LINES).to_string();
     }
     if to_id.get() == ctx.cache.current_user().id.get() {
-        return "I cannot read letters. Send it to a person.".to_string();
+        return "Mujhe letter bhej ke kya milega? Kisi insaan ko bhej.".to_string();
     }
     if !letter_rate_ok(from_id) {
-        return "You have sent too many letters this hour. Try again later.".to_string();
+        return "Bas kar bhai, postman thak gaya. Ek ghante baad aana.".to_string();
     }
 
     let to_name = to_id
@@ -759,10 +777,10 @@ impl EventHandler for Handler {
                     None => ("That letter has gone missing.".to_string(), false),
                     Some(l) if l.to_id != clicker => {
                         // Say nothing about who it is for beyond that it is not them.
-                        ("This letter is not addressed to you.".to_string(), false)
+                        ("Ye teri chitthi nahi hai. Chal nikal.".to_string(), false)
                     }
                     Some(l) if l.opened => (
-                        "You have already opened this one. Letters open once.".to_string(),
+                        "Ek baar khol chuka hai. Dobara nahi milegi.".to_string(),
                         false,
                     ),
                     Some(mut l) => {
@@ -840,11 +858,11 @@ impl EventHandler for Handler {
                     (_, None) => "That letter has gone missing.".to_string(),
                     (Some(channel), Some(orig)) => {
                         if orig.to_id != sender {
-                            "You cannot reply to a letter that was not yours.".to_string()
+                            "Ye chitthi teri thi hi nahi, jawab kya dega.".to_string()
                         } else if body.trim().is_empty() {
-                            "Empty reply, nothing sent.".to_string()
+                            "Khaali jawab? Rehne de.".to_string()
                         } else if !letter_rate_ok(sender) {
-                            "You have sent too many letters this hour.".to_string()
+                            "Bas kar bhai, ek ghante baad aana.".to_string()
                         } else {
                             let reply = Letter {
                                 id: nanoid::nanoid!(8),
