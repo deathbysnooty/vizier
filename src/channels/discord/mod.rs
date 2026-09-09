@@ -602,11 +602,26 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
 
 /// Post the "you have a letter" notice with its Open button.
 async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) {
-    // Replies are announced exactly like first letters, mention and all. Saying
-    // "this is a reply" would out the recipient as someone who sent one; making
-    // them indistinguishable means the mention reveals nothing that a normal
-    // letter notice does not already reveal, and the recipient can still tell
-    // which notice is theirs.
+    // Replies are never posted to the channel. Naming both parties on every
+    // exchange draws an obvious A, B, A, B pattern that identifies a pair of
+    // correspondents to anyone reading, no matter what any single notice says.
+    // The reply reaches its recipient privately and through /letterbox instead.
+    if letter.in_reply_to.is_some() {
+        let uid = serenity::all::UserId::new(letter.to_id);
+        if let Ok(dm) = uid.create_dm_channel(&http).await {
+            let _ = dm
+                .id
+                .send_message(
+                    &http,
+                    CreateMessage::new().content(
+                        "Tumhari gumnaam chitthi ka jawab aa gaya hai. `/letterbox` likh ke kholo.",
+                    ),
+                )
+                .await;
+        }
+        return;
+    }
+
     let pool = LETTER_SHOUTS;
     // Keyed off the letter id so a given letter always reads the same, while
     // consecutive letters vary.
