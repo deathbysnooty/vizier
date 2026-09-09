@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.47] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Keep the notice alive so replies can thread off it
 ## [0.10.46] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Name letter threads after the known participant
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.46
 ## [0.10.45] - 2026-09-09
 
 ### 🚀 Features
