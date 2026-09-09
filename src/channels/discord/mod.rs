@@ -728,9 +728,10 @@ async fn post_reply_in_thread(
         .await
         .ok()?;
 
-    // The unnamed party gets told privately, since the thread cannot name them.
+    // Both sides get the DM. The unnamed party has no other way to know, and
+    // the named one still has to find the right thread among several.
     // A thread id is a channel id, so <#id> renders as a link straight to it.
-    if reply.to_id != root.to_id {
+    {
         let uid = serenity::all::UserId::new(reply.to_id);
         if let Ok(dm) = uid.create_dm_channel(&http).await {
             let _ = dm
