@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.46] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* Name letter threads after the known participant
 ## [0.10.45] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Replies live in a thread, and the exchange clears itself up
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.45
 ## [0.10.44] - 2026-09-09
 
 ### ⚙️ Miscellaneous Tasks
