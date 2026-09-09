@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.31] - 2026-09-09
+
+### 🐛 Bug Fixes
+
+- *(discord)* Reply notices name nobody, and carry the thread
 ## [0.10.30] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Letter rejections speak in the bot's voice
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.30
 ## [0.10.29] - 2026-09-09
 
 ### 🚀 Features
