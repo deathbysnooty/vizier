@@ -481,7 +481,7 @@ fn author_role_names(ctx: &Context, msg: &Message) -> Vec<String> {
 // open to every member even while the AI side is admin-only.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Letter {
     id: String,
     from_id: u64,
@@ -498,6 +498,13 @@ struct Letter {
     /// The public notice announcing this letter, removed once it is read.
     #[serde(default)]
     notice_msg: Option<u64>,
+    /// The first letter of this exchange. Its notice carries the thread that
+    /// every later reply is posted into.
+    #[serde(default)]
+    root_id: Option<String>,
+    /// Thread hanging off the root notice, created with the first reply.
+    #[serde(default)]
+    thread_id: Option<u64>,
 }
 
 fn letter_key(id: &str) -> String {
@@ -578,6 +585,19 @@ async fn load_letter(
     serde_json::from_value(v).ok()
 }
 
+/// The first letter of an exchange, following in_reply_to back.
+async fn root_of(storage: &Arc<crate::storage::VizierStorage>, letter: &Letter) -> Option<Letter> {
+    let mut id = letter.root_id.clone().or_else(|| letter.in_reply_to.clone())?;
+    for _ in 0..10 {
+        let l = load_letter(storage, &id).await?;
+        match l.in_reply_to.clone() {
+            Some(parent) => id = parent,
+            None => return Some(l),
+        }
+    }
+    None
+}
+
 async fn save_letter(storage: &Arc<crate::storage::VizierStorage>, letter: &Letter) {
     if let Ok(v) = serde_json::to_value(letter) {
         let _ = storage.save_state(letter_key(&letter.id), v).await;
@@ -649,16 +669,61 @@ async fn log_letter(http: Arc<Http>, letter: &Letter) {
     }
 }
 
-/// Post the "you have a letter" notice with its Open button, returning the
-/// message id so it can be removed once the letter is read.
-async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> Option<u64> {
-    // Replies are never announced. A reply's recipient is by definition whoever
-    // wrote the original, so any notice naming them identifies both ends of the
-    // exchange - and deleting notices on read does not help while people are
-    // watching the pings arrive. The reply reaches its recipient by DM and
-    // through /letterbox instead.
-    if letter.in_reply_to.is_some() {
-        let uid = serenity::all::UserId::new(letter.to_id);
+/// Post a reply into the thread hanging off the exchange's first notice,
+/// creating that thread if this is the first reply.
+///
+/// Only the original recipient is ever tagged. They were already named on the
+/// parent notice, so tagging them there reveals nothing new - while whoever
+/// sent the first letter is never named anywhere, and is told by DM instead.
+async fn post_reply_in_thread(
+    http: Arc<Http>,
+    channel: u64,
+    storage: &Arc<crate::storage::VizierStorage>,
+    reply: &Letter,
+) -> Option<u64> {
+    let root = root_of(storage, reply).await?;
+
+    let thread_id = match root.thread_id {
+        Some(t) => t,
+        None => {
+            let parent_msg = root.notice_msg?;
+            let thread = ChannelId::new(channel)
+                .create_thread_from_message(
+                    &http,
+                    serenity::all::MessageId::new(parent_msg),
+                    serenity::all::CreateThread::new("chitthi ka silsila"),
+                )
+                .await
+                .ok()?;
+            let mut updated = root.clone();
+            updated.thread_id = Some(thread.id.get());
+            save_letter(storage, &updated).await;
+            thread.id.get()
+        }
+    };
+
+    // Tag only the person the parent notice already named.
+    let content = if reply.to_id == root.to_id {
+        format!("<@{}> ek aur jawab aaya hai.", reply.to_id)
+    } else {
+        "Ek jawab aaya hai. Jiska hai, wahi khol paayega.".to_string()
+    };
+    let button = serenity::all::CreateButton::new(format!("lopen:{}", reply.id))
+        .label("Kholo")
+        .style(serenity::all::ButtonStyle::Primary);
+    let sent = ChannelId::new(thread_id)
+        .send_message(
+            &http,
+            CreateMessage::new()
+                .content(content)
+                .components(vec![serenity::all::CreateActionRow::Buttons(vec![button])]),
+        )
+        .await
+        .ok()?;
+
+    // The unnamed party gets told privately, since the thread cannot name them.
+    if reply.to_id != root.to_id {
+        let uid = serenity::all::UserId::new(reply.to_id);
         if let Ok(dm) = uid.create_dm_channel(&http).await {
             let _ = dm
                 .id
@@ -670,9 +735,13 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> O
                 )
                 .await;
         }
-        return None;
     }
+    Some(sent.id.get())
+}
 
+/// Post the "you have a letter" notice with its Open button, returning the
+/// message id so it can be removed once the letter is read.
+async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> Option<u64> {
     let pool = LETTER_SHOUTS;
     // Keyed off the letter id so a given letter always reads the same, while
     // consecutive letters vary.
@@ -767,6 +836,8 @@ async fn handle_letter_command(
         opened: false,
         in_reply_to: None,
         notice_msg: None,
+        root_id: None,
+        thread_id: None,
     };
     let mut letter = letter;
     letter.notice_msg = post_letter_notice(ctx.http.clone(), channel, &letter).await;
@@ -896,19 +967,53 @@ impl EventHandler for Handler {
                     Some(mut l) => {
                         l.opened = true;
 
-                        // Take the notice down. Leaving it up keeps a public
-                        // record of who receives letters, and a notice that
-                        // lingers marks its letter as still unread.
-                        if let (Some(mid), Some(ch)) = (l.notice_msg, letters_channel()) {
-                            let http = ctx.http.clone();
-                            tokio::spawn(async move {
-                                let _ = ChannelId::new(ch)
-                                    .delete_message(&http, serenity::all::MessageId::new(mid))
-                                    .await;
-                            });
-                        }
                         l.notice_msg = None;
                         save_letter(&self.1.storage, &l).await;
+
+                        // Once nothing in this exchange is unread, take the whole
+                        // thing down after a pause - long enough to finish
+                        // reading, short enough that the channel does not become
+                        // a record of who talks to whom.
+                        if let Some(ch) = letters_channel() {
+                            let root = root_of(&self.1.storage, &l)
+                                .await
+                                .unwrap_or_else(|| l.clone());
+                            let storage = self.1.storage.clone();
+                            let http = ctx.http.clone();
+                            let this_id = l.id.clone();
+                            tokio::spawn(async move {
+                                let delay = env_u64("VIZIER_LETTER_CLEANUP_SECS", 120);
+                                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+
+                                // Anything still unread means the exchange is live.
+                                let ids = inbox_ids(&storage, root.to_id).await;
+                                let mut ids2 = inbox_ids(&storage, root.from_id).await;
+                                ids2.extend(ids);
+                                for id in ids2 {
+                                    if id == this_id {
+                                        continue;
+                                    }
+                                    if let Some(other) = load_letter(&storage, &id).await {
+                                        let same = other.id == root.id
+                                            || other.root_id.as_deref() == Some(root.id.as_str())
+                                            || other.in_reply_to.as_deref()
+                                                == Some(root.id.as_str());
+                                        if same && !other.opened {
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                if let Some(tid) = root.thread_id {
+                                    let _ = ChannelId::new(tid).delete(&http).await;
+                                }
+                                if let Some(mid) = root.notice_msg {
+                                    let _ = ChannelId::new(ch)
+                                        .delete_message(&http, serenity::all::MessageId::new(mid))
+                                        .await;
+                                }
+                            });
+                        }
 
                         // On a reply, show what they wrote first - without it the
                         // answer arrives with no idea which letter it belongs to.
@@ -1013,10 +1118,17 @@ impl EventHandler for Handler {
                                 opened: false,
                                 in_reply_to: Some(orig.id.clone()),
                                 notice_msg: None,
+                                root_id: orig.root_id.clone().or(Some(orig.id.clone())),
+                                thread_id: None,
                             };
                             let mut reply = reply;
-                            reply.notice_msg =
-                                post_letter_notice(ctx.http.clone(), channel, &reply).await;
+                            reply.notice_msg = post_reply_in_thread(
+                                ctx.http.clone(),
+                                channel,
+                                &self.1.storage,
+                                &reply,
+                            )
+                            .await;
                             save_letter(&self.1.storage, &reply).await;
                             inbox_push(&self.1.storage, reply.to_id, &reply.id).await;
                             log_letter(ctx.http.clone(), &reply).await;
