@@ -501,6 +501,32 @@ fn letter_key(id: &str) -> String {
     format!("letter__{}", id)
 }
 
+/// Index of letter ids per recipient. State storage is get/put by key with no
+/// way to scan, so an inbox has to be maintained alongside the letters.
+fn inbox_key(user_id: u64) -> String {
+    format!("letterbox__{}", user_id)
+}
+
+async fn inbox_ids(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> Vec<String> {
+    match storage.get_state(inbox_key(user_id)).await {
+        Ok(Some(v)) => serde_json::from_value(v).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+async fn inbox_push(storage: &Arc<crate::storage::VizierStorage>, user_id: u64, id: &str) {
+    let mut ids = inbox_ids(storage, user_id).await;
+    ids.push(id.to_string());
+    // Bounded: an inbox is for what is still unread, not a permanent archive.
+    if ids.len() > 100 {
+        let cut = ids.len() - 100;
+        ids.drain(0..cut);
+    }
+    if let Ok(v) = serde_json::to_value(ids) {
+        let _ = storage.save_state(inbox_key(user_id), v).await;
+    }
+}
+
 fn letters_channel() -> Option<u64> {
     std::env::var("VIZIER_LETTERS_CHANNEL").ok()?.trim().parse().ok()
 }
@@ -695,6 +721,7 @@ async fn handle_letter_command(
         in_reply_to: None,
     };
     save_letter(storage, &letter).await;
+    inbox_push(storage, letter.to_id, &letter.id).await;
     post_letter_notice(ctx.http.clone(), channel, &letter).await;
 
     format!(
@@ -774,6 +801,10 @@ impl EventHandler for Handler {
                 .required(true),
             );
         let _ = Command::create_global_command(ctx.http.clone(), letter).await;
+
+        let inbox = CreateCommand::new("letterbox")
+            .description("check your unopened anonymous letters (only you see this)");
+        let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
 
         let trace = CreateCommand::new("letter_trace")
             .description("admin only: who sent a letter")
@@ -914,6 +945,7 @@ impl EventHandler for Handler {
                                 in_reply_to: Some(orig.id.clone()),
                             };
                             save_letter(&self.1.storage, &reply).await;
+                            inbox_push(&self.1.storage, reply.to_id, &reply.id).await;
                             post_letter_notice(ctx.http.clone(), channel, &reply).await;
                             format!("Reply sent. They will see a notice in <#{}>.", channel)
                         }
@@ -1015,6 +1047,70 @@ impl EventHandler for Handler {
                                 .ephemeral(true)
                                 .content(reply),
                         ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "letterbox" {
+                let me = command.user.id.get();
+                let ids = inbox_ids(&self.1.storage, me).await;
+                let mut unopened: Vec<Letter> = vec![];
+                for id in ids.iter().rev() {
+                    if let Some(l) = load_letter(&self.1.storage, id).await {
+                        if !l.opened && l.to_id == me {
+                            unopened.push(l);
+                        }
+                    }
+                    if unopened.len() >= 5 {
+                        break;
+                    }
+                }
+
+                let (text, buttons) = if unopened.is_empty() {
+                    ("Koi nayi chitthi nahi hai. Sannata hai.".to_string(), vec![])
+                } else {
+                    let lines: Vec<String> = unopened
+                        .iter()
+                        .map(|l| {
+                            let kind = if l.in_reply_to.is_some() {
+                                "jawab"
+                            } else {
+                                "chitthi"
+                            };
+                            format!("- ek {} (`{}`)", kind, l.id)
+                        })
+                        .collect();
+                    (
+                        format!(
+                            "**Tumhare {} unopened:**\n{}\n\nKholne ke liye niche button dabao.",
+                            unopened.len(),
+                            lines.join("\n")
+                        ),
+                        unopened
+                            .iter()
+                            .map(|l| {
+                                serenity::all::CreateButton::new(format!("lopen:{}", l.id))
+                                    .label(if l.in_reply_to.is_some() {
+                                        "Jawab kholo"
+                                    } else {
+                                        "Chitthi kholo"
+                                    })
+                                    .style(serenity::all::ButtonStyle::Primary)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                };
+
+                let mut resp = CreateInteractionResponseMessage::new()
+                    .ephemeral(true)
+                    .content(text);
+                if !buttons.is_empty() {
+                    resp = resp.components(vec![serenity::all::CreateActionRow::Buttons(buttons)]);
+                }
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(resp),
                     )
                     .await;
             }
