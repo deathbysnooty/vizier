@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.49] - 2026-09-09
+
+### 🚀 Features
+
+- *(discord)* DM both sides of a letter thread
 ## [0.10.48] - 2026-09-09
 
 ### 🚀 Features
 
 - *(discord)* Point the reply DM at the thread
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.48
 ## [0.10.47] - 2026-09-09
 
 ### 🐛 Bug Fixes
