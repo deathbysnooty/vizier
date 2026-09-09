@@ -1,63 +1,45 @@
-pub const EXTRACTION_PROMPT: &str = r#"You are reviewing your recent conversation history to extract valuable insights.
+pub const EXTRACTION_PROMPT: &str = r#"You are reviewing recent messages from one Discord channel to build up what you know about the people in it.
 
-Review the provided session history and extract the following into a structured report:
+For each person who spoke, note only what the messages actually show:
 
-## Extracted Insights
+### Per person
+- **Who**: their display name and Discord id.
+- **What they talked about**: recurring interests, projects, opinions they stated outright.
+- **How they argue**: what they treat as evidence, how they concede, their habits and running jokes.
+- **Notable moments**: a claim, prediction, commitment, reversal or unfinished argument. Quote the words and give the message id.
+- **With whom**: who they tease, argue with, back up, or unexpectedly agree with.
+- **Anything that contradicts** what you already believed about them. This matters more than confirmation.
 
-### Facts & Preferences
-- User preferences, project details, technical decisions, environment details
+### Rules
+- Quote or closely paraphrase, and cite the message id. An observation with no receipt is worthless.
+- One message is an episode, not a pattern. Say which it is.
+- Describe behaviour, never character. "Asks for sources when she disagrees" is fine. "Argumentative and insecure" is not.
+- Never infer anyone's mental health, trauma, sexuality, religion, politics or personal circumstances. Not even in passing.
+- If someone barely spoke, say so and move on. Do not pad.
+- Note anyone who asked not to be talked about or profiled.
 
-### Feedback & Corrections
-- Things the user corrected, praised, or complained about
+Output the report directly."#;
 
-### Task Progress
-- What was accomplished, what's pending, blockers, next steps
+pub const CONSOLIDATION_PROMPT_TEMPLATE: &str = r#"You are folding today's observations into what you know about the people on this server.
 
-### Relationship Context
-- Communication style preferences, emotional cues, relationship dynamics
-
-### Learnings
-- New patterns discovered, useful information, lessons learned
-
-### Action Items
-- Follow-ups needed, reminders, unresolved questions
-- For each item, note:
-  - **Type**: task (specific deadline), recurring (periodic check-in), behavioral (preference/correction to remember), or reference (general context)
-  - **Urgency**: immediate, soon, or eventually
-
-Output your extraction report directly as your response."#;
-
-pub const CONSOLIDATION_PROMPT_TEMPLATE: &str = r#"You are consolidating insights from your recent dream extractions into your long-term knowledge.
-
-Here are the extraction reports from each session this dream cycle:
+Here are the reports from each channel this cycle:
 
 {extraction_content}
 
-Now do the following:
+Do this:
 
-1. **Create or update memories** — Write extracted facts, learnings, and context to your vector memory using memory_write. Use [[slug]] links to connect related memories.
+1. **One memory per person.** Check `memory_list` first. If a person already has a `profile: <name>` memory, update it with `memory_write` rather than creating a second one. Keep the id in the title stable.
 
-2. **Update your documents** — Modify your CORE if you've learned new patterns about yourself or your user.
+2. **Keep it evidence-shaped.** A profile holds: what they are into, how they argue, notable things they said with the quote and message id and roughly when, who they interact with, and how confident you are. Store what happened, not what you suspect it means.
 
-3. **Triage every action item** — Review ALL action items from every extraction. For EACH item, choose the correct persistence mechanism:
+3. **Promote carefully.** An observation seen once stays an episode, dated. Only call something a pattern when several separate conversations show it. Repetition inside one argument is not confirmation.
 
-   | Type | Action |
-   |------|--------|
-   | Specific deadline or one-time follow-up | `schedule_one_time_task` |
-   | Recurring check-in at specific times | `schedule_cron_task` |
-   | Behavioral correction or user preference | `WRITE_CORE` |
-   | General fact or context worth remembering | `memory_write` |
+4. **Prefer the newer truth.** If someone changed their mind or corrected themselves, update the profile and say when it changed. What they stated explicitly outweighs anything you inferred earlier.
 
-   Do NOT skip any action item. Every item must be persisted or explicitly noted as intentionally dropped in your final report.
+5. **Drop what did not hold.** If today's messages contradict something in a profile, remove or qualify it. Do not keep a claim alive because you wrote it once.
 
-4. **Create new skills** — If you identified recurring workflows, patterns, or specialized knowledge that could be reused, create a new skill using create_skill. First check list_skills to avoid duplicating existing skills.
+6. **Leave people out on request.** If someone asked not to be profiled, delete their profile with `memory_delete` and do not write another.
 
-5. **Link knowledge** — Connect new memories to existing ones. Check memory_list and memory_graph for related memories.
+Never store guesses about anyone's mental health, trauma, sexuality, religion, politics or personal life. Never store your own jokes as if they were facts about a person.
 
-6. **Clean up redundancies** — If new information duplicates existing memories, update the existing ones rather than creating duplicates.
-
-7. **Audit action items** — Re-read all extraction reports. Verify every action item was handled:
-   - State the count: N tasks scheduled, X CORE updates, Y memories written
-   - List any action items you intentionally dropped and why
-
-8. **Output your consolidation report** as your final text response. Summarize what you did, key decisions made, and anything noteworthy."#;
+Report briefly which profiles you created, updated, or dropped."#;
