@@ -211,9 +211,6 @@ pub struct SearchDiscordHistoryArgs {
     )]
     query: Option<String>,
 
-    #[schemars(description = "optional: restrict to one discord channel id")]
-    channel_id: Option<u64>,
-
     #[schemars(
         description = "optional: only messages from this person, matched against their discord display name or user id"
     )]
@@ -262,23 +259,15 @@ impl VizierTool for SearchDiscordHistory {
             return Ok("Give either something to search for, or a person to search by.".to_string());
         }
 
-        // An explicit channel narrows the search; it never widens it.
-        let allowed = searchable_channels();
-        if allowed.is_empty() {
+        // Always every monitored channel. There is deliberately no channel
+        // argument: the model cannot know real channel ids, and guesses that were
+        // a few digits off surfaced to users as "that channel is not monitored"
+        // about channels that are.
+        let channels: Vec<u64> = searchable_channels();
+        if channels.is_empty() {
             return Ok("No monitored channels are configured, so there is nothing to search."
                 .to_string());
         }
-        let channels: Vec<u64> = match args.channel_id {
-            Some(c) if allowed.contains(&c) => vec![c],
-            Some(_) => {
-                return Ok(
-                    "That channel is not one of the monitored channels, so its history \
-                     cannot be searched."
-                        .to_string(),
-                );
-            }
-            None => allowed,
-        };
         let slugs: Vec<String> = channels
             .iter()
             .map(|c| VizierChannelId::DiscordChanel(*c).to_slug())
