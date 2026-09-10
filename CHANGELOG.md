@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.52] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* Welcome arrivals, and /rejoin
 ## [0.10.51] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Track voice time, and stop counting other bots
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.51
 ## [0.10.50] - 2026-09-09
 
 ### 🐛 Bug Fixes
