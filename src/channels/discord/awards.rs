@@ -422,7 +422,19 @@ fn pick_winners(people: &HashMap<u64, Person>, members: &HashMap<u64, MemberInfo
 
 fn fonts() -> &'static Mutex<FontSystem> {
     static FONTS: OnceLock<Mutex<FontSystem>> = OnceLock::new();
-    FONTS.get_or_init(|| Mutex::new(FontSystem::new()))
+    FONTS.get_or_init(|| {
+        let mut fs = FontSystem::new();
+        // On Linux the font list comes from fontconfig's fonts.conf. Without
+        // fontconfig installed that file is missing and the list is empty,
+        // so look in the usual places directly.
+        if fs.db().len() == 0 {
+            for dir in ["/usr/share/fonts", "/usr/local/share/fonts"] {
+                fs.db_mut().load_fonts_dir(dir);
+            }
+        }
+        tracing::info!("awards: {} font faces available", fs.db().len());
+        Mutex::new(fs)
+    })
 }
 
 type Cached = (Instant, Arc<Vec<u8>>, String);
@@ -552,10 +564,16 @@ pub async fn card_png(ctx: &Context, guild: GuildId, view: View) -> Result<(Arc<
             View::Overall => "one award per person  ·  bots, #moderator-only and game rooms not counted".to_string(),
         },
     };
-    let png = tokio::task::spawn_blocking(move || awards_card::render(&card, &mut fonts().lock()))
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("drawing the card failed")?;
+    let png = tokio::task::spawn_blocking(move || {
+        let mut fs = fonts().lock();
+        // cosmic-text panics rather than drawing with no fonts at all.
+        if fs.db().len() == 0 {
+            return Err("no fonts installed to draw with".to_string());
+        }
+        awards_card::render(&card, &mut fs).ok_or_else(|| "drawing the card failed".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     let (done, total) = stats::history_progress();
     let mut note = String::new();
