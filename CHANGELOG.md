@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.53] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* Drop ranking - voice tracking and /rejoin
+- *(discord)* /rejoinstats
 ## [0.10.52] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Welcome arrivals, and /rejoin
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.52
 ## [0.10.51] - 2026-09-10
 
 ### 🚀 Features
