@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.60] - 2026-09-10
+
+### 🐛 Bug Fixes
+
+- *(discord)* Mark the voice log caught up even after a mid-import restart
+- *(discord)* /awards could not find fonts on the server
 ## [0.10.59] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* /awards
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.59
 ## [0.10.58] - 2026-09-10
 
 ### 🚀 Features
