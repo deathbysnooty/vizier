@@ -942,6 +942,9 @@ async fn joinlog_bump(
     if !name.is_empty() {
         log.name = name.to_string();
     }
+    // Once we have seen it happen ourselves, the record is no longer only as
+    // good as what Dyno logged.
+    log.source = "live".to_string();
     if let Ok(v) = serde_json::to_value(&log) {
         let _ = storage.save_state(joinlog_key(user_id), v).await;
     }
