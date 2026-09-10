@@ -345,7 +345,10 @@ pub async fn follow_voice_log(http: Arc<Http>, log_channel: u64) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let mut announced = upto > 0;
+    // Whether the end has ever been reached, not whether reading ever began:
+    // a restart part-way through the first import must still announce it, or
+    // /awards keeps saying the voice history is loading forever.
+    let mut announced = voice_caught_up();
     let mut pages = 0u32;
     loop {
         let builder = GetMessages::new().after(MessageId::new(upto.max(1))).limit(100);
