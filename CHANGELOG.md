@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.54] - 2026-09-10
+
+### 🐛 Bug Fixes
+
+- *(discord)* Mark join records the bot saw itself
 ## [0.10.53] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Drop ranking - voice tracking and /rejoin
 - *(discord)* /rejoinstats
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.53
 ## [0.10.52] - 2026-09-10
 
 ### 🚀 Features
