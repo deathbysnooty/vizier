@@ -906,17 +906,80 @@ async fn joinlog_get(storage: &Arc<crate::storage::VizierStorage>, user_id: u64)
     }
 }
 
-/// Everyone the join log knows about, noisiest first.
+/// Accounts that belong to the same person: alt id -> the id we keep.
+///
+/// People remake their Discord account and their join history would otherwise
+/// split in two, making a serial rejoiner look like two casual ones.
+const ALIAS_KEY: &str = "joinlog_aliases";
+
+async fn alias_map(storage: &Arc<crate::storage::VizierStorage>) -> HashMap<u64, u64> {
+    let Ok(Some(v)) = storage.get_state(ALIAS_KEY.to_string()).await else {
+        return HashMap::new();
+    };
+    let raw: HashMap<String, String> = serde_json::from_value(v).unwrap_or_default();
+    raw.into_iter()
+        .filter_map(|(k, v)| Some((k.parse().ok()?, v.parse().ok()?)))
+        .collect()
+}
+
+/// Follow a chain of account changes to the account we report under. The hop
+/// limit stops a mistaken A->B->A pair from spinning forever.
+fn resolve_alias(map: &HashMap<u64, u64>, mut id: u64) -> u64 {
+    for _ in 0..8 {
+        match map.get(&id) {
+            Some(&next) if next != id => id = next,
+            _ => break,
+        }
+    }
+    id
+}
+
+/// Merge one person's older account into the one they use now.
+fn fold_join_logs(into: &mut JoinLog, other: &JoinLog) {
+    into.joins += other.joins;
+    into.leaves += other.leaves;
+    let earliest = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (Some(x), Some(y)) => Some(if x <= y { x.clone() } else { y.clone() }),
+        (Some(x), None) => Some(x.clone()),
+        (None, b) => b.clone(),
+    };
+    let latest = |a: &Option<String>, b: &Option<String>| match (a, b) {
+        (Some(x), Some(y)) => Some(if x >= y { x.clone() } else { y.clone() }),
+        (Some(x), None) => Some(x.clone()),
+        (None, b) => b.clone(),
+    };
+    into.first_join = earliest(&into.first_join, &other.first_join);
+    into.last_join = latest(&into.last_join, &other.last_join);
+    into.last_leave = latest(&into.last_leave, &other.last_leave);
+    if into.name.is_empty() {
+        into.name = other.name.clone();
+    }
+}
+
+/// Everyone the join log knows about, noisiest first, one entry per person
+/// rather than one per account.
 async fn joinlog_all(storage: &Arc<crate::storage::VizierStorage>) -> Vec<(u64, JoinLog)> {
     let rows = storage.list_state("joinlog__".to_string()).await.unwrap_or_default();
-    let mut out: Vec<(u64, JoinLog)> = rows
-        .into_iter()
-        .filter_map(|(k, v)| {
-            let id = k.strip_prefix("joinlog__")?.parse::<u64>().ok()?;
-            let log: JoinLog = serde_json::from_value(v).ok()?;
-            Some((id, log))
-        })
-        .collect();
+    let aliases = alias_map(storage).await;
+
+    let mut merged: HashMap<u64, JoinLog> = HashMap::new();
+    for (k, v) in rows {
+        let Some(id) = k.strip_prefix("joinlog__").and_then(|r| r.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Ok(log) = serde_json::from_value::<JoinLog>(v) else {
+            continue;
+        };
+        let owner = resolve_alias(&aliases, id);
+        match merged.get_mut(&owner) {
+            Some(existing) => fold_join_logs(existing, &log),
+            None => {
+                merged.insert(owner, log);
+            }
+        }
+    }
+
+    let mut out: Vec<(u64, JoinLog)> = merged.into_iter().collect();
     out.sort_by(|a, b| b.1.joins.cmp(&a.1.joins).then(b.1.leaves.cmp(&a.1.leaves)));
     out
 }
@@ -1103,6 +1166,26 @@ impl EventHandler for Handler {
         let inbox = CreateCommand::new("letterbox")
             .description("check your unopened anonymous letters (only you see this)");
         let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
+
+        let samebanda = CreateCommand::new("samebanda")
+            .description("same person, new account - merge their join history (admins only)")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::User,
+                    "purana",
+                    "the account they used before",
+                )
+                .required(true),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::User,
+                    "naya",
+                    "the account they use now",
+                )
+                .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), samebanda).await;
 
         let rejoinstats = CreateCommand::new("rejoinstats")
             .description("who keeps leaving and coming back");
@@ -1430,6 +1513,66 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "samebanda" {
+                let opt = |n: &str| {
+                    command.data.options.iter().find(|o| o.name == n).and_then(|o| match &o.value {
+                        serenity::all::CommandDataOptionValue::User(id) => Some(id.get()),
+                        _ => None,
+                    })
+                };
+                let text = if !admin_ids().contains(&command.user.id.get()) {
+                    "Ye admin ka kaam hai.".to_string()
+                } else {
+                    match (opt("purana"), opt("naya")) {
+                        (Some(old), Some(new)) if old == new => {
+                            "Dono same account hain. Kya jod raha hai?".to_string()
+                        }
+                        (Some(old), Some(new)) => {
+                            let mut raw: HashMap<String, String> = self
+                                .1
+                                .storage
+                                .get_state(ALIAS_KEY.to_string())
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|v| serde_json::from_value(v).ok())
+                                .unwrap_or_default();
+                            raw.insert(old.to_string(), new.to_string());
+                            let _ = self
+                                .1
+                                .storage
+                                .save_state(
+                                    ALIAS_KEY.to_string(),
+                                    serde_json::json!(raw),
+                                )
+                                .await;
+                            let all = joinlog_all(&self.1.storage).await;
+                            let merged = all.iter().find(|(id, _)| *id == new);
+                            match merged {
+                                Some((_, log)) => format!(
+                                    "Jod diya. <@{}> aur <@{}> ab ek hi bande hain.\nMila ke **{}** baar aaya, **{}** baar gaya.",
+                                    old, new, log.joins, log.leaves
+                                ),
+                                None => format!("Jod diya. <@{}> ab <@{}> hai.", old, new),
+                            }
+                        }
+                        _ => "Dono account bata - purana aur naya.".to_string(),
+                    }
+                };
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(text)
+                                .allowed_mentions(
+                                    serenity::all::CreateAllowedMentions::new().empty_users(),
+                                ),
                         ),
                     )
                     .await;
