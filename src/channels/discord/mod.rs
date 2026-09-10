@@ -922,8 +922,148 @@ fn voice_stop(user_id: u64) -> Option<u64> {
     Some(std::time::Instant::now().duration_since(started).as_secs())
 }
 
+// ---------------------------------------------------------------------------
+// Join / leave history
+//
+// Seeded from the server's Dyno member-log channel and kept current from here.
+// Discord exposes no history of its own for this, so the counts are only as
+// good as what was recorded at the time.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct JoinLog {
+    #[serde(default)]
+    joins: u32,
+    #[serde(default)]
+    leaves: u32,
+    #[serde(default)]
+    first_join: Option<String>,
+    #[serde(default)]
+    last_join: Option<String>,
+    #[serde(default)]
+    last_leave: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    source: String,
+}
+
+fn joinlog_key(user_id: u64) -> String {
+    format!("joinlog__{}", user_id)
+}
+
+async fn joinlog_get(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> JoinLog {
+    match storage.get_state(joinlog_key(user_id)).await {
+        Ok(Some(v)) => serde_json::from_value(v).unwrap_or_default(),
+        _ => JoinLog::default(),
+    }
+}
+
+async fn joinlog_bump(
+    storage: &Arc<crate::storage::VizierStorage>,
+    user_id: u64,
+    name: &str,
+    joined: bool,
+) -> JoinLog {
+    let mut log = joinlog_get(storage, user_id).await;
+    let now = Utc::now().to_rfc3339();
+    if joined {
+        log.joins += 1;
+        if log.first_join.is_none() {
+            log.first_join = Some(now.clone());
+        }
+        log.last_join = Some(now);
+    } else {
+        log.leaves += 1;
+        log.last_leave = Some(now);
+    }
+    if !name.is_empty() {
+        log.name = name.to_string();
+    }
+    if let Ok(v) = serde_json::to_value(&log) {
+        let _ = storage.save_state(joinlog_key(user_id), v).await;
+    }
+    log
+}
+
+fn welcome_channel() -> Option<u64> {
+    std::env::var("VIZIER_WELCOME_CHANNEL").ok()?.trim().parse().ok()
+}
+
+/// Lines for someone arriving for the first time.
+const WELCOME_FIRST: &[&str] = &[
+    "Aa gaya ek aur. Welcome to **Midlyf Crisis India**, {u}. Bakchodi shuru karo.",
+    "Welcome {u}. Yahan sab pagal hain, tum bhi adjust kar loge.",
+    "{u} joined. Naya shikaar. Welcome to **MLCI** 🎉",
+    "Welcome {u}! Rules padh lena, phir bhool jaana, sab yahi karte hain.",
+];
+
+/// Lines for a returner. `{n}` is the number of times they have now joined.
+const WELCOME_BACK: &[&str] = &[
+    "{u} is back. {n}th time. Is server ka koi chakkar hai kya?",
+    "Wapas aa gaya {u}. Ye {n}th entry hai. Ab ke baar ruk jaana.",
+    "{u} returns for round {n}. Kahin aur mann nahi laga?",
+    "Dekho kaun laut aaya. {u}, {n}th baar. Hum gin rahe hain.",
+    "{u} ne {n}th baar join kiya hai. Rishta toh mazboot hai, bas confusing hai.",
+];
+
+fn ordinal(n: u32) -> String {
+    match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => format!("{}th", n),
+        (1, _) => format!("{}st", n),
+        (2, _) => format!("{}nd", n),
+        (3, _) => format!("{}rd", n),
+        _ => format!("{}th", n),
+    }
+}
+
 #[async_trait]
 impl EventHandler for Handler {
+    async fn guild_member_addition(&self, ctx: Context, member: serenity::all::Member) {
+        if member.user.bot {
+            return;
+        }
+        let uid = member.user.id.get();
+        let name = member.user.name.clone();
+        let log = joinlog_bump(&self.1.storage, uid, &name, true).await;
+
+        let Some(channel) = welcome_channel() else {
+            return;
+        };
+        // joins is now the count including this arrival, so >1 means a returner.
+        let text = if log.joins > 1 {
+            let pool = WELCOME_BACK;
+            let idx = (uid as usize).wrapping_add(log.joins as usize) % pool.len();
+            pool[idx]
+                .replace("{u}", &format!("<@{}>", uid))
+                .replace("{n}", &ordinal(log.joins))
+        } else {
+            let pool = WELCOME_FIRST;
+            let idx = (uid as usize) % pool.len();
+            pool[idx].replace("{u}", &format!("<@{}>", uid))
+        };
+        if let Err(err) = ChannelId::new(channel)
+            .send_message(&ctx.http, CreateMessage::new().content(text))
+            .await
+        {
+            tracing::error!("failed to post welcome: {:?}", err);
+        }
+    }
+
+    async fn guild_member_removal(
+        &self,
+        _ctx: Context,
+        _guild: serenity::all::GuildId,
+        user: serenity::all::User,
+        _member: Option<serenity::all::Member>,
+    ) {
+        if user.bot {
+            return;
+        }
+        // Recorded quietly - announcing departures invites drama.
+        joinlog_bump(&self.1.storage, user.id.get(), &user.name, false).await;
+    }
+
     async fn voice_state_update(
         &self,
         _ctx: Context,
@@ -1053,6 +1193,18 @@ impl EventHandler for Handler {
 
         // Deliberately not "letters": one character from "letter" meant people
         // could mute themselves while trying to send one.
+        let rejoin = CreateCommand::new("rejoin")
+            .description("how many times someone has left and come back")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::User,
+                    "member",
+                    "whose record to look up",
+                )
+                .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), rejoin).await;
+
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
         let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
@@ -1375,6 +1527,39 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "rejoin" {
+                let target = command.data.options.iter().find(|o| o.name == "member").and_then(
+                    |o| match &o.value {
+                        serenity::all::CommandDataOptionValue::User(id) => Some(*id),
+                        _ => None,
+                    },
+                );
+                let text = match target {
+                    None => "Kisko dekhna hai? Naam toh bata.".to_string(),
+                    Some(uid) => {
+                        let log = joinlog_get(&self.1.storage, uid.get()).await;
+                        if log.joins == 0 && log.leaves == 0 {
+                            format!("<@{}> ka koi record nahi hai. Ya toh shuru se yahin hai, ya logs se pehle ka hai.", uid)
+                        } else if log.joins <= 1 {
+                            format!("<@{}> ek hi baar aaya hai aur tab se yahin hai. Boring.", uid)
+                        } else {
+                            format!(
+                                "<@{}> ne **{}** baar join kiya hai aur **{}** baar chhoda hai.\nAbhi {} round chal raha hai.",
+                                uid, log.joins, log.leaves, ordinal(log.joins)
+                            )
+                        }
+                    }
+                };
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new().content(text),
                         ),
                     )
                     .await;
