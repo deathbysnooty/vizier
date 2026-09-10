@@ -909,6 +909,16 @@ async fn voice_add(storage: &Arc<crate::storage::VizierStorage>, user_id: u64, s
     tracing::debug!("voice: user {} +{}s (total {}s)", user_id, secs, total);
 }
 
+/// Voice channels whose occupants are not really there - the AFK channel,
+/// mostly. Time spent in them is not counted as being in VC.
+fn voice_ignored_channels() -> Vec<u64> {
+    std::env::var("VIZIER_VOICE_IGNORE_CHANNELS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect()
+}
+
 fn voice_start(user_id: u64) {
     if let Ok(mut g) = voice_sessions().lock() {
         g.entry(user_id).or_insert_with(std::time::Instant::now);
@@ -1166,8 +1176,12 @@ impl EventHandler for Handler {
         // Someone who is deafened cannot hear the room, so they are not in it.
         // Without this, whoever falls asleep in a voice channel with headphones
         // off banks the most hours and wins any "lives in VC" comparison.
+        // Being parked in the AFK channel is likewise not being in VC, and a
+        // move into it is exactly how Discord handles someone who went idle.
+        let ignored = voice_ignored_channels();
         let present = |vs: &serenity::all::VoiceState| {
-            vs.channel_id.filter(|_| !vs.self_deaf && !vs.deaf)
+            vs.channel_id
+                .filter(|c| !vs.self_deaf && !vs.deaf && !ignored.contains(&c.get()))
         };
         let was_in = old.as_ref().and_then(&present);
         let now_in = present(&new);
@@ -1199,8 +1213,10 @@ impl EventHandler for Handler {
         // never be credited until they moved.
         for guild in ctx.cache.guilds() {
             if let Some(g) = ctx.cache.guild(guild) {
+                let ignored = voice_ignored_channels();
                 for (uid, vs) in g.voice_states.iter() {
-                    if vs.channel_id.is_some() && !vs.self_deaf && !vs.deaf {
+                    let parked = vs.channel_id.is_some_and(|c| ignored.contains(&c.get()));
+                    if vs.channel_id.is_some() && !parked && !vs.self_deaf && !vs.deaf {
                         voice_start(uid.get());
                     }
                 }
