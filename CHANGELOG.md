@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.55] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* Merge join history across account changes
 ## [0.10.54] - 2026-09-10
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Mark join records the bot saw itself
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.54
 ## [0.10.53] - 2026-09-10
 
 ### 🚀 Features
