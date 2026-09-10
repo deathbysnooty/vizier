@@ -31,6 +31,30 @@ impl StateStorage for SqliteStorage {
             None => Ok(None),
         }
     }
+
+    async fn list_state(&self, prefix: String) -> Result<Vec<(String, serde_json::Value)>> {
+        let conn = self.conn.lock();
+        // ESCAPE so a key containing % or _ cannot widen the match. Join logs
+        // are keyed "joinlog__<id>", which is exactly that case.
+        let mut stmt = conn.prepare(
+            "SELECT key, value FROM state WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
+        )?;
+        let pattern = format!(
+            "{}%",
+            prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+        );
+        let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (k, v) = r?;
+            if let Ok(val) = serde_json::from_str(&v) {
+                out.push((k, val));
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait::async_trait]

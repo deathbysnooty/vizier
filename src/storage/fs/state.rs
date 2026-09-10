@@ -33,6 +33,30 @@ impl StateStorage for FileSystemStorage {
 
         Ok(None)
     }
+
+    async fn list_state(&self, prefix: String) -> Result<Vec<(String, serde_json::Value)>> {
+        let dir = build_path(&self.workspace, &[STATE_PATH]);
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(out);
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(key) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(e.path()) {
+                if let Ok(val) = serde_json::from_str(&raw) {
+                    out.push((key.to_string(), val));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
 }
 
 #[async_trait::async_trait]

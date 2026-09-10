@@ -906,6 +906,21 @@ async fn joinlog_get(storage: &Arc<crate::storage::VizierStorage>, user_id: u64)
     }
 }
 
+/// Everyone the join log knows about, noisiest first.
+async fn joinlog_all(storage: &Arc<crate::storage::VizierStorage>) -> Vec<(u64, JoinLog)> {
+    let rows = storage.list_state("joinlog__".to_string()).await.unwrap_or_default();
+    let mut out: Vec<(u64, JoinLog)> = rows
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let id = k.strip_prefix("joinlog__")?.parse::<u64>().ok()?;
+            let log: JoinLog = serde_json::from_value(v).ok()?;
+            Some((id, log))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.joins.cmp(&a.1.joins).then(b.1.leaves.cmp(&a.1.leaves)));
+    out
+}
+
 async fn joinlog_bump(
     storage: &Arc<crate::storage::VizierStorage>,
     user_id: u64,
@@ -1085,6 +1100,10 @@ impl EventHandler for Handler {
         let inbox = CreateCommand::new("letterbox")
             .description("check your unopened anonymous letters (only you see this)");
         let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
+
+        let rejoinstats = CreateCommand::new("rejoinstats")
+            .description("who keeps leaving and coming back");
+        let _ = Command::create_global_command(ctx.http.clone(), rejoinstats).await;
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1408,6 +1427,51 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
+                        ),
+                    )
+                    .await;
+            }
+
+            if command.data.name == "rejoinstats" {
+                let all = joinlog_all(&self.1.storage).await;
+                let repeat: Vec<_> = all.iter().filter(|(_, l)| l.joins >= 2).collect();
+                let text = if repeat.is_empty() {
+                    "Abhi tak koi wapas nahi aaya. Sab pehli baar mein tik gaye. Boring server.".to_string()
+                } else {
+                    let mut lines = vec![format!(
+                        "**Ghar wapsi board** - {} log aise hain jo gaye aur phir laut aaye.\n",
+                        repeat.len()
+                    )];
+                    for (rank, (uid, log)) in repeat.iter().take(15).enumerate() {
+                        let jibe = match log.joins {
+                            2 => "ek baar mann badla",
+                            3..=4 => "aadat ho gayi hai",
+                            5..=7 => "ye toh revolving door hai",
+                            _ => "bhai yahin ka kiraya de do",
+                        };
+                        lines.push(format!(
+                            "`{:>2}.` <@{}> - **{}** baar aaya, **{}** baar gaya  ·  _{}_",
+                            rank + 1,
+                            uid,
+                            log.joins,
+                            log.leaves,
+                            jibe
+                        ));
+                    }
+                    if repeat.len() > 15 {
+                        lines.push(format!("\n...aur {} log.", repeat.len() - 15));
+                    }
+                    lines.join("\n")
+                };
+                let _ = command
+                    .create_response(
+                        ctx.http.clone(),
+                        serenity::all::CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(text)
+                                .allowed_mentions(
+                                    serenity::all::CreateAllowedMentions::new().empty_users(),
+                                ),
                         ),
                     )
                     .await;
