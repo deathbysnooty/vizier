@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.57] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* Do not count the AFK channel as time in voice
 ## [0.10.56] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Restore voice time, without the AFK problem
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.56
 ## [0.10.55] - 2026-09-10
 
 ### 🚀 Features
