@@ -869,60 +869,6 @@ async fn handle_letter_command(
 }
 
 // ---------------------------------------------------------------------------
-// Voice time
-//
-// Discord keeps no history of who sat in a voice channel, so this can only be
-// measured live - every minute not recorded is lost for good. Sessions are held
-// in memory and the accumulated total per person is written to storage when a
-// session ends.
-// ---------------------------------------------------------------------------
-
-static VOICE_SESSIONS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<u64, std::time::Instant>>,
-> = std::sync::OnceLock::new();
-
-fn voice_sessions() -> &'static std::sync::Mutex<HashMap<u64, std::time::Instant>> {
-    VOICE_SESSIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn voice_key(user_id: u64) -> String {
-    format!("voicetime__{}", user_id)
-}
-
-async fn voice_total(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> u64 {
-    match storage.get_state(voice_key(user_id)).await {
-        Ok(Some(v)) => v.as_u64().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-/// Add a finished session to someone's running total.
-async fn voice_add(storage: &Arc<crate::storage::VizierStorage>, user_id: u64, secs: u64) {
-    // A session shorter than this is someone clicking through channels.
-    if secs < env_u64("VIZIER_VOICE_MIN_SECS", 30) {
-        return;
-    }
-    let total = voice_total(storage, user_id).await + secs;
-    let _ = storage
-        .save_state(voice_key(user_id), serde_json::json!(total))
-        .await;
-    tracing::debug!("voice: user {} +{}s (total {}s)", user_id, secs, total);
-}
-
-fn voice_start(user_id: u64) {
-    if let Ok(mut g) = voice_sessions().lock() {
-        g.entry(user_id).or_insert_with(std::time::Instant::now);
-    }
-}
-
-/// End a session and return how long it ran.
-fn voice_stop(user_id: u64) -> Option<u64> {
-    let mut g = voice_sessions().lock().ok()?;
-    let started = g.remove(&user_id)?;
-    Some(std::time::Instant::now().duration_since(started).as_secs())
-}
-
-// ---------------------------------------------------------------------------
 // Join / leave history
 //
 // Seeded from the server's Dyno member-log channel and kept current from here.
@@ -951,6 +897,7 @@ struct JoinLog {
 fn joinlog_key(user_id: u64) -> String {
     format!("joinlog__{}", user_id)
 }
+
 
 async fn joinlog_get(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> JoinLog {
     match storage.get_state(joinlog_key(user_id)).await {
@@ -1064,60 +1011,8 @@ impl EventHandler for Handler {
         joinlog_bump(&self.1.storage, user.id.get(), &user.name, false).await;
     }
 
-    async fn voice_state_update(
-        &self,
-        _ctx: Context,
-        old: Option<serenity::all::VoiceState>,
-        new: serenity::all::VoiceState,
-    ) {
-        let Some(member) = new.member.as_ref().or(old.as_ref().and_then(|o| o.member.as_ref()))
-        else {
-            return;
-        };
-        // Bots idle in voice channels for hours; they are not participants.
-        if member.user.bot {
-            return;
-        }
-        let uid = member.user.id.get();
-
-        let was_in = old.as_ref().and_then(|o| o.channel_id);
-        let now_in = new.channel_id;
-
-        match (was_in, now_in) {
-            // Joined from nowhere.
-            (None, Some(_)) => voice_start(uid),
-            // Left entirely.
-            (Some(_), None) => {
-                if let Some(secs) = voice_stop(uid) {
-                    voice_add(&self.1.storage, uid, secs).await;
-                }
-            }
-            // Moved rooms: bank the old session, start a new one. Mute and
-            // deafen changes also land here with the channel unchanged, and
-            // those must not reset the clock.
-            (Some(a), Some(b)) if a != b => {
-                if let Some(secs) = voice_stop(uid) {
-                    voice_add(&self.1.storage, uid, secs).await;
-                }
-                voice_start(uid);
-            }
-            _ => {}
-        }
-    }
 
     async fn ready(&self, ctx: Context, _ready: Ready) {
-        // Anyone already sitting in a channel when we connect would otherwise
-        // never be credited until they moved.
-        for guild in ctx.cache.guilds() {
-            if let Some(g) = ctx.cache.guild(guild) {
-                for (uid, vs) in g.voice_states.iter() {
-                    if vs.channel_id.is_some() {
-                        voice_start(uid.get());
-                    }
-                }
-            }
-        }
-
         let ping = CreateCommand::new("ping").description("a simple ping");
 
         let new = CreateCommand::new("new").description("create fresh new session");
@@ -1190,20 +1085,6 @@ impl EventHandler for Handler {
         let inbox = CreateCommand::new("letterbox")
             .description("check your unopened anonymous letters (only you see this)");
         let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
-
-        // Deliberately not "letters": one character from "letter" meant people
-        // could mute themselves while trying to send one.
-        let rejoin = CreateCommand::new("rejoin")
-            .description("how many times someone has left and come back")
-            .add_option(
-                CreateCommandOption::new(
-                    serenity::all::CommandOptionType::User,
-                    "member",
-                    "whose record to look up",
-                )
-                .required(true),
-            );
-        let _ = Command::create_global_command(ctx.http.clone(), rejoin).await;
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1527,39 +1408,6 @@ impl EventHandler for Handler {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
-                        ),
-                    )
-                    .await;
-            }
-
-            if command.data.name == "rejoin" {
-                let target = command.data.options.iter().find(|o| o.name == "member").and_then(
-                    |o| match &o.value {
-                        serenity::all::CommandDataOptionValue::User(id) => Some(*id),
-                        _ => None,
-                    },
-                );
-                let text = match target {
-                    None => "Kisko dekhna hai? Naam toh bata.".to_string(),
-                    Some(uid) => {
-                        let log = joinlog_get(&self.1.storage, uid.get()).await;
-                        if log.joins == 0 && log.leaves == 0 {
-                            format!("<@{}> ka koi record nahi hai. Ya toh shuru se yahin hai, ya logs se pehle ka hai.", uid)
-                        } else if log.joins <= 1 {
-                            format!("<@{}> ek hi baar aaya hai aur tab se yahin hai. Boring.", uid)
-                        } else {
-                            format!(
-                                "<@{}> ne **{}** baar join kiya hai aur **{}** baar chhoda hai.\nAbhi {} round chal raha hai.",
-                                uid, log.joins, log.leaves, ordinal(log.joins)
-                            )
-                        }
-                    }
-                };
-                let _ = command
-                    .create_response(
-                        ctx.http.clone(),
-                        serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().content(text),
                         ),
                     )
                     .await;
