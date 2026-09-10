@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.56] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* Restore voice time, without the AFK problem
 ## [0.10.55] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Merge join history across account changes
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.55
 ## [0.10.54] - 2026-09-10
 
 ### 🐛 Bug Fixes
