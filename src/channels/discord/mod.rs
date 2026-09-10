@@ -27,6 +27,8 @@ use crate::storage::state::StateStorage;
 use crate::transport::VizierTransport;
 use crate::utils::remove_think_tags;
 
+mod stats;
+
 pub struct DiscordChannelReader {
     deps: VizierDependencies,
     token: String,
@@ -48,6 +50,12 @@ impl DiscordChannelReader {
 #[async_trait::async_trait]
 impl VizierChannel for DiscordChannelReader {
     async fn run(&self) -> Result<()> {
+        // Activity counts for /awards. Failing to open them must not take the
+        // bot down - it only means nothing is counted this run.
+        if let Err(err) = stats::open(&self.deps.config.workspace, &allowed_channels()) {
+            tracing::error!("stats database unavailable: {}", err);
+        }
+
         let intents = GatewayIntents::all();
         let mut client = Client::builder(self.token.clone(), intents)
             .event_handler(Handler(self.agent_id.clone(), self.deps.clone()))
@@ -869,70 +877,6 @@ async fn handle_letter_command(
 }
 
 // ---------------------------------------------------------------------------
-// Voice time
-//
-// Discord keeps no history of who sat in a voice channel, so this can only be
-// measured live - every minute not recorded is lost for good. Sessions are held
-// in memory and the accumulated total per person is written to storage when a
-// session ends.
-// ---------------------------------------------------------------------------
-
-static VOICE_SESSIONS: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<u64, std::time::Instant>>,
-> = std::sync::OnceLock::new();
-
-fn voice_sessions() -> &'static std::sync::Mutex<HashMap<u64, std::time::Instant>> {
-    VOICE_SESSIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-fn voice_key(user_id: u64) -> String {
-    format!("voicetime__{}", user_id)
-}
-
-async fn voice_total(storage: &Arc<crate::storage::VizierStorage>, user_id: u64) -> u64 {
-    match storage.get_state(voice_key(user_id)).await {
-        Ok(Some(v)) => v.as_u64().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-/// Add a finished session to someone's running total.
-async fn voice_add(storage: &Arc<crate::storage::VizierStorage>, user_id: u64, secs: u64) {
-    // A session shorter than this is someone clicking through channels.
-    if secs < env_u64("VIZIER_VOICE_MIN_SECS", 30) {
-        return;
-    }
-    let total = voice_total(storage, user_id).await + secs;
-    let _ = storage
-        .save_state(voice_key(user_id), serde_json::json!(total))
-        .await;
-    tracing::debug!("voice: user {} +{}s (total {}s)", user_id, secs, total);
-}
-
-/// Voice channels whose occupants are not really there - the AFK channel,
-/// mostly. Time spent in them is not counted as being in VC.
-fn voice_ignored_channels() -> Vec<u64> {
-    std::env::var("VIZIER_VOICE_IGNORE_CHANNELS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect()
-}
-
-fn voice_start(user_id: u64) {
-    if let Ok(mut g) = voice_sessions().lock() {
-        g.entry(user_id).or_insert_with(std::time::Instant::now);
-    }
-}
-
-/// End a session and return how long it ran.
-fn voice_stop(user_id: u64) -> Option<u64> {
-    let mut g = voice_sessions().lock().ok()?;
-    let started = g.remove(&user_id)?;
-    Some(std::time::Instant::now().duration_since(started).as_secs())
-}
-
-// ---------------------------------------------------------------------------
 // Join / leave history
 //
 // Seeded from the server's Dyno member-log channel and kept current from here.
@@ -1157,69 +1101,22 @@ impl EventHandler for Handler {
     }
 
 
-    async fn voice_state_update(
-        &self,
-        _ctx: Context,
-        old: Option<serenity::all::VoiceState>,
-        new: serenity::all::VoiceState,
-    ) {
-        let Some(member) = new.member.as_ref().or(old.as_ref().and_then(|o| o.member.as_ref()))
-        else {
-            return;
-        };
-        // Bots idle in voice channels for hours; they are not participants.
-        if member.user.bot {
-            return;
-        }
-        let uid = member.user.id.get();
-
-        // Someone who is deafened cannot hear the room, so they are not in it.
-        // Without this, whoever falls asleep in a voice channel with headphones
-        // off banks the most hours and wins any "lives in VC" comparison.
-        // Being parked in the AFK channel is likewise not being in VC, and a
-        // move into it is exactly how Discord handles someone who went idle.
-        let ignored = voice_ignored_channels();
-        let present = |vs: &serenity::all::VoiceState| {
-            vs.channel_id
-                .filter(|c| !vs.self_deaf && !vs.deaf && !ignored.contains(&c.get()))
-        };
-        let was_in = old.as_ref().and_then(&present);
-        let now_in = present(&new);
-
-        match (was_in, now_in) {
-            // Arrived, or came back from being deafened.
-            (None, Some(_)) => voice_start(uid),
-            // Left, or deafened themselves.
-            (Some(_), None) => {
-                if let Some(secs) = voice_stop(uid) {
-                    voice_add(&self.1.storage, uid, secs).await;
-                }
-            }
-            // Moved rooms: bank the old session, start a new one. A plain mute
-            // change also lands here with the channel unchanged, and that must
-            // not reset the clock - muted people are still listening.
-            (Some(a), Some(b)) if a != b => {
-                if let Some(secs) = voice_stop(uid) {
-                    voice_add(&self.1.storage, uid, secs).await;
-                }
-                voice_start(uid);
-            }
-            _ => {}
-        }
-    }
-
     async fn ready(&self, ctx: Context, _ready: Ready) {
-        // Anyone already sitting in a channel when we connect would otherwise
-        // never be credited until they moved.
-        for guild in ctx.cache.guilds() {
-            if let Some(g) = ctx.cache.guild(guild) {
-                let ignored = voice_ignored_channels();
-                for (uid, vs) in g.voice_states.iter() {
-                    let parked = vs.channel_id.is_some_and(|c| ignored.contains(&c.get()));
-                    if vs.channel_id.is_some() && !parked && !vs.self_deaf && !vs.deaf {
-                        voice_start(uid.get());
-                    }
+        // History import, downtime catch-up and the voice log each start once
+        // per process. Ready fires again on every reconnect, and two copies of
+        // one import would count every message twice.
+        static STATS_TASKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if stats::is_open() && !STATS_TASKS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            for channel in allowed_channels() {
+                let http = ctx.http.clone();
+                tokio::spawn(async move { stats::catch_up(http, channel).await });
+            }
+            match std::env::var("VIZIER_VOICE_LOG_CHANNEL").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+                Some(log) => {
+                    let http = ctx.http.clone();
+                    tokio::spawn(async move { stats::follow_voice_log(http, log).await });
                 }
+                None => tracing::warn!("VIZIER_VOICE_LOG_CHANNEL not set - voice time will not be recorded"),
             }
         }
 
@@ -2447,6 +2344,12 @@ Ye message sirf tumhe dikh raha hai."#,
             if !allowed.is_empty() && !allowed.contains(&msg.channel_id.get()) {
                 return;
             }
+        }
+
+        // Counted before the pause check: /awards is a record of the server,
+        // not of whether the bot happened to be listening.
+        if !is_dm {
+            stats::count_live(&msg);
         }
 
         // Paused by an admin: read nothing, store nothing, spend nothing.
