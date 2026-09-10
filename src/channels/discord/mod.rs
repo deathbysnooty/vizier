@@ -27,6 +27,8 @@ use crate::storage::state::StateStorage;
 use crate::transport::VizierTransport;
 use crate::utils::remove_think_tags;
 
+mod awards;
+mod awards_card;
 mod stats;
 
 pub struct DiscordChannelReader {
@@ -1213,6 +1215,10 @@ impl EventHandler for Handler {
             );
         let _ = Command::create_global_command(ctx.http.clone(), samebanda).await;
 
+        let awards_cmd = CreateCommand::new("awards")
+            .description("the server's awards - all time, or last week");
+        let _ = Command::create_global_command(ctx.http.clone(), awards_cmd).await;
+
         let rejoinstats = CreateCommand::new("rejoinstats")
             .description("who keeps leaving and coming back");
         let _ = Command::create_global_command(ctx.http.clone(), rejoinstats).await;
@@ -1238,6 +1244,31 @@ impl EventHandler for Handler {
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
+            if id == "awards_view" {
+                let view = match &component.data.kind {
+                    serenity::all::ComponentInteractionDataKind::StringSelect { values } => {
+                        awards::View::from_value(values.first().map(String::as_str).unwrap_or("overall"))
+                    }
+                    _ => awards::View::Overall,
+                };
+                // Acknowledge at once; the redraw can take a few seconds.
+                let _ = component.defer(&ctx.http).await;
+                if let Some(guild) = component.guild_id {
+                    match awards::card_png(&ctx, guild, view).await {
+                        Ok((png, note)) => {
+                            let edit = serenity::all::EditInteractionResponse::new()
+                                .content(note)
+                                .clear_attachments()
+                                .new_attachment(CreateAttachment::bytes(png.to_vec(), "awards.png"))
+                                .components(vec![awards::view_menu(view)]);
+                            let _ = component.edit_response(&ctx.http, edit).await;
+                        }
+                        Err(err) => tracing::warn!("awards redraw failed: {}", err),
+                    }
+                }
+                return;
+            }
+
             if let Some(letter_id) = id.strip_prefix("lopen:") {
                 let clicker = component.user.id.get();
                 let letter = load_letter(&self.1.storage, letter_id).await;
@@ -1602,6 +1633,26 @@ impl EventHandler for Handler {
                         ),
                     )
                     .await;
+            }
+
+            if command.data.name == "awards" {
+                // Counting and drawing take longer than Discord waits for a reply.
+                let _ = command.defer(&ctx.http).await;
+                let reply = match command.guild_id {
+                    None => serenity::all::EditInteractionResponse::new().content("Ye server mein chalta hai."),
+                    Some(guild) => match awards::card_png(&ctx, guild, awards::View::Overall).await {
+                        Ok((png, note)) => serenity::all::EditInteractionResponse::new()
+                            .content(note)
+                            .new_attachment(CreateAttachment::bytes(png.to_vec(), "awards.png"))
+                            .components(vec![awards::view_menu(awards::View::Overall)]),
+                        Err(err) => {
+                            tracing::warn!("awards failed: {}", err);
+                            serenity::all::EditInteractionResponse::new()
+                                .content("Awards abhi nahi ban paaye. Thodi der mein try kar.")
+                        }
+                    },
+                };
+                let _ = command.edit_response(&ctx.http, reply).await;
             }
 
             if command.data.name == "rejoinstats" {

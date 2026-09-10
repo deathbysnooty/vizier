@@ -27,8 +27,10 @@ const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
 static DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 /// First message id that belongs to this run. Anything older is the import's.
 static BOUNDARY: OnceLock<u64> = OnceLock::new();
+/// The channels this run counts, for reporting import progress.
+static CHANNELS: OnceLock<Vec<u64>> = OnceLock::new();
 
-fn ist() -> FixedOffset {
+pub fn ist() -> FixedOffset {
     FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("valid offset")
 }
 
@@ -43,6 +45,38 @@ fn bucket(unix: i64) -> (String, u32) {
 fn snowflake_now() -> u64 {
     let ms = chrono::Utc::now().timestamp_millis();
     ((ms - DISCORD_EPOCH_MS) as u64) << 22
+}
+
+pub fn db() -> Option<Arc<Mutex<Connection>>> {
+    DB.get().cloned()
+}
+
+/// How many allowed channels have had their whole history counted.
+pub fn history_progress() -> (usize, usize) {
+    let (Some(db), Some(channels)) = (DB.get(), CHANNELS.get()) else {
+        return (0, 0);
+    };
+    let conn = db.lock();
+    let done = channels
+        .iter()
+        .filter(|&&c| {
+            conn.query_row("SELECT done FROM hist_marks WHERE channel_id = ?1", params![c as i64], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0)
+                == 1
+        })
+        .count();
+    (done, channels.len())
+}
+
+/// Whether Dyno's voice log has been read to the end at least once.
+pub fn voice_caught_up() -> bool {
+    DB.get().is_some_and(|db| {
+        db.lock()
+            .query_row("SELECT 1 FROM meta WHERE key = 'voice_log_caught_up'", [], |_| Ok(()))
+            .is_ok()
+    })
 }
 
 pub fn is_open() -> bool {
@@ -81,6 +115,7 @@ pub fn open(workspace: &str, channels: &[u64]) -> anyhow::Result<()> {
         )?;
     }
     let _ = BOUNDARY.set(boundary);
+    let _ = CHANNELS.set(channels.to_vec());
     let _ = DB.set(Arc::new(Mutex::new(conn)));
     Ok(())
 }
@@ -208,6 +243,13 @@ pub async fn catch_up(http: Arc<Http>, channel: u64) {
                 let text = err.to_string();
                 if text.contains("Missing Access") || text.contains("Missing Permissions") {
                     tracing::warn!("stats: no access to history of channel {}: {}", channel, text);
+                    // Nothing readable will ever come from it; do not leave
+                    // the progress note waiting on it forever.
+                    let _ = db.lock().execute(
+                        "INSERT INTO hist_marks (channel_id, upto, done) VALUES (?1, ?2, 1)
+                         ON CONFLICT (channel_id) DO UPDATE SET done = 1",
+                        params![channel as i64, upto as i64],
+                    );
                     return;
                 }
                 failures += 1;
@@ -330,6 +372,9 @@ pub async fn follow_voice_log(http: Arc<Http>, log_channel: u64) {
                 }
                 if !announced {
                     tracing::info!("stats: voice log caught up after {} pages", pages);
+                    let _ = db
+                        .lock()
+                        .execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('voice_log_caught_up', '1')", []);
                     announced = true;
                 }
             }
