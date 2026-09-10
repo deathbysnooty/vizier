@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.59] - 2026-09-10
+
+### 🚀 Features
+
+- *(discord)* /awards
 ## [0.10.58] - 2026-09-10
 
 ### 🚀 Features
 
 - *(discord)* Count messages and read voice from Dyno's log
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.58
 ## [0.10.57] - 2026-09-10
 
 ### 🚀 Features
