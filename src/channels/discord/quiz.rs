@@ -369,6 +369,97 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
 /// every few rounds.
 const THEME_FULL: i64 = 100;
 
+/// Questions per round of the genre vote.
+const BLOCK: u32 = 20;
+/// How long the genre vote stays open.
+const VOTE_TIME: Duration = Duration::from_secs(60);
+const MIX: &str = "mix";
+
+/// A group of themes players can vote for. Member questions are only in the mix.
+struct Genre {
+    key: &'static str,
+    label: &'static str,
+    /// Finishes "The next 20 questions are ...".
+    about: &'static str,
+    themes: &'static [&'static str],
+}
+
+const GENRES: &[Genre] = &[
+    Genre {
+        key: "bollywood",
+        label: "🎬 Bollywood",
+        about: "from Bollywood and Indian cinema",
+        themes: &["bollywood", "bollywood_2000s", "bollywood_buzz", "regional_cinema", "india_films_books", "bollywood_news"],
+    },
+    Genre {
+        key: "music_tv",
+        label: "🎵 Music & TV",
+        about: "from music, TV and desi pop culture",
+        themes: &["music_tv", "indian_pop_music", "indian_tv_ott", "desi_pop", "world_music"],
+    },
+    Genre {
+        key: "sports",
+        label: "🏏 Sports",
+        about: "from cricket, IPL, football and more",
+        themes: &["cricket", "cricket_players", "ipl", "football_f1", "world_sport"],
+    },
+    Genre {
+        key: "places",
+        label: "🗺️ India & places",
+        about: "about India's states, cities, food and geography",
+        themes: &[
+            "north_india", "south_india", "east_northeast", "west_central", "india_map", "geography", "world_geography",
+            "indian_food",
+        ],
+    },
+    Genre {
+        key: "history_culture",
+        label: "📜 History & culture",
+        about: "from history, mythology, Hindi and GK",
+        themes: &["history_civics", "culture", "mythology_tales", "hindi", "indian_gk", "world_history", "arts_books"],
+    },
+    Genre {
+        key: "brain",
+        label: "🧩 Brain games",
+        about: "riddles, logic puzzles and brain teasers",
+        themes: &["riddles", "logical_reasoning", "brain_teasers"],
+    },
+    Genre {
+        key: "life",
+        label: "💡 Life smarts",
+        about: "useful home, food, money and tech smarts",
+        themes: &[
+            "home_science", "food_science", "beauty_science", "work_abbreviations", "did_you_know", "daily_life_india",
+            "money_smarts", "tech_smarts",
+        ],
+    },
+    Genre {
+        key: "world_pop",
+        label: "🍿 Hollywood & games",
+        about: "from Hollywood, world TV, anime and games",
+        themes: &["hollywood", "world_tv", "anime_gaming", "games_comics", "film_tv"],
+    },
+    Genre {
+        key: "science_gk",
+        label: "🔬 Science & GK",
+        about: "from science, tech and general knowledge",
+        themes: &["science_tech", "general_knowledge", "society_culture", "food_drink", "sports_science_biz"],
+    },
+];
+
+fn genre(key: &str) -> Option<&'static Genre> {
+    GENRES.iter().find(|g| g.key == key)
+}
+
+/// The genre vote while it is open: which keys are on offer and who picked what.
+struct Vote {
+    id: u32,
+    keys: Vec<&'static str>,
+    votes: std::collections::HashMap<u64, &'static str>,
+}
+
+static VOTE: LazyLock<Mutex<Option<Vote>>> = LazyLock::new(|| Mutex::new(None));
+
 /// The theme a bank question is scheduled under, and which side of the
 /// India/world split that theme sits on. Every written topic is its own theme;
 /// the Wikidata templates and the downloaded databases' many categories are
@@ -456,11 +547,22 @@ const NEWS_SHELF_LIFE: i64 = 90 * 24 * 3600;
 /// it has - then that theme's least-asked question. The last few themes sit
 /// out a turn, and a third typed or third multiple-choice question in a row
 /// is avoided whenever the pool allows it.
-fn pick(recent: &Recent) -> Option<Question> {
-    pick_from(&DB.get()?.lock(), recent)
+fn pick(recent: &Recent, genre: Option<&[&str]>) -> Option<Question> {
+    pick_from(&DB.get()?.lock(), recent, genre)
 }
 
-fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
+fn pick_from(conn: &Connection, recent: &Recent, genre: Option<&[&str]>) -> Option<Question> {
+    if let Some(themes) = genre {
+        // A voted genre: only its themes, from either side, with the same variety rules.
+        let streak_kind = Recent::streak(&recent.kinds).unwrap_or("");
+        let themes = serde_json::to_string(themes).ok()?;
+        for (avoid_kind, fresh_topic) in [(streak_kind, true), (streak_kind, false), ("", true), ("", false)] {
+            if let Some(q) = pick_one(conn, "", &themes, avoid_kind, fresh_topic.then_some(&recent.themes[..])) {
+                return Some(q);
+            }
+        }
+        // A genre with nothing left to ask falls back to the mix.
+    }
     let world_streak = Recent::streak(&recent.sides) == Some("world");
     let preferred: &[&str] = if world_streak {
         &["india"]
@@ -477,7 +579,7 @@ fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
     for regions in [preferred, &["india", "world"][..]] {
         for (avoid_kind, fresh_topic) in rules {
             for region in regions {
-                if let Some(q) = pick_one(conn, region, avoid_kind, fresh_topic.then_some(&recent.themes[..])) {
+                if let Some(q) = pick_one(conn, region, "[]", avoid_kind, fresh_topic.then_some(&recent.themes[..])) {
                     return Some(q);
                 }
             }
@@ -486,15 +588,26 @@ fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
     None
 }
 
-/// The least-asked question of a random theme on one side. Themes of at least
-/// `THEME_FULL` questions are equally likely; smaller ones proportionally less.
-fn pick_one(conn: &Connection, side: &str, avoid_kind: &str, avoid_themes: Option<&[String]>) -> Option<Question> {
+/// The least-asked question of a random theme. `side` limits it to one side of
+/// the India/world split ("" for both) and `only` to a JSON list of themes
+/// ("[]" for all). Themes of at least `THEME_FULL` questions are equally
+/// likely; smaller ones proportionally less.
+fn pick_one(
+    conn: &Connection,
+    side: &str,
+    only: &str,
+    avoid_kind: &str,
+    avoid_themes: Option<&[String]>,
+) -> Option<Question> {
     let stale_news = Utc::now().timestamp() - NEWS_SHELF_LIFE;
-    let playable = "active = 1 AND retired = 0 AND theme_region = ?1 AND kind != ?2
-                    AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)";
+    let playable = "active = 1 AND retired = 0 AND (?1 = '' OR theme_region = ?1)
+                    AND (?4 = '[]' OR theme IN (SELECT value FROM json_each(?4)))
+                    AND kind != ?2 AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)";
     let themes: Vec<(String, i64)> = conn
         .prepare(&format!("SELECT theme, COUNT(*) FROM questions WHERE {} GROUP BY theme", playable))
-        .and_then(|mut s| s.query_map(params![side, avoid_kind, stale_news], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .and_then(|mut s| {
+            s.query_map(params![side, avoid_kind, stale_news, only], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
         .unwrap_or_default();
     let pool: Vec<&(String, i64)> =
         themes.iter().filter(|(theme, _)| !avoid_themes.is_some_and(|recent| recent.contains(theme))).collect();
@@ -508,11 +621,15 @@ fn pick_one(conn: &Connection, side: &str, avoid_kind: &str, avoid_themes: Optio
             roll <= 0.0
         })
         .unwrap_or(last);
-    let (id, body, added_by): (String, String, Option<i64>) = conn
+    let (id, body, added_by, theme_region): (String, String, Option<i64>, String) = conn
         .query_row(
-            &format!("SELECT id, body, added_by FROM questions WHERE {} AND theme = ?4 ORDER BY asked, random() LIMIT 1", playable),
-            params![side, avoid_kind, stale_news, theme],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            &format!(
+                "SELECT id, body, added_by, theme_region FROM questions WHERE {} AND theme = ?5
+                 ORDER BY asked, random() LIMIT 1",
+                playable
+            ),
+            params![side, avoid_kind, stale_news, only, theme],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .ok()
@@ -521,8 +638,128 @@ fn pick_one(conn: &Connection, side: &str, avoid_kind: &str, avoid_themes: Optio
     let mut q = serde_json::from_str::<Question>(&body).ok()?;
     q.added_by = added_by.map(|u| u as u64);
     q.theme = theme.clone();
-    q.theme_region = side.to_string();
+    q.theme_region = theme_region;
     Some(q)
+}
+
+fn theme_count(conn: &Connection, themes: &[&str]) -> i64 {
+    let only = serde_json::to_string(themes).unwrap_or_else(|_| "[]".into());
+    conn.query_row(
+        "SELECT COUNT(*) FROM questions WHERE active = 1 AND retired = 0
+         AND theme IN (SELECT value FROM json_each(?1))",
+        params![only],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
+}
+
+fn vote_buttons(
+    id: u32,
+    keys: &[&'static str],
+    votes: &std::collections::HashMap<u64, &'static str>,
+    open: bool,
+) -> Vec<CreateActionRow> {
+    let count = |key: &str| votes.values().filter(|v| **v == key).count();
+    let top = keys.iter().map(|k| count(k)).max().unwrap_or(0);
+    let buttons: Vec<CreateButton> = keys
+        .iter()
+        .map(|key| {
+            let label = if *key == MIX { "🎲 Mix" } else { genre(key).map(|g| g.label).unwrap_or(key) };
+            let n = count(key);
+            let style = if n > 0 && n == top { ButtonStyle::Primary } else { ButtonStyle::Secondary };
+            CreateButton::new(format!("quizvote:{}:{}", id, key))
+                .label(format!("{} · {}", label, n))
+                .style(style)
+                .disabled(!open)
+        })
+        .collect();
+    buttons.chunks(5).map(|row| CreateActionRow::Buttons(row.to_vec())).collect()
+}
+
+/// The genre vote between blocks of questions. Returns the winning genre, or
+/// `None` for the mix (mix won, nobody voted, or there's nothing to choose).
+async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
+    let keys: Vec<&'static str> = {
+        let db = DB.get()?;
+        let conn = db.lock();
+        GENRES
+            .iter()
+            .filter(|g| theme_count(&conn, g.themes) > 0)
+            .map(|g| g.key)
+            .chain(std::iter::once(MIX))
+            .collect()
+    };
+    if keys.len() < 3 {
+        return None;
+    }
+    let id = rand::random::<u32>();
+    *VOTE.lock() = Some(Vote { id, keys: keys.clone(), votes: Default::default() });
+    let ends = Utc::now().timestamp() + VOTE_TIME.as_secs() as i64;
+    let invite = format!(
+        "🗳️ **Vote for the next {} questions!** Voting closes <t:{}:R>. Most votes wins; a tie is settled at random.",
+        BLOCK, ends
+    );
+    let sent = channel
+        .send_message(
+            &ctx.http,
+            CreateMessage::new().content(invite).components(vote_buttons(id, &keys, &Default::default(), true)),
+        )
+        .await;
+    tokio::time::sleep(VOTE_TIME).await;
+    let vote = VOTE.lock().take()?;
+    let tally = |key: &str| vote.votes.values().filter(|v| **v == key).count();
+    let top = vote.keys.iter().map(|k| tally(k)).max().unwrap_or(0);
+    let winner: Option<&'static str> = (top > 0).then(|| {
+        let tied: Vec<&'static str> = vote.keys.iter().copied().filter(|k| tally(k) == top).collect();
+        tied[rand::random::<u32>() as usize % tied.len()]
+    });
+    if let Ok(message) = sent {
+        let closed = EditMessage::new()
+            .content("🗳️ Voting closed.")
+            .components(vote_buttons(id, &vote.keys, &vote.votes, false));
+        let _ = channel.edit_message(&ctx.http, message.id, closed).await;
+    }
+    let plural = if top == 1 { "" } else { "s" };
+    let chosen = winner.and_then(genre);
+    let result = match (winner, chosen) {
+        (None, _) => format!("Nobody voted, so the next {} questions are a mix of everything.", BLOCK),
+        (Some(_), Some(g)) => {
+            format!("{} wins with **{}** vote{}! The next {} questions are {}.", g.label, top, plural, BLOCK, g.about)
+        }
+        (Some(_), None) => {
+            format!("🎲 **Mix** wins with **{}** vote{}! The next {} questions are from everything.", top, plural, BLOCK)
+        }
+    };
+    let _ = channel.say(&ctx.http, result).await;
+    tokio::time::sleep(GAP).await;
+    chosen
+}
+
+async fn cast_vote(ctx: &Context, component: &ComponentInteraction, rest: &str) {
+    let mut parts = rest.splitn(2, ':');
+    let (Some(Ok(id)), Some(key)) = (parts.next().map(str::parse::<u32>), parts.next()) else {
+        return;
+    };
+    let rows = {
+        let mut guard = VOTE.lock();
+        match guard.as_mut() {
+            Some(vote) if vote.id == id => match vote.keys.iter().copied().find(|k| *k == key) {
+                Some(choice) => {
+                    vote.votes.insert(component.user.id.get(), choice);
+                    Some(vote_buttons(vote.id, &vote.keys, &vote.votes, true))
+                }
+                None => None,
+            },
+            _ => None,
+        }
+    };
+    match rows {
+        Some(rows) => {
+            let update = CreateInteractionResponseMessage::new().components(rows);
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+        }
+        None => whisper(ctx, component, "This vote has closed.").await,
+    }
 }
 
 fn next_round() -> u64 {
@@ -783,9 +1020,10 @@ pub async fn start_command(
          👇 Multiple choice: press a button. A wrong pick means a 1-minute wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
          ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
+         🗳️ Every {} questions, everyone votes on the genre for the next round.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
-        count, SKIPS_NEEDED, ROLE_NAME
+        count, SKIPS_NEEDED, BLOCK, ROLE_NAME
     );
     let _ = command
         .create_response(
@@ -842,6 +1080,9 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
     let _running = Running;
     STOP.store(false, Ordering::SeqCst);
     let mut recent = Recent::default();
+    // The first block after a start is a mix; every block after that is voted on.
+    let mut genre: Option<&'static Genre> = None;
+    let mut in_block = 0u32;
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -853,12 +1094,18 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             tokio::time::sleep(Duration::from_secs(60)).await;
             continue;
         }
-        let Some(question) = pick(&recent) else {
+        if in_block >= BLOCK {
+            genre = run_vote(&ctx, channel).await;
+            in_block = 0;
+            continue;
+        }
+        let Some(question) = pick(&recent, genre.map(|g| g.themes)) else {
             let _ = channel.say(&ctx.http, "Out of questions! Ask an admin to add more.").await;
             set_running(false);
             break;
         };
         recent.push(&question);
+        in_block += 1;
         let round = next_round();
         let (options, correct) =
             if question.is_mcq() { shuffled(&question.options, &question.a) } else { (Vec::new(), 0) };
@@ -1168,7 +1415,9 @@ async fn give_hint(ctx: &Context, msg: &Message) {
             let _ = msg.channel_id.send_message(&ctx.http, reply("That's all the hints you get. Over to you 😏".into())).await;
         }
         _ => {
-            let text = if RUNNING.load(Ordering::SeqCst) {
+            let text = if VOTE.lock().is_some() {
+                "Voting is on. Pick the next genre above, then ask for a hint."
+            } else if RUNNING.load(Ordering::SeqCst) {
                 "Wait for the next question, then ask for a hint."
             } else {
                 "No question is running. Start one with `/quiz`."
@@ -1210,6 +1459,8 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         review(ctx, component, sid, true).await;
     } else if let Some(sid) = id.strip_prefix("quizno:") {
         review(ctx, component, sid, false).await;
+    } else if let Some(rest) = id.strip_prefix("quizvote:") {
+        cast_vote(ctx, component, rest).await;
     } else if let Some(rest) = id.strip_prefix("quiz:") {
         choose(ctx, component, rest).await;
     }
@@ -2227,7 +2478,7 @@ mod tests {
 
         // India or world is a weighted coin toss per question, so look at many picks.
         let ids: std::collections::BTreeSet<String> =
-            (0..40).filter_map(|_| pick(&Recent::default())).map(|q| q.id).collect();
+            (0..40).filter_map(|_| pick(&Recent::default(), None)).map(|q| q.id).collect();
         assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["t-1", "t-2"]);
 
         let bengaluru = {
@@ -2238,7 +2489,7 @@ mod tests {
         };
         assert!(bengaluru.accepts("bangalore") && bengaluru.accepts("Bengaluru") && !bengaluru.accepts("Mysore"));
         for _ in 0..5 {
-            assert_eq!(pick(&Recent::default()).map(|q| q.id).as_deref(), Some("t-1"));
+            assert_eq!(pick(&Recent::default(), None).map(|q| q.id).as_deref(), Some("t-1"));
         }
         let _ = std::fs::remove_dir_all(&workspace);
     }
@@ -2270,7 +2521,7 @@ mod tests {
         let mut recent = Recent::default();
         let picked: Vec<Question> = (0..120)
             .map(|_| {
-                let q = pick_from(&conn, &recent).expect("a question");
+                let q = pick_from(&conn, &recent, None).expect("a question");
                 recent.push(&q);
                 q
             })
@@ -2282,6 +2533,15 @@ mod tests {
         }
         let india = picked.iter().filter(|q| q.region == "india").count() as f64 / picked.len() as f64;
         assert!((0.55..=0.95).contains(&india), "india share {}", india);
+
+        // A voted genre only ever serves its own themes, from either side.
+        let genre: &[&str] = &["films", "science"];
+        let mut recent = Recent::default();
+        for _ in 0..30 {
+            let q = pick_from(&conn, &recent, Some(genre)).expect("a genre question");
+            assert!(genre.contains(&q.theme.as_str()), "{} is not in the genre", q.theme);
+            recent.push(&q);
+        }
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
