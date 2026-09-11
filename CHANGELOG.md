@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.66] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* /quizstop, and quiz reports go to review instead of skipping
 ## [0.10.65] - 2026-09-11
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Quiz !skip is for admins only
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.65
 ## [0.10.64] - 2026-09-11
 
 ### 🚀 Features
