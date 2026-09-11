@@ -11,3 +11,9 @@ webui/build/
 webui/.vite/
 webui/.react-router/
 
+
+# quiz bank: downloaded third-party dumps, fetch cache and fact-check logs stay local
+quizbank/api/
+quizbank/wikidata/.cache/
+quizbank/reviews/
+__pycache__/

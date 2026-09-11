@@ -1,0 +1,2209 @@
+//! /quiz - a never-ending quiz in one channel.
+//!
+//! One question at a time and the first right answer takes the point. Typed
+//! questions forgive small spelling slips; multiple choice gives each person
+//! one click. There is no time limit: a question stays, moved back to the
+//! bottom of the channel as chat piles up, until someone answers it or enough
+//! people `!skip` it. The quiz stays on across restarts once started.
+//!
+//! Questions live in quiz.db, loaded at every startup from the JSONL files
+//! under `{workspace}/quizbank/`. Points are a log, one row per point, so the
+//! weekly board is a filter on the same table and the all-time leader holds
+//! the Quiz Leader role.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
+use std::time::Duration;
+
+use chrono::{Datelike, TimeZone, Utc};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serenity::all::{
+    ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind, Context,
+    CreateActionRow, CreateAllowedMentions, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption,
+    EditMessage, EditRole, GuildId, Message, MessageId, RoleId, UserId,
+};
+use regex::Regex;
+use serenity::all::EditInteractionResponse;
+use tokio::sync::Notify;
+
+use crate::dependencies::VizierDependencies;
+use crate::storage::VizierStorage;
+
+const GAP: Duration = Duration::from_secs(4);
+/// `!skip` votes from different members that pass over a question. One admin is enough.
+const SKIPS_NEEDED: usize = 3;
+/// Time between two `!hint`s on the same question.
+const HINT_COOLDOWN: Duration = Duration::from_secs(5);
+/// Wrong options `!hint` may knock out of a multiple-choice question.
+const MAX_KNOCKOUTS: usize = 2;
+/// Messages under the question before it is moved back to the bottom of the channel.
+const STICKY_AFTER: u32 = 4;
+/// Least time between two such moves, to stay clear of rate limits.
+const STICKY_GAP: Duration = Duration::from_secs(6);
+/// Reports from different members that retire a question. One admin report is enough.
+const FLAGS_TO_RETIRE: i64 = 3;
+/// Pending /quizadd submissions one member may have waiting at once.
+const MAX_PENDING: i64 = 5;
+const ROLE_NAME: &str = "Quiz Leader";
+const CREDITS: &str =
+    "Questions: Open Trivia DB (CC BY-SA 4.0) · The Trivia API (CC BY-NC 4.0) · Wikidata · MLCI members";
+
+static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+static LIVE: LazyLock<Mutex<Option<Live>>> = LazyLock::new(|| Mutex::new(None));
+static RUNNING: AtomicBool = AtomicBool::new(false);
+static LEADER_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+/// Held around every edit of the question message, so a late hint edit can
+/// never land on top of the final "answered" / "time up" version.
+static EDIT_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+/// Every answer, accepted form and option in the bank, normalised.
+static KNOWN: LazyLock<parking_lot::RwLock<HashSet<String>>> =
+    LazyLock::new(|| parking_lot::RwLock::new(HashSet::new()));
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Question {
+    id: String,
+    kind: String,
+    q: String,
+    a: String,
+    #[serde(default)]
+    alt: Vec<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    cat: String,
+    #[serde(default)]
+    region: String,
+    #[serde(default)]
+    diff: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    src: String,
+    #[serde(skip)]
+    added_by: Option<u64>,
+}
+
+impl Question {
+    fn is_mcq(&self) -> bool {
+        self.kind == "mcq"
+    }
+
+    fn is_valid(&self) -> bool {
+        let filled = !self.id.is_empty() && !self.q.trim().is_empty() && !self.a.trim().is_empty();
+        let shape = match self.kind.as_str() {
+            "text" => true,
+            "mcq" => {
+                let unique: HashSet<&String> = self.options.iter().collect();
+                self.options.len() == 4 && unique.len() == 4 && self.options.contains(&self.a)
+            }
+            _ => false,
+        };
+        filled && shape && self.q.len() <= 1000
+    }
+
+    fn accepts(&self, guess: &str) -> bool {
+        self.accepts_given(guess, &KNOWN.read())
+    }
+
+    /// An exact accepted form always scores. A slip is forgiven only when the
+    /// guess isn't itself some other answer the bank knows: "Iceland" is not a
+    /// typo of "Ireland", and "Jaipur" is not a typo of "Raipur".
+    fn accepts_given(&self, guess: &str, known: &HashSet<String>) -> bool {
+        let g = norm(guess);
+        if g.is_empty() {
+            return false;
+        }
+        let forms: Vec<&String> = std::iter::once(&self.a).chain(self.alt.iter()).collect();
+        if forms.iter().any(|form| norm(form) == g) {
+            return true;
+        }
+        !known.contains(&g) && forms.iter().any(|form| close_enough(guess, form))
+    }
+}
+
+/// The question on screen right now.
+struct Live {
+    round: u64,
+    question: Question,
+    /// Multiple choice options in the order shown.
+    options: Vec<String>,
+    correct: usize,
+    /// Wrong options knocked out by `!hint`.
+    removed: Vec<usize>,
+    /// Letters of each word the hint shows so far.
+    hints: usize,
+    last_hint: Option<std::time::Instant>,
+    channel: ChannelId,
+    /// The question message now showing; it changes when the question is moved down.
+    message: MessageId,
+    /// Messages posted under the question since it was last moved down.
+    below: u32,
+    last_bump: std::time::Instant,
+    winner: Option<u64>,
+    /// Retired by a report while it was up.
+    skipped: bool,
+    /// Who has used their one multiple-choice click.
+    tried: HashSet<u64>,
+    /// Who has typed `!skip` on this question.
+    skip_votes: HashSet<u64>,
+    /// Passed over by `!skip`.
+    passed: bool,
+    done: Arc<Notify>,
+}
+
+impl Live {
+    /// Still waiting for an answer: not won, skipped or removed.
+    fn is_open(&self) -> bool {
+        self.winner.is_none() && !self.skipped && !self.passed
+    }
+}
+
+enum Shown {
+    Open { hint: Option<String> },
+    Won(u64),
+    Skipped,
+    Removed,
+}
+
+/// Clears the running flag however the quiz loop ends.
+struct Running;
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        LIVE.lock().take();
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// How many questions come from the India pool, `VIZIER_QUIZ_INDIA_SHARE` (0 to 1).
+fn india_share() -> f64 {
+    std::env::var("VIZIER_QUIZ_INDIA_SHARE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(0.7)
+}
+
+/// Who gets the approval DMs for member and news questions, and may press
+/// their buttons: `VIZIER_QUIZ_REVIEWERS` (comma-separated user ids), or the
+/// bot admins when unset.
+fn reviewers() -> Vec<u64> {
+    std::env::var("VIZIER_QUIZ_REVIEWERS")
+        .ok()
+        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect::<Vec<_>>())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(super::admin_ids)
+}
+
+/// The quiz channel, from `VIZIER_QUIZ_CHANNEL`.
+pub fn channel() -> Option<ChannelId> {
+    std::env::var("VIZIER_QUIZ_CHANNEL").ok()?.trim().parse::<u64>().ok().map(ChannelId::new)
+}
+
+pub fn open(workspace: &str) -> anyhow::Result<()> {
+    let conn = open_conn(workspace)?;
+    *KNOWN.write() = known_names(&conn);
+    let _ = DB.set(Mutex::new(conn));
+    Ok(())
+}
+
+fn known_names(conn: &Connection) -> HashSet<String> {
+    let bodies: Vec<String> = conn
+        .prepare("SELECT body FROM questions")
+        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+        .unwrap_or_default();
+    bodies
+        .iter()
+        .filter_map(|body| serde_json::from_str::<Question>(body).ok())
+        .flat_map(|q| std::iter::once(q.a).chain(q.alt).chain(q.options).collect::<Vec<_>>())
+        .map(|name| norm(&name))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn open_conn(workspace: &str) -> anyhow::Result<Connection> {
+    let dir = crate::utils::build_path(workspace, &[".runtime"]);
+    std::fs::create_dir_all(&dir)?;
+    let mut conn = Connection::open(dir.join("quiz.db"))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA busy_timeout=5000;
+         CREATE TABLE IF NOT EXISTS questions (
+             id TEXT PRIMARY KEY, body TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'text',
+             region TEXT NOT NULL, cat TEXT NOT NULL, src TEXT NOT NULL,
+             active INTEGER NOT NULL DEFAULT 1, retired INTEGER NOT NULL DEFAULT 0,
+             asked INTEGER NOT NULL DEFAULT 0, added_by INTEGER, added_ts INTEGER);
+         CREATE INDEX IF NOT EXISTS questions_pick ON questions (active, retired, region, asked);
+         CREATE TABLE IF NOT EXISTS flags (
+             question_id TEXT NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (question_id, user_id));
+         CREATE TABLE IF NOT EXISTS points (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+             question_id TEXT NOT NULL, ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS points_user ON points (user_id, ts);
+         CREATE TABLE IF NOT EXISTS submissions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, body TEXT NOT NULL,
+             ts INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch TEXT, link TEXT);
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )?;
+    let loaded = import_bank(&mut conn, &crate::utils::build_path(workspace, &["quizbank"]))?;
+    let active: i64 =
+        conn.query_row("SELECT COUNT(*) FROM questions WHERE active = 1 AND retired = 0", [], |r| r.get(0))?;
+    tracing::info!("quiz: {} questions read from the bank, {} in play", loaded, active);
+    Ok(conn)
+}
+
+fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_jsonl(&path, out);
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+/// Upserts every question in the bank. Questions that have left the bank stop
+/// being asked; member questions and report counts are never touched.
+fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
+    let mut files = Vec::new();
+    collect_jsonl(dir, &mut files);
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY); DELETE FROM temp.seen;")?;
+    let (mut loaded, mut skipped) = (0, 0);
+    {
+        let mut upsert = tx.prepare(
+            "INSERT INTO questions (id, body, region, cat, src, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET body = excluded.body, region = excluded.region,
+                 cat = excluded.cat, src = excluded.src, kind = excluded.kind",
+        )?;
+        let mut seen = tx.prepare("INSERT OR IGNORE INTO temp.seen (id) VALUES (?1)")?;
+        for file in &files {
+            for line in std::fs::read_to_string(file)?.lines().filter(|l| !l.trim().is_empty()) {
+                let Ok(mut q) = serde_json::from_str::<Question>(line) else {
+                    skipped += 1;
+                    continue;
+                };
+                if q.src.is_empty() || q.src == "member" {
+                    q.src = q.id.split('-').next().unwrap_or("bank").to_string();
+                }
+                if q.region != "india" {
+                    q.region = "world".into();
+                }
+                if !q.is_valid() {
+                    skipped += 1;
+                    continue;
+                }
+                upsert.execute(params![q.id, serde_json::to_string(&q)?, q.region, q.cat, q.src, q.kind])?;
+                seen.execute(params![q.id])?;
+                loaded += 1;
+            }
+        }
+    }
+    if loaded > 0 {
+        tx.execute(
+            "UPDATE questions SET active = (id IN (SELECT id FROM temp.seen)) WHERE src != 'member'",
+            [],
+        )?;
+    }
+    tx.commit()?;
+    if skipped > 0 {
+        tracing::warn!("quiz: skipped {} malformed questions in the bank", skipped);
+    }
+    Ok(loaded)
+}
+
+fn meta_get(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
+}
+
+fn meta_set(conn: &Connection, key: &str, value: &str) {
+    let _ = conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    );
+}
+
+/// What the last few questions were, so the next one can differ.
+#[derive(Default)]
+struct Recent {
+    cats: Vec<String>,
+    kinds: Vec<String>,
+    regions: Vec<String>,
+}
+
+impl Recent {
+    fn push(&mut self, q: &Question) {
+        for (list, value, keep) in
+            [(&mut self.cats, &q.cat, 3), (&mut self.kinds, &q.kind, 2), (&mut self.regions, &q.region, 2)]
+        {
+            list.push(value.clone());
+            if list.len() > keep {
+                list.remove(0);
+            }
+        }
+    }
+
+    /// Set when the last two were the same, so a third in a row is avoided.
+    fn streak(list: &[String]) -> Option<&str> {
+        match list {
+            [a, b] if a == b => Some(a.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// News questions stop being asked after this long.
+const NEWS_SHELF_LIFE: i64 = 90 * 24 * 3600;
+
+/// India or world (`india_share`, never three world questions in a row), then
+/// a category, then that category's least-asked question. Categories are
+/// weighted by the square root of their size, so one huge source (a thousand
+/// video game questions) can't drown the rest; the last few categories sit
+/// out a turn, and a third typed or third multiple-choice question in a row
+/// is avoided whenever the pool allows it.
+fn pick(recent: &Recent) -> Option<Question> {
+    pick_from(&DB.get()?.lock(), recent)
+}
+
+fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
+    let world_streak = Recent::streak(&recent.regions) == Some("world");
+    let preferred: &[&str] = if world_streak {
+        &["india"]
+    } else if rand::random::<f64>() < india_share() {
+        &["india", "world"]
+    } else {
+        &["world", "india"]
+    };
+    let streak_kind = Recent::streak(&recent.kinds).unwrap_or("");
+    // Loosen one rule at a time: kind and topic both fresh, then only the
+    // kind, then only the topic, then anything. Only when all of that fails
+    // in the preferred regions may a third world question in a row through.
+    let rules = [(streak_kind, true), (streak_kind, false), ("", true), ("", false)];
+    for regions in [preferred, &["india", "world"][..]] {
+        for (avoid_kind, fresh_topic) in rules {
+            for region in regions {
+                if let Some(q) = pick_one(conn, region, avoid_kind, fresh_topic.then_some(&recent.cats[..])) {
+                    return Some(q);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The least-asked question of a weighted-random category in one region.
+fn pick_one(conn: &Connection, region: &str, avoid_kind: &str, avoid_cats: Option<&[String]>) -> Option<Question> {
+    let stale_news = Utc::now().timestamp() - NEWS_SHELF_LIFE;
+    let playable = "active = 1 AND retired = 0 AND region = ?1 AND kind != ?2
+                    AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)";
+    let cats: Vec<(String, i64)> = conn
+        .prepare(&format!("SELECT cat, COUNT(*) FROM questions WHERE {} GROUP BY cat", playable))
+        .and_then(|mut s| s.query_map(params![region, avoid_kind, stale_news], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .unwrap_or_default();
+    let pool: Vec<&(String, i64)> =
+        cats.iter().filter(|(cat, _)| !avoid_cats.is_some_and(|recent| recent.contains(cat))).collect();
+    let last = pool.last()?;
+    let mut roll = rand::random::<f64>() * pool.iter().map(|(_, n)| (*n as f64).sqrt()).sum::<f64>();
+    let (cat, _) = pool
+        .iter()
+        .find(|(_, n)| {
+            roll -= (*n as f64).sqrt();
+            roll <= 0.0
+        })
+        .unwrap_or(last);
+    let (id, body, added_by): (String, String, Option<i64>) = conn
+        .query_row(
+            &format!("SELECT id, body, added_by FROM questions WHERE {} AND cat = ?4 ORDER BY asked, random() LIMIT 1", playable),
+            params![region, avoid_kind, stale_news, cat],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let _ = conn.execute("UPDATE questions SET asked = asked + 1 WHERE id = ?1", params![id]);
+    let mut q = serde_json::from_str::<Question>(&body).ok()?;
+    q.added_by = added_by.map(|u| u as u64);
+    Some(q)
+}
+
+fn next_round() -> u64 {
+    let Some(db) = DB.get() else {
+        return 0;
+    };
+    let conn = db.lock();
+    let round = meta_get(&conn, "round").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + 1;
+    meta_set(&conn, "round", &round.to_string());
+    round
+}
+
+fn add_point(user: u64, question: &str) -> i64 {
+    let Some(db) = DB.get() else {
+        return 0;
+    };
+    let conn = db.lock();
+    let _ = conn.execute(
+        "INSERT INTO points (user_id, question_id, ts) VALUES (?1, ?2, ?3)",
+        params![user as i64, question, Utc::now().timestamp()],
+    );
+    conn.query_row("SELECT COUNT(*) FROM points WHERE user_id = ?1", params![user as i64], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+// --- answers ----------------------------------------------------------------
+
+/// Lower case, punctuation gone, a leading "the"/"a"/"an" dropped, spaces removed.
+fn norm(text: &str) -> String {
+    let lower = text.to_lowercase().replace('&', " and ");
+    let cleaned: String = lower.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    let words = match words.first() {
+        Some(&("the" | "a" | "an")) if words.len() > 1 => &words[1..],
+        _ => &words[..],
+    };
+    words.concat()
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + usize::from(ca != cb));
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Romanised Hindi is spelled many ways: Kabeer/Kabir, kotwaal/kotwal,
+/// Pawan/Pavan, Phir/Fir. Folds those to one spelling before comparing.
+fn fold(normed: &str) -> String {
+    let swapped = normed.replace("aa", "a").replace("ee", "i").replace("oo", "u").replace("ph", "f").replace('w', "v");
+    let mut out = String::with_capacity(swapped.len());
+    for c in swapped.chars() {
+        if out.chars().last() != Some(c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Exact after normalising and folding Hinglish spellings, or a slip or two on
+/// longer answers. Anything with a digit in it - years, scores, codes - has to
+/// be exact.
+fn close_enough(guess: &str, answer: &str) -> bool {
+    let (g, a) = (norm(guess), norm(answer));
+    if g.is_empty() || a.is_empty() {
+        return false;
+    }
+    if g == a {
+        return true;
+    }
+    let digits = a.chars().chain(g.chars()).any(|c| c.is_ascii_digit());
+    let (g, a) = (fold(&g), fold(&a));
+    if !digits && g == a {
+        return true;
+    }
+    // A digit on either side must match exactly: "Dhoom 2" is not a typo of "Dhoom".
+    if a.chars().chain(g.chars()).any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let slack = match a.chars().count() {
+        0..=4 => 0,
+        5..=8 => 1,
+        _ => 2,
+    };
+    slack > 0 && levenshtein(&g, &a) <= slack
+}
+
+/// The first `level` letters of each word, the rest blanked: `M u _ _ _ _`.
+/// Never more than half of a word (rounded up), so hints alone can't give it away.
+fn hint_at(answer: &str, level: usize) -> String {
+    answer
+        .split_whitespace()
+        .map(|word| {
+            let letters = word.chars().filter(|c| c.is_alphanumeric()).count();
+            let show = level.min(letters.div_ceil(2)).max(1);
+            let mut seen = 0;
+            word.chars()
+                .map(|c| {
+                    if !c.is_alphanumeric() {
+                        return c.to_string();
+                    }
+                    seen += 1;
+                    if seen <= show { c.to_string() } else { "_".into() }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("   ")
+}
+
+fn shuffled(options: &[String], answer: &str) -> (Vec<String>, usize) {
+    let mut keyed: Vec<(u64, String)> = options.iter().map(|o| (rand::random::<u64>(), o.clone())).collect();
+    keyed.sort_by_key(|(k, _)| *k);
+    let options: Vec<String> = keyed.into_iter().map(|(_, o)| o).collect();
+    let correct = options.iter().position(|o| o == answer).unwrap_or(0);
+    (options, correct)
+}
+
+// --- drawing ----------------------------------------------------------------
+
+fn pretty(cat: &str) -> String {
+    cat.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
+    let mut text = if q.src == "news" { "📰 **Bollywood news**\n".to_string() } else { String::new() };
+    text.push_str(&format!("**{}**\n", q.q));
+    match shown {
+        Shown::Open { hint } => {
+            let how = if q.is_mcq() { "👇 Pick an option, one try each" } else { "✍️ Type your answer" };
+            text.push_str(&format!("\n{} · no time limit · stuck? `!hint` or `!skip`", how));
+            if let Some(hint) = hint {
+                text.push_str(&format!("\n💡 Hint: `{}`", hint));
+            }
+        }
+        Shown::Won(user) => text.push_str(&format!("\n✅ <@{}> got it: **{}**", user, q.a)),
+        Shown::Skipped => text.push_str(&format!("\n⏭️ Skipped. The answer was **{}**", q.a)),
+        Shown::Removed => text.push_str("\n🚩 This question was removed."),
+    }
+    if matches!(shown, Shown::Won(_) | Shown::Skipped) && !q.note.is_empty() {
+        text.push_str(&format!("\n_{}_", q.note));
+    }
+    if let Some(by) = q.added_by {
+        text.push_str(&format!("\n\nQuestion by <@{}>", by));
+    }
+    let colour = match shown {
+        Shown::Open { .. } => 0x5865F2,
+        Shown::Won(_) => 0x57F287,
+        Shown::Skipped => 0x95A5A6,
+        Shown::Removed => 0xED4245,
+    };
+    let flag = if q.region == "india" { "🇮🇳" } else { "🌍" };
+    let mut footer = format!("{} {}", flag, pretty(&q.cat));
+    if !q.diff.is_empty() {
+        footer.push_str(&format!(" · {}", q.diff));
+    }
+    CreateEmbed::new()
+        .title(format!("Question #{}", round))
+        .description(text)
+        .colour(colour)
+        .footer(CreateEmbedFooter::new(footer))
+}
+
+fn components(
+    round: u64,
+    q: &Question,
+    options: &[String],
+    correct: usize,
+    open: bool,
+    removed: &[usize],
+) -> Vec<CreateActionRow> {
+    let mut rows = Vec::new();
+    if q.is_mcq() {
+        for (i, option) in options.iter().enumerate() {
+            let mut label = format!("{}. {}", ['A', 'B', 'C', 'D'][i.min(3)], option);
+            if label.chars().count() > 80 {
+                label = label.chars().take(79).collect::<String>() + "…";
+            }
+            let style = match (open, i == correct) {
+                (false, true) => ButtonStyle::Success,
+                _ => ButtonStyle::Secondary,
+            };
+            let gone = open && removed.contains(&i);
+            if gone {
+                label = clip(&format!("✖ {}", label), 80);
+            }
+            let button =
+                CreateButton::new(format!("quiz:{}:{}", round, i)).label(label).style(style).disabled(!open || gone);
+            rows.push(CreateActionRow::Buttons(vec![button]));
+        }
+    }
+    rows.push(CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("quizflag:{}", q.id)).label("🚩 Report question").style(ButtonStyle::Secondary),
+    ]));
+    rows
+}
+
+fn celebrate(user: u64, q: &Question, total: i64) -> String {
+    let verbs = ["got it", "nailed it", "was fastest", "is spot on", "takes the point"];
+    let verb = verbs[rand::random::<u32>() as usize % verbs.len()];
+    format!("✅ <@{}> {}! Answer: **{}** · +1 · total **{}**", user, verb, q.a, total)
+}
+
+// --- the loop ---------------------------------------------------------------
+
+pub async fn start_command(
+    ctx: &Context,
+    storage: &Arc<VizierStorage>,
+    agent_id: &str,
+    command: &CommandInteraction,
+) {
+    let whisper = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    let Some(home) = channel() else {
+        let _ = command.create_response(&ctx.http, whisper("The quiz channel isn't set up yet.".into())).await;
+        return;
+    };
+    let refusal = if command.channel_id != home {
+        Some(format!("The quiz only runs in <#{}>.", home))
+    } else if super::is_paused(storage, agent_id).await {
+        Some("The bot is paused right now.".into())
+    } else if DB.get().is_none() {
+        Some("The quiz isn't working right now. Let an admin know.".into())
+    } else if RUNNING.swap(true, Ordering::SeqCst) {
+        Some("A quiz is already running. The current question is in the channel.".into())
+    } else {
+        None
+    };
+    if let Some(text) = refusal {
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+    let count: i64 = DB
+        .get()
+        .map(|db| {
+            db.lock()
+                .query_row("SELECT COUNT(*) FROM questions WHERE active = 1 AND retired = 0", [], |r| r.get(0))
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    let intro = format!(
+        "🧠 **Quiz started!** {} questions ready.\n\
+         ✍️ Typed questions: the first correct answer wins, and small spelling slips are fine.\n\
+         👇 Multiple choice: press a button, one try per question.\n\
+         💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
+         ⏭️ No time limit: a question stays until someone gets it. Stuck? {} people typing `!skip`, or one admin, moves on.\n\
+         Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
+         -# Send in your own question with `/quizadd`",
+        count, SKIPS_NEEDED, ROLE_NAME
+    );
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(intro)),
+        )
+        .await;
+    set_running(true);
+    tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home));
+}
+
+/// Remembers across restarts whether the quiz is on.
+fn set_running(on: bool) {
+    if let Some(db) = DB.get() {
+        meta_set(&db.lock(), "running", if on { "1" } else { "0" });
+    }
+}
+
+/// After a restart, carries on a quiz that was running before it.
+pub fn resume(ctx: &Context, storage: &Arc<VizierStorage>, agent_id: &str) {
+    let Some(home) = channel() else {
+        return;
+    };
+    let was_running = DB.get().is_some_and(|db| meta_get(&db.lock(), "running").as_deref() == Some("1"));
+    if was_running && !RUNNING.swap(true, Ordering::SeqCst) {
+        tracing::info!("quiz: resuming after restart");
+        tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home));
+    }
+}
+
+async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channel: ChannelId) {
+    let _running = Running;
+    let mut recent = Recent::default();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    loop {
+        // A pause holds the quiz rather than ending it, so it carries on after /resume.
+        if super::is_paused(&storage, &agent_id).await {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            continue;
+        }
+        let Some(question) = pick(&recent) else {
+            let _ = channel.say(&ctx.http, "Out of questions! Ask an admin to add more.").await;
+            set_running(false);
+            break;
+        };
+        recent.push(&question);
+        let round = next_round();
+        let (options, correct) =
+            if question.is_mcq() { shuffled(&question.options, &question.a) } else { (Vec::new(), 0) };
+        let sent = channel
+            .send_message(
+                &ctx.http,
+                CreateMessage::new()
+                    .embed(embed(round, &question, &Shown::Open { hint: None }))
+                    .components(components(round, &question, &options, correct, true, &[])),
+            )
+            .await;
+        let message: MessageId = match sent {
+            Ok(m) => m.id,
+            Err(err) => {
+                tracing::warn!("quiz question not sent: {}", err);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        let done = Arc::new(Notify::new());
+        *LIVE.lock() = Some(Live {
+            round,
+            question: question.clone(),
+            options: options.clone(),
+            correct,
+            removed: Vec::new(),
+            hints: 0,
+            last_hint: None,
+            channel,
+            message,
+            below: 0,
+            last_bump: std::time::Instant::now(),
+            winner: None,
+            skipped: false,
+            tried: HashSet::new(),
+            skip_votes: HashSet::new(),
+            passed: false,
+            done: done.clone(),
+        });
+
+        // No time limit: the question stays until someone answers it, enough
+        // people skip it, or a report removes it.
+        done.notified().await;
+
+        // Whoever got in before this take() won; nobody can after it.
+        let Some(live) = LIVE.lock().take() else {
+            break;
+        };
+        let shown = if live.skipped {
+            Shown::Removed
+        } else if let Some(winner) = live.winner {
+            Shown::Won(winner)
+        } else {
+            Shown::Skipped
+        };
+        let edits = EDIT_LOCK.lock().await;
+        let _ = channel
+            .edit_message(
+                &ctx.http,
+                live.message,
+                EditMessage::new()
+                    .embed(embed(round, &question, &shown))
+                    .components(components(round, &question, &options, correct, false, &[])),
+            )
+            .await;
+        drop(edits);
+        if matches!(shown, Shown::Skipped) {
+            let _ = channel.say(&ctx.http, format!("⏭️ Skipped! The answer was **{}**.", question.a)).await;
+        }
+        tokio::time::sleep(GAP).await;
+    }
+}
+
+/// A message in the quiz channel. Returns true when the channel is the quiz's,
+/// answered or not, so nothing else in the bot reacts to quiz chatter.
+pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
+    if channel() != Some(msg.channel_id) {
+        return false;
+    }
+    if msg.content.trim().eq_ignore_ascii_case("!hint") {
+        give_hint(ctx, msg).await;
+        return true;
+    }
+    if msg.content.trim().eq_ignore_ascii_case("!skip") {
+        vote_skip(ctx, msg).await;
+        return true;
+    }
+    if msg.content.chars().count() > 80 {
+        note_chatter(ctx, 1);
+        return true;
+    }
+    let user = msg.author.id.get();
+    let won = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live)
+                if !live.question.is_mcq()
+                    && live.is_open()
+                    && live.question.added_by != Some(user)
+                    && live.question.accepts(&msg.content) =>
+            {
+                live.winner = Some(user);
+                live.done.notify_one();
+                Some(live.question.clone())
+            }
+            _ => None,
+        }
+    };
+    if won.is_none() {
+        note_chatter(ctx, 1);
+    }
+    if let Some(q) = won {
+        let total = add_point(user, &q.id);
+        let _ = msg.react(&ctx.http, '✅').await;
+        let reply = CreateMessage::new()
+            .content(celebrate(user, &q, total))
+            .reference_message(msg)
+            .allowed_mentions(CreateAllowedMentions::new());
+        let _ = msg.channel_id.send_message(&ctx.http, reply).await;
+        if let Some(guild) = msg.guild_id {
+            spawn_leader(ctx, guild, msg.channel_id);
+        }
+    }
+    true
+}
+
+/// `!skip`: three different people, or one admin, pass over the open question.
+async fn vote_skip(ctx: &Context, msg: &Message) {
+    let user = msg.author.id.get();
+    let admin = super::admin_ids().contains(&user);
+    let votes = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.is_open() => {
+                live.skip_votes.insert(user);
+                let count = live.skip_votes.len();
+                if admin || count >= SKIPS_NEEDED {
+                    live.passed = true;
+                    live.done.notify_one();
+                    None
+                } else {
+                    Some(count)
+                }
+            }
+            _ => return,
+        }
+    };
+    if let Some(count) = votes {
+        let text = format!(
+            "⏭️ Skip vote {}/{}. {} more to skip this question.",
+            count,
+            SKIPS_NEEDED,
+            SKIPS_NEEDED - count
+        );
+        let reply = CreateMessage::new().content(text).reference_message(msg).allowed_mentions(CreateAllowedMentions::new());
+        let _ = msg.channel_id.send_message(&ctx.http, reply).await;
+        note_chatter(ctx, 2);
+    }
+}
+
+/// Counts messages that pushed the open question up the channel. Once enough
+/// pile up under it, the question is posted again at the bottom.
+fn note_chatter(ctx: &Context, messages: u32) {
+    let round = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.is_open() => {
+                live.below += messages;
+                if live.below >= STICKY_AFTER && live.last_bump.elapsed() >= STICKY_GAP {
+                    live.below = 0;
+                    live.last_bump = std::time::Instant::now();
+                    Some(live.round)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    if let Some(round) = round {
+        let ctx = ctx.clone();
+        tokio::spawn(async move { move_question_down(&ctx, round).await });
+    }
+}
+
+/// Reposts the open question - with its hint and knocked-out options - at the
+/// bottom of the channel and deletes the old copy. If the round ends while the
+/// new copy is being sent, the new copy is the one deleted, so the final
+/// "answered" / "time up" edit always lands on the message that stays.
+async fn move_question_down(ctx: &Context, round: u64) {
+    let _edits = EDIT_LOCK.lock().await;
+    let snap = {
+        let guard = LIVE.lock();
+        match guard.as_ref() {
+            Some(live) if live.round == round && live.is_open() => Some((
+                live.question.clone(),
+                live.options.clone(),
+                live.correct,
+                live.removed.clone(),
+                live.hints,
+                live.channel,
+                live.message,
+            )),
+            _ => None,
+        }
+    };
+    let Some((question, options, correct, removed, hints, channel, old)) = snap else {
+        return;
+    };
+    let hint = (!question.is_mcq() && hints > 0).then(|| hint_at(&question.a, hints));
+    let copy = CreateMessage::new()
+        .embed(embed(round, &question, &Shown::Open { hint }))
+        .components(components(round, &question, &options, correct, true, &removed));
+    let Ok(new) = channel.send_message(&ctx.http, copy).await else {
+        return;
+    };
+    let still_open = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.round == round && live.is_open() => {
+                live.message = new.id;
+                true
+            }
+            _ => false,
+        }
+    };
+    let stale = if still_open { old } else { new.id };
+    let _ = channel.delete_message(&ctx.http, stale).await;
+}
+
+/// `!hint` in the quiz channel: one more letter of each word on a typed
+/// question, one wrong option knocked out on multiple choice.
+async fn give_hint(ctx: &Context, msg: &Message) {
+    enum Hint {
+        Idle,
+        Wait,
+        Enough,
+        Letters(String),
+        Knocked(String),
+    }
+    struct Snapshot {
+        round: u64,
+        question: Question,
+        options: Vec<String>,
+        correct: usize,
+        removed: Vec<usize>,
+        channel: ChannelId,
+        message: MessageId,
+    }
+    let _edits = EDIT_LOCK.lock().await;
+    let (hint, snap) = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.is_open() => {
+                let hint = if live.last_hint.is_some_and(|t| t.elapsed() < HINT_COOLDOWN) {
+                    Hint::Wait
+                } else if live.question.is_mcq() {
+                    let wrong: Vec<usize> =
+                        (0..live.options.len()).filter(|i| *i != live.correct && !live.removed.contains(i)).collect();
+                    if live.removed.len() >= MAX_KNOCKOUTS || wrong.is_empty() {
+                        Hint::Enough
+                    } else {
+                        let out = wrong[rand::random::<u32>() as usize % wrong.len()];
+                        live.removed.push(out);
+                        Hint::Knocked(live.options[out].clone())
+                    }
+                } else if live.hints > 0 && hint_at(&live.question.a, live.hints + 1) == hint_at(&live.question.a, live.hints) {
+                    Hint::Enough
+                } else {
+                    live.hints += 1;
+                    Hint::Letters(hint_at(&live.question.a, live.hints))
+                };
+                if matches!(hint, Hint::Letters(_) | Hint::Knocked(_)) {
+                    live.last_hint = Some(std::time::Instant::now());
+                }
+                let snap = Snapshot {
+                    round: live.round,
+                    question: live.question.clone(),
+                    options: live.options.clone(),
+                    correct: live.correct,
+                    removed: live.removed.clone(),
+                    channel: live.channel,
+                    message: live.message,
+                };
+                (hint, Some(snap))
+            }
+            _ => (Hint::Idle, None),
+        }
+    };
+    let reply = |text: String| {
+        CreateMessage::new().content(text).reference_message(msg).allowed_mentions(CreateAllowedMentions::new())
+    };
+    match (hint, snap) {
+        (Hint::Letters(shown), Some(s)) => {
+            let open = Shown::Open { hint: Some(shown.clone()) };
+            let _ = s.channel.edit_message(&ctx.http, s.message, EditMessage::new().embed(embed(s.round, &s.question, &open))).await;
+            let _ = msg.channel_id.send_message(&ctx.http, reply(format!("💡 `{}`", shown))).await;
+        }
+        (Hint::Knocked(option), Some(s)) => {
+            let buttons = components(s.round, &s.question, &s.options, s.correct, true, &s.removed);
+            let _ = s.channel.edit_message(&ctx.http, s.message, EditMessage::new().components(buttons)).await;
+            let _ = msg.channel_id.send_message(&ctx.http, reply(format!("💡 **{}** is wrong, so it's gone.", option))).await;
+        }
+        (Hint::Wait, _) => {
+            let _ = msg.react(&ctx.http, '⏳').await;
+        }
+        (Hint::Enough, _) => {
+            let _ = msg.channel_id.send_message(&ctx.http, reply("That's all the hints you get. Over to you 😏".into())).await;
+        }
+        _ => {
+            let text = if RUNNING.load(Ordering::SeqCst) {
+                "Wait for the next question, then ask for a hint."
+            } else {
+                "No question is running. Start one with `/quiz`."
+            };
+            let _ = msg.channel_id.send_message(&ctx.http, reply(text.into())).await;
+        }
+    }
+    // The "!hint" and the bot's reply both push the question up.
+    note_chatter(ctx, 2);
+}
+
+// --- buttons and menus --------------------------------------------------------
+
+async fn whisper(ctx: &Context, component: &ComponentInteraction, text: impl Into<String>) {
+    let reply = CreateInteractionResponseMessage::new().content(text).ephemeral(true);
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
+    let id = component.data.custom_id.clone();
+    if id == "quizlb" {
+        let week = matches!(&component.data.kind,
+            ComponentInteractionDataKind::StringSelect { values } if values.first().is_some_and(|v| v == "week"));
+        let update = CreateInteractionResponseMessage::new().embed(board(week)).components(vec![board_menu(week)]);
+        let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+    } else if let Some(batch) = id.strip_prefix("quiznewsrej:") {
+        news_select(ctx, component, batch).await;
+    } else if let Some(batch) = id.strip_prefix("quiznewsok:") {
+        news_finish(ctx, component, batch, true).await;
+    } else if let Some(batch) = id.strip_prefix("quiznewsno:") {
+        news_finish(ctx, component, batch, false).await;
+    } else if let Some(qid) = id.strip_prefix("quizflag:") {
+        flag(ctx, component, qid).await;
+    } else if let Some(sid) = id.strip_prefix("quizok:") {
+        review(ctx, component, sid, true).await;
+    } else if let Some(sid) = id.strip_prefix("quizno:") {
+        review(ctx, component, sid, false).await;
+    } else if let Some(rest) = id.strip_prefix("quiz:") {
+        choose(ctx, component, rest).await;
+    }
+}
+
+async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
+    let mut parts = rest.split(':');
+    let (Some(Ok(round)), Some(Ok(choice))) =
+        (parts.next().map(str::parse::<u64>), parts.next().map(str::parse::<usize>))
+    else {
+        return;
+    };
+    let user = component.user.id.get();
+    enum Click {
+        Over,
+        Gone,
+        Own,
+        Again,
+        Wrong,
+        Right(Question, Vec<String>, usize),
+    }
+    let click = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.round == round && live.is_open() => {
+                if live.removed.contains(&choice) {
+                    Click::Gone
+                } else if live.question.added_by == Some(user) {
+                    Click::Own
+                } else if !live.tried.insert(user) {
+                    Click::Again
+                } else if choice == live.correct {
+                    live.winner = Some(user);
+                    live.done.notify_one();
+                    Click::Right(live.question.clone(), live.options.clone(), live.correct)
+                } else {
+                    Click::Wrong
+                }
+            }
+            _ => Click::Over,
+        }
+    };
+    match click {
+        Click::Over => whisper(ctx, component, "This question is already over.").await,
+        Click::Gone => whisper(ctx, component, "That option was removed by a hint.").await,
+        Click::Own => whisper(ctx, component, "You can't answer your own question 😏").await,
+        Click::Again => whisper(ctx, component, "One try per question. Wait for the next one.").await,
+        Click::Wrong => whisper(ctx, component, "❌ Wrong! That was your one try for this question.").await,
+        Click::Right(q, options, correct) => {
+            let total = add_point(user, &q.id);
+            let update = CreateInteractionResponseMessage::new()
+                .embed(embed(round, &q, &Shown::Won(user)))
+                .components(components(round, &q, &options, correct, false, &[]));
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+            let note = CreateMessage::new()
+                .content(celebrate(user, &q, total))
+                .allowed_mentions(CreateAllowedMentions::new());
+            let _ = component.channel_id.send_message(&ctx.http, note).await;
+            if let Some(guild) = component.guild_id {
+                spawn_leader(ctx, guild, component.channel_id);
+            }
+        }
+    }
+}
+
+async fn flag(ctx: &Context, component: &ComponentInteraction, qid: &str) {
+    let user = component.user.id.get();
+    let admin = super::admin_ids().contains(&user);
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let (count, retired) = {
+        let conn = db.lock();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO flags (question_id, user_id) VALUES (?1, ?2)",
+            params![qid, user as i64],
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM flags WHERE question_id = ?1", params![qid], |r| r.get(0))
+            .unwrap_or(0);
+        let retire = admin || count >= FLAGS_TO_RETIRE;
+        if retire {
+            let _ = conn.execute("UPDATE questions SET retired = 1 WHERE id = ?1", params![qid]);
+        }
+        (count, retire)
+    };
+    if retired {
+        tracing::info!("quiz: question {} retired after a report from {}", qid, user);
+        if let Some(live) = LIVE.lock().as_mut() {
+            if live.question.id == qid && live.winner.is_none() {
+                live.skipped = true;
+                live.done.notify_one();
+            }
+        }
+    }
+    let text = if admin {
+        "🚩 Removed. This question won't come up again.".to_string()
+    } else if retired {
+        format!("🚩 {} people reported it, so the question is removed.", FLAGS_TO_RETIRE)
+    } else {
+        format!("🚩 Reported ({}/{}). The question is removed at {} reports.", count, FLAGS_TO_RETIRE, FLAGS_TO_RETIRE)
+    };
+    whisper(ctx, component, text).await;
+}
+
+// --- leaderboard and leader role ------------------------------------------------
+
+/// Monday 00:00 in India, this week.
+fn week_start() -> i64 {
+    let ist = super::stats::ist();
+    let now = Utc::now().with_timezone(&ist);
+    let monday = now.date_naive() - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
+    monday
+        .and_hms_opt(0, 0, 0)
+        .and_then(|t| ist.from_local_datetime(&t).single())
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}
+
+fn board(week: bool) -> CreateEmbed {
+    let since = if week { week_start() } else { 0 };
+    let (rows, leader, answered) = DB
+        .get()
+        .map(|db| {
+            let conn = db.lock();
+            let rows: Vec<(u64, i64)> = conn
+                .prepare(
+                    "SELECT user_id, COUNT(*) AS n FROM points WHERE ts >= ?1
+                     GROUP BY user_id ORDER BY n DESC, MAX(id) ASC LIMIT 10",
+                )
+                .and_then(|mut s| {
+                    s.query_map(params![since], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)))?.collect()
+                })
+                .unwrap_or_default();
+            let answered: i64 = conn
+                .query_row("SELECT COUNT(*) FROM points WHERE ts >= ?1", params![since], |r| r.get(0))
+                .unwrap_or(0);
+            (rows, meta_get(&conn, "leader").and_then(|v| v.parse::<u64>().ok()), answered)
+        })
+        .unwrap_or_default();
+    let mut text = String::from(if week { "**This week** (since Monday)\n\n" } else { "**All time**\n\n" });
+    if rows.is_empty() {
+        text.push_str("No points yet. Start a quiz with `/quiz` in the quiz channel.");
+    }
+    for (i, (user, points)) in rows.iter().enumerate() {
+        let place = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            _ => format!("`{:>2}.`", i + 1),
+        };
+        let crown = if leader == Some(*user) { " 👑" } else { "" };
+        text.push_str(&format!("{} <@{}>{} · **{}**\n", place, user, crown, points));
+    }
+    if answered > 0 {
+        text.push_str(&format!("\n-# {} questions answered correctly", answered));
+    }
+    CreateEmbed::new()
+        .title("🏆 Quiz Leaderboard")
+        .description(text)
+        .colour(0xF1C40F)
+        .footer(CreateEmbedFooter::new(CREDITS))
+}
+
+fn board_menu(week: bool) -> CreateActionRow {
+    let options = vec![
+        CreateSelectMenuOption::new("All time", "all").default_selection(!week),
+        CreateSelectMenuOption::new("This week", "week").default_selection(week),
+    ];
+    CreateActionRow::SelectMenu(CreateSelectMenu::new("quizlb", CreateSelectMenuKind::String { options }))
+}
+
+pub async fn leaderboard_command(ctx: &Context, command: &CommandInteraction) {
+    let reply = CreateInteractionResponseMessage::new().embed(board(false)).components(vec![board_menu(false)]);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+fn spawn_leader(ctx: &Context, guild: GuildId, channel: ChannelId) {
+    let ctx = ctx.clone();
+    tokio::spawn(async move { update_leader(&ctx, guild, channel).await });
+}
+
+/// Moves the Quiz Leader role to the all-time top scorer. On a tie, whoever
+/// reached the score first keeps it.
+async fn update_leader(ctx: &Context, guild: GuildId, channel: ChannelId) {
+    let _one_at_a_time = LEADER_LOCK.lock().await;
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let (top, previous, stored_role) = {
+        let conn = db.lock();
+        let top: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT user_id, COUNT(*) AS n FROM points GROUP BY user_id ORDER BY n DESC, MAX(id) ASC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        (
+            top,
+            meta_get(&conn, "leader").and_then(|v| v.parse::<u64>().ok()),
+            meta_get(&conn, "leader_role").and_then(|v| v.parse::<u64>().ok()),
+        )
+    };
+    let Some((top, points)) = top else {
+        return;
+    };
+    let top = top as u64;
+    if previous == Some(top) {
+        return;
+    }
+    let role = match leader_role(ctx, guild, stored_role).await {
+        Ok(role) => role,
+        Err(err) => {
+            tracing::warn!("quiz leader role unavailable: {}", err);
+            return;
+        }
+    };
+    if let Err(err) = ctx.http.add_member_role(guild, UserId::new(top), role, Some("Top quiz scorer")).await {
+        tracing::warn!("quiz leader role not given to {}: {}", top, err);
+        return;
+    }
+    if let Some(previous) = previous {
+        let _ = ctx
+            .http
+            .remove_member_role(guild, UserId::new(previous), role, Some("No longer the top quiz scorer"))
+            .await;
+    }
+    meta_set(&db.lock(), "leader", &top.to_string());
+    // Early on the lead changes hands every question; only announce once it means something.
+    if points >= 3 {
+        let text = match previous {
+            Some(previous) => format!("👑 **New {}:** <@{}> has overtaken <@{}>!", ROLE_NAME, top, previous),
+            None => format!("👑 <@{}> is the first **{}**!", top, ROLE_NAME),
+        };
+        let note = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+        let _ = channel.send_message(&ctx.http, note).await;
+    }
+}
+
+async fn leader_role(ctx: &Context, guild: GuildId, stored: Option<u64>) -> Result<RoleId, String> {
+    let roles = guild.roles(&ctx.http).await.map_err(|e| e.to_string())?;
+    if let Some(id) = stored.map(RoleId::new) {
+        if roles.contains_key(&id) {
+            return Ok(id);
+        }
+    }
+    let id = match roles.values().find(|r| r.name == ROLE_NAME) {
+        Some(role) => role.id,
+        None => {
+            let builder = EditRole::new().name(ROLE_NAME).colour(0xF1C40F).hoist(false).mentionable(false);
+            guild.create_role(&ctx.http, builder).await.map_err(|e| e.to_string())?.id
+        }
+    };
+    if let Some(db) = DB.get() {
+        meta_set(&db.lock(), "leader_role", &id.get().to_string());
+    }
+    Ok(id)
+}
+
+// --- member questions -----------------------------------------------------------
+
+pub async fn add_command(ctx: &Context, command: &CommandInteraction) {
+    let get = |name: &str| {
+        command
+            .data
+            .options
+            .iter()
+            .find(|o| o.name == name)
+            .and_then(|o| o.value.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let respond = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    let (Some(q), Some(a)) = (get("question"), get("answer")) else {
+        let _ = command.create_response(&ctx.http, respond("Both a question and an answer are needed.".into())).await;
+        return;
+    };
+    let wrong: Vec<String> = ["wrong1", "wrong2", "wrong3"].iter().filter_map(|n| get(n)).collect();
+    let mut options = Vec::new();
+    if !wrong.is_empty() {
+        options = std::iter::once(a.clone()).chain(wrong.iter().cloned()).collect();
+        let unique: HashSet<String> = options.iter().map(|o| o.to_lowercase()).collect();
+        if wrong.len() != 3 || unique.len() != 4 {
+            let text = "For multiple choice, give three different wrong options (wrong1, wrong2, wrong3). For a typed question, give none.";
+            let _ = command.create_response(&ctx.http, respond(text.into())).await;
+            return;
+        }
+    }
+    let alt: Vec<String> = match (&options.is_empty(), get("also")) {
+        (true, Some(also)) => also.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        _ => Vec::new(),
+    };
+    let question = Question {
+        id: String::new(),
+        kind: if options.is_empty() { "text" } else { "mcq" }.into(),
+        q,
+        a,
+        alt,
+        options,
+        cat: "server".into(),
+        region: "india".into(),
+        diff: String::new(),
+        note: String::new(),
+        src: "member".into(),
+        added_by: None,
+    };
+    let user = command.user.id.get();
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let saved = {
+        let conn = db.lock();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM submissions WHERE user_id = ?1 AND status = 'pending'",
+                params![user as i64],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if pending >= MAX_PENDING {
+            None
+        } else {
+            let body = serde_json::to_string(&question).unwrap_or_default();
+            conn.execute(
+                "INSERT INTO submissions (user_id, body, ts) VALUES (?1, ?2, ?3)",
+                params![user as i64, body, Utc::now().timestamp()],
+            )
+            .ok()
+            .map(|_| conn.last_insert_rowid())
+        }
+    };
+    let Some(sid) = saved else {
+        let text = format!("You already have {} questions waiting for approval. Try again once they're reviewed.", MAX_PENDING);
+        let _ = command.create_response(&ctx.http, respond(text)).await;
+        return;
+    };
+    let _ = command
+        .create_response(
+            &ctx.http,
+            respond("📨 Sent! It joins the quiz once it's approved. Don't tell anyone the answer 🤫".into()),
+        )
+        .await;
+
+    let mut text = format!("**Question:** {}\n**Answer:** {}", question.q, question.a);
+    if !question.alt.is_empty() {
+        text.push_str(&format!("\n**Also accepted:** {}", question.alt.join(", ")));
+    }
+    if question.is_mcq() {
+        text.push_str(&format!("\n**Wrong options:** {}", question.options[1..].join(", ")));
+    }
+    text.push_str(&format!("\n\nBheja: <@{}>", user));
+    let card = CreateMessage::new()
+        .embed(CreateEmbed::new().title(format!("New quiz question #{}", sid)).description(text).colour(0x5865F2))
+        .components(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("quizok:{}", sid)).label("✅ Approve").style(ButtonStyle::Success),
+            CreateButton::new(format!("quizno:{}", sid)).label("❌ Reject").style(ButtonStyle::Danger),
+        ])]);
+    for admin in reviewers() {
+        if let Err(err) = UserId::new(admin).direct_message(&ctx.http, card.clone()).await {
+            tracing::warn!("quiz submission {} not sent to admin {}: {}", sid, admin, err);
+        }
+    }
+}
+
+async fn review(ctx: &Context, component: &ComponentInteraction, sid: &str, approve: bool) {
+    let admin = component.user.id.get();
+    if !reviewers().contains(&admin) {
+        whisper(ctx, component, "Only the quiz reviewer can do this.").await;
+        return;
+    }
+    let (Ok(sid), Some(db)) = (sid.parse::<i64>(), DB.get()) else {
+        return;
+    };
+    let outcome: Result<u64, String> = {
+        let conn = db.lock();
+        let row: Option<(i64, String, String)> = conn
+            .query_row("SELECT user_id, body, status FROM submissions WHERE id = ?1", params![sid], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()
+            .ok()
+            .flatten();
+        match row {
+            None => Err("That submission wasn't found.".into()),
+            Some((_, _, status)) if status != "pending" => Err(format!("This was already {}.", status)),
+            Some((_, body, _)) if approve && serde_json::from_str::<Question>(&body).is_err() => {
+                Err("This submission's data is broken.".into())
+            }
+            Some((author, body, _)) => {
+                if let (true, Ok(mut q)) = (approve, serde_json::from_str::<Question>(&body)) {
+                    q.id = format!("member-{}", sid);
+                    q.src = "member".into();
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_by, added_ts)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'member', ?6, ?7)",
+                        params![
+                            q.id,
+                            serde_json::to_string(&q).unwrap_or_default(),
+                            q.kind,
+                            q.region,
+                            q.cat,
+                            author,
+                            Utc::now().timestamp()
+                        ],
+                    );
+                }
+                let status = if approve { "approved" } else { "rejected" };
+                let _ = conn.execute("UPDATE submissions SET status = ?1 WHERE id = ?2", params![status, sid]);
+                Ok(author as u64)
+            }
+        }
+    };
+    match outcome {
+        Err(text) => {
+            let update = CreateInteractionResponseMessage::new().content(text).components(vec![]);
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+        }
+        Ok(author) => {
+            let verdict = if approve { "✅ Approved" } else { "❌ Rejected" };
+            let update = CreateInteractionResponseMessage::new()
+                .content(format!("{} by <@{}>", verdict, admin))
+                .components(vec![]);
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+            if approve {
+                let note = CreateMessage::new().content("🎉 Your quiz question was approved! It's now in the quiz.");
+                let _ = UserId::new(author).direct_message(&ctx.http, note).await;
+            }
+        }
+    }
+}
+
+// --- weekly news questions ---------------------------------------------------------
+//
+// Once a week the bot reads entertainment headlines, asks the model for
+// questions built only from what those headlines say, and DMs them to the
+// admins as one batch. Nothing reaches the quiz until an admin approves it,
+// and news questions retire after `NEWS_SHELF_LIFE`.
+
+const NEWS_FEEDS: &[&str] = &[
+    "https://www.hindustantimes.com/feeds/rss/entertainment/bollywood/rssfeed.xml",
+    "https://feeds.feedburner.com/ndtvmovies-latest",
+    "https://www.bollywoodhungama.com/feed/",
+    "https://www.koimoi.com/feed/",
+    "https://www.indiatoday.in/rss/1206533",
+    "https://timesofindia.indiatimes.com/rssfeeds/1081479906.cms",
+];
+const NEWS_MAX_ITEMS: usize = 90;
+const NEWS_MAX_QUESTIONS: usize = 15;
+/// Monday, this many hours after midnight in India.
+const NEWS_HOUR: i64 = 11;
+
+/// Gossip, tragedy, courts and politics: the news a quiz must not turn into points.
+static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(reported(ly)?|rumou?rs?|buzz|speculat\w*|sources|insiders?|spotted|troll\w*|slams?|lash(es|ed)?|arrest\w*|police|fir|court|lawsuit|legal|case|death|dead|dies|died|passe[sd] away|funeral|hospital\w*|health|ill|illness|accident|injur\w*|pregnan\w*|baby|babies|daughter|son|divorce\w*|split|break-?up|dating|affair|link-?up|controvers\w*|boycott\w*|feud|politic\w*|minister|mp|mla|bjp|congress|election|pakistan\w*|religio\w*|leak\w*|net worth|fees?|salary|body|weight)\b",
+    )
+    .expect("valid regex")
+});
+
+struct NewsItem {
+    title: String,
+    summary: String,
+    link: String,
+    published: chrono::DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct Drafted {
+    kind: String,
+    q: String,
+    a: String,
+    #[serde(default)]
+    alt: Vec<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    item: usize,
+}
+
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+fn unescape(text: &str) -> String {
+    static ENTITY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"&(#[xX][0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos|nbsp|rsquo|lsquo|rdquo|ldquo|hellip|ndash|mdash);")
+            .expect("valid regex")
+    });
+    ENTITY
+        .replace_all(text, |c: &regex::Captures| -> String {
+            match &c[1] {
+                "amp" => "&".into(),
+                "lt" => "<".into(),
+                "gt" => ">".into(),
+                "quot" | "rdquo" | "ldquo" => "\"".into(),
+                "apos" | "rsquo" | "lsquo" => "'".into(),
+                "nbsp" => " ".into(),
+                "hellip" => "…".into(),
+                "ndash" => "–".into(),
+                "mdash" => "—".into(),
+                other => {
+                    let code = match other.strip_prefix("#x").or_else(|| other.strip_prefix("#X")) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => other.strip_prefix('#').and_then(|d| d.parse().ok()),
+                    };
+                    code.and_then(char::from_u32).map(String::from).unwrap_or_default()
+                }
+            }
+        })
+        .into_owned()
+}
+
+/// Text of an RSS field: CDATA unwrapped, entities decoded, markup dropped.
+fn clean_text(raw: &str) -> String {
+    static MARKUP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<[^>]*>").expect("valid regex"));
+    let raw = raw.replace("<![CDATA[", "").replace("]]>", "");
+    let text = unescape(&MARKUP.replace_all(&unescape(&raw), " "));
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn field(block: &str, name: &str) -> String {
+    Regex::new(&format!(r"(?s)<{0}(?:\s[^>]*)?>(.*?)</{0}>", regex::escape(name)))
+        .ok()
+        .and_then(|re| re.captures(block).map(|c| clean_text(&c[1])))
+        .unwrap_or_default()
+}
+
+fn parse_feed(xml: &str) -> Vec<NewsItem> {
+    static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<item[\s>].*?</item>").expect("valid regex"));
+    ITEM.find_iter(xml)
+        .filter_map(|m| {
+            let block = m.as_str();
+            let date = [field(block, "pubDate"), field(block, "dc:date")].into_iter().find(|d| !d.is_empty())?;
+            let published = chrono::DateTime::parse_from_rfc2822(&date)
+                .or_else(|_| chrono::DateTime::parse_from_rfc3339(&date))
+                .ok()?
+                .with_timezone(&Utc);
+            let title = field(block, "title");
+            (!title.is_empty()).then(|| NewsItem {
+                title,
+                summary: field(block, "description"),
+                link: field(block, "link"),
+                published,
+            })
+        })
+        .collect()
+}
+
+/// The last week's entertainment headlines, newest first, with the sensitive ones left out.
+async fn fetch_news() -> Vec<NewsItem> {
+    let feeds: Vec<String> = std::env::var("VIZIER_QUIZ_NEWS_FEEDS")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .filter(|v: &Vec<String>| !v.is_empty())
+        .unwrap_or_else(|| NEWS_FEEDS.iter().map(|s| s.to_string()).collect());
+    let Ok(client) = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; MLCI-quiz/1.0)")
+        .timeout(Duration::from_secs(20))
+        .build()
+    else {
+        return Vec::new();
+    };
+    let since = Utc::now() - chrono::Duration::days(7);
+    let (mut items, mut seen) = (Vec::new(), HashSet::new());
+    for feed in feeds {
+        let body = match client.get(&feed).send().await {
+            Ok(response) => response.text().await.unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!("quiz news: {} unreadable: {}", feed, err);
+                continue;
+            }
+        };
+        for item in parse_feed(&body) {
+            if item.published >= since && !SENSITIVE.is_match(&item.title) && seen.insert(norm(&item.title)) {
+                items.push(item);
+            }
+        }
+    }
+    items.sort_by(|a, b| b.published.cmp(&a.published));
+    items.truncate(NEWS_MAX_ITEMS);
+    items
+}
+
+fn news_prompt(items: &[NewsItem]) -> String {
+    let ist = super::stats::ist();
+    let mut list = String::new();
+    for (i, item) in items.iter().enumerate() {
+        list.push_str(&format!(
+            "{}. [{}] {} — {}\n",
+            i + 1,
+            item.published.with_timezone(&ist).format("%-d %b %Y"),
+            item.title,
+            clip(&item.summary, 300)
+        ));
+    }
+    format!(
+        r#"You write quiz questions for an Indian Discord server's Bollywood quiz, using this week's entertainment news.
+
+Today is {today}. Below are {count} news items (date, headline, summary) from Indian entertainment sites.
+
+Write up to {max} quiz questions. Rules:
+- Use ONLY facts stated plainly in the items below. Never add facts from memory and never guess.
+- Only confirmed, on-record news: film and series releases, trailers and teasers, titles and release dates announced by the makers, casting announced by the makers, box office milestones as stated, awards and nominations, songs released, new shows and their hosts, weddings or engagements announced by the couple themselves.
+- Skip anything that is a rumour or "reportedly"/"sources said"/"buzz"; reviews and opinions; trolling and social media reactions; pregnancies, children, health, deaths, accidents; legal cases, police, controversies, feuds, boycotts; politics, politicians, religion, caste; India-Pakistan matters; looks, bodies, fees, money earned; anything sexual.
+- Hindi cinema first. South Indian or Hollywood news only when it is big news in India.
+- Every question names the month and year so it stays true later, e.g. "In {month}, which actor was announced as the lead of ...?"
+- Exactly one correct answer, and the answer must appear word for word in the news item.
+- kind "text": the answer is a name or title of at most 4 words; "alt" lists other fair ways to write it (a well-known short form, first name if unambiguous). kind "mcq": "options" has 4 entries, one exactly equal to the answer, three plausible wrong ones of the same type (real actors, real films). Roughly half each.
+- "note": one short line of context from the item, at most 20 words.
+- "item": the number of the news item the question comes from. At most one question per item.
+
+Reply with ONLY a JSON array and no other text, like:
+[{{"kind":"text","q":"...","a":"...","alt":["..."],"options":[],"note":"...","item":3}}]
+
+News items:
+{list}"#,
+        today = Utc::now().with_timezone(&ist).format("%-d %B %Y"),
+        month = Utc::now().with_timezone(&ist).format("%B %Y"),
+        count = items.len(),
+        max = NEWS_MAX_QUESTIONS,
+        list = list,
+    )
+}
+
+async fn ask_model(deps: &VizierDependencies, agent_id: &str, prompt: String) -> anyhow::Result<String> {
+    use crate::agents::agent::model::{VizierModel, VizierModelTrait};
+    use crate::storage::agent::AgentStorage;
+    use rig_core::message::{AssistantContent, Message as ModelMessage};
+
+    let config = deps.storage.get_agent(agent_id).await?.ok_or_else(|| anyhow::anyhow!("no config for {}", agent_id))?;
+    let model = VizierModel::new_with_override(deps, &config, None).await?;
+    let (_, choice, _) = model.completion(ModelMessage::user(prompt), vec![], vec![]).await?;
+    Ok(choice
+        .iter()
+        .filter_map(|c| match c {
+            AssistantContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(""))
+}
+
+fn parse_drafts(reply: &str) -> Vec<Drafted> {
+    let (Some(start), Some(end)) = (reply.find('['), reply.rfind(']')) else {
+        return Vec::new();
+    };
+    if end <= start {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(&reply[start..=end])
+        .map(|values| values.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Turns model drafts into questions, keeping only the ones whose answer is
+/// actually in the news item they cite and that pass every content check.
+fn vet_drafts(drafts: Vec<Drafted>, items: &[NewsItem]) -> Vec<(Question, String)> {
+    let mut out: Vec<(Question, String)> = Vec::new();
+    let mut used = HashSet::new();
+    for d in drafts {
+        let Some(item) = d.item.checked_sub(1).and_then(|i| items.get(i)) else {
+            continue;
+        };
+        let mcq = d.kind == "mcq";
+        let q = Question {
+            id: "news-draft".into(),
+            kind: if mcq { "mcq" } else { "text" }.into(),
+            q: d.q.trim().to_string(),
+            a: d.a.trim().to_string(),
+            alt: if mcq { Vec::new() } else { d.alt },
+            options: if mcq { d.options } else { Vec::new() },
+            cat: "bollywood_news".into(),
+            region: "india".into(),
+            diff: "medium".into(),
+            note: clip(d.note.trim(), 160),
+            src: "news".into(),
+            added_by: None,
+        };
+        let source = norm(&format!("{} {}", item.title, item.summary));
+        let grounded = !norm(&q.a).is_empty() && source.contains(&norm(&q.a));
+        let short = mcq || q.a.split_whitespace().count() <= 4;
+        let clean = !SENSITIVE.is_match(&format!("{} {} {}", q.q, q.a, q.note));
+        if q.is_valid() && grounded && short && clean && q.q.len() <= 300 && used.insert(d.item) {
+            out.push((q, item.link.clone()));
+        }
+        if out.len() == NEWS_MAX_QUESTIONS {
+            break;
+        }
+    }
+    out
+}
+
+/// Reads the week's news, drafts questions and DMs them to the admins for approval.
+pub async fn news_round(ctx: &Context, deps: &VizierDependencies, agent_id: &str) -> Result<usize, String> {
+    let items = fetch_news().await;
+    if items.len() < 5 {
+        return Err(format!("only {} usable news items this week", items.len()));
+    }
+    let reply = ask_model(deps, agent_id, news_prompt(&items)).await.map_err(|e| e.to_string())?;
+    let vetted = vet_drafts(parse_drafts(&reply), &items);
+    if vetted.is_empty() {
+        return Err("none of the model's questions passed the checks".into());
+    }
+    let Some(db) = DB.get() else {
+        return Err("the quiz database is unavailable".into());
+    };
+    let batch = format!("news-{}", Utc::now().format("%Y%m%d%H%M%S"));
+    let saved: Vec<(i64, Question, String)> = {
+        let conn = db.lock();
+        vetted
+            .into_iter()
+            .filter_map(|(q, link)| {
+                conn.execute(
+                    "INSERT INTO submissions (user_id, body, ts, batch, link) VALUES (0, ?1, ?2, ?3, ?4)",
+                    params![serde_json::to_string(&q).ok()?, Utc::now().timestamp(), batch, link],
+                )
+                .ok()?;
+                Some((conn.last_insert_rowid(), q, link))
+            })
+            .collect()
+    };
+    send_news_batch(ctx, &batch, &saved).await;
+    tracing::info!("quiz news: batch {} with {} questions sent for approval", batch, saved.len());
+    Ok(saved.len())
+}
+
+async fn send_news_batch(ctx: &Context, batch: &str, saved: &[(i64, Question, String)]) {
+    let cards: Vec<CreateEmbed> = saved
+        .iter()
+        .enumerate()
+        .map(|(i, (_, q, link))| {
+            let mut text = format!("**Answer:** {}", q.a);
+            if !q.alt.is_empty() {
+                text.push_str(&format!("\n**Also accepted:** {}", q.alt.join(", ")));
+            }
+            if q.is_mcq() {
+                let wrong: Vec<&String> = q.options.iter().filter(|o| **o != q.a).collect();
+                text.push_str(&format!("\n**Wrong options:** {}", wrong.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" / ")));
+            }
+            if !q.note.is_empty() {
+                text.push_str(&format!("\n_{}_", q.note));
+            }
+            if link.starts_with("http") {
+                text.push_str(&format!("\n[Read the story]({})", link));
+            }
+            CreateEmbed::new().title(clip(&format!("{}. {}", i + 1, q.q), 256)).description(text).colour(0xE67E22)
+        })
+        .collect();
+    let options: Vec<CreateSelectMenuOption> = saved
+        .iter()
+        .enumerate()
+        .map(|(i, (sid, q, _))| CreateSelectMenuOption::new(clip(&format!("{}. {}", i + 1, q.q), 100), sid.to_string()))
+        .collect();
+    let controls = vec![
+        CreateActionRow::SelectMenu(
+            CreateSelectMenu::new(format!("quiznewsrej:{}", batch), CreateSelectMenuKind::String { options })
+                .placeholder("❌ Pick any questions to reject")
+                .min_values(0)
+                .max_values(saved.len() as u8),
+        ),
+        CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("quiznewsok:{}", batch)).label("✅ Approve the rest").style(ButtonStyle::Success),
+            CreateButton::new(format!("quiznewsno:{}", batch)).label("🗑️ Reject all").style(ButtonStyle::Danger),
+        ]),
+    ];
+    let intro = format!(
+        "📰 **This week's Bollywood news questions** · {} made\nPick any that are wrong or weak in the menu below, then press **Approve the rest**. \
+         Approved questions stay in the quiz for 90 days.",
+        saved.len()
+    );
+    let chunks: Vec<&[CreateEmbed]> = cards.chunks(5).collect();
+    for admin in reviewers() {
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut message = CreateMessage::new().embeds(chunk.to_vec());
+            if i == 0 {
+                message = message.content(intro.clone());
+            }
+            if i + 1 == chunks.len() {
+                message = message.components(controls.clone());
+            }
+            if let Err(err) = UserId::new(admin).direct_message(&ctx.http, message).await {
+                tracing::warn!("quiz news batch {} not sent to admin {}: {}", batch, admin, err);
+                break;
+            }
+        }
+    }
+}
+
+async fn news_select(ctx: &Context, component: &ComponentInteraction, batch: &str) {
+    if !reviewers().contains(&component.user.id.get()) {
+        whisper(ctx, component, "Only the quiz reviewer can do this.").await;
+        return;
+    }
+    let chosen: Vec<i64> = match &component.data.kind {
+        ComponentInteractionDataKind::StringSelect { values } => values.iter().filter_map(|v| v.parse().ok()).collect(),
+        _ => Vec::new(),
+    };
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if meta_get(&conn, &format!("batch:{}", batch)).is_none() {
+            let _ = conn.execute(
+                "UPDATE submissions SET status = CASE WHEN id IN (SELECT value FROM json_each(?1)) THEN 'rejected' ELSE 'pending' END
+                 WHERE batch = ?2 AND status IN ('pending', 'rejected')",
+                params![serde_json::to_string(&chosen).unwrap_or_default(), batch],
+            );
+        }
+    }
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::Acknowledge).await;
+}
+
+async fn news_finish(ctx: &Context, component: &ComponentInteraction, batch: &str, approve: bool) {
+    let admin = component.user.id.get();
+    if !reviewers().contains(&admin) {
+        whisper(ctx, component, "Only the quiz reviewer can do this.").await;
+        return;
+    }
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let text = {
+        let conn = db.lock();
+        let key = format!("batch:{}", batch);
+        if let Some(done) = meta_get(&conn, &key) {
+            format!("This batch was already handled: {}", done)
+        } else {
+            let rows: Vec<(i64, String)> = if approve {
+                conn.prepare("SELECT id, body FROM submissions WHERE batch = ?1 AND status = 'pending'")
+                    .and_then(|mut s| s.query_map(params![batch], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let now = Utc::now().timestamp();
+            let mut approved = 0;
+            for (sid, body) in rows {
+                let Ok(mut q) = serde_json::from_str::<Question>(&body) else {
+                    continue;
+                };
+                q.id = format!("news-{}", sid);
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_ts)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'news', ?6)",
+                    params![q.id, serde_json::to_string(&q).unwrap_or_default(), q.kind, q.region, q.cat, now],
+                );
+                if inserted.is_ok() {
+                    approved += 1;
+                    let _ = conn.execute("UPDATE submissions SET status = 'approved' WHERE id = ?1", params![sid]);
+                }
+            }
+            let _ = conn.execute(
+                "UPDATE submissions SET status = 'rejected' WHERE batch = ?1 AND status IN ('pending', 'rejected')",
+                params![batch],
+            );
+            let total: i64 = conn
+                .query_row("SELECT COUNT(*) FROM submissions WHERE batch = ?1", params![batch], |r| r.get(0))
+                .unwrap_or(0);
+            let summary = format!("✅ {} approved · ❌ {} rejected · <@{}>", approved, total - approved, admin);
+            meta_set(&conn, &key, &summary);
+            summary
+        }
+    };
+    let update = CreateInteractionResponseMessage::new().content(text).components(vec![]);
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
+}
+
+/// `/quiznews`: an admin makes this week's batch now instead of waiting for Monday.
+pub async fn news_command(ctx: &Context, deps: &VizierDependencies, agent_id: &str, command: &CommandInteraction) {
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let reply = CreateInteractionResponseMessage::new().content("Only admins can do this.").ephemeral(true);
+        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+        return;
+    }
+    let _ = command.defer_ephemeral(&ctx.http).await;
+    let text = match news_round(ctx, deps, agent_id).await {
+        Ok(n) => format!("📰 Made {} news questions and sent them to you by DM for approval.", n),
+        Err(err) => format!("Couldn't make news questions: {}", err),
+    };
+    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(text)).await;
+}
+
+/// Every Monday at `NEWS_HOUR` in India, once per week, surviving restarts.
+/// `VIZIER_QUIZ_NEWS=off` turns the weekly run off; `/quiznews` still works.
+pub fn spawn_weekly_news(ctx: Context, deps: VizierDependencies, agent_id: String) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1800)).await;
+            if std::env::var("VIZIER_QUIZ_NEWS").is_ok_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+                continue;
+            }
+            let week = week_start();
+            let due = Utc::now().timestamp() >= week + NEWS_HOUR * 3600
+                && DB.get().is_some_and(|db| {
+                    let conn = db.lock();
+                    let fresh = meta_get(&conn, "news_week").as_deref() != Some(week.to_string().as_str());
+                    if fresh {
+                        meta_set(&conn, "news_week", &week.to_string());
+                    }
+                    fresh
+                });
+            if due {
+                match news_round(&ctx, &deps, &agent_id).await {
+                    Ok(n) => tracing::info!("quiz news: weekly batch of {} sent", n),
+                    Err(err) => tracing::warn!("quiz news: weekly batch failed: {}", err),
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_forgive_slips_but_not_wrong_answers() {
+        assert!(close_enough("mumbai", "Mumbai"));
+        assert!(close_enough("  The Mumbai!! ", "Mumbai"));
+        assert!(close_enough("new delhi", "New Delhi"));
+        assert!(close_enough("newdelhi", "New Delhi"));
+        assert!(close_enough("tendulker", "Tendulkar"));
+        assert!(close_enough("ramesh sipy", "Ramesh Sippy"));
+        assert!(!close_enough("iraq", "Iran"));
+        assert!(!close_enough("australia", "Austria"));
+        assert!(!close_enough("slovenia", "Slovakia"));
+        assert!(!close_enough("1984", "1983"));
+        assert!(!close_enough("dhoom 2", "Dhoom"));
+        assert!(!close_enough("kahaani2", "Kahaani"));
+        assert!(close_enough("Dhoom 2", "dhoom2"));
+        assert!(!close_enough("", "Mumbai"));
+        assert!(close_enough("Rock & Roll", "rock and roll"));
+        // Hinglish spellings of the same word.
+        assert!(close_enough("kabeer", "Kabir"));
+        assert!(close_enough("kotwaal", "kotwal"));
+        assert!(close_enough("ranee", "rani"));
+        assert!(close_enough("pavan", "Pawan"));
+        assert!(close_enough("Sachhin Tendulkar", "Sachin Tendulkar"));
+        assert!(!close_enough("dhoom 22", "Dhoom 2"));
+    }
+
+    #[test]
+    fn bank_imports_skips_bad_rows_and_picks_every_question_once() {
+        let workspace = std::env::temp_dir().join(format!("quiztest-{}", std::process::id()));
+        let bank = workspace.join("quizbank").join("ai");
+        std::fs::create_dir_all(&bank).unwrap();
+        let lines = [
+            r#"{"id":"t-1","kind":"text","q":"Capital of Karnataka?","a":"Bengaluru","alt":["Bangalore"],"options":[],"cat":"geography","region":"india","diff":"easy","note":""}"#,
+            r#"{"id":"t-2","kind":"mcq","q":"Largest planet?","a":"Jupiter","alt":[],"options":["Mars","Jupiter","Venus","Earth"],"cat":"science","region":"world","diff":"easy","note":""}"#,
+            r#"{"id":"t-3","kind":"mcq","q":"Broken, answer not an option","a":"X","alt":[],"options":["A","B","C","D"],"cat":"science","region":"world","diff":"easy","note":""}"#,
+            "not json",
+        ];
+        std::fs::write(bank.join("sample.jsonl"), lines.join("\n")).unwrap();
+        open(workspace.to_str().unwrap()).unwrap();
+
+        // India or world is a weighted coin toss per question, so look at many picks.
+        let ids: std::collections::BTreeSet<String> =
+            (0..40).filter_map(|_| pick(&Recent::default())).map(|q| q.id).collect();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["t-1", "t-2"]);
+
+        let bengaluru = {
+            let conn = DB.get().unwrap().lock();
+            conn.execute("UPDATE questions SET retired = 1 WHERE id = 't-2'", []).unwrap();
+            let body: String = conn.query_row("SELECT body FROM questions WHERE id = 't-1'", [], |r| r.get(0)).unwrap();
+            serde_json::from_str::<Question>(&body).unwrap()
+        };
+        assert!(bengaluru.accepts("bangalore") && bengaluru.accepts("Bengaluru") && !bengaluru.accepts("Mysore"));
+        for _ in 0..5 {
+            assert_eq!(pick(&Recent::default()).map(|q| q.id).as_deref(), Some("t-1"));
+        }
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn mix_never_runs_three_of_a_kind_or_three_world_in_a_row() {
+        let workspace = std::env::temp_dir().join(format!("quizmix-{}", std::process::id()));
+        let bank = workspace.join("quizbank");
+        std::fs::create_dir_all(&bank).unwrap();
+        let mut lines = Vec::new();
+        let mut add = |n: usize, kind: &str, region: &str, cats: &[&str]| {
+            for i in 0..n {
+                let options = if kind == "mcq" { r#"["A","B","C","D"]"# } else { "[]" };
+                lines.push(format!(
+                    r#"{{"id":"{k}-{r}-{i}","kind":"{k}","q":"Q {k} {r} {i}","a":"A","alt":[],"options":{o},"cat":"{c}","region":"{r}","diff":"easy","note":""}}"#,
+                    k = kind, r = region, i = i, o = options, c = cats[i % cats.len()]
+                ));
+            }
+        };
+        // Every region-and-kind pool has four topics, one more than the three
+        // that sit out, so all three rules can always be met - as in the real bank.
+        add(40, "text", "india", &["films", "food", "cricket", "history"]);
+        add(20, "mcq", "india", &["films", "geography", "music", "tv"]);
+        add(40, "mcq", "world", &["games", "science", "music", "sport"]);
+        add(20, "text", "world", &["science", "capitals", "elements", "art"]);
+        std::fs::write(bank.join("mix.jsonl"), lines.join("\n")).unwrap();
+        let conn = open_conn(workspace.to_str().unwrap()).unwrap();
+
+        let mut recent = Recent::default();
+        let picked: Vec<Question> = (0..120)
+            .map(|_| {
+                let q = pick_from(&conn, &recent).expect("a question");
+                recent.push(&q);
+                q
+            })
+            .collect();
+        for run in picked.windows(3) {
+            assert!(!(run[0].kind == run[1].kind && run[1].kind == run[2].kind), "three {} in a row", run[0].kind);
+            assert!(!run.iter().all(|q| q.region == "world"), "three world questions in a row");
+            assert!(!(run[0].cat == run[1].cat || run[1].cat == run[2].cat || run[0].cat == run[2].cat));
+        }
+        let india = picked.iter().filter(|q| q.region == "india").count() as f64 / picked.len() as f64;
+        assert!((0.55..=0.95).contains(&india), "india share {}", india);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn news_items_parse_and_only_grounded_clean_drafts_survive() {
+        let xml = r#"<rss><channel>
+<item><title><![CDATA[Haiwaan trailer out: Akshay Kumar &amp; Saif Ali Khan reunite]]></title>
+<description>&lt;p&gt;The makers released the trailer on Monday.&lt;/p&gt;</description>
+<link>https://example.com/a</link><pubDate><![CDATA[Fri, 11 Sep 2026 12:43:16 +0530]]></pubDate></item>
+<item><title>Star reportedly dating co-star after film wrap</title><description>Rumours fly.</description>
+<link>https://example.com/b</link><pubDate>2026-09-10T07:20:38+05:30</pubDate></item>
+<item><title>No date on this one</title></item>
+</channel></rss>"#;
+        let items = parse_feed(xml);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Haiwaan trailer out: Akshay Kumar & Saif Ali Khan reunite");
+        assert_eq!(items[0].summary, "The makers released the trailer on Monday.");
+        assert!(SENSITIVE.is_match(&items[1].title) && !SENSITIVE.is_match(&items[0].title));
+
+        let draft = |q: &str, a: &str, item: usize| Drafted {
+            kind: "text".into(),
+            q: q.into(),
+            a: a.into(),
+            alt: vec![],
+            options: vec![],
+            note: String::new(),
+            item,
+        };
+        let reply = "```json\n[{\"kind\":\"text\",\"q\":\"x\",\"a\":\"y\",\"item\":1}]\n```";
+        assert_eq!(parse_drafts(reply).len(), 1);
+        let vetted = vet_drafts(
+            vec![
+                draft("In September 2026, who directed Haiwaan?", "Priyadarshan", 1),
+                draft("In September 2026, which actor reunited with Saif Ali Khan in the Haiwaan trailer?", "Akshay Kumar", 1),
+                draft("In September 2026, which trailer did Akshay Kumar share?", "Haiwaan", 1),
+                draft("In September 2026, who was reportedly dating a co-star?", "Star", 2),
+                draft("Out of range", "Akshay Kumar", 9),
+            ],
+            &items,
+        );
+        let answers: Vec<&str> = vetted.iter().map(|(q, _)| q.a.as_str()).collect();
+        assert_eq!(answers, ["Akshay Kumar"]);
+        assert_eq!(vetted[0].1, "https://example.com/a");
+    }
+
+    #[test]
+    fn a_real_different_answer_is_never_a_typo() {
+        let question = |a: &str| Question {
+            id: "x".into(),
+            kind: "text".into(),
+            q: "?".into(),
+            a: a.into(),
+            alt: vec![],
+            options: vec![],
+            cat: String::new(),
+            region: "world".into(),
+            diff: String::new(),
+            note: String::new(),
+            src: String::new(),
+            added_by: None,
+        };
+        let known: HashSet<String> = ["iceland", "ireland", "austria", "australia", "jaipur", "raipur"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!question("Ireland").accepts_given("Iceland", &known));
+        assert!(question("Ireland").accepts_given("Irelnd", &known));
+        assert!(question("Ireland").accepts_given("ireland", &known));
+        assert!(!question("Australia").accepts_given("austria", &known));
+        assert!(!question("Raipur").accepts_given("Jaipur", &known));
+        assert!(question("Raipur").accepts_given("Raipor", &known));
+    }
+
+    #[test]
+    fn hints_show_first_letters() {
+        assert_eq!(hint_at("Mumbai", 1), "M _ _ _ _ _");
+        assert_eq!(hint_at("Ramesh Sippy", 1), "R _ _ _ _ _   S _ _ _ _");
+        assert_eq!(hint_at("Mumbai", 2), "M u _ _ _ _");
+        assert_eq!(hint_at("Ramesh Sippy", 2), "R a _ _ _ _   S i _ _ _");
+        // Never past half a word, however many hints are asked for.
+        assert_eq!(hint_at("Mumbai", 9), "M u m _ _ _");
+        assert_eq!(hint_at("1983", 9), "1 9 _ _");
+    }
+}

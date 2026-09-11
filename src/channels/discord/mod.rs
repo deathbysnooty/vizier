@@ -29,6 +29,7 @@ use crate::utils::remove_think_tags;
 
 mod awards;
 mod awards_card;
+mod quiz;
 mod quote;
 mod quote_card;
 mod stats;
@@ -58,6 +59,9 @@ impl VizierChannel for DiscordChannelReader {
         // bot down - it only means nothing is counted this run.
         if let Err(err) = stats::open(&self.deps.config.workspace, &allowed_channels()) {
             tracing::error!("stats database unavailable: {}", err);
+        }
+        if let Err(err) = quiz::open(&self.deps.config.workspace) {
+            tracing::error!("quiz database unavailable: {}", err);
         }
 
         let intents = GatewayIntents::all();
@@ -1229,6 +1233,31 @@ impl EventHandler for Handler {
             .description("who keeps leaving and coming back");
         let _ = Command::create_global_command(ctx.http.clone(), rejoinstats).await;
 
+        let quiz_cmd = CreateCommand::new("quiz").description("start the never-ending quiz (quiz channel only)");
+        let _ = Command::create_global_command(ctx.http.clone(), quiz_cmd).await;
+
+        let quiz_board = CreateCommand::new("quizleaderboard").description("top quiz scorers - all time or this week");
+        let _ = Command::create_global_command(ctx.http.clone(), quiz_board).await;
+
+        let text_option = |name: &str, about: &str, max: u16| {
+            CreateCommandOption::new(serenity::all::CommandOptionType::String, name, about).max_length(max)
+        };
+        let quiz_add = CreateCommand::new("quizadd")
+            .description("send a question for the quiz - an admin approves it first")
+            .add_option(text_option("question", "the question", 300).required(true))
+            .add_option(text_option("answer", "the correct answer", 100).required(true))
+            .add_option(text_option("also", "other answers that should also count, comma separated", 200))
+            .add_option(text_option("wrong1", "multiple choice: a wrong option (give all three)", 80))
+            .add_option(text_option("wrong2", "multiple choice: a second wrong option", 80))
+            .add_option(text_option("wrong3", "multiple choice: a third wrong option", 80));
+        let _ = Command::create_global_command(ctx.http.clone(), quiz_add).await;
+
+        let quiz_news = CreateCommand::new("quiznews")
+            .description("admin only: make this week's Bollywood news questions now");
+        let _ = Command::create_global_command(ctx.http.clone(), quiz_news).await;
+        quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
+        quiz::resume(&ctx, &self.1.storage, &self.0);
+
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
         let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
@@ -1250,6 +1279,10 @@ impl EventHandler for Handler {
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
+            if id.starts_with("quiz") {
+                quiz::on_component(&ctx, component).await;
+                return;
+            }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
                 quote::on_component(&ctx, &self.1.storage, component).await;
                 return;
@@ -1681,6 +1714,20 @@ impl EventHandler for Handler {
                     },
                 };
                 let _ = command.edit_response(&ctx.http, reply).await;
+            }
+
+            // The quiz is open to everyone, admin-only mode included: it never reaches the model.
+            if command.data.name == "quiz" {
+                quiz::start_command(&ctx, &self.1.storage, &agent_id, &command).await;
+            }
+            if command.data.name == "quizleaderboard" {
+                quiz::leaderboard_command(&ctx, &command).await;
+            }
+            if command.data.name == "quizadd" {
+                quiz::add_command(&ctx, &command).await;
+            }
+            if command.data.name == "quiznews" {
+                quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
             }
 
             if command.data.name == "rejoinstats" {
@@ -2444,6 +2491,12 @@ Ye message sirf tumhe dikh raha hai."#,
                     let _ = msg.reply(&ctx.http, "Kisko quote karun? Us message pe reply karke bol.").await;
                 }
             }
+            return;
+        }
+
+        // The quiz channel belongs to the quiz: answers are checked there, for
+        // everyone, and nothing in it ever reaches the model.
+        if !is_dm && quiz::on_message(&ctx, &msg).await {
             return;
         }
 
