@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.65] - 2026-09-11
+
+### 🐛 Bug Fixes
+
+- *(discord)* Quiz !skip is for admins only
 ## [0.10.64] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* /quiz - never-ending quiz with a fact-checked question bank
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.64
 ## [0.10.63] - 2026-09-11
 
 ### 🐛 Bug Fixes
