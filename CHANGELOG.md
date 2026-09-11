@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.67] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quiz skip votes and a 1-minute MCQ retry
 ## [0.10.66] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* /quizstop, and quiz reports go to review instead of skipping
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.66
 ## [0.10.65] - 2026-09-11
 
 ### 🐛 Bug Fixes
