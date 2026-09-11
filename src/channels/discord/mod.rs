@@ -1255,6 +1255,9 @@ impl EventHandler for Handler {
         let quiz_news = CreateCommand::new("quiznews")
             .description("admin only: make this week's Bollywood news questions now");
         let _ = Command::create_global_command(ctx.http.clone(), quiz_news).await;
+
+        let quiz_stop = CreateCommand::new("quizstop").description("admin only: stop the quiz until someone runs /quiz again");
+        let _ = Command::create_global_command(ctx.http.clone(), quiz_stop).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
         quiz::resume(&ctx, &self.1.storage, &self.0);
 
@@ -1725,6 +1728,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "quizadd" {
                 quiz::add_command(&ctx, &command).await;
+            }
+            if command.data.name == "quizstop" {
+                quiz::stop_command(&ctx, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;

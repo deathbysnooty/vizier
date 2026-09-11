@@ -43,8 +43,6 @@ const MAX_KNOCKOUTS: usize = 2;
 const STICKY_AFTER: u32 = 4;
 /// Least time between two such moves, to stay clear of rate limits.
 const STICKY_GAP: Duration = Duration::from_secs(6);
-/// Reports from different members that retire a question. One admin report is enough.
-const FLAGS_TO_RETIRE: i64 = 3;
 /// Pending /quizadd submissions one member may have waiting at once.
 const MAX_PENDING: i64 = 5;
 const ROLE_NAME: &str = "Quiz Leader";
@@ -54,6 +52,8 @@ const CREDITS: &str =
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 static LIVE: LazyLock<Mutex<Option<Live>>> = LazyLock::new(|| Mutex::new(None));
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Set by `/quizstop`; the loop ends at its next step.
+static STOP: AtomicBool = AtomicBool::new(false);
 static LEADER_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 /// Held around every edit of the question message, so a late hint edit can
 /// never land on top of the final "answered" / "time up" version.
@@ -143,8 +143,6 @@ struct Live {
     below: u32,
     last_bump: std::time::Instant,
     winner: Option<u64>,
-    /// Retired by a report while it was up.
-    skipped: bool,
     /// Who has used their one multiple-choice click.
     tried: HashSet<u64>,
     /// Passed over by an admin's `!skip`.
@@ -153,9 +151,9 @@ struct Live {
 }
 
 impl Live {
-    /// Still waiting for an answer: not won, skipped or removed.
+    /// Still waiting for an answer: not won and not skipped.
     fn is_open(&self) -> bool {
-        self.winner.is_none() && !self.skipped && !self.passed
+        self.winner.is_none() && !self.passed
     }
 }
 
@@ -163,7 +161,6 @@ enum Shown {
     Open { hint: Option<String> },
     Won(u64),
     Skipped,
-    Removed,
 }
 
 /// Clears the running flag however the quiz loop ends.
@@ -587,7 +584,6 @@ fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
         }
         Shown::Won(user) => text.push_str(&format!("\n✅ <@{}> got it: **{}**", user, q.a)),
         Shown::Skipped => text.push_str(&format!("\n⏭️ Skipped. The answer was **{}**", q.a)),
-        Shown::Removed => text.push_str("\n🚩 This question was removed."),
     }
     if matches!(shown, Shown::Won(_) | Shown::Skipped) && !q.note.is_empty() {
         text.push_str(&format!("\n_{}_", q.note));
@@ -599,7 +595,6 @@ fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
         Shown::Open { .. } => 0x5865F2,
         Shown::Won(_) => 0x57F287,
         Shown::Skipped => 0x95A5A6,
-        Shown::Removed => 0xED4245,
     };
     let flag = if q.region == "india" { "🇮🇳" } else { "🌍" };
     let mut footer = format!("{} {}", flag, pretty(&q.cat));
@@ -711,6 +706,28 @@ pub async fn start_command(
     tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home));
 }
 
+/// `/quizstop`: an admin ends the quiz. It stays off, restarts included, until
+/// someone runs `/quiz` again.
+pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
+    let text = if !super::admin_ids().contains(&command.user.id.get()) {
+        "Only admins can stop the quiz."
+    } else if !RUNNING.load(Ordering::SeqCst) {
+        set_running(false);
+        "The quiz isn't running."
+    } else {
+        set_running(false);
+        STOP.store(true, Ordering::SeqCst);
+        let mut guard = LIVE.lock();
+        if let Some(live) = guard.as_mut().filter(|live| live.is_open()) {
+            live.passed = true;
+            live.done.notify_one();
+        }
+        "Stopping the quiz."
+    };
+    let reply = CreateInteractionResponseMessage::new().content(text).ephemeral(true);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
 /// Remembers across restarts whether the quiz is on.
 fn set_running(on: bool) {
     if let Some(db) = DB.get() {
@@ -732,9 +749,14 @@ pub fn resume(ctx: &Context, storage: &Arc<VizierStorage>, agent_id: &str) {
 
 async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channel: ChannelId) {
     let _running = Running;
+    STOP.store(false, Ordering::SeqCst);
     let mut recent = Recent::default();
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
+        if STOP.load(Ordering::SeqCst) {
+            let _ = channel.say(&ctx.http, "🛑 The quiz has been stopped by an admin. Start it again with `/quiz`.").await;
+            break;
+        }
         // A pause holds the quiz rather than ending it, so it carries on after /resume.
         if super::is_paused(&storage, &agent_id).await {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -779,7 +801,6 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             below: 0,
             last_bump: std::time::Instant::now(),
             winner: None,
-            skipped: false,
             tried: HashSet::new(),
             passed: false,
             done: done.clone(),
@@ -793,12 +814,9 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
         let Some(live) = LIVE.lock().take() else {
             break;
         };
-        let shown = if live.skipped {
-            Shown::Removed
-        } else if let Some(winner) = live.winner {
-            Shown::Won(winner)
-        } else {
-            Shown::Skipped
+        let shown = match live.winner {
+            Some(winner) => Shown::Won(winner),
+            None => Shown::Skipped,
         };
         let edits = EDIT_LOCK.lock().await;
         let _ = channel
@@ -811,6 +829,9 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             )
             .await;
         drop(edits);
+        if STOP.load(Ordering::SeqCst) {
+            continue;
+        }
         if matches!(shown, Shown::Skipped) {
             let _ = channel.say(&ctx.http, format!("⏭️ Skipped! The answer was **{}**.", question.a)).await;
         }
@@ -1073,6 +1094,10 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         news_finish(ctx, component, batch, false).await;
     } else if let Some(qid) = id.strip_prefix("quizflag:") {
         flag(ctx, component, qid).await;
+    } else if let Some(qid) = id.strip_prefix("quizretire:") {
+        report_decision(ctx, component, qid, true).await;
+    } else if let Some(qid) = id.strip_prefix("quizkeep:") {
+        report_decision(ctx, component, qid, false).await;
     } else if let Some(sid) = id.strip_prefix("quizok:") {
         review(ctx, component, sid, true).await;
     } else if let Some(sid) = id.strip_prefix("quizno:") {
@@ -1142,44 +1167,75 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
     }
 }
 
+/// 🚩 on a question: recorded, and never skips or removes it by itself - a
+/// report must not be a free skip. The first report of each question goes to
+/// the reviewers by DM, to keep it or remove it for the future.
 async fn flag(ctx: &Context, component: &ComponentInteraction, qid: &str) {
     let user = component.user.id.get();
-    let admin = super::admin_ids().contains(&user);
     let Some(db) = DB.get() else {
         return;
     };
-    let (count, retired) = {
+    let (count, first, body) = {
         let conn = db.lock();
-        let _ = conn.execute(
-            "INSERT OR IGNORE INTO flags (question_id, user_id) VALUES (?1, ?2)",
-            params![qid, user as i64],
-        );
+        let added = conn
+            .execute("INSERT OR IGNORE INTO flags (question_id, user_id) VALUES (?1, ?2)", params![qid, user as i64])
+            .unwrap_or(0)
+            > 0;
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM flags WHERE question_id = ?1", params![qid], |r| r.get(0))
             .unwrap_or(0);
-        let retire = admin || count >= FLAGS_TO_RETIRE;
-        if retire {
-            let _ = conn.execute("UPDATE questions SET retired = 1 WHERE id = ?1", params![qid]);
-        }
-        (count, retire)
+        let body: Option<String> = conn
+            .query_row("SELECT body FROM questions WHERE id = ?1", params![qid], |r| r.get(0))
+            .optional()
+            .ok()
+            .flatten();
+        (count, added && count == 1, body)
     };
-    if retired {
-        tracing::info!("quiz: question {} retired after a report from {}", qid, user);
-        if let Some(live) = LIVE.lock().as_mut() {
-            if live.question.id == qid && live.winner.is_none() {
-                live.skipped = true;
-                live.done.notify_one();
-            }
+    tracing::info!("quiz: question {} reported by {} ({} reports so far)", qid, user, count);
+    whisper(ctx, component, "🚩 Thanks, reported. An admin will check this question.").await;
+
+    let (true, Some(q)) = (first, body.and_then(|b| serde_json::from_str::<Question>(&b).ok())) else {
+        return;
+    };
+    let mut text = format!("**Question:** {}\n**Answer:** {}", q.q, q.a);
+    if !q.alt.is_empty() {
+        text.push_str(&format!("\n**Also accepted:** {}", q.alt.join(", ")));
+    }
+    if q.is_mcq() {
+        let wrong: Vec<&str> = q.options.iter().filter(|o| **o != q.a).map(|o| o.as_str()).collect();
+        text.push_str(&format!("\n**Wrong options:** {}", wrong.join(" / ")));
+    }
+    text.push_str(&format!("\n\nReported by <@{}> · {} · `{}`", user, pretty(&q.cat), q.id));
+    let card = CreateMessage::new()
+        .embed(CreateEmbed::new().title("🚩 Quiz question reported").description(text).colour(0xED4245))
+        .components(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("quizretire:{}", q.id)).label("🗑️ Remove question").style(ButtonStyle::Danger),
+            CreateButton::new(format!("quizkeep:{}", q.id)).label("✅ Keep").style(ButtonStyle::Secondary),
+        ])]);
+    for reviewer in reviewers() {
+        if let Err(err) = UserId::new(reviewer).direct_message(&ctx.http, card.clone()).await {
+            tracing::warn!("quiz report for {} not sent to {}: {}", q.id, reviewer, err);
         }
     }
-    let text = if admin {
-        "🚩 Removed. This question won't come up again.".to_string()
-    } else if retired {
-        format!("🚩 {} people reported it, so the question is removed.", FLAGS_TO_RETIRE)
-    } else {
-        format!("🚩 Reported ({}/{}). The question is removed at {} reports.", count, FLAGS_TO_RETIRE, FLAGS_TO_RETIRE)
-    };
-    whisper(ctx, component, text).await;
+}
+
+/// A reviewer's call on a reported question. Removing only stops it coming up
+/// again; if it is on screen right now it stays there - an admin can `!skip`.
+async fn report_decision(ctx: &Context, component: &ComponentInteraction, qid: &str, remove: bool) {
+    let reviewer = component.user.id.get();
+    if !reviewers().contains(&reviewer) {
+        whisper(ctx, component, "Only the quiz reviewer can do this.").await;
+        return;
+    }
+    if remove {
+        if let Some(db) = DB.get() {
+            let _ = db.lock().execute("UPDATE questions SET retired = 1 WHERE id = ?1", params![qid]);
+        }
+        tracing::info!("quiz: question {} removed after review by {}", qid, reviewer);
+    }
+    let verdict = if remove { "🗑️ Removed. It won't come up again." } else { "✅ Kept." };
+    let update = CreateInteractionResponseMessage::new().content(format!("{} · <@{}>", verdict, reviewer)).components(vec![]);
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
 }
 
 // --- leaderboard and leader role ------------------------------------------------
