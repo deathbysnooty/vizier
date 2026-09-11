@@ -253,7 +253,12 @@ fn open_conn(workspace: &str) -> anyhow::Result<Connection> {
          CREATE TABLE IF NOT EXISTS submissions (
              id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, body TEXT NOT NULL,
              ts INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch TEXT, link TEXT);
-         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS rounds (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, genre TEXT NOT NULL, label TEXT NOT NULL,
+             winner INTEGER, points INTEGER NOT NULL DEFAULT 0, answered INTEGER NOT NULL DEFAULT 0,
+             asked INTEGER NOT NULL DEFAULT 0, top TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS rounds_genre ON rounds (genre, winner);",
     )?;
     // Themes came after the first deploy: add their columns to an existing database.
     let has_theme = {
@@ -558,6 +563,8 @@ static VOTE: LazyLock<Mutex<Option<Vote>>> = LazyLock::new(|| Mutex::new(None));
 /// Kept in memory; a restart starts a fresh round.
 #[derive(Default)]
 struct Board {
+    /// The genre key, or `MIX`.
+    key: String,
     label: String,
     asked: u32,
     /// user -> (points this round, order of the point that reached that total)
@@ -567,8 +574,8 @@ struct Board {
 
 static BOARD: LazyLock<Mutex<Board>> = LazyLock::new(|| Mutex::new(Board::default()));
 
-fn new_round(label: &str) {
-    *BOARD.lock() = Board { label: label.to_string(), ..Default::default() };
+fn new_round(key: &str, label: &str) {
+    *BOARD.lock() = Board { key: key.to_string(), label: label.to_string(), ..Default::default() };
 }
 
 /// +1 for this round; returns the member's round total.
@@ -589,8 +596,9 @@ fn standings(scores: &HashMap<u64, (u32, u64)>) -> Vec<(u64, u32, u64)> {
     rows
 }
 
-/// The end-of-round message: the round's top 3.
-fn round_summary(board: &Board) -> String {
+/// The end-of-round message: the round's top 3, and its winner crowned with
+/// `crowns`, how many rounds of this genre they have now won.
+fn round_summary(board: &Board, crowns: Option<i64>) -> String {
     let rows = standings(&board.scores);
     let answered: u32 = rows.iter().map(|r| r.1).sum();
     let mut text = format!("🏁 **{} round over!** {} of {} questions answered.", board.label, answered, board.asked);
@@ -603,12 +611,90 @@ fn round_summary(board: &Board) -> String {
         let medal = ["🥇", "🥈", "🥉"][i];
         text.push_str(&format!("\n{} <@{}> · **{}**", medal, user, points));
     }
+    if let (Some((user, _, _)), Some(n)) = (rows.first(), crowns) {
+        let plural = if n == 1 { "" } else { "s" };
+        text.push_str(&format!(
+            "\n👑 <@{}> is crowned the **{}** champion · {} crown{} in this genre",
+            user, board.label, n, plural
+        ));
+    }
     let shown = rows.len().min(3);
     let tied = rows.windows(2).take(shown).any(|w| w[0].1 == w[1].1);
     if tied {
         text.push_str("\n-# Tied scores go to whoever got there first.");
     }
     text
+}
+
+/// Saves a finished round for the genre champions board. Returns how many
+/// rounds of this genre its winner has now won, or `None` if nobody scored.
+fn record_round(conn: &Connection, board: &Board) -> Option<i64> {
+    let rows = standings(&board.scores);
+    let answered: u32 = rows.iter().map(|r| r.1).sum();
+    let top: Vec<(u64, u32)> = rows.iter().take(3).map(|r| (r.0, r.1)).collect();
+    let winner = rows.first().map(|r| (r.0, r.1));
+    let saved = conn.execute(
+        "INSERT INTO rounds (genre, label, winner, points, answered, asked, top, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            board.key,
+            board.label,
+            winner.map(|w| w.0 as i64),
+            winner.map(|w| w.1).unwrap_or(0),
+            answered,
+            board.asked,
+            serde_json::to_string(&top).unwrap_or_else(|_| "[]".into()),
+            Utc::now().timestamp()
+        ],
+    );
+    if let Err(err) = saved {
+        tracing::warn!("quiz: round not recorded: {}", err);
+    }
+    let (user, _) = winner?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM rounds WHERE genre = ?1 AND winner = ?2",
+        params![board.key, user as i64],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// One line per genre that has had a round won: its reigning champion (the
+/// latest round's winner) and whoever has won it most often.
+fn champion_lines(conn: &Connection) -> Vec<String> {
+    let genres = GENRES.iter().map(|g| (g.key, g.label)).chain(std::iter::once((MIX, "🎲 Mix")));
+    let mut lines = Vec::new();
+    for (key, label) in genres {
+        let reigning: Option<i64> = conn
+            .query_row(
+                "SELECT winner FROM rounds WHERE genre = ?1 AND winner IS NOT NULL ORDER BY id DESC LIMIT 1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let Some(reigning) = reigning else {
+            continue;
+        };
+        // On a tie, whoever reached that many crowns first.
+        let most: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT winner, COUNT(*) AS n FROM rounds WHERE genre = ?1 AND winner IS NOT NULL
+                 GROUP BY winner ORDER BY n DESC, MAX(id) ASC LIMIT 1",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        lines.push(match most {
+            Some((user, n)) if user != reigning => format!("{} · 👑 <@{}> · 🏆 <@{}> ×{}", label, reigning, user, n),
+            Some((_, n)) => format!("{} · 👑🏆 <@{}> ×{}", label, reigning, n),
+            None => format!("{} · 👑 <@{}>", label, reigning),
+        });
+    }
+    lines
 }
 
 /// The theme a bank question is scheduled under, and which side of the
@@ -1233,7 +1319,7 @@ pub async fn start_command(
          👇 Multiple choice: press a button. A wrong pick means a 1-minute wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
          ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
-         🗳️ Rounds of {} questions: each round has its own scores, its top 3 are announced at the end, then everyone votes on the next round's genre.\n\
+         🗳️ Rounds of {} questions: each round has its own scores, its winner is crowned that genre's champion (`/quizleaderboard` → Genre champions), then everyone votes on the next round's genre.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
         count, SKIPS_NEEDED, BLOCK, ROLE_NAME
@@ -1296,7 +1382,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
     // The first block after a start is a mix; every block after that is voted on.
     let mut genre: Option<&'static Genre> = None;
     let mut in_block = 0u32;
-    new_round("🎲 Mix");
+    new_round(MIX, "🎲 Mix");
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -1309,13 +1395,15 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             continue;
         }
         if in_block >= BLOCK {
-            let summary = round_summary(&BOARD.lock());
+            let finished = std::mem::take(&mut *BOARD.lock());
+            let crowns = DB.get().and_then(|db| record_round(&db.lock(), &finished));
+            let summary = round_summary(&finished, crowns);
             let _ = channel
                 .send_message(&ctx.http, CreateMessage::new().content(summary).allowed_mentions(CreateAllowedMentions::new()))
                 .await;
             tokio::time::sleep(GAP).await;
             genre = run_vote(&ctx, channel).await;
-            new_round(genre.map(|g| g.label).unwrap_or("🎲 Mix"));
+            new_round(genre.map(|g| g.key).unwrap_or(MIX), genre.map(|g| g.label).unwrap_or("🎲 Mix"));
             in_block = 0;
             continue;
         }
@@ -1660,9 +1748,16 @@ async fn whisper(ctx: &Context, component: &ComponentInteraction, text: impl Int
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let id = component.data.custom_id.clone();
     if id == "quizlb" {
-        let week = matches!(&component.data.kind,
-            ComponentInteractionDataKind::StringSelect { values } if values.first().is_some_and(|v| v == "week"));
-        let update = CreateInteractionResponseMessage::new().embed(board(week)).components(vec![board_menu(week)]);
+        let view = match &component.data.kind {
+            ComponentInteractionDataKind::StringSelect { values } => values.first().cloned().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let embed = match view.as_str() {
+            "genres" => champions(),
+            "week" => board(true),
+            _ => board(false),
+        };
+        let update = CreateInteractionResponseMessage::new().embed(embed).components(vec![board_menu(&view)]);
         let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
     } else if let Some(batch) = id.strip_prefix("quiznewsrej:") {
         news_select(ctx, component, batch).await;
@@ -1889,16 +1984,45 @@ fn board(week: bool) -> CreateEmbed {
         .footer(CreateEmbedFooter::new(CREDITS))
 }
 
-fn board_menu(week: bool) -> CreateActionRow {
+/// The genre champions board: who wears each genre's crown.
+fn champions() -> CreateEmbed {
+    let (lines, rounds) = DB
+        .get()
+        .map(|db| {
+            let conn = db.lock();
+            let rounds: i64 = conn.query_row("SELECT COUNT(*) FROM rounds", [], |r| r.get(0)).unwrap_or(0);
+            (champion_lines(&conn), rounds)
+        })
+        .unwrap_or_default();
+    let mut text =
+        String::from("**Genre champions**\n-# 👑 won the latest round of that genre · 🏆 has won it most often\n\n");
+    if lines.is_empty() {
+        text.push_str(&format!(
+            "No rounds won yet. After every {} questions, the round's top scorer is crowned that genre's champion.",
+            BLOCK
+        ));
+    } else {
+        text.push_str(&lines.join("\n"));
+        text.push_str(&format!("\n\n-# {} round{} played", rounds, if rounds == 1 { "" } else { "s" }));
+    }
+    CreateEmbed::new()
+        .title("🏆 Quiz Leaderboard")
+        .description(text)
+        .colour(0xF1C40F)
+        .footer(CreateEmbedFooter::new(CREDITS))
+}
+
+fn board_menu(view: &str) -> CreateActionRow {
     let options = vec![
-        CreateSelectMenuOption::new("All time", "all").default_selection(!week),
-        CreateSelectMenuOption::new("This week", "week").default_selection(week),
+        CreateSelectMenuOption::new("All time", "all").default_selection(!matches!(view, "week" | "genres")),
+        CreateSelectMenuOption::new("This week", "week").default_selection(view == "week"),
+        CreateSelectMenuOption::new("Genre champions", "genres").default_selection(view == "genres"),
     ];
     CreateActionRow::SelectMenu(CreateSelectMenu::new("quizlb", CreateSelectMenuKind::String { options }))
 }
 
 pub async fn leaderboard_command(ctx: &Context, command: &CommandInteraction) {
-    let reply = CreateInteractionResponseMessage::new().embed(board(false)).components(vec![board_menu(false)]);
+    let reply = CreateInteractionResponseMessage::new().embed(board(false)).components(vec![board_menu("all")]);
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }
 
@@ -2733,6 +2857,7 @@ mod tests {
     #[test]
     fn round_top_three_breaks_ties_by_who_got_there_first() {
         let board = Board {
+            key: "bollywood".into(),
             label: "🎬 Bollywood".into(),
             asked: 20,
             // a and b both on 5, but b reached 5 first (win #9 before a's win #12).
@@ -2741,12 +2866,39 @@ mod tests {
         };
         let order: Vec<u64> = standings(&board.scores).iter().map(|r| r.0).collect();
         assert_eq!(order, vec![3, 2, 1, 4]);
-        let text = round_summary(&board);
+        let text = round_summary(&board, Some(2));
+        assert!(text.contains("👑 <@3> is crowned the **🎬 Bollywood** champion · 2 crowns in this genre"), "{}", text);
         assert!(text.contains("18 of 20 questions answered"), "{}", text);
         assert!(text.contains("🥇 <@3> · **7**") && text.contains("🥈 <@2> · **5**") && text.contains("🥉 <@1> · **5**"));
         assert!(!text.contains("<@4>") && text.contains("Tied"));
         let empty = Board { label: "🎲 Mix".into(), asked: 20, ..Default::default() };
-        assert!(round_summary(&empty).contains("Nobody scored"));
+        assert!(round_summary(&empty, None).contains("Nobody scored"));
+    }
+
+    #[test]
+    fn finished_rounds_crown_genre_champions() {
+        let workspace = std::env::temp_dir().join(format!("quizcrown-{}", std::process::id()));
+        std::fs::create_dir_all(workspace.join("quizbank")).unwrap();
+        let conn = open_conn(workspace.to_str().unwrap()).unwrap();
+        let board = |key: &str, label: &str, scores: &[(u64, u32)]| Board {
+            key: key.into(),
+            label: label.into(),
+            asked: 20,
+            scores: scores.iter().enumerate().map(|(i, (u, p))| (*u, (*p, i as u64))).collect(),
+            wins: 0,
+        };
+        assert_eq!(record_round(&conn, &board("bollywood", "🎬 Bollywood", &[(1, 7), (2, 5)])), Some(1));
+        assert_eq!(record_round(&conn, &board("bollywood", "🎬 Bollywood", &[(1, 6)])), Some(2));
+        assert_eq!(record_round(&conn, &board("bollywood", "🎬 Bollywood", &[(2, 9), (1, 3)])), Some(1));
+        assert_eq!(record_round(&conn, &board("pokemon", "🔴 Pokémon", &[])), None);
+        assert_eq!(record_round(&conn, &board(MIX, "🎲 Mix", &[(3, 4)])), Some(1));
+        // Bollywood: 2 won the latest round, 1 has the most crowns; nobody won Pokémon, so it isn't listed.
+        assert_eq!(
+            champion_lines(&conn),
+            vec!["🎬 Bollywood · 👑 <@2> · 🏆 <@1> ×2".to_string(), "🎲 Mix · 👑🏆 <@3> ×1".to_string()]
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
