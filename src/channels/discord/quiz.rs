@@ -89,6 +89,11 @@ struct Question {
     src: String,
     #[serde(skip)]
     added_by: Option<u64>,
+    /// Scheduling theme and its side of the India/world split, from the database.
+    #[serde(skip)]
+    theme: String,
+    #[serde(skip)]
+    theme_region: String,
 }
 
 impl Question {
@@ -250,6 +255,23 @@ fn open_conn(workspace: &str) -> anyhow::Result<Connection> {
              ts INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', batch TEXT, link TEXT);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
+    // Themes came after the first deploy: add their columns to an existing database.
+    let has_theme = {
+        let mut columns = conn.prepare("PRAGMA table_info(questions)")?;
+        let names = columns.query_map([], |r| r.get::<_, String>(1))?.collect::<Result<Vec<_>, _>>()?;
+        names.iter().any(|name| name == "theme")
+    };
+    if !has_theme {
+        conn.execute_batch(
+            "ALTER TABLE questions ADD COLUMN theme TEXT NOT NULL DEFAULT '';
+             ALTER TABLE questions ADD COLUMN theme_region TEXT NOT NULL DEFAULT 'india';",
+        )?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS questions_theme ON questions (active, retired, theme_region, theme, asked);
+         UPDATE questions SET theme = 'server', theme_region = 'india' WHERE src = 'member' AND theme = '';
+         UPDATE questions SET theme = 'bollywood_news', theme_region = 'india' WHERE src = 'news' AND theme = '';",
+    )?;
     let loaded = import_bank(&mut conn, &crate::utils::build_path(workspace, &["quizbank"]))?;
     let active: i64 =
         conn.query_row("SELECT COUNT(*) FROM questions WHERE active = 1 AND retired = 0", [], |r| r.get(0))?;
@@ -287,12 +309,17 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
     let (mut loaded, mut skipped) = (0, 0);
     {
         let mut upsert = tx.prepare(
-            "INSERT INTO questions (id, body, region, cat, src, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO questions (id, body, region, cat, src, kind, theme, theme_region)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET body = excluded.body, region = excluded.region,
-                 cat = excluded.cat, src = excluded.src, kind = excluded.kind",
+                 cat = excluded.cat, src = excluded.src, kind = excluded.kind,
+                 theme = excluded.theme, theme_region = excluded.theme_region",
         )?;
         let mut seen = tx.prepare("INSERT OR IGNORE INTO temp.seen (id) VALUES (?1)")?;
         for file in &files {
+            let name = |p: Option<&std::ffi::OsStr>| p.map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let folder = name(file.parent().and_then(|p| p.file_name()));
+            let stem = name(file.file_stem());
             for line in std::fs::read_to_string(file)?.lines().filter(|l| !l.trim().is_empty()) {
                 let Ok(mut q) = serde_json::from_str::<Question>(line) else {
                     skipped += 1;
@@ -308,7 +335,17 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
                     skipped += 1;
                     continue;
                 }
-                upsert.execute(params![q.id, serde_json::to_string(&q)?, q.region, q.cat, q.src, q.kind])?;
+                let (theme, theme_region) = theme_for(&folder, &stem, &q.cat, &q.region);
+                upsert.execute(params![
+                    q.id,
+                    serde_json::to_string(&q)?,
+                    q.region,
+                    q.cat,
+                    q.src,
+                    q.kind,
+                    theme,
+                    theme_region
+                ])?;
                 seen.execute(params![q.id])?;
                 loaded += 1;
             }
@@ -327,6 +364,50 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
     Ok(loaded)
 }
 
+/// A theme with at least this many questions gets a full turn; smaller ones
+/// get a proportional share, so a handful of member questions don't repeat
+/// every few rounds.
+const THEME_FULL: i64 = 100;
+
+/// The theme a bank question is scheduled under, and which side of the
+/// India/world split that theme sits on. Every written topic is its own theme;
+/// the Wikidata templates and the downloaded databases' many categories are
+/// grouped into broad themes, so each gets about as many turns as one written
+/// topic. A question keeps its own region for the flag it shows.
+fn theme_for(folder: &str, stem: &str, cat: &str, region: &str) -> (String, String) {
+    const WORLD_TOPICS: &[&str] = &["world_tv", "hollywood", "anime_gaming", "football_f1"];
+    let (theme, side): (&str, &str) = match folder {
+        "ai" => (stem, if WORLD_TOPICS.contains(&stem) { "world" } else { "india" }),
+        "wikidata" => match stem {
+            "country_capital" | "country_currency" | "calling_code" => ("world_geography", "world"),
+            "element_symbol" => ("science_tech", "world"),
+            "hindi_film_director" | "hindi_film_year" | "indian_book_author" => ("india_films_books", "india"),
+            _ => ("india_map", "india"),
+        },
+        "api" => (
+            match cat {
+                "film_and_tv" | "film" | "television" | "cartoon_animations" | "musicals_theatres" => "film_tv",
+                "music" => "world_music",
+                "science" | "science_nature" | "computers" | "mathematics" | "gadgets" | "animals" | "vehicles" => {
+                    "science_tech"
+                }
+                "geography" => "world_geography",
+                "history" | "mythology" | "politics" => "world_history",
+                "sport_and_leisure" | "sports" => "world_sport",
+                "video_games" | "board_games" | "japanese_anime_manga" | "comics" => "games_comics",
+                "arts_and_literature" | "art" | "books" => "arts_books",
+                "food_and_drink" => "food_drink",
+                "society_and_culture" => "society_culture",
+                _ => "general_knowledge",
+            },
+            "world",
+        ),
+        // Anything else (tests, ad-hoc files): the category is the theme, on the question's own side.
+        _ => (cat, if region == "india" { "india" } else { "world" }),
+    };
+    (theme.to_string(), side.to_string())
+}
+
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
 }
@@ -341,15 +422,15 @@ fn meta_set(conn: &Connection, key: &str, value: &str) {
 /// What the last few questions were, so the next one can differ.
 #[derive(Default)]
 struct Recent {
-    cats: Vec<String>,
+    themes: Vec<String>,
     kinds: Vec<String>,
-    regions: Vec<String>,
+    sides: Vec<String>,
 }
 
 impl Recent {
     fn push(&mut self, q: &Question) {
         for (list, value, keep) in
-            [(&mut self.cats, &q.cat, 3), (&mut self.kinds, &q.kind, 2), (&mut self.regions, &q.region, 2)]
+            [(&mut self.themes, &q.theme, 3), (&mut self.kinds, &q.kind, 2), (&mut self.sides, &q.theme_region, 2)]
         {
             list.push(value.clone());
             if list.len() > keep {
@@ -370,10 +451,9 @@ impl Recent {
 /// News questions stop being asked after this long.
 const NEWS_SHELF_LIFE: i64 = 90 * 24 * 3600;
 
-/// India or world (`india_share`, never three world questions in a row), then
-/// a category, then that category's least-asked question. Categories are
-/// weighted by the square root of their size, so one huge source (a thousand
-/// video game questions) can't drown the rest; the last few categories sit
+/// India or world (`india_share`, never three world themes in a row), then a
+/// theme on that side - every theme an equal chance, however many questions
+/// it has - then that theme's least-asked question. The last few themes sit
 /// out a turn, and a third typed or third multiple-choice question in a row
 /// is avoided whenever the pool allows it.
 fn pick(recent: &Recent) -> Option<Question> {
@@ -381,7 +461,7 @@ fn pick(recent: &Recent) -> Option<Question> {
 }
 
 fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
-    let world_streak = Recent::streak(&recent.regions) == Some("world");
+    let world_streak = Recent::streak(&recent.sides) == Some("world");
     let preferred: &[&str] = if world_streak {
         &["india"]
     } else if rand::random::<f64>() < india_share() {
@@ -397,7 +477,7 @@ fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
     for regions in [preferred, &["india", "world"][..]] {
         for (avoid_kind, fresh_topic) in rules {
             for region in regions {
-                if let Some(q) = pick_one(conn, region, avoid_kind, fresh_topic.then_some(&recent.cats[..])) {
+                if let Some(q) = pick_one(conn, region, avoid_kind, fresh_topic.then_some(&recent.themes[..])) {
                     return Some(q);
                 }
             }
@@ -406,30 +486,32 @@ fn pick_from(conn: &Connection, recent: &Recent) -> Option<Question> {
     None
 }
 
-/// The least-asked question of a weighted-random category in one region.
-fn pick_one(conn: &Connection, region: &str, avoid_kind: &str, avoid_cats: Option<&[String]>) -> Option<Question> {
+/// The least-asked question of a random theme on one side. Themes of at least
+/// `THEME_FULL` questions are equally likely; smaller ones proportionally less.
+fn pick_one(conn: &Connection, side: &str, avoid_kind: &str, avoid_themes: Option<&[String]>) -> Option<Question> {
     let stale_news = Utc::now().timestamp() - NEWS_SHELF_LIFE;
-    let playable = "active = 1 AND retired = 0 AND region = ?1 AND kind != ?2
+    let playable = "active = 1 AND retired = 0 AND theme_region = ?1 AND kind != ?2
                     AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)";
-    let cats: Vec<(String, i64)> = conn
-        .prepare(&format!("SELECT cat, COUNT(*) FROM questions WHERE {} GROUP BY cat", playable))
-        .and_then(|mut s| s.query_map(params![region, avoid_kind, stale_news], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+    let themes: Vec<(String, i64)> = conn
+        .prepare(&format!("SELECT theme, COUNT(*) FROM questions WHERE {} GROUP BY theme", playable))
+        .and_then(|mut s| s.query_map(params![side, avoid_kind, stale_news], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .unwrap_or_default();
     let pool: Vec<&(String, i64)> =
-        cats.iter().filter(|(cat, _)| !avoid_cats.is_some_and(|recent| recent.contains(cat))).collect();
+        themes.iter().filter(|(theme, _)| !avoid_themes.is_some_and(|recent| recent.contains(theme))).collect();
     let last = pool.last()?;
-    let mut roll = rand::random::<f64>() * pool.iter().map(|(_, n)| (*n as f64).sqrt()).sum::<f64>();
-    let (cat, _) = pool
+    let weight = |n: i64| n.min(THEME_FULL) as f64;
+    let mut roll = rand::random::<f64>() * pool.iter().map(|(_, n)| weight(*n)).sum::<f64>();
+    let (theme, _) = pool
         .iter()
         .find(|(_, n)| {
-            roll -= (*n as f64).sqrt();
+            roll -= weight(*n);
             roll <= 0.0
         })
         .unwrap_or(last);
     let (id, body, added_by): (String, String, Option<i64>) = conn
         .query_row(
-            &format!("SELECT id, body, added_by FROM questions WHERE {} AND cat = ?4 ORDER BY asked, random() LIMIT 1", playable),
-            params![region, avoid_kind, stale_news, cat],
+            &format!("SELECT id, body, added_by FROM questions WHERE {} AND theme = ?4 ORDER BY asked, random() LIMIT 1", playable),
+            params![side, avoid_kind, stale_news, theme],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()
@@ -438,6 +520,8 @@ fn pick_one(conn: &Connection, region: &str, avoid_kind: &str, avoid_cats: Optio
     let _ = conn.execute("UPDATE questions SET asked = asked + 1 WHERE id = ?1", params![id]);
     let mut q = serde_json::from_str::<Question>(&body).ok()?;
     q.added_by = added_by.map(|u| u as u64);
+    q.theme = theme.clone();
+    q.theme_region = side.to_string();
     Some(q)
 }
 
@@ -1479,6 +1563,8 @@ pub async fn add_command(ctx: &Context, command: &CommandInteraction) {
         note: String::new(),
         src: "member".into(),
         added_by: None,
+        theme: String::new(),
+        theme_region: String::new(),
     };
     let user = command.user.id.get();
     let Some(db) = DB.get() else {
@@ -1567,8 +1653,8 @@ async fn review(ctx: &Context, component: &ComponentInteraction, sid: &str, appr
                     q.id = format!("member-{}", sid);
                     q.src = "member".into();
                     let _ = conn.execute(
-                        "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_by, added_ts)
-                         VALUES (?1, ?2, ?3, ?4, ?5, 'member', ?6, ?7)",
+                        "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_by, added_ts, theme, theme_region)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'member', ?6, ?7, 'server', 'india')",
                         params![
                             q.id,
                             serde_json::to_string(&q).unwrap_or_default(),
@@ -1857,6 +1943,8 @@ fn vet_drafts(drafts: Vec<Drafted>, items: &[NewsItem]) -> Vec<(Question, String
             note: clip(d.note.trim(), 160),
             src: "news".into(),
             added_by: None,
+            theme: String::new(),
+            theme_region: String::new(),
         };
         let source = norm(&format!("{} {}", item.title, item.summary));
         let grounded = !norm(&q.a).is_empty() && source.contains(&norm(&q.a));
@@ -2020,8 +2108,8 @@ async fn news_finish(ctx: &Context, component: &ComponentInteraction, batch: &st
                 };
                 q.id = format!("news-{}", sid);
                 let inserted = conn.execute(
-                    "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_ts)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'news', ?6)",
+                    "INSERT OR IGNORE INTO questions (id, body, kind, region, cat, src, added_ts, theme, theme_region)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'news', ?6, 'bollywood_news', 'india')",
                     params![q.id, serde_json::to_string(&q).unwrap_or_default(), q.kind, q.region, q.cat, now],
                 );
                 if inserted.is_ok() {
@@ -2254,6 +2342,8 @@ mod tests {
             note: String::new(),
             src: String::new(),
             added_by: None,
+            theme: String::new(),
+            theme_region: String::new(),
         };
         let known: HashSet<String> = ["iceland", "ireland", "austria", "australia", "jaipur", "raipur"]
             .iter()
