@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.68] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quiz themes get equal turns
+
+### 💼 Other
+
+- Second wave - 15 fact-checked topics
 ## [0.10.67] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Quiz skip votes and a 1-minute MCQ retry
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.67
 ## [0.10.66] - 2026-09-11
 
 ### 🚀 Features
