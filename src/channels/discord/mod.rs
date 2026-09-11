@@ -29,6 +29,8 @@ use crate::utils::remove_think_tags;
 
 mod awards;
 mod awards_card;
+mod quote;
+mod quote_card;
 mod stats;
 
 pub struct DiscordChannelReader {
@@ -1215,6 +1217,10 @@ impl EventHandler for Handler {
             );
         let _ = Command::create_global_command(ctx.http.clone(), samebanda).await;
 
+        // Right-click a message -> Apps -> Quote.
+        let quote_cmd = CreateCommand::new("Quote").kind(serenity::all::CommandType::Message);
+        let _ = Command::create_global_command(ctx.http.clone(), quote_cmd).await;
+
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
         let _ = Command::create_global_command(ctx.http.clone(), awards_cmd).await;
@@ -1244,6 +1250,11 @@ impl EventHandler for Handler {
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
+            if id.starts_with("qstyle:") || id.starts_with("qsave:") {
+                quote::on_component(&ctx, &self.1.storage, component).await;
+                return;
+            }
+
             if id == "awards_view" {
                 let view = match &component.data.kind {
                     serenity::all::ComponentInteractionDataKind::StringSelect { values } => {
@@ -1633,6 +1644,23 @@ impl EventHandler for Handler {
                         ),
                     )
                     .await;
+            }
+
+            if command.data.name == "Quote" {
+                let _ = command.defer_ephemeral(&ctx.http).await;
+                let text = match (command.guild_id, command.data.target()) {
+                    (Some(guild), Some(serenity::all::ResolvedTarget::Message(original))) => {
+                        match quote::start(&ctx, &self.1.storage, original, command.user.id, guild).await {
+                            Ok(()) => "Quote ban gaya - style chuno aur Save dabao.".to_string(),
+                            Err(err) => {
+                                tracing::warn!("quote failed: {}", err);
+                                "Quote nahi ban paaya. Thodi der mein try kar.".to_string()
+                            }
+                        }
+                    }
+                    _ => "Ye sirf server ke messages pe chalta hai.".to_string(),
+                };
+                let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
             }
 
             if command.data.name == "awards" {
@@ -2455,6 +2483,33 @@ Ye message sirf tumhe dikh raha hai."#,
         // bot's own user, over HTTP when the cache is cold, and an Err used to
         // skip every message silently - no reply, nothing logged. A DM is
         // addressed to us by definition, so it counts as a mention regardless.
+        // "@Loduchand quote this" as a reply makes a quote card rather than a
+        // chat reply - it costs no tokens and must not reach the model.
+        if !is_dm && !silence_this_author {
+            let bot_id = ctx.cache.current_user().id.get();
+            if quote::is_request(&msg, bot_id) {
+                let original = match msg.referenced_message.as_deref() {
+                    Some(m) => Some(m.clone()),
+                    None => match msg.message_reference.as_ref().and_then(|r| r.message_id) {
+                        Some(id) => msg.channel_id.message(&ctx.http, id).await.ok(),
+                        None => None,
+                    },
+                };
+                match (msg.guild_id, original) {
+                    (Some(guild), Some(original)) => {
+                        if let Err(err) = quote::start(&ctx, &self.1.storage, &original, msg.author.id, guild).await {
+                            tracing::warn!("quote failed: {}", err);
+                            let _ = msg.reply(&ctx.http, "Quote nahi ban paaya. Thodi der mein try kar.").await;
+                        }
+                    }
+                    _ => {
+                        let _ = msg.reply(&ctx.http, "Kisko quote karun? Us message pe reply karke bol.").await;
+                    }
+                }
+                return;
+            }
+        }
+
         let is_mention = match msg.mentions_me(&ctx.http).await {
             Ok(m) => m || is_dm,
             Err(err) => {

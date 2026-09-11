@@ -57,14 +57,14 @@ fn section_style(key: &str) -> ([u8; 3], &'static str) {
     }
 }
 
-fn paint(c: [u8; 3], a: u8) -> Paint<'static> {
+pub(super) fn paint(c: [u8; 3], a: u8) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color_rgba8(c[0], c[1], c[2], a);
     p.anti_alias = true;
     p
 }
 
-fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
+pub(super) fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
     let k = 0.5523 * r;
     let mut pb = PathBuilder::new();
     pb.move_to(x + r, y);
@@ -80,14 +80,14 @@ fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
     pb.finish()
 }
 
-fn fill_circle(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3]) {
+pub(super) fn fill_circle(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3]) {
     if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
         px.fill_path(&path, &paint(c, 255), FillRule::Winding, Transform::identity(), None);
     }
 }
 
 /// Blend a glyph fragment onto an opaque canvas.
-fn blend_rect(px: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, c: Color) {
+pub(super) fn blend_rect(px: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, c: Color) {
     let a = c.a() as u32;
     if a == 0 {
         return;
@@ -107,7 +107,7 @@ fn blend_rect(px: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, c: Color) {
 }
 
 /// A square, circle-cropped avatar; grey if the person has left.
-fn avatar_pixmap(bytes: Option<&[u8]>, size: u32, departed: bool) -> Option<Pixmap> {
+pub(super) fn avatar_pixmap(bytes: Option<&[u8]>, size: u32, departed: bool) -> Option<Pixmap> {
     let mut img = image::load_from_memory(bytes?).ok()?;
     if departed {
         img = image::DynamicImage::ImageLuma8(img.to_luma8());

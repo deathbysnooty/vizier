@@ -108,7 +108,7 @@ static AFK_TAG: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// What people see in the server, minus a stale AFK tag.
-fn clean_name(name: &str) -> String {
+pub(super) fn clean_name(name: &str) -> String {
     let cleaned = AFK_TAG.replace_all(name, "").trim().to_string();
     if cleaned.is_empty() {
         name.to_string()
@@ -420,7 +420,7 @@ fn pick_winners(people: &HashMap<u64, Person>, members: &HashMap<u64, MemberInfo
     out
 }
 
-fn fonts() -> &'static Mutex<FontSystem> {
+pub(super) fn fonts() -> &'static Mutex<FontSystem> {
     static FONTS: OnceLock<Mutex<FontSystem>> = OnceLock::new();
     FONTS.get_or_init(|| {
         let mut fs = FontSystem::new();
