@@ -2416,6 +2416,37 @@ Ye message sirf tumhe dikh raha hai."#,
             return;
         }
 
+        // "@Loduchand quote this" as a reply makes a quote card. Anyone can ask,
+        // in any channel the bot can see - the same reach as the right-click
+        // Quote - because it costs no tokens and never reaches the model. It
+        // still honours a pause and admin-only mode, like any other mention.
+        if !is_dm && quote::is_request(&msg, ctx.cache.current_user().id.get()) {
+            if is_paused(&self.1.storage, &agent_id).await
+                || (is_admin_only(&self.1.storage, &agent_id).await && !author_is_admin)
+            {
+                return;
+            }
+            let original = match msg.referenced_message.as_deref() {
+                Some(m) => Some(m.clone()),
+                None => match msg.message_reference.as_ref().and_then(|r| r.message_id) {
+                    Some(id) => msg.channel_id.message(&ctx.http, id).await.ok(),
+                    None => None,
+                },
+            };
+            match (msg.guild_id, original) {
+                (Some(guild), Some(original)) => {
+                    if let Err(err) = quote::start(&ctx, &self.1.storage, &original, msg.author.id, guild).await {
+                        tracing::warn!("quote failed: {}", err);
+                        let _ = msg.reply(&ctx.http, "Quote nahi ban paaya. Thodi der mein try kar.").await;
+                    }
+                }
+                _ => {
+                    let _ = msg.reply(&ctx.http, "Kisko quote karun? Us message pe reply karke bol.").await;
+                }
+            }
+            return;
+        }
+
         // The channel allowlist governs server channels. A DM has no place on
         // that list, so it must not be filtered by it.
         if !is_dm {
@@ -2483,33 +2514,6 @@ Ye message sirf tumhe dikh raha hai."#,
         // bot's own user, over HTTP when the cache is cold, and an Err used to
         // skip every message silently - no reply, nothing logged. A DM is
         // addressed to us by definition, so it counts as a mention regardless.
-        // "@Loduchand quote this" as a reply makes a quote card rather than a
-        // chat reply - it costs no tokens and must not reach the model.
-        if !is_dm && !silence_this_author {
-            let bot_id = ctx.cache.current_user().id.get();
-            if quote::is_request(&msg, bot_id) {
-                let original = match msg.referenced_message.as_deref() {
-                    Some(m) => Some(m.clone()),
-                    None => match msg.message_reference.as_ref().and_then(|r| r.message_id) {
-                        Some(id) => msg.channel_id.message(&ctx.http, id).await.ok(),
-                        None => None,
-                    },
-                };
-                match (msg.guild_id, original) {
-                    (Some(guild), Some(original)) => {
-                        if let Err(err) = quote::start(&ctx, &self.1.storage, &original, msg.author.id, guild).await {
-                            tracing::warn!("quote failed: {}", err);
-                            let _ = msg.reply(&ctx.http, "Quote nahi ban paaya. Thodi der mein try kar.").await;
-                        }
-                    }
-                    _ => {
-                        let _ = msg.reply(&ctx.http, "Kisko quote karun? Us message pe reply karke bol.").await;
-                    }
-                }
-                return;
-            }
-        }
-
         let is_mention = match msg.mentions_me(&ctx.http).await {
             Ok(m) => m || is_dm,
             Err(err) => {

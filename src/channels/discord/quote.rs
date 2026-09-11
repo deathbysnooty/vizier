@@ -64,8 +64,11 @@ async fn store(storage: &Storage, rec: &Record) {
 }
 
 static ASK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*(?:isko\s+|ye\s+|this\s+)?(?:quote|qoute)(?:\s+(?:this|it|kar|karo|kr|kardo|krdo|kar\s+do))?\s*[.!?]*\s*$")
-        .expect("regex")
+    Regex::new(concat!(
+        r"(?i)^\s*(?:isko|ise|ye|this|pls|please)?\s*(?:quote|qoute)(?:\s+(?:this|it|that))?(?:\s+(?:message|msg))?",
+        r"(?:\s+(?:kar|karo|kr|kro|kardo|krdo|karde|kar\s+do|kar\s+de))?(?:\s+(?:pls|plz|please|bhai|yaar|na|jaldi))*\s*[.!?]*\s*$",
+    ))
+    .expect("regex")
 });
 static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@[!&]?\d+>").expect("regex"));
 static CUSTOM_EMOJI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<a?:(\w+):\d+>").expect("regex"));

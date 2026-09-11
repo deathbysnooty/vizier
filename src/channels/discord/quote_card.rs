@@ -17,7 +17,7 @@ use tiny_skia::{
     RadialGradient, Rect, SpreadMode, Stroke, Transform,
 };
 
-use super::awards_card::{avatar_pixmap, blend_rect, fill_circle, paint, rrect};
+use super::awards_card::{avatar_pixmap, blend_rect, fill_circle, paint};
 
 pub struct Quote {
     pub text: String,
@@ -33,44 +33,18 @@ pub enum Style {
     Noir,
     Rang,
     Spotlight,
-    Duotone,
-    Marble,
-    Pothi,
     Scroll,
-    Chitthi,
-    Illuminated,
-    Cosmos,
-    Zen,
 }
 
 impl Style {
-    pub const ALL: [Style; 11] = [
-        Style::Noir,
-        Style::Rang,
-        Style::Spotlight,
-        Style::Duotone,
-        Style::Marble,
-        Style::Pothi,
-        Style::Scroll,
-        Style::Chitthi,
-        Style::Illuminated,
-        Style::Cosmos,
-        Style::Zen,
-    ];
+    pub const ALL: [Style; 4] = [Style::Noir, Style::Rang, Style::Spotlight, Style::Scroll];
 
     pub fn key(self) -> &'static str {
         match self {
             Style::Noir => "noir",
             Style::Rang => "rang",
             Style::Spotlight => "spotlight",
-            Style::Duotone => "duotone",
-            Style::Marble => "marble",
-            Style::Pothi => "parchment",
             Style::Scroll => "scroll",
-            Style::Chitthi => "chitthi",
-            Style::Illuminated => "illuminated",
-            Style::Cosmos => "cosmos",
-            Style::Zen => "zen",
         }
     }
 
@@ -83,14 +57,7 @@ impl Style {
             Style::Noir => "🖤 Noir",
             Style::Rang => "🎨 Rang",
             Style::Spotlight => "🔦 Spotlight",
-            Style::Duotone => "💜 Duotone",
-            Style::Marble => "🏛️ Marble",
-            Style::Pothi => "📜 Parchment",
-            Style::Scroll => "🪶 Scroll",
-            Style::Chitthi => "✉️ Chitthi",
-            Style::Illuminated => "✨ Illuminated",
-            Style::Cosmos => "🌌 Cosmos",
-            Style::Zen => "🍃 Zen",
+            Style::Scroll => "📜 Scroll",
         }
     }
 }
@@ -360,12 +327,6 @@ fn fade(px: &mut Pixmap, x0: f32, x1: f32, c: [u8; 3]) {
     fade_with(px, x0, x1, |_| c);
 }
 
-/// The same dissolve, into a texture instead of a flat colour.
-fn fade_into(px: &mut Pixmap, x0: f32, x1: f32, under: &Pixmap) {
-    let data = under.data();
-    fade_with(px, x0, x1, |i| [data[i * 4], data[i * 4 + 1], data[i * 4 + 2]]);
-}
-
 fn fade_with(px: &mut Pixmap, x0: f32, x1: f32, target: impl Fn(usize) -> [u8; 3]) {
     let w = px.width() as usize;
     let ramp: Vec<f32> = (0..w)
@@ -545,18 +506,6 @@ fn spotlight(p: &mut Pen<'_>, q: &Quote) {
     grain(&mut p.px, 8, seed(q));
 }
 
-fn duotone(p: &mut Pen<'_>, q: &Quote) {
-    let (shadow, light, bg) = ([24, 8, 52], [255, 138, 96], [13, 5, 28]);
-    p.px.fill(sk(bg, 255));
-    draw_portrait(p, q, &Tone::Duo(shadow, light), [90, 40, 110]);
-    fade(&mut p.px, 250.0, 640.0, bg);
-    glow(&mut p.px, 1040.0, 90.0, 380.0, [255, 60, 150], 60);
-    vignette(&mut p.px, 160);
-    text_block(p, q, 640.0, 1165.0, Face::Sans, false, [255, 255, 255], [255, 120, 170], [190, 160, 200], light, [170, 70, 120]);
-    footer(p, q, [150, 120, 160]);
-    grain(&mut p.px, 7, seed(q));
-}
-
 fn spaced(s: &str) -> String {
     s.chars().map(String::from).collect::<Vec<_>>().join("\u{2009}")
 }
@@ -609,67 +558,6 @@ fn texture(colour_at: impl Fn(f32, f32) -> [u8; 3]) -> Option<Pixmap> {
     Some(pm)
 }
 
-fn marble_at(x: f32, y: f32) -> [u8; 3] {
-    let warp = fbm(x * 0.0035, y * 0.0035, 7);
-    let vein = (1.0 - ((x * 0.0021 + y * 0.0013) * std::f32::consts::PI * 2.0 + warp * 6.0).sin().abs()).powf(7.0);
-    let twist = fbm(x * 0.008, y * 0.008, 11);
-    let fine = (1.0 - ((x * 0.006 - y * 0.003) * 6.28 + twist * 4.0).sin().abs()).powf(24.0);
-    // the stone goes quiet behind the words
-    let s = ((x - 520.0) / 160.0).clamp(0.0, 1.0);
-    let calm = 1.0 - 0.65 * s * s * (3.0 - 2.0 * s);
-    let g = 238.0 - fbm(x * 0.002, y * 0.002, 3) * 22.0 - (vein * 34.0 + fine * 12.0) * calm;
-    [clamp8(g), clamp8(g - 2.0), clamp8(g - 6.0)]
-}
-
-/// Dark wood, for anything lying on a desk.
-fn desk_colour(x: f32, y: f32) -> [f32; 3] {
-    let wood = fbm(x * 0.004, y * 0.05, 79) * 18.0;
-    [26.0 + wood, 17.0 + wood * 0.6, 11.0 + wood * 0.3]
-}
-
-/// Old parchment: mottled, spotted, fibrous.
-fn sheet_colour(x: f32, y: f32) -> [f32; 3] {
-    let mottle = (fbm(x * 0.004, y * 0.004, 91) - 0.4) * 0.8;
-    let spots = (fbm(x * 0.012, y * 0.012, 93) - 0.56).max(0.0) * 2.6;
-    let fibre = fbm(x * 0.08, y * 0.015, 95) * 0.12;
-    let d = mottle + spots + fibre;
-    [232.0 - d * 70.0, 212.0 - d * 80.0, 166.0 - d * 90.0]
-}
-
-/// An aged sheet with ragged, scorched edges, lying on a dark desk.
-fn parchment_at(x: f32, y: f32) -> [u8; 3] {
-    let edge = x.min(W - x).min(y).min(H - y) - 24.0 + (fbm(x * 0.018, y * 0.018, 77) - 0.5) * 34.0;
-    if edge < 0.0 {
-        let d = desk_colour(x, y);
-        return [clamp8(d[0]), clamp8(d[1]), clamp8(d[2])];
-    }
-    let sheet = sheet_colour(x, y);
-    // scorched towards the edge, nearly black right at it
-    let burn = (edge / 42.0).clamp(0.0, 1.0).powf(0.55);
-    let scorch = [58.0, 32.0, 14.0];
-    [
-        clamp8(scorch[0] + (sheet[0] - scorch[0]) * burn),
-        clamp8(scorch[1] + (sheet[1] - scorch[1]) * burn),
-        clamp8(scorch[2] + (sheet[2] - scorch[2]) * burn),
-    ]
-}
-
-fn space_at(x: f32, y: f32) -> [u8; 3] {
-    let t = (x / W) * 0.6 + (y / H) * 0.4;
-    let dust = (fbm(x * 0.0028, y * 0.0028, 41) - 0.45).max(0.0) * 2.4;
-    let gas = (fbm(x * 0.004 + 9.0, y * 0.004, 43) - 0.5).max(0.0) * 2.0;
-    [
-        clamp8(4.0 + 12.0 * t + dust * 70.0 + gas * 10.0),
-        clamp8(6.0 + 4.0 * t + dust * 30.0 + gas * 50.0),
-        clamp8(18.0 + 22.0 * t + dust * 110.0 + gas * 90.0),
-    ]
-}
-
-fn rice_paper_at(x: f32, y: f32) -> [u8; 3] {
-    let f = fbm(x * 0.03, y * 0.03, 61) * 10.0 + fbm(x * 0.004, y * 0.004, 63) * 8.0;
-    [clamp8(246.0 - f), clamp8(242.0 - f), clamp8(234.0 - f * 1.1)]
-}
-
 fn dot(px: &mut Pixmap, x: f32, y: f32, r: f32, c: [u8; 3], a: u8) {
     if let Some(path) = PathBuilder::from_circle(x, y, r) {
         px.fill_path(&path, &paint(c, a), FillRule::Winding, Transform::identity(), None);
@@ -686,653 +574,297 @@ fn medallion(bytes: Option<&[u8]>, size: u32, tone: &Tone) -> Option<Pixmap> {
     Some(pm)
 }
 
-fn stars(px: &mut Pixmap, seed: u32, count: usize, clear: (f32, f32, f32, f32)) {
-    let mut s = seed | 1;
-    for _ in 0..count {
-        let mut next = || {
-            s ^= s << 13;
-            s ^= s >> 17;
-            s ^= s << 5;
-            s as f32 / u32::MAX as f32
-        };
-        let (x, y, b) = (next() * W, next() * H, next().powf(3.0));
-        if x > clear.0 && x < clear.2 && y > clear.1 && y < clear.3 && b < 0.9 {
-            continue;
-        }
-        if b > 0.8 {
-            glow(px, x, y, 9.0 + b * 9.0, [200, 215, 255], 80);
-        }
-        dot(px, x, y, 0.5 + b * 1.5, [235, 240, 255], (60.0 + b * 195.0) as u8);
-    }
+// The scroll: a horizontal parchment between two vertical rolled ends, with
+// turned brass knobs, burgundy silk ribbons, a sepia portrait on the left and
+// the words in calligraphy on the right.
+
+const ROLL_L: f32 = 80.0;
+const ROLL_R: f32 = 1120.0;
+const ROLL_HW: f32 = 34.0;
+const ROLL_TOP: f32 = 92.0;
+const ROLL_BOTTOM: f32 = 538.0;
+const SHEET_TOP: f32 = 98.0;
+const SHEET_BOTTOM: f32 = 532.0;
+
+/// Warm, aged parchment: broad mottling, a few stains, fine fibres.
+fn sheet_colour(x: f32, y: f32) -> [f32; 3] {
+    let mottle = (fbm(x * 0.004, y * 0.004, 91) - 0.45) * 0.6;
+    let stains = (fbm(x * 0.015, y * 0.015, 93) - 0.6).max(0.0) * 1.0;
+    let fibre = (fbm(x * 0.09, y * 0.02, 95) - 0.5) * 0.18;
+    let speck = (noise(x * 0.6, y * 0.6, 97) - 0.5) * 0.05;
+    let d = mottle + stains + fibre + speck;
+    [222.0 - d * 50.0, 186.0 - d * 60.0, 134.0 - d * 66.0]
 }
 
-/// The avatar as a planet: lit from the upper left, night side clipped to the disc.
-fn planet(p: &mut Pen<'_>, q: &Quote, cx: f32, cy: f32, r: f32) {
-    glow(&mut p.px, cx, cy, r * 1.6, [70, 130, 255], 80);
-    match medallion(q.avatar.as_deref(), (2.0 * r) as u32, &Tone::Colour) {
-        Some(pm) => p.px.draw_pixmap(
-            (cx - r).round() as i32,
-            (cy - r).round() as i32,
-            pm.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        ),
-        None => {
-            dot(&mut p.px, cx, cy, r, [40, 52, 90], 255);
-            p.centered(&initial(&q.author), cx, cy + r * 0.3, r * 0.8, Face::Sans, Weight::LIGHT, [200, 215, 255]);
-        }
-    }
-    night_side(&mut p.px, cx, cy, r);
-    if let Some(disc) = PathBuilder::from_circle(cx, cy, r) {
-        let stroke = Stroke { width: 2.0, ..Stroke::default() };
-        p.px.stroke_path(&disc, &paint([150, 190, 255], 110), &stroke, Transform::identity(), None);
-    }
-}
-
-/// Darkens the half of the disc facing away from a light at its upper left.
-fn night_side(px: &mut Pixmap, cx: f32, cy: f32, r: f32) {
-    let (w, h) = (px.width() as i32, px.height() as i32);
-    let (lx, ly) = (cx - r * 0.45, cy - r * 0.5);
-    let space = [3.0, 5.0, 18.0];
-    let data = px.data_mut();
-    for y in ((cy - r) as i32).max(0)..=((cy + r) as i32).min(h - 1) {
-        for x in ((cx - r) as i32).max(0)..=((cx + r) as i32).min(w - 1) {
-            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-            if dx * dx + dy * dy > r * r {
-                continue;
-            }
-            let d = ((x as f32 - lx).powi(2) + (y as f32 - ly).powi(2)).sqrt() / (r * 1.9);
-            let t = ((d - 0.25) / 0.55).clamp(0.0, 1.0);
-            let dark = t * t * (3.0 - 2.0 * t) * 0.9;
-            let i = ((y * w + x) * 4) as usize;
-            for k in 0..3 {
-                data[i + k] = (data[i + k] as f32 * (1.0 - dark) + space[k] * dark) as u8;
-            }
-        }
-    }
-}
-
-/// A single-stroke brush circle, thick in the middle, breaking up at the tail.
-fn enso(px: &mut Pixmap, cx: f32, cy: f32, r: f32, seed: u32) {
-    let n = 1100;
-    for i in 0..n {
-        let t = i as f32 / n as f32;
-        if t > 0.72 && hash2(i as i32, 7, seed) < (t - 0.72) * 2.4 {
-            continue;
-        }
-        let th = -1.25 + 5.7 * t;
-        let rr = r + (noise(t * 5.0, 1.5, seed) - 0.5) * 12.0;
-        let taper = if t > 0.8 { (1.0 - (t - 0.8) * 3.0).max(0.25) } else { 1.0 };
-        let width = 30.0 * (0.4 + 0.6 * (std::f32::consts::PI * t).sin()) * taper;
-        dot(px, cx + rr * th.cos(), cy + rr * th.sin(), width / 2.0, [26, 24, 22], 55);
-    }
-}
-
-/// A red name seal, the kind stamped beside a signature.
-fn seal(p: &mut Pen<'_>, x: f32, y: f32, size: f32, name: &str) {
-    let (red, cream) = ([178, 38, 30], [246, 238, 226]);
-    if let Some(sq) = rrect(x, y, size, size, 6.0) {
-        p.px.fill_path(&sq, &paint(red, 235), FillRule::Winding, Transform::identity(), None);
-    }
-    if let Some(inner) = rrect(x + 5.0, y + 5.0, size - 10.0, size - 10.0, 4.0) {
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        p.px.stroke_path(&inner, &paint(cream, 220), &stroke, Transform::identity(), None);
-    }
-    p.centered(&initial(name), x + size / 2.0, y + size * 0.7, size * 0.52, Face::Serif, Weight::BOLD, cream);
-}
-
-fn marble(p: &mut Pen<'_>, q: &Quote) {
-    let (gold, ink) = ([168, 132, 72], [44, 40, 38]);
-    let Some(stone) = texture(marble_at) else { return };
-    p.px.draw_pixmap(0, 0, stone.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-    let bust = Tone::Duo([74, 70, 66], [240, 236, 230]);
-    if let Some(pm) = decode(q.avatar.as_deref()).and_then(|img| portrait(&img, 660, H as u32, &bust)) {
-        p.px.draw_pixmap(-30, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-    }
-    fade_into(&mut p.px, 250.0, 640.0, &stone);
-    vignette_tint(&mut p.px, 110, [70, 62, 54]);
-    if let Some(frame) = rrect(20.0, 20.0, W - 40.0, H - 40.0, 2.0) {
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        p.px.stroke_path(&frame, &paint(gold, 200), &stroke, Transform::identity(), None);
-    }
-    text_block(p, q, 640.0, 1150.0, Face::SerifItalic, true, ink, [138, 104, 52], [120, 114, 106], gold, gold);
-    footer(p, q, [128, 120, 110]);
-    grain(&mut p.px, 4, seed(q));
-}
-
-fn ordinal_suffix(n: u32) -> &'static str {
-    match (n % 10, n % 100) {
-        (_, 11..=13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    }
-}
-
-fn roman(mut n: u32) -> String {
-    let mut out = String::new();
-    for (value, numeral) in [
-        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
-        (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
-    ] {
-        while n >= value {
-            out.push_str(numeral);
-            n -= value;
-        }
-    }
-    out
-}
-
-/// "11 Sep 2026" as a letter-writer of old would put it.
-fn olden_date(q: &Quote) -> String {
-    let month = |m: &str| -> String {
-        match m {
-            "Jan" => "January", "Feb" => "February", "Mar" => "March", "Apr" => "April",
-            "May" => "May", "Jun" => "June", "Jul" => "July", "Aug" => "August",
-            "Sep" => "September", "Oct" => "October", "Nov" => "November", "Dec" => "December",
-            other => other,
-        }
-        .to_string()
-    };
-    let parts: Vec<&str> = q.when.split_whitespace().collect();
-    let written = match parts.as_slice() {
-        [d, m, y] => match (d.parse::<u32>(), y.parse::<u32>()) {
-            (Ok(d), Ok(y)) => format!("Written this {}{} day of {}, in the year {}", d, ordinal_suffix(d), month(m), roman(y)),
-            _ => q.when.clone(),
-        },
-        _ => q.when.clone(),
-    };
-    if q.channel.is_empty() {
-        written
-    } else {
-        format!("{}, in {}", written, q.channel)
-    }
-}
-
-/// A pen swash under the signature.
-fn flourish(px: &mut Pixmap, x0: f32, x1: f32, y: f32, ink: [u8; 3]) {
-    let n = ((x1 - x0) * 1.5).max(10.0) as i32;
-    for i in 0..n {
-        let t = i as f32 / n as f32;
-        let x = x0 - 10.0 + (x1 - x0 + 30.0) * t;
-        let yy = y + (t * std::f32::consts::PI * 1.5).sin() * 5.0 - t * 4.0;
-        let width = 0.6 + 2.4 * (t * std::f32::consts::PI).sin();
-        dot(px, x, yy, width / 2.0, ink, 160);
-    }
-}
-
-/// Red sealing wax, pressed with the writer's face.
-fn wax_seal(p: &mut Pen<'_>, q: &Quote, cx: f32, cy: f32, r: f32, seed: u32) {
-    let (w, h) = (p.px.width() as i32, p.px.height() as i32);
-    let reach = r * 1.25;
-    {
-        let data = p.px.data_mut();
-        for y in ((cy - reach) as i32).max(0)..=((cy + reach) as i32).min(h - 1) {
-            for x in ((cx - reach) as i32).max(0)..=((cx + reach) as i32).min(w - 1) {
-                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-                let dist = (dx * dx + dy * dy).sqrt();
-                let edge = r * (1.0 + (noise(dy.atan2(dx) * 1.6 + 10.0, 0.5, seed) - 0.5) * 0.18);
-                let i = ((y * w + x) * 4) as usize;
-                if dist > edge {
-                    // a soft shadow just outside the wax
-                    if dist < edge + 12.0 {
-                        let a = (1.0 - (dist - edge) / 12.0) * 0.4;
-                        for (k, s) in [30.0, 16.0, 8.0].into_iter().enumerate() {
-                            data[i + k] = (data[i + k] as f32 * (1.0 - a) + s * a) as u8;
-                        }
-                    }
-                    continue;
-                }
-                let rim = ((edge - dist) / 10.0).clamp(0.0, 1.0);
-                let light = ((-dx - dy) / (1.4 * r)).clamp(-1.0, 1.0);
-                let shade = 0.62 + 0.28 * light + 0.18 * rim;
-                for (k, base) in [158.0, 26.0, 20.0].into_iter().enumerate() {
-                    data[i + k] = clamp8(base * shade);
-                }
-            }
-        }
-    }
-    let inner = (r * 1.26) as u32;
-    if let Some(pm) = medallion(q.avatar.as_deref(), inner, &Tone::Duo([62, 8, 6], [236, 128, 96])) {
-        let pressed = PixmapPaint { opacity: 0.92, ..PixmapPaint::default() };
-        let half = inner as f32 / 2.0;
-        p.px.draw_pixmap((cx - half).round() as i32, (cy - half).round() as i32, pm.as_ref(), &pressed, Transform::identity(), None);
-    }
-    if let Some(ring) = PathBuilder::from_circle(cx, cy, r * 0.66) {
-        let stroke = Stroke { width: 4.0, ..Stroke::default() };
-        p.px.stroke_path(&ring, &paint([92, 12, 10], 220), &stroke, Transform::identity(), None);
-    }
-    if let Some(ring) = PathBuilder::from_circle(cx - 1.5, cy - 1.5, r * 0.66 + 3.0) {
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        p.px.stroke_path(&ring, &paint([220, 110, 90], 120), &stroke, Transform::identity(), None);
-    }
-}
-
-/// A letter in quill ink on old parchment, signed and sealed in wax.
-fn pothi(p: &mut Pen<'_>, q: &Quote) {
-    let (ink, sepia) = ([44, 26, 14], [112, 72, 38]);
-    let sd = seed(q);
-    if let Some(sheet) = texture(parchment_at) {
-        p.px.draw_pixmap(0, 0, sheet.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-    }
-    let (x0, x1) = (96.0, 820.0);
-    let text = p.paragraph(&q.text, Face::Script, Weight::NORMAL, x1 - x0, 350.0, 62.0, 30.0, Align::Left);
-    let th = Pen::height(&text);
-    let top = ((H - (th + 130.0)) / 2.0 - 16.0).max(54.0);
-    p.draw_ink(&text, x0, top, ink);
-    let sig = p.fit(&format!("— {}", q.author), 46.0, Face::Script, Weight::NORMAL, 520.0);
-    let sig_buf = p.layout(&sig, 46.0, Face::Script, Weight::NORMAL, None, None);
-    let (line_y, sw) = sig_buf.layout_runs().next().map(|r| (r.line_y, r.line_w)).unwrap_or((46.0, 0.0));
-    let sx = (x1 - sw).max(x0 + 140.0);
-    let base = top + th + 64.0;
-    p.draw_ink(&sig_buf, sx, base - line_y, ink);
-    flourish(&mut p.px, sx, sx + sw, base + 14.0, ink);
-    wax_seal(p, q, 1010.0, 290.0, 106.0, sd);
-    let handle = p.fit(&format!("@{}", q.handle), 17.0, Face::SerifItalic, Weight::NORMAL, 260.0);
-    p.centered(&handle, 1010.0, 446.0, 17.0, Face::SerifItalic, Weight::NORMAL, sepia);
-    let dateline = p.fit(&olden_date(q), 17.0, Face::SerifItalic, Weight::NORMAL, 780.0);
-    p.line(&dateline, x0, H - 46.0, 17.0, Face::SerifItalic, Weight::NORMAL, sepia);
-    grain(&mut p.px, 5, sd);
-}
-
-fn rect_a(px: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, c: [u8; 3], a: u8) {
-    if let Some(r) = Rect::from_xywh(x, y, w, h) {
-        px.fill_rect(r, &paint(c, a), Transform::identity(), None);
-    }
-}
-
-/// A scroll with rolled ends, casting a shadow on a dark desk.
-fn scroll_at(x: f32, y: f32) -> [u8; 3] {
-    let (left, right) = (150.0, 1050.0);
-    for (y0, y1) in [(56.0, 104.0), (526.0, 574.0)] {
-        if y >= y0 && y <= y1 && x >= left - 22.0 && x <= right + 22.0 {
-            let t = (y - y0) / (y1 - y0);
-            let round = 0.42 + 0.58 * (std::f32::consts::PI * t).sin().powf(0.6);
-            let end = ((x - (left - 22.0)).min(right + 22.0 - x) / 16.0).clamp(0.0, 1.0);
-            let s = sheet_colour(x, y);
-            let k = round * (0.5 + 0.5 * end);
-            return [clamp8(s[0] * k), clamp8(s[1] * k), clamp8(s[2] * k)];
-        }
-    }
-    if x >= left && x <= right && y > 100.0 && y < 530.0 {
-        // the sheet curls into the rolls, so it darkens next to them
-        let near = ((y - 104.0).min(526.0 - y) / 28.0).clamp(0.0, 1.0);
-        let k = 0.74 + 0.26 * near;
+/// Walnut desk, and the parchment lying on it between the rolls.
+fn scroll_desk_at(x: f32, y: f32) -> [u8; 3] {
+    let deckle = (fbm(x * 0.022, y * 0.022, 131) - 0.5) * 22.0;
+    let (top, bottom) = (SHEET_TOP + deckle, SHEET_BOTTOM - deckle);
+    if x >= ROLL_L + 16.0 && x <= ROLL_R - 16.0 && y >= top && y <= bottom {
         let s = sheet_colour(x, y);
+        let edge = (y - top).min(bottom - y);
+        let browned = (1.0 - (edge / 20.0).clamp(0.0, 1.0)).powf(1.4) * 0.26;
+        let by_roll = (1.0 - ((x - (ROLL_L + ROLL_HW)).min((ROLL_R - ROLL_HW) - x) / 46.0).clamp(0.0, 1.0)) * 0.28;
+        let k = 1.02 - browned - by_roll;
         return [clamp8(s[0] * k), clamp8(s[1] * k), clamp8(s[2] * k)];
     }
-    let d = desk_colour(x, y);
-    let dx = (left - 22.0 - x).max(x - right - 22.0).max(0.0);
-    let dy = (56.0 - y).max(y - 574.0).max(0.0);
-    let shadow = (1.0 - (dx * dx + dy * dy).sqrt() / 36.0).clamp(0.0, 1.0) * 0.6;
-    [clamp8(d[0] * (1.0 - shadow)), clamp8(d[1] * (1.0 - shadow)), clamp8(d[2] * (1.0 - shadow))]
+    let v = fbm(x * 0.0012, y * 0.06, 137) * 0.8 + (fbm(x * 0.008, y * 0.3, 139) - 0.5) * 0.4;
+    let wood = [58.0 + v * 60.0, 32.0 + v * 34.0, 20.0 + v * 18.0];
+    let dx = (ROLL_L - ROLL_HW - 6.0 - x).max(x - (ROLL_R + ROLL_HW + 6.0)).max(0.0);
+    let dy = (SHEET_TOP - 60.0 - y).max(y - (SHEET_BOTTOM + 60.0)).max(0.0);
+    let shadow = (1.0 - (dx * dx + dy * dy).sqrt() / 24.0).clamp(0.0, 1.0) * 0.4;
+    [clamp8(wood[0] * (1.0 - shadow)), clamp8(wood[1] * (1.0 - shadow)), clamp8(wood[2] * (1.0 - shadow))]
 }
 
-/// Two red ribbon tails with swallowtail ends.
-fn ribbon(px: &mut Pixmap, cx: f32, top: f32, len: f32) {
-    for (dx, tilt, c) in [(-18.0, -26.0, [132, 18, 22]), (6.0, 30.0, [92, 10, 14])] {
-        let mut pb = PathBuilder::new();
-        pb.move_to(cx + dx, top);
-        pb.line_to(cx + dx + 22.0, top);
-        pb.line_to(cx + dx + 22.0 + tilt, top + len);
-        pb.line_to(cx + dx + 11.0 + tilt, top + len - 14.0);
-        pb.line_to(cx + dx + tilt, top + len);
-        pb.close();
-        if let Some(path) = pb.finish() {
-            px.fill_path(&path, &paint(c, 255), FillRule::Winding, Transform::identity(), None);
+/// A rolled end: parchment wound round a rod, shaded as a cylinder.
+fn roll(px: &mut Pixmap, cx: f32, top: f32, bottom: f32, hw: f32) {
+    let (w, h) = (px.width() as i32, px.height() as i32);
+    let data = px.data_mut();
+    for y in (top as i32).max(0)..=(bottom as i32).min(h - 1) {
+        for x in ((cx - hw) as i32).max(0)..=((cx + hw) as i32).min(w - 1) {
+            let t = (x as f32 - cx) / hw;
+            if t.abs() > 1.0 {
+                continue;
+            }
+            let round = (1.0 - t * t).sqrt();
+            let light = 0.52 + 0.42 * round + 0.12 * (1.0 - (t + 0.35).abs() * 2.2).max(0.0);
+            let s = sheet_colour(x as f32 * 0.4, y as f32 * 0.3);
+            let i = ((y * w + x) * 4) as usize;
+            data[i] = clamp8((s[0] + 24.0) * light);
+            data[i + 1] = clamp8((s[1] + 26.0) * light);
+            data[i + 2] = clamp8((s[2] + 30.0) * light);
         }
+    }
+}
+
+/// A turned fitting - bronze knob or silk band - shaded as a lit cylinder.
+/// `profile(y)` gives its half-width on each row, 0 where there is nothing.
+fn turned(px: &mut Pixmap, cx: f32, y0: f32, y1: f32, base: [f32; 3], shine: f32, profile: impl Fn(f32) -> f32) {
+    let (w, h) = (px.width() as i32, px.height() as i32);
+    let data = px.data_mut();
+    for y in (y0.floor() as i32).max(0)..=(y1.ceil() as i32).min(h - 1) {
+        let hw = profile(y as f32);
+        if hw <= 0.0 {
+            continue;
+        }
+        for x in ((cx - hw - 1.0) as i32).max(0)..=((cx + hw + 1.0) as i32).min(w - 1) {
+            let off = x as f32 - cx;
+            let aa = (hw + 0.5 - off.abs()).clamp(0.0, 1.0);
+            if aa <= 0.0 {
+                continue;
+            }
+            let t = (off / hw).clamp(-1.0, 1.0);
+            let round = (1.0 - t * t).sqrt();
+            let spec = (1.0 - ((t + 0.38) * 3.2).abs()).max(0.0).powi(2);
+            let k = 0.3 + 0.62 * round + shine * spec;
+            let i = ((y * w + x) * 4) as usize;
+            for c in 0..3 {
+                let v = (base[c] * k).clamp(0.0, 255.0);
+                data[i + c] = (data[i + c] as f32 * (1.0 - aa) + v * aa) as u8;
+            }
+        }
+    }
+}
+
+/// Bronze knobs capping both ends of a roll: collar, rings, neck, knob, tip.
+fn finials(px: &mut Pixmap, cx: f32, top: f32, bottom: f32, hw: f32) {
+    let profile = move |d: f32| -> f32 {
+        if d < 0.0 {
+            0.0
+        } else if d < 7.0 {
+            hw + 5.0
+        } else if d < 10.0 {
+            hw + 1.0
+        } else if d < 16.0 {
+            hw + 4.0
+        } else if d < 22.0 {
+            hw * 0.45
+        } else if d < 44.0 {
+            let m = (d - 33.0) / 11.0;
+            hw * 0.28 + hw * 0.42 * (1.0 - m * m).max(0.0).sqrt()
+        } else if d < 50.0 {
+            5.0
+        } else if d < 58.0 {
+            let m = (d - 54.0) / 4.0;
+            (7.0 * (1.0 - m * m).max(0.0).sqrt()).max(2.0)
+        } else {
+            0.0
+        }
+    };
+    let bronze = [164.0, 116.0, 50.0];
+    turned(px, cx, top - 58.0, top, bronze, 0.5, |y| profile(top - y));
+    turned(px, cx, bottom, bottom + 58.0, bronze, 0.5, |y| profile(y - bottom));
+}
+
+/// A burgundy silk band round the roll, knotted on the side facing the page.
+fn ribbon_band(px: &mut Pixmap, cx: f32, y: f32, hw: f32, dir: f32) {
+    turned(px, cx, y - 13.0, y + 13.0, [132.0, 22.0, 46.0], 0.35, |yy| if (yy - y).abs() <= 13.0 { hw + 3.0 } else { 0.0 });
+    let kx = cx + dir * (hw + 2.0);
+    dot(px, kx, y, 11.0, [104, 16, 36], 255);
+    dot(px, kx - dir * 2.5, y - 3.0, 5.0, [168, 60, 84], 170);
+}
+
+/// A ribbon end hanging from its knot: mostly straight down, drifting a
+/// little towards the page, with a forked tip. `dir` +1 drifts right.
+fn ribbon_tail(px: &mut Pixmap, x: f32, y: f32, dir: f32, len: f32) {
+    let at = |fx: f32, fy: f32| (x + dir * fx * len, y + fy * len);
+    let mut pb = PathBuilder::new();
+    let (sx, sy) = at(0.02, -0.02);
+    pb.move_to(sx, sy);
+    let ((a, b), (c, d), (e, f)) = (at(0.2, 0.25), at(0.3, 0.62), at(0.4, 1.0));
+    pb.cubic_to(a, b, c, d, e, f);
+    let (e, f) = at(0.3, 0.9);
+    pb.line_to(e, f);
+    let (e, f) = at(0.14, 1.0);
+    pb.line_to(e, f);
+    let ((a, b), (c, d), (e, f)) = (at(0.1, 0.62), at(-0.06, 0.3), at(-0.26, 0.04));
+    pb.cubic_to(a, b, c, d, e, f);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        px.fill_path(&path, &paint([112, 18, 40], 255), FillRule::Winding, Transform::identity(), None);
+    }
+    let mut pb = PathBuilder::new();
+    let (sx, sy) = at(0.04, 0.04);
+    pb.move_to(sx, sy);
+    let ((a, b), (c, d), (e, f)) = (at(0.16, 0.3), at(0.22, 0.6), at(0.3, 0.86));
+    pb.cubic_to(a, b, c, d, e, f);
+    let ((a, b), (c, d), (e, f)) = (at(0.14, 0.6), at(0.06, 0.3), at(-0.04, 0.08));
+    pb.cubic_to(a, b, c, d, e, f);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        px.fill_path(&path, &paint([176, 66, 90], 100), FillRule::Winding, Transform::identity(), None);
     }
 }
 
 fn scroll(p: &mut Pen<'_>, q: &Quote) {
-    let (ink, sepia) = ([44, 26, 14], [112, 72, 38]);
-    let sd = seed(q);
-    if let Some(bg) = texture(scroll_at) {
+    let (ink, bronze, soft) = ([40, 22, 12], [122, 80, 34], [66, 42, 26]);
+    if let Some(bg) = texture(scroll_desk_at) {
         p.px.draw_pixmap(0, 0, bg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
     }
-    let date = p.fit(&olden_date(q), 16.0, Face::SerifItalic, Weight::NORMAL, 820.0);
-    p.centered(&date, W / 2.0, 140.0, 16.0, Face::SerifItalic, Weight::NORMAL, sepia);
-    let text = p.paragraph(&q.text, Face::Script, Weight::NORMAL, 760.0, 250.0, 58.0, 28.0, Align::Center);
-    let th = Pen::height(&text);
-    let top = 168.0 + (250.0 - th).max(0.0) / 2.0;
-    p.draw_ink(&text, W / 2.0 - 380.0, top, ink);
-    let sig = p.fit(&format!("— {}", q.author), 42.0, Face::Script, Weight::NORMAL, 520.0);
-    let sig_buf = p.layout(&sig, 42.0, Face::Script, Weight::NORMAL, None, None);
-    let (line_y, sw) = sig_buf.layout_runs().next().map(|r| (r.line_y, r.line_w)).unwrap_or((42.0, 0.0));
-    let base = (top + th + 56.0).min(488.0);
-    let sx = W / 2.0 - sw / 2.0;
-    p.draw_ink(&sig_buf, sx, base - line_y, ink);
-    flourish(&mut p.px, sx, sx + sw, base + 12.0, ink);
-    let handle = p.fit(&format!("@{}", q.handle), 15.0, Face::SerifItalic, Weight::NORMAL, 400.0);
-    p.centered(&handle, W / 2.0, (base + 38.0).min(514.0), 15.0, Face::SerifItalic, Weight::NORMAL, sepia);
-    ribbon(&mut p.px, 1000.0, 520.0, 96.0);
-    wax_seal(p, q, 1000.0, 510.0, 62.0, sd);
-    grain(&mut p.px, 5, sd);
-}
-
-/// Yellowed letter paper with a deckled edge, on the desk.
-fn letter_at(x: f32, y: f32) -> [u8; 3] {
-    let edge = (x - 70.0).min(880.0 - x).min(y - 40.0).min(592.0 - y) + (noise(x * 0.25, y * 0.25, 111) - 0.5) * 5.0;
-    if edge < 0.0 {
-        let d = desk_colour(x, y);
-        return [clamp8(d[0]), clamp8(d[1]), clamp8(d[2])];
-    }
-    let age = (fbm(x * 0.004, y * 0.004, 113) - 0.45) * 0.35 + fbm(x * 0.06, y * 0.015, 115) * 0.05;
-    let fresh = (edge / 60.0).clamp(0.0, 1.0).powf(0.4);
-    let base = [244.0 - age * 50.0, 236.0 - age * 56.0, 214.0 - age * 70.0];
-    let old = [214.0, 190.0, 140.0];
-    [
-        clamp8(old[0] + (base[0] - old[0]) * fresh),
-        clamp8(old[1] + (base[1] - old[1]) * fresh),
-        clamp8(old[2] + (base[2] - old[2]) * fresh),
-    ]
-}
-
-/// The ring a cup of chai leaves behind.
-fn coffee_ring(px: &mut Pixmap, cx: f32, cy: f32, r: f32, seed: u32) {
-    let (w, h) = (px.width() as i32, px.height() as i32);
-    let data = px.data_mut();
-    let reach = r + 14.0;
-    for y in ((cy - reach) as i32).max(0)..=((cy + reach) as i32).min(h - 1) {
-        for x in ((cx - reach) as i32).max(0)..=((cx + reach) as i32).min(w - 1) {
-            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-            let dist = (dx * dx + dy * dy).sqrt();
-            let ang = dy.atan2(dx);
-            let wobble = (noise(ang * 2.0 + 4.0, 1.0, seed) - 0.5) * 8.0;
-            let ring = (-((dist - r - wobble) / 3.5).powi(2)).exp() * (0.55 + 0.45 * noise(ang * 3.0, 2.0, seed ^ 7));
-            let fill = if dist < r + wobble { 0.07 } else { 0.0 };
-            let a = (ring * 0.38 + fill).min(0.6);
-            if a < 0.01 {
-                continue;
-            }
-            let i = ((y * w + x) * 4) as usize;
-            for (k, c) in [120.0, 78.0, 38.0].into_iter().enumerate() {
-                data[i + k] = (data[i + k] as f32 * (1.0 - a) + c * a) as u8;
-            }
+    for (cx, dir) in [(ROLL_L, 1.0), (ROLL_R, -1.0)] {
+        roll(&mut p.px, cx, ROLL_TOP, ROLL_BOTTOM, ROLL_HW);
+        finials(&mut p.px, cx, ROLL_TOP, ROLL_BOTTOM, ROLL_HW);
+        for (band, len) in [(ROLL_TOP + 34.0, 84.0), (ROLL_BOTTOM - 34.0, 58.0)] {
+            ribbon_band(&mut p.px, cx, band, ROLL_HW, dir);
+            ribbon_tail(&mut p.px, cx + dir * (ROLL_HW + 2.0), band + 6.0, dir, len);
         }
     }
-}
 
-/// The writer's face as a perforated postage stamp.
-fn stamp(p: &mut Pen<'_>, q: &Quote, x: f32, y: f32, w: f32, h: f32) {
-    rect(&mut p.px, x, y, w, h, [242, 236, 222]);
-    let desk = [30, 20, 13];
-    let mut t = 0.0;
-    while t <= w {
-        dot(&mut p.px, x + t, y, 5.0, desk, 255);
-        dot(&mut p.px, x + t, y + h, 5.0, desk, 255);
-        t += 14.0;
-    }
-    let mut t = 0.0;
-    while t <= h {
-        dot(&mut p.px, x, y + t, 5.0, desk, 255);
-        dot(&mut p.px, x + w, y + t, 5.0, desk, 255);
-        t += 14.0;
-    }
-    let inset = 14.0;
-    let img_h = h - 62.0;
-    if let Some(pm) = decode(q.avatar.as_deref()).and_then(|img| portrait(&img, (w - 2.0 * inset) as u32, img_h as u32, &Tone::Colour)) {
-        let faded = PixmapPaint { opacity: 0.88, ..PixmapPaint::default() };
-        p.px.draw_pixmap((x + inset) as i32, (y + inset) as i32, pm.as_ref(), &faded, Transform::identity(), None);
-    }
-    if let Some(frame) = rrect(x + inset, y + inset, w - 2.0 * inset, img_h, 0.5) {
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        p.px.stroke_path(&frame, &paint([120, 40, 40], 255), &stroke, Transform::identity(), None);
-    }
-    p.centered("MLCI POST", x + w / 2.0, y + h - 30.0, 15.0, Face::Serif, Weight::BOLD, [120, 36, 36]);
-    p.centered("₹14", x + w / 2.0, y + h - 12.0, 13.0, Face::Serif, Weight::SEMIBOLD, [80, 70, 60]);
-}
-
-/// A round cancellation postmark, with waves running off to the right.
-fn postmark(p: &mut Pen<'_>, cx: f32, cy: f32, r: f32, top: &str, bottom: &str) {
-    let ink = [34, 40, 72];
-    for (rr, width) in [(r, 3.0), (r - 9.0, 1.5)] {
-        if let Some(c) = PathBuilder::from_circle(cx, cy, rr) {
+    let (ax, ay, r) = (300.0, 315.0, 134.0);
+    for (rr, width, c) in [(r + 9.0, 6.0, [98, 62, 26]), (r + 15.5, 1.8, [160, 112, 52])] {
+        if let Some(ring) = PathBuilder::from_circle(ax, ay, rr) {
             let stroke = Stroke { width, ..Stroke::default() };
-            p.px.stroke_path(&c, &paint(ink, 190), &stroke, Transform::identity(), None);
+            p.px.stroke_path(&ring, &paint(c, 255), &stroke, Transform::identity(), None);
         }
     }
-    let a = p.fit(top, 12.0, Face::Sans, Weight::BOLD, 2.0 * r - 14.0);
-    p.centered(&a, cx, cy + 3.0, 12.0, Face::Sans, Weight::BOLD, ink);
-    let b = p.fit(bottom, 9.0, Face::Sans, Weight::SEMIBOLD, 2.0 * r - 18.0);
-    p.centered(&b, cx, cy + 19.0, 9.0, Face::Sans, Weight::SEMIBOLD, ink);
-    for k in 0..4 {
-        let y0 = cy - 26.0 + 17.0 * k as f32;
-        let mut x = cx + r + 4.0;
-        while x < cx + r + 170.0 {
-            dot(&mut p.px, x, y0 + ((x - cx) * 0.06).sin() * 5.0, 1.3, ink, 170);
-            x += 1.5;
-        }
-    }
-}
-
-fn chitthi(p: &mut Pen<'_>, q: &Quote) {
-    let ink = [30, 34, 62];
-    let sd = seed(q);
-    if let Some(bg) = texture(letter_at) {
-        p.px.draw_pixmap(0, 0, bg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-    }
-    for k in 0..10 {
-        rect_a(&mut p.px, 78.0, 128.0 + 44.0 * k as f32, 794.0, 1.0, [150, 172, 196], 150);
-    }
-    rect_a(&mut p.px, 150.0, 46.0, 1.5, 540.0, [196, 90, 90], 170);
-    coffee_ring(&mut p.px, 720.0, 470.0, 58.0, sd);
-    let greet = p.layout("Dear MLCI,", 34.0, Face::Script, Weight::NORMAL, None, None);
-    let gy = greet.layout_runs().next().map(|r| r.line_y).unwrap_or(34.0);
-    p.draw_ink(&greet, 170.0, 124.0 - gy, ink);
-    // written along the ruled lines: fixed 44px line height, smaller hand for longer notes
-    let mut size = 38.0;
-    let text = loop {
-        let buf = p.layout_with(&q.text, size, 44.0, Face::Script, Weight::NORMAL, Some(600.0), Some(Align::Left));
-        if buf.layout_runs().count() <= 8 || size <= 24.0 {
-            break buf;
-        }
-        size -= 2.0;
-    };
-    let first = text.layout_runs().next().map(|r| r.line_y).unwrap_or(30.0);
-    p.draw_ink(&text, 170.0, 168.0 - first, ink);
-    let lines = text.layout_runs().count().max(1) as f32;
-    let last = 172.0 + 44.0 * (lines - 1.0);
-    let sig_base = (last + 88.0).min(524.0) - 4.0;
-    let sig = p.fit(&format!("— {}", q.author), 38.0, Face::Script, Weight::NORMAL, 420.0);
-    let sig_buf = p.layout(&sig, 38.0, Face::Script, Weight::NORMAL, None, None);
-    let (sly, sw) = sig_buf.layout_runs().next().map(|r| (r.line_y, r.line_w)).unwrap_or((38.0, 0.0));
-    p.draw_ink(&sig_buf, 850.0 - sw, sig_base - sly, ink);
-    stamp(p, q, 930.0, 70.0, 180.0, 212.0);
-    // franked on the paper beside the stamp, the waves running across it
-    postmark(p, 846.0, 132.0, 58.0, &q.when.to_uppercase(), &q.channel.to_uppercase());
-    let handle = p.fit(&format!("@{}", q.handle), 16.0, Face::SerifItalic, Weight::NORMAL, 240.0);
-    p.centered(&handle, 1020.0, 404.0, 16.0, Face::SerifItalic, Weight::NORMAL, [196, 182, 156]);
-    grain(&mut p.px, 4, sd);
-}
-
-fn vellum_at(x: f32, y: f32) -> [u8; 3] {
-    let m = (fbm(x * 0.003, y * 0.003, 101) - 0.45) * 0.5 + fbm(x * 0.07, y * 0.02, 103) * 0.06;
-    [clamp8(240.0 - m * 40.0), clamp8(230.0 - m * 46.0), clamp8(204.0 - m * 56.0)]
-}
-
-fn diamond(px: &mut Pixmap, cx: f32, cy: f32, s: f32, c: [u8; 3]) {
-    let mut pb = PathBuilder::new();
-    pb.move_to(cx, cy - s);
-    pb.line_to(cx + s, cy);
-    pb.line_to(cx, cy + s);
-    pb.line_to(cx - s, cy);
-    pb.close();
-    if let Some(path) = pb.finish() {
-        px.fill_path(&path, &paint(c, 255), FillRule::Winding, Transform::identity(), None);
-    }
-}
-
-/// Gold double rule with red and blue diamonds between, gilded corners.
-fn manuscript_border(px: &mut Pixmap) {
-    let (gold, red, blue) = ([182, 142, 64], [150, 32, 30], [34, 62, 132]);
-    for (inset, width) in [(22.0, 3.0), (46.0, 1.5)] {
-        if let Some(frame) = rrect(inset, inset, W - 2.0 * inset, H - 2.0 * inset, 1.0) {
-            let stroke = Stroke { width, ..Stroke::default() };
-            px.stroke_path(&frame, &paint(gold, 255), &stroke, Transform::identity(), None);
-        }
-    }
-    let band = 34.0;
-    let (mut x, mut i) = (60.0, 0);
-    while x < W - 50.0 {
-        let c = if i % 2 == 0 { red } else { blue };
-        diamond(px, x, band, 5.0, c);
-        diamond(px, x, H - band, 5.0, c);
-        x += 22.0;
-        i += 1;
-    }
-    let (mut y, mut i) = (60.0, 0);
-    while y < H - 50.0 {
-        let c = if i % 2 == 0 { blue } else { red };
-        diamond(px, band, y, 5.0, c);
-        diamond(px, W - band, y, 5.0, c);
-        y += 22.0;
-        i += 1;
-    }
-    for (cx, cy) in [(band, band), (W - band, band), (band, H - band), (W - band, H - band)] {
-        if let Some(sq) = rrect(cx - 13.0, cy - 13.0, 26.0, 26.0, 2.0) {
-            px.fill_path(&sq, &paint(gold, 255), FillRule::Winding, Transform::identity(), None);
-        }
-        dot(px, cx, cy, 5.0, red, 255);
-    }
-}
-
-/// The avatar in a bevelled gold ring, lit from the upper left.
-fn gilded_frame(p: &mut Pen<'_>, q: &Quote, cx: f32, cy: f32, r: f32) {
-    let (w, h) = (p.px.width() as i32, p.px.height() as i32);
-    let (inner, outer) = (r + 5.0, r + 16.0);
-    {
-        let data = p.px.data_mut();
-        for y in ((cy - outer) as i32 - 1).max(0)..=((cy + outer) as i32 + 1).min(h - 1) {
-            for x in ((cx - outer) as i32 - 1).max(0)..=((cx + outer) as i32 + 1).min(w - 1) {
-                let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist > outer + 1.0 || dist < inner {
-                    continue;
-                }
-                let across = ((dist - inner) / (outer - inner)).clamp(0.0, 1.0);
-                let bevel = 0.7 + 0.3 * (std::f32::consts::PI * across).sin();
-                let light = 0.75 + 0.35 * ((-dx - dy) / (1.4 * outer)).clamp(-1.0, 1.0);
-                let aa = (outer - dist + 1.0).clamp(0.0, 1.0);
-                let i = ((y * w + x) * 4) as usize;
-                for (k, base) in [212.0, 168.0, 78.0].into_iter().enumerate() {
-                    let gold = (base * bevel * light).clamp(0.0, 255.0);
-                    data[i + k] = (data[i + k] as f32 * (1.0 - aa) + gold * aa) as u8;
-                }
-            }
-        }
-    }
-    dot(&mut p.px, cx, cy, inner, [140, 30, 28], 255);
-    dot(&mut p.px, cx, cy, r + 2.0, [236, 224, 196], 255);
-    match medallion(q.avatar.as_deref(), (2.0 * r) as u32, &Tone::Colour) {
+    match medallion(q.avatar.as_deref(), (2.0 * r) as u32, &Tone::Duo([44, 28, 16], [240, 220, 180])) {
         Some(pm) => p.px.draw_pixmap(
-            (cx - r).round() as i32,
-            (cy - r).round() as i32,
+            (ax - r).round() as i32,
+            (ay - r).round() as i32,
             pm.as_ref(),
             &PixmapPaint::default(),
             Transform::identity(),
             None,
         ),
-        None => p.centered(&initial(&q.author), cx, cy + r * 0.3, r * 0.9, Face::Serif, Weight::BOLD, [140, 30, 28]),
+        None => p.centered(&initial(&q.author), ax, ay + r * 0.32, r * 0.9, Face::Serif, Weight::BOLD, bronze),
     }
-}
+    fleur(&mut p.px, ax, ay - r - 36.0, 44.0, bronze);
+    fleur(&mut p.px, ax, ay + r + 36.0, 44.0, bronze);
 
-fn illuminated(p: &mut Pen<'_>, q: &Quote) {
-    let (ink, red, gold, blue) = ([40, 30, 24], [150, 32, 30], [190, 150, 70], [34, 62, 132]);
-    let sd = seed(q);
-    if let Some(bg) = texture(vellum_at) {
-        p.px.draw_pixmap(0, 0, bg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    // A short quote stays on one big line, as a calligrapher would set it;
+    // only a longer one wraps.
+    let (cx, width) = (784.0, 500.0);
+    let mut one_line = None;
+    let mut size = 86.0;
+    while size >= 54.0 {
+        let buf = p.layout(&q.text, size, Face::Script, Weight::NORMAL, Some(width), Some(Align::Center));
+        if buf.layout_runs().count() == 1 {
+            one_line = Some(buf);
+            break;
+        }
+        size -= 2.0;
     }
-    vignette_tint(&mut p.px, 90, [110, 80, 40]);
-    manuscript_border(&mut p.px);
-    gilded_frame(p, q, 262.0, 318.0, 120.0);
-    p.line(&spaced("LIBER GYAAN · CAPUT XIV"), 470.0, 104.0, 15.0, Face::Serif, Weight::SEMIBOLD, red);
-    // the first letter gilded, the rest of the quote hanging beside it
-    let mut chars = q.text.chars();
-    let first = chars.next().unwrap_or(' ');
-    let (cap, rest) = if first.is_ascii_alphanumeric() {
-        (Some(first.to_ascii_uppercase().to_string()), chars.as_str().to_string())
-    } else {
-        (None, q.text.clone())
+    let text = match one_line {
+        Some(buf) => buf,
+        None => p.paragraph(&q.text, Face::Script, Weight::NORMAL, width, 170.0, 54.0, 26.0, Align::Center),
     };
-    let top = 136.0;
-    let tx = if cap.is_some() { 574.0 } else { 470.0 };
-    if let Some(cap) = &cap {
-        let s = 86.0;
-        if let Some(b) = rrect(470.0, top, s, s, 3.0) {
-            p.px.fill_path(&b, &paint(blue, 255), FillRule::Winding, Transform::identity(), None);
-            let stroke = Stroke { width: 3.0, ..Stroke::default() };
-            p.px.stroke_path(&b, &paint(gold, 255), &stroke, Transform::identity(), None);
-        }
-        for (dx, dy) in [(8.0, 8.0), (s - 8.0, 8.0), (8.0, s - 8.0), (s - 8.0, s - 8.0)] {
-            dot(&mut p.px, 470.0 + dx, top + dy, 2.5, gold, 255);
-        }
-        p.centered(cap, 470.0 + s / 2.0, top + s * 0.76, s * 0.7, Face::Serif, Weight::BOLD, [236, 196, 110]);
-    }
-    let text = p.paragraph(rest.trim_start(), Face::Serif, Weight::NORMAL, 1130.0 - tx, 320.0, 42.0, 22.0, Align::Left);
     let th = Pen::height(&text);
-    p.draw_ink(&text, tx, top + 2.0, ink);
-    let base = (top + th.max(86.0) + 50.0).min(520.0);
-    let by = p.fit(&format!("— {}", q.author), 28.0, Face::SerifItalic, Weight::NORMAL, 600.0);
-    p.line(&by, 470.0, base, 28.0, Face::SerifItalic, Weight::NORMAL, red);
-    let handle = p.fit(&format!("@{}", q.handle), 15.0, Face::Serif, Weight::NORMAL, 600.0);
-    p.line(&handle, 470.0, base + 24.0, 15.0, Face::Serif, Weight::NORMAL, [120, 100, 80]);
-    let date = p.fit(&olden_date(q), 15.0, Face::SerifItalic, Weight::NORMAL, 660.0);
-    p.line(&date, 470.0, H - 70.0, 15.0, Face::SerifItalic, Weight::NORMAL, [130, 104, 70]);
-    grain(&mut p.px, 4, sd);
+    let t0 = (315.0 - (th + 236.0) / 2.0).max(108.0);
+    p.draw_ink(&text, cx - width / 2.0, t0, ink);
+    let mut y = t0 + th + 20.0;
+    fleur_rule(&mut p.px, cx, y + 12.0, 130.0, bronze);
+    y += 44.0;
+    let author = p.fit(&q.author, 44.0, Face::Serif, Weight::BOLD, width);
+    p.centered(&author, cx, y + 36.0, 44.0, Face::Serif, Weight::BOLD, ink);
+    y += 46.0;
+    let handle = p.fit(&format!("@{}", q.handle), 24.0, Face::Serif, Weight::NORMAL, width);
+    p.centered(&handle, cx, y + 28.0, 24.0, Face::Serif, Weight::NORMAL, soft);
+    y += 56.0;
+    fleur_rule(&mut p.px, cx, y + 12.0, 190.0, bronze);
+    y += 38.0;
+    let meta: Vec<String> = [q.channel.clone(), q.when.clone()].into_iter().filter(|s| !s.is_empty()).collect();
+    let meta = p.fit(&meta.join(" · "), 22.0, Face::Serif, Weight::NORMAL, width);
+    p.centered(&meta, cx, y + 24.0, 22.0, Face::Serif, Weight::NORMAL, soft);
+    grain(&mut p.px, 4, seed(q));
 }
 
-fn cosmos(p: &mut Pen<'_>, q: &Quote) {
-    if let Some(sky) = texture(space_at) {
-        p.px.draw_pixmap(0, 0, sky.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+/// A fleur-de-lis `size` px tall, centred on (cx, cy).
+fn fleur(px: &mut Pixmap, cx: f32, cy: f32, size: f32, colour: [u8; 3]) {
+    let at = |x: f32, y: f32| (cx + x * size, cy + y * size);
+    let fill = |px: &mut Pixmap, pb: PathBuilder| {
+        if let Some(path) = pb.finish() {
+            px.fill_path(&path, &paint(colour, 255), FillRule::Winding, Transform::identity(), None);
+        }
+    };
+    let mut pb = PathBuilder::new();
+    let (x, y) = at(0.0, -0.5);
+    pb.move_to(x, y);
+    let ((a, b), (c, d), (e, f)) = (at(0.17, -0.3), at(0.13, -0.02), at(0.0, 0.1));
+    pb.cubic_to(a, b, c, d, e, f);
+    let ((a, b), (c, d), (e, f)) = (at(-0.13, -0.02), at(-0.17, -0.3), at(0.0, -0.5));
+    pb.cubic_to(a, b, c, d, e, f);
+    pb.close();
+    fill(px, pb);
+    for side in [1.0f32, -1.0] {
+        let mut pb = PathBuilder::new();
+        let (x, y) = at(0.03 * side, 0.06);
+        pb.move_to(x, y);
+        let ((a, b), (c, d), (e, f)) = (at(0.08 * side, -0.24), at(0.46 * side, -0.3), at(0.42 * side, 0.0));
+        pb.cubic_to(a, b, c, d, e, f);
+        let ((a, b), (c, d), (e, f)) = (at(0.4 * side, 0.13), at(0.26 * side, 0.12), at(0.27 * side, 0.02));
+        pb.cubic_to(a, b, c, d, e, f);
+        let ((a, b), (c, d), (e, f)) = (at(0.2 * side, -0.05), at(0.12 * side, 0.04), at(0.05 * side, 0.12));
+        pb.cubic_to(a, b, c, d, e, f);
+        pb.close();
+        fill(px, pb);
     }
-    glow(&mut p.px, 880.0, 150.0, 420.0, [120, 60, 210], 45);
-    stars(&mut p.px, seed(q), 300, (600.0, 60.0, 1180.0, 580.0));
-    planet(p, q, 300.0, 315.0, 150.0);
-    let (x0, x1) = (620.0, 1160.0);
-    let cx = (x0 + x1) / 2.0;
-    let text = p.paragraph(&q.text, Face::Sans, Weight::LIGHT, x1 - x0, 320.0, 52.0, 24.0, Align::Center);
-    let th = Pen::height(&text);
-    let top = ((H - (th + 110.0)) / 2.0 - 6.0).max(40.0);
-    p.draw(&text, x0, top, [236, 240, 250]);
-    let ry = top + th + 30.0;
-    p.centered("✦", cx, ry + 10.0, 18.0, Face::Sans, Weight::NORMAL, [150, 175, 230]);
-    let by = p.fit(&spaced(&q.author.to_uppercase()), 18.0, Face::Sans, Weight::MEDIUM, x1 - x0);
-    p.centered(&by, cx, ry + 48.0, 18.0, Face::Sans, Weight::MEDIUM, [170, 190, 230]);
-    let handle = p.fit(&format!("@{}", q.handle), 15.0, Face::Sans, Weight::NORMAL, x1 - x0);
-    p.centered(&handle, cx, ry + 72.0, 15.0, Face::Sans, Weight::NORMAL, [110, 124, 160]);
-    footer(p, q, [100, 112, 150]);
-    grain(&mut p.px, 3, seed(q));
+    let (x, y) = at(-0.22, 0.08);
+    if let Some(r) = Rect::from_xywh(x, y, 0.44 * size, 0.07 * size) {
+        px.fill_rect(r, &paint(colour, 255), Transform::identity(), None);
+    }
+    let mut pb = PathBuilder::new();
+    let (x, y) = at(0.0, 0.15);
+    pb.move_to(x, y);
+    let ((a, b), (e, f)) = (at(0.1, 0.3), at(0.0, 0.5));
+    pb.quad_to(a, b, e, f);
+    let ((a, b), (e, f)) = (at(-0.1, 0.3), at(0.0, 0.15));
+    pb.quad_to(a, b, e, f);
+    pb.close();
+    fill(px, pb);
 }
 
-fn zen(p: &mut Pen<'_>, q: &Quote) {
-    let (ink, soft) = ([38, 36, 32], [120, 114, 104]);
-    if let Some(paper) = texture(rice_paper_at) {
-        p.px.draw_pixmap(0, 0, paper.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+/// A rule that tapers away on both sides of a small fleur-de-lis.
+fn fleur_rule(px: &mut Pixmap, cx: f32, cy: f32, half: f32, colour: [u8; 3]) {
+    for side in [1.0f32, -1.0] {
+        let mut t = 0.0;
+        while t <= 1.0 {
+            let x = cx + side * (18.0 + (half - 18.0) * t);
+            let width = 0.5 + 1.6 * (1.0 - t).powf(0.7);
+            dot(px, x, cy, width / 2.0 + 0.2, colour, 235);
+            t += 0.5 / half.max(1.0);
+        }
     }
-    let (cx, cy) = (320.0, 315.0);
-    if let Some(pm) = medallion(q.avatar.as_deref(), 210, &Tone::Grey) {
-        let faded = PixmapPaint { opacity: 0.88, ..PixmapPaint::default() };
-        p.px.draw_pixmap((cx - 105.0) as i32, (cy - 105.0) as i32, pm.as_ref(), &faded, Transform::identity(), None);
-    }
-    enso(&mut p.px, cx, cy, 168.0, seed(q));
-    let (x0, x1) = (640.0, 1120.0);
-    let text = p.paragraph(&q.text, Face::Serif, Weight::NORMAL, x1 - x0, 300.0, 46.0, 22.0, Align::Left);
-    let th = Pen::height(&text);
-    let top = ((H - (th + 104.0)) / 2.0).max(50.0);
-    p.draw(&text, x0, top, ink);
-    let ry = top + th + 30.0;
-    rect(&mut p.px, x0, ry, 36.0, 2.0, [180, 170, 158]);
-    let by = p.fit(&format!("— {}", q.author), 26.0, Face::SerifItalic, Weight::NORMAL, 380.0);
-    let bw = p.line(&by, x0, ry + 44.0, 26.0, Face::SerifItalic, Weight::NORMAL, soft);
-    let handle = p.fit(&format!("@{}", q.handle), 15.0, Face::Sans, Weight::NORMAL, 380.0);
-    p.line(&handle, x0, ry + 68.0, 15.0, Face::Sans, Weight::NORMAL, [160, 152, 142]);
-    // stamped just after the signature, as on a scroll
-    seal(p, x0 + bw + 24.0, ry + 12.0, 50.0, &q.author);
-    footer(p, q, [168, 160, 150]);
-    grain(&mut p.px, 3, seed(q));
+    fleur(px, cx, cy - 1.0, 26.0, colour);
 }
 
 fn pick(fs: &FontSystem, names: &[&str]) -> String {
@@ -1362,14 +894,7 @@ pub fn render(q: &Quote, style: Style, fs: &mut FontSystem) -> Option<Vec<u8>> {
         Style::Noir => noir(&mut pen, q),
         Style::Rang => rang(&mut pen, q),
         Style::Spotlight => spotlight(&mut pen, q),
-        Style::Duotone => duotone(&mut pen, q),
-        Style::Marble => marble(&mut pen, q),
-        Style::Pothi => pothi(&mut pen, q),
         Style::Scroll => scroll(&mut pen, q),
-        Style::Chitthi => chitthi(&mut pen, q),
-        Style::Illuminated => illuminated(&mut pen, q),
-        Style::Cosmos => cosmos(&mut pen, q),
-        Style::Zen => zen(&mut pen, q),
     }
     pen.px.encode_png().ok()
 }
