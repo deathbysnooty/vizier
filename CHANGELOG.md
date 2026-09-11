@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.69] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quiz genre vote every 20 questions
 ## [0.10.68] - 2026-09-11
 
 ### 🚀 Features
@@ -11,6 +16,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Second wave - 15 fact-checked topics
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.68
 ## [0.10.67] - 2026-09-11
 
 ### 🚀 Features
