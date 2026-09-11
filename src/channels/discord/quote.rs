@@ -150,7 +150,7 @@ async fn draw(rec: &Record) -> Result<Vec<u8>, String> {
         when: rec.when.clone(),
         channel: if rec.channel_name.is_empty() { String::new() } else { format!("#{}", rec.channel_name) },
     };
-    let style = Style::from_key(&rec.style).unwrap_or(Style::Classic);
+    let style = Style::from_key(&rec.style).unwrap_or(Style::Noir);
     tokio::task::spawn_blocking(move || {
         let mut fs = awards::fonts().lock();
         if fs.db().len() == 0 {
@@ -197,7 +197,7 @@ pub async fn start(ctx: &Context, storage: &Storage, original: &Message, quoter:
         text: quote_text(original, bot_id),
         when,
         channel_name,
-        style: Style::Classic.key().to_string(),
+        style: Style::Noir.key().to_string(),
         saved: false,
     };
     let png = draw(&rec).await?;
@@ -210,7 +210,7 @@ pub async fn start(ctx: &Context, storage: &Storage, original: &Message, quoter:
                 .reference_message(original)
                 .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles().replied_user(false))
                 .add_file(CreateAttachment::bytes(png, "quote.png"))
-                .components(controls(&rec.id, Style::Classic)),
+                .components(controls(&rec.id, Style::Noir)),
         )
         .await
         .map_err(|e| e.to_string())?;
