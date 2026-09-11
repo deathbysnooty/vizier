@@ -304,6 +304,8 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
     if files.is_empty() {
         return Ok(0);
     }
+    let moved = read_retheme(dir);
+    let dropped = read_dropped(dir);
     let tx = conn.transaction()?;
     tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY); DELETE FROM temp.seen;")?;
     let (mut loaded, mut skipped) = (0, 0);
@@ -335,7 +337,14 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
                     skipped += 1;
                     continue;
                 }
-                let (theme, theme_region) = theme_for(&folder, &stem, &q.cat, &q.region);
+                // Left out on review: unseen, so it stops being asked like any removed question.
+                if dropped.contains(&q.id) {
+                    continue;
+                }
+                let (theme, theme_region) = match moved.get(&q.id) {
+                    Some(theme) => (theme.clone(), side_of(theme).to_string()),
+                    None => theme_for(&folder, &stem, &q.cat, &q.region),
+                };
                 upsert.execute(params![
                     q.id,
                     serde_json::to_string(&q)?,
@@ -384,66 +393,150 @@ struct Genre {
     themes: &'static [&'static str],
 }
 
+/// In button order, five to a row: Indian entertainment, world entertainment,
+/// fandoms, knowledge, then sports, life smarts and brain games beside the mix.
+/// Every theme in the bank belongs to one genre.
 const GENRES: &[Genre] = &[
     Genre {
         key: "bollywood",
         label: "🎬 Bollywood",
         about: "from Bollywood and Indian cinema",
-        themes: &["bollywood", "bollywood_2000s", "bollywood_buzz", "regional_cinema", "india_films_books", "bollywood_news"],
+        themes: &["bollywood", "bollywood_2000s", "bollywood_buzz", "bollywood_news", "regional_cinema", "india_films"],
     },
     Genre {
-        key: "music_tv",
-        label: "🎵 Music & TV",
-        about: "from music, TV and desi pop culture",
-        themes: &["music_tv", "indian_pop_music", "indian_tv_ott", "desi_pop", "world_music"],
+        key: "bollywood_songs",
+        label: "🎶 Bollywood songs",
+        about: "about Bollywood songs, singers and composers",
+        themes: &["bollywood_songs"],
+    },
+    Genre {
+        key: "indian_pop",
+        label: "📺 Indian pop culture",
+        about: "from Indian pop culture: TV, ads, memes and nostalgia",
+        themes: &["indian_pop_culture", "desi_pop", "indian_tv_ott"],
+    },
+    Genre {
+        key: "cricket",
+        label: "🏏 Cricket",
+        about: "from cricket and the IPL",
+        themes: &["cricket", "cricket_players", "ipl"],
+    },
+    Genre {
+        key: "india",
+        label: "🗺️ India",
+        about: "about India's states, places and culture",
+        themes: &["north_india", "south_india", "east_northeast", "west_central", "india_map", "geography", "culture"],
+    },
+    Genre {
+        key: "hollywood",
+        label: "🎥 Hollywood movies",
+        about: "from Hollywood and world cinema",
+        themes: &["hollywood", "world_films"],
+    },
+    Genre {
+        key: "tv",
+        label: "📺 TV shows",
+        about: "from TV series, sitcoms and cartoons",
+        themes: &["world_tv", "tv_shows"],
+    },
+    Genre {
+        key: "music",
+        label: "🎵 Music",
+        about: "about music from India and the world",
+        themes: &["music_tv", "indian_pop_music", "world_music"],
+    },
+    Genre {
+        key: "games",
+        label: "🎮 Video games",
+        about: "from video games and gaming",
+        themes: &["video_games", "anime_gaming"],
+    },
+    Genre {
+        key: "anime",
+        label: "🍥 Anime & comics",
+        about: "from anime, manga and comics",
+        themes: &["anime_comics"],
+    },
+    Genre {
+        key: "harry_potter",
+        label: "⚡ Harry Potter",
+        about: "from the world of Harry Potter",
+        themes: &["harry_potter"],
+    },
+    Genre {
+        key: "game_of_thrones",
+        label: "🐉 Game of Thrones",
+        about: "from Game of Thrones",
+        themes: &["game_of_thrones"],
+    },
+    Genre {
+        key: "mcu",
+        label: "🦸 Marvel movies",
+        about: "from the Marvel Cinematic Universe films",
+        themes: &["mcu_movies"],
+    },
+    Genre {
+        key: "pokemon",
+        label: "🔴 Pokémon",
+        about: "all about Pokémon",
+        themes: &["pokemon"],
+    },
+    Genre {
+        key: "disney",
+        label: "🏰 Disney",
+        about: "from Disney and Pixar films and Disney TV shows",
+        themes: &["disney"],
+    },
+    Genre {
+        key: "world_geography",
+        label: "🌍 World geography",
+        about: "about countries, capitals and the world map",
+        themes: &["world_geography"],
+    },
+    Genre {
+        key: "history",
+        label: "📜 History & mythology",
+        about: "from history and mythology",
+        themes: &["history_civics", "mythology_tales", "world_history"],
+    },
+    Genre {
+        key: "gk",
+        label: "📚 GK & books",
+        about: "general knowledge, books, words and business",
+        themes: &["indian_gk", "general_knowledge", "society_culture", "arts_books", "hindi", "india_books"],
+    },
+    Genre {
+        key: "science",
+        label: "🔬 Science & tech",
+        about: "from science, space and technology",
+        themes: &["science_tech", "indian_science"],
+    },
+    Genre {
+        key: "food",
+        label: "🍛 Food",
+        about: "about food, cooking and drinks",
+        themes: &["indian_food", "food_drink", "food_science"],
     },
     Genre {
         key: "sports",
-        label: "🏏 Sports",
-        about: "from cricket, IPL, football and more",
-        themes: &["cricket", "cricket_players", "ipl", "football_f1", "world_sport"],
+        label: "⚽ Sports",
+        about: "from football, F1 and sport around the world",
+        themes: &["football_f1", "world_sport", "indian_sports"],
     },
     Genre {
-        key: "places",
-        label: "🗺️ India & places",
-        about: "about India's states, cities, food and geography",
+        key: "life",
+        label: "💡 Life smarts",
+        about: "useful home, money, work and tech smarts",
         themes: &[
-            "north_india", "south_india", "east_northeast", "west_central", "india_map", "geography", "world_geography",
-            "indian_food",
+            "home_science", "beauty_science", "work_abbreviations", "did_you_know", "daily_life_india", "money_smarts",
+            "tech_smarts",
         ],
-    },
-    Genre {
-        key: "history_culture",
-        label: "📜 History & culture",
-        about: "from history, mythology, Hindi and GK",
-        themes: &["history_civics", "culture", "mythology_tales", "hindi", "indian_gk", "world_history", "arts_books"],
     },
     Genre {
         key: "brain",
         label: "🧩 Brain games",
         about: "riddles, logic puzzles and brain teasers",
         themes: &["riddles", "logical_reasoning", "brain_teasers"],
-    },
-    Genre {
-        key: "life",
-        label: "💡 Life smarts",
-        about: "useful home, food, money and tech smarts",
-        themes: &[
-            "home_science", "food_science", "beauty_science", "work_abbreviations", "did_you_know", "daily_life_india",
-            "money_smarts", "tech_smarts",
-        ],
-    },
-    Genre {
-        key: "world_pop",
-        label: "🍿 Hollywood & games",
-        about: "from Hollywood, world TV, anime and games",
-        themes: &["hollywood", "world_tv", "anime_gaming", "games_comics", "film_tv"],
-    },
-    Genre {
-        key: "science_gk",
-        label: "🔬 Science & GK",
-        about: "from science, tech and general knowledge",
-        themes: &["science_tech", "general_knowledge", "society_culture", "food_drink", "sports_science_biz"],
     },
 ];
 
@@ -524,37 +617,93 @@ fn round_summary(board: &Board) -> String {
 /// grouped into broad themes, so each gets about as many turns as one written
 /// topic. A question keeps its own region for the flag it shows.
 fn theme_for(folder: &str, stem: &str, cat: &str, region: &str) -> (String, String) {
-    const WORLD_TOPICS: &[&str] = &["world_tv", "hollywood", "anime_gaming", "football_f1"];
-    let (theme, side): (&str, &str) = match folder {
-        "ai" => (stem, if WORLD_TOPICS.contains(&stem) { "world" } else { "india" }),
-        "wikidata" => match stem {
-            "country_capital" | "country_currency" | "calling_code" => ("world_geography", "world"),
-            "element_symbol" => ("science_tech", "world"),
-            "hindi_film_director" | "hindi_film_year" | "indian_book_author" => ("india_films_books", "india"),
-            _ => ("india_map", "india"),
+    let theme: &str = match folder {
+        // The few early files that mixed subjects send each part to the theme it belongs with.
+        "ai" => match (stem, cat) {
+            ("culture", "food") => "indian_food",
+            ("culture", "mythology") => "mythology_tales",
+            ("desi_pop", "gaming") => "video_games",
+            ("music_tv", "tv") => "indian_tv_ott",
+            ("sports_science_biz", "business") => "indian_gk",
+            ("sports_science_biz", "science" | "space") => "indian_science",
+            ("sports_science_biz", _) => "indian_sports",
+            _ => stem,
         },
-        "api" => (
-            match cat {
-                "film_and_tv" | "film" | "television" | "cartoon_animations" | "musicals_theatres" => "film_tv",
-                "music" => "world_music",
-                "science" | "science_nature" | "computers" | "mathematics" | "gadgets" | "animals" | "vehicles" => {
-                    "science_tech"
-                }
-                "geography" => "world_geography",
-                "history" | "mythology" | "politics" => "world_history",
-                "sport_and_leisure" | "sports" => "world_sport",
-                "video_games" | "board_games" | "japanese_anime_manga" | "comics" => "games_comics",
-                "arts_and_literature" | "art" | "books" => "arts_books",
-                "food_and_drink" => "food_drink",
-                "society_and_culture" => "society_culture",
-                _ => "general_knowledge",
-            },
-            "world",
-        ),
+        "wikidata" => match stem {
+            "country_capital" | "country_currency" | "calling_code" => "world_geography",
+            "element_symbol" => "science_tech",
+            "hindi_film_director" | "hindi_film_year" => "india_films",
+            "indian_book_author" => "india_books",
+            _ => "india_map",
+        },
+        "api" => match cat {
+            "film_and_tv" | "film" => "world_films",
+            "television" | "cartoon_animations" => "tv_shows",
+            "musicals_theatres" => "arts_books",
+            "music" => "world_music",
+            "science" | "science_nature" | "computers" | "mathematics" | "gadgets" | "animals" | "vehicles" => {
+                "science_tech"
+            }
+            "geography" => "world_geography",
+            "history" | "mythology" | "politics" => "world_history",
+            "sport_and_leisure" | "sports" => "world_sport",
+            "video_games" | "board_games" => "video_games",
+            "japanese_anime_manga" | "comics" => "anime_comics",
+            "arts_and_literature" | "art" | "books" => "arts_books",
+            "food_and_drink" => "food_drink",
+            "society_and_culture" => "society_culture",
+            _ => "general_knowledge",
+        },
         // Anything else (tests, ad-hoc files): the category is the theme, on the question's own side.
-        _ => (cat, if region == "india" { "india" } else { "world" }),
+        _ => return (cat.to_string(), (if region == "india" { "india" } else { "world" }).to_string()),
     };
-    (theme.to_string(), side.to_string())
+    (theme.to_string(), side_of(theme).to_string())
+}
+
+/// Themes on the world side of the India/world split; every other theme is India's.
+const WORLD_THEMES: &[&str] = &[
+    "world_tv", "hollywood", "anime_gaming", "football_f1", "harry_potter", "game_of_thrones", "mcu_movies", "pokemon",
+    "disney", "world_films", "tv_shows", "video_games", "anime_comics", "world_music", "science_tech", "world_geography",
+    "world_history", "world_sport", "arts_books", "food_drink", "society_culture", "general_knowledge",
+];
+
+fn side_of(theme: &str) -> &'static str {
+    if WORLD_THEMES.contains(&theme) { "world" } else { "india" }
+}
+
+/// `dropped.json` in the bank: questions left out on review (too old, too
+/// niche, dated...), as `{reason: [question ids]}`, so a fresh download of a
+/// database doesn't bring them back.
+fn read_dropped(dir: &Path) -> HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("dropped.json")) else {
+        return HashSet::new();
+    };
+    match serde_json::from_str::<HashMap<String, Vec<String>>>(&text) {
+        Ok(reasons) => reasons.into_values().flatten().collect(),
+        Err(err) => {
+            tracing::warn!("quiz: dropped.json ignored: {}", err);
+            HashSet::new()
+        }
+    }
+}
+
+/// `retheme.json` in the bank: hand-picked questions from other files that
+/// belong to a newer topic's theme (the Pokémon questions from the downloaded
+/// databases, say), as `{theme: [question ids]}`. Returns id -> theme.
+fn read_retheme(dir: &Path) -> HashMap<String, String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("retheme.json")) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str::<HashMap<String, Vec<String>>>(&text) {
+        Ok(themes) => themes
+            .into_iter()
+            .flat_map(|(theme, ids)| ids.into_iter().map(move |id| (id, theme.clone())))
+            .collect(),
+        Err(err) => {
+            tracing::warn!("quiz: retheme.json ignored: {}", err);
+            HashMap::new()
+        }
+    }
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Option<String> {
@@ -2507,6 +2656,79 @@ pub fn spawn_weekly_news(ctx: Context, deps: VizierDependencies, agent_id: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_files_split_and_hand_picked_questions_move_theme() {
+        let workspace = std::env::temp_dir().join(format!("quizretheme-{}", std::process::id()));
+        let bank = workspace.join("quizbank");
+        std::fs::create_dir_all(bank.join("ai")).unwrap();
+        std::fs::create_dir_all(bank.join("api")).unwrap();
+        let row = |id: &str, cat: &str, region: &str| {
+            format!(
+                r#"{{"id":"{}","kind":"text","q":"Question {}?","a":"A","alt":[],"options":[],"cat":"{}","region":"{}","diff":"easy","note":""}}"#,
+                id, id, cat, region
+            )
+        };
+        let culture = [row("c-food", "food", "india"), row("c-arts", "arts", "india")].join("\n");
+        std::fs::write(bank.join("ai").join("culture.jsonl"), culture).unwrap();
+        let api = [
+            row("otdb-poke", "video_games", "world"),
+            row("otdb-mario", "video_games", "world"),
+            row("otdb-naruto", "japanese_anime_manga", "world"),
+            row("otdb-1951", "film", "world"),
+        ]
+        .join("\n");
+        std::fs::write(bank.join("api").join("opentdb.jsonl"), api).unwrap();
+        std::fs::write(bank.join("retheme.json"), r#"{"pokemon": ["otdb-poke"], "bollywood_songs": ["c-arts"]}"#).unwrap();
+        std::fs::write(bank.join("dropped.json"), r#"{"old": ["otdb-1951"]}"#).unwrap();
+        let conn = open_conn(workspace.to_str().unwrap()).unwrap();
+        let theme = |id: &str| -> (String, String) {
+            conn.query_row("SELECT theme, theme_region FROM questions WHERE id = ?1", params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+        };
+        assert_eq!(theme("c-food"), ("indian_food".into(), "india".into()));
+        assert_eq!(theme("c-arts"), ("bollywood_songs".into(), "india".into()));
+        assert_eq!(theme("otdb-poke"), ("pokemon".into(), "world".into()));
+        assert_eq!(theme("otdb-mario"), ("video_games".into(), "world".into()));
+        assert_eq!(theme("otdb-naruto"), ("anime_comics".into(), "world".into()));
+        let dropped: i64 =
+            conn.query_row("SELECT COUNT(*) FROM questions WHERE id = 'otdb-1951'", [], |r| r.get(0)).unwrap();
+        assert_eq!(dropped, 0);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// A new topic file must be added to a genre, or it only ever shows up in the mix.
+    #[test]
+    fn every_bank_theme_belongs_to_a_genre() {
+        // The vote is one button per genre plus the mix, and a message holds at most 25 buttons.
+        assert!(GENRES.len() + 1 <= 25, "{} genres won't fit on the vote", GENRES.len());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("quizbank");
+        let mut files = Vec::new();
+        collect_jsonl(&root, &mut files);
+        let moved = read_retheme(&root);
+        let in_genre = |theme: &str| GENRES.iter().any(|g| g.themes.contains(&theme));
+        let mut missing: std::collections::BTreeSet<String> = moved.values().filter(|t| !in_genre(t)).cloned().collect();
+        for file in &files {
+            let folder = file.parent().and_then(|p| p.file_name()).unwrap().to_string_lossy().into_owned();
+            if !["ai", "api", "wikidata"].contains(&folder.as_str()) {
+                continue;
+            }
+            let stem = file.file_stem().unwrap().to_string_lossy().into_owned();
+            for line in std::fs::read_to_string(file).unwrap().lines().filter(|l| !l.trim().is_empty()) {
+                let Ok(q) = serde_json::from_str::<Question>(line) else {
+                    continue;
+                };
+                let theme = moved.get(&q.id).cloned().unwrap_or_else(|| theme_for(&folder, &stem, &q.cat, &q.region).0);
+                if !in_genre(&theme) {
+                    missing.insert(theme);
+                }
+            }
+        }
+        assert!(missing.is_empty(), "themes in no genre: {:?}", missing);
+    }
 
     #[test]
     fn round_top_three_breaks_ties_by_who_got_there_first() {
