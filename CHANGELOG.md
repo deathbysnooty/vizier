@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.63] - 2026-09-11
+
+### 🐛 Bug Fixes
+
+- *(discord)* Quotes work for everyone in admin-only mode
 ## [0.10.62] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Quote card style exploration (11 styles)
 - *(discord)* Quote card styles - noir, rang, spotlight, scroll
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.62
 ## [0.10.61] - 2026-09-11
 
 ### 🚀 Features
