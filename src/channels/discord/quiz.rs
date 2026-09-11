@@ -12,7 +12,7 @@
 //! weekly board is a filter on the same table and the all-time leader holds
 //! the Quiz Leader role.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -459,6 +459,64 @@ struct Vote {
 }
 
 static VOTE: LazyLock<Mutex<Option<Vote>>> = LazyLock::new(|| Mutex::new(None));
+
+/// The current round (the questions between two genre votes): its own points,
+/// separate from the all-time ones, announced as a top 3 when the round ends.
+/// Kept in memory; a restart starts a fresh round.
+#[derive(Default)]
+struct Board {
+    label: String,
+    asked: u32,
+    /// user -> (points this round, order of the point that reached that total)
+    scores: HashMap<u64, (u32, u64)>,
+    wins: u64,
+}
+
+static BOARD: LazyLock<Mutex<Board>> = LazyLock::new(|| Mutex::new(Board::default()));
+
+fn new_round(label: &str) {
+    *BOARD.lock() = Board { label: label.to_string(), ..Default::default() };
+}
+
+/// +1 for this round; returns the member's round total.
+fn round_point(user: u64) -> u32 {
+    let mut board = BOARD.lock();
+    board.wins += 1;
+    let order = board.wins;
+    let entry = board.scores.entry(user).or_insert((0, 0));
+    entry.0 += 1;
+    entry.1 = order;
+    entry.0
+}
+
+/// Most points first; on a tie, whoever got there first.
+fn standings(scores: &HashMap<u64, (u32, u64)>) -> Vec<(u64, u32, u64)> {
+    let mut rows: Vec<(u64, u32, u64)> = scores.iter().map(|(u, (p, o))| (*u, *p, *o)).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    rows
+}
+
+/// The end-of-round message: the round's top 3.
+fn round_summary(board: &Board) -> String {
+    let rows = standings(&board.scores);
+    let answered: u32 = rows.iter().map(|r| r.1).sum();
+    let mut text = format!("🏁 **{} round over!** {} of {} questions answered.", board.label, answered, board.asked);
+    if rows.is_empty() {
+        text.push_str("\nNobody scored this round.");
+        return text;
+    }
+    text.push_str(" Top of the round:");
+    for (i, (user, points, _)) in rows.iter().take(3).enumerate() {
+        let medal = ["🥇", "🥈", "🥉"][i];
+        text.push_str(&format!("\n{} <@{}> · **{}**", medal, user, points));
+    }
+    let shown = rows.len().min(3);
+    let tied = rows.windows(2).take(shown).any(|w| w[0].1 == w[1].1);
+    if tied {
+        text.push_str("\n-# Tied scores go to whoever got there first.");
+    }
+    text
+}
 
 /// The theme a bank question is scheduled under, and which side of the
 /// India/world split that theme sits on. Every written topic is its own theme;
@@ -929,6 +987,12 @@ fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
     if !q.diff.is_empty() {
         footer.push_str(&format!(" · {}", q.diff));
     }
+    {
+        let board = BOARD.lock();
+        if board.asked > 0 {
+            footer.push_str(&format!(" · {} round {}/{}", board.label, board.asked, BLOCK));
+        }
+    }
     CreateEmbed::new()
         .title(format!("Question #{}", round))
         .description(text)
@@ -970,10 +1034,10 @@ fn components(
     rows
 }
 
-fn celebrate(user: u64, q: &Question, total: i64) -> String {
+fn celebrate(user: u64, q: &Question, this_round: u32, total: i64) -> String {
     let verbs = ["got it", "nailed it", "was fastest", "is spot on", "takes the point"];
     let verb = verbs[rand::random::<u32>() as usize % verbs.len()];
-    format!("✅ <@{}> {}! Answer: **{}** · +1 · total **{}**", user, verb, q.a, total)
+    format!("✅ <@{}> {}! Answer: **{}** · +1 · this round **{}** · total **{}**", user, verb, q.a, this_round, total)
 }
 
 // --- the loop ---------------------------------------------------------------
@@ -1020,7 +1084,7 @@ pub async fn start_command(
          👇 Multiple choice: press a button. A wrong pick means a 1-minute wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
          ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
-         🗳️ Every {} questions, everyone votes on the genre for the next round.\n\
+         🗳️ Rounds of {} questions: each round has its own scores, its top 3 are announced at the end, then everyone votes on the next round's genre.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
         count, SKIPS_NEEDED, BLOCK, ROLE_NAME
@@ -1083,6 +1147,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
     // The first block after a start is a mix; every block after that is voted on.
     let mut genre: Option<&'static Genre> = None;
     let mut in_block = 0u32;
+    new_round("🎲 Mix");
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -1095,7 +1160,13 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             continue;
         }
         if in_block >= BLOCK {
+            let summary = round_summary(&BOARD.lock());
+            let _ = channel
+                .send_message(&ctx.http, CreateMessage::new().content(summary).allowed_mentions(CreateAllowedMentions::new()))
+                .await;
+            tokio::time::sleep(GAP).await;
             genre = run_vote(&ctx, channel).await;
+            new_round(genre.map(|g| g.label).unwrap_or("🎲 Mix"));
             in_block = 0;
             continue;
         }
@@ -1106,6 +1177,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
         };
         recent.push(&question);
         in_block += 1;
+        BOARD.lock().asked = in_block;
         let round = next_round();
         let (options, correct) =
             if question.is_mcq() { shuffled(&question.options, &question.a) } else { (Vec::new(), 0) };
@@ -1208,7 +1280,7 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
             {
                 live.winner = Some(user);
                 live.done.notify_one();
-                Some(live.question.clone())
+                Some((live.question.clone(), round_point(user)))
             }
             _ => None,
         }
@@ -1216,11 +1288,11 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
     if won.is_none() {
         note_chatter(ctx, 1);
     }
-    if let Some(q) = won {
+    if let Some((q, this_round)) = won {
         let total = add_point(user, &q.id);
         let _ = msg.react(&ctx.http, '✅').await;
         let reply = CreateMessage::new()
-            .content(celebrate(user, &q, total))
+            .content(celebrate(user, &q, this_round, total))
             .reference_message(msg)
             .allowed_mentions(CreateAllowedMentions::new());
         let _ = msg.channel_id.send_message(&ctx.http, reply).await;
@@ -1481,7 +1553,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Ruled,
         Wait(u64),
         Wrong,
-        Right(Question, Vec<String>, usize),
+        Right(Question, Vec<String>, usize, u32),
     }
     let click = {
         let mut guard = LIVE.lock();
@@ -1502,7 +1574,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
                 } else if choice == live.correct {
                     live.winner = Some(user);
                     live.done.notify_one();
-                    Click::Right(live.question.clone(), live.options.clone(), live.correct)
+                    Click::Right(live.question.clone(), live.options.clone(), live.correct, round_point(user))
                 } else {
                     // A wrong pick costs a minute, and that option stays ruled out for them.
                     let entry = live.tried.entry(user).or_insert_with(|| (std::time::Instant::now(), HashSet::new()));
@@ -1521,14 +1593,14 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Click::Ruled => whisper(ctx, component, "You already tried that one. Pick a different option.").await,
         Click::Wait(left) => whisper(ctx, component, format!("⏳ You can pick again in {}s.", left)).await,
         Click::Wrong => whisper(ctx, component, "❌ Wrong! You can pick again in 1 minute.").await,
-        Click::Right(q, options, correct) => {
+        Click::Right(q, options, correct, this_round) => {
             let total = add_point(user, &q.id);
             let update = CreateInteractionResponseMessage::new()
                 .embed(embed(round, &q, &Shown::Won(user)))
                 .components(components(round, &q, &options, correct, false, &[]));
             let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
             let note = CreateMessage::new()
-                .content(celebrate(user, &q, total))
+                .content(celebrate(user, &q, this_round, total))
                 .allowed_mentions(CreateAllowedMentions::new());
             let _ = component.channel_id.send_message(&ctx.http, note).await;
             if let Some(guild) = component.guild_id {
@@ -2435,6 +2507,25 @@ pub fn spawn_weekly_news(ctx: Context, deps: VizierDependencies, agent_id: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_top_three_breaks_ties_by_who_got_there_first() {
+        let board = Board {
+            label: "🎬 Bollywood".into(),
+            asked: 20,
+            // a and b both on 5, but b reached 5 first (win #9 before a's win #12).
+            scores: HashMap::from([(1, (5, 12)), (2, (5, 9)), (3, (7, 15)), (4, (1, 2))]),
+            wins: 18,
+        };
+        let order: Vec<u64> = standings(&board.scores).iter().map(|r| r.0).collect();
+        assert_eq!(order, vec![3, 2, 1, 4]);
+        let text = round_summary(&board);
+        assert!(text.contains("18 of 20 questions answered"), "{}", text);
+        assert!(text.contains("🥇 <@3> · **7**") && text.contains("🥈 <@2> · **5**") && text.contains("🥉 <@1> · **5**"));
+        assert!(!text.contains("<@4>") && text.contains("Tied"));
+        let empty = Board { label: "🎲 Mix".into(), asked: 20, ..Default::default() };
+        assert!(round_summary(&empty).contains("Nobody scored"));
+    }
 
     #[test]
     fn answers_forgive_slips_but_not_wrong_answers() {

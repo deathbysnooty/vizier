@@ -1110,6 +1110,10 @@ impl EventHandler for Handler {
 
 
     async fn ready(&self, ctx: Context, _ready: Ready) {
+        // A running quiz comes back first: registering the slash commands below
+        // takes the better part of a minute, and players notice the silence.
+        quiz::resume(&ctx, &self.1.storage, &self.0);
+
         // History import, downtime catch-up and the voice log each start once
         // per process. Ready fires again on every reconnect, and two copies of
         // one import would count every message twice.
@@ -1259,7 +1263,6 @@ impl EventHandler for Handler {
         let quiz_stop = CreateCommand::new("quizstop").description("admin only: stop the quiz until someone runs /quiz again");
         let _ = Command::create_global_command(ctx.http.clone(), quiz_stop).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
-        quiz::resume(&ctx, &self.1.storage, &self.0);
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
