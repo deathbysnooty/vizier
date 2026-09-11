@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.61] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quote cards
 ## [0.10.60] - 2026-09-10
 
 ### 🐛 Bug Fixes
 
 - *(discord)* Mark the voice log caught up even after a mid-import restart
 - *(discord)* /awards could not find fonts on the server
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.60
 ## [0.10.59] - 2026-09-10
 
 ### 🚀 Features
