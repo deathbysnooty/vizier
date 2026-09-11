@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.62] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quote card style exploration (11 styles)
+- *(discord)* Quote card styles - noir, rang, spotlight, scroll
 ## [0.10.61] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Quote cards
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.61
 ## [0.10.60] - 2026-09-10
 
 ### 🐛 Bug Fixes
