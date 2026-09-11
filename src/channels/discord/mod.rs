@@ -2418,12 +2418,12 @@ Ye message sirf tumhe dikh raha hai."#,
 
         // "@Loduchand quote this" as a reply makes a quote card. Anyone can ask,
         // in any channel the bot can see - the same reach as the right-click
-        // Quote - because it costs no tokens and never reaches the model. It
-        // still honours a pause and admin-only mode, like any other mention.
+        // Quote - because it costs no tokens and never reaches the model. That
+        // includes admin-only mode, which exists to stop the bot chatting with
+        // everyone: a quote is not a chat. A pause still stops it, since that
+        // is the bot switched off.
         if !is_dm && quote::is_request(&msg, ctx.cache.current_user().id.get()) {
-            if is_paused(&self.1.storage, &agent_id).await
-                || (is_admin_only(&self.1.storage, &agent_id).await && !author_is_admin)
-            {
+            if is_paused(&self.1.storage, &agent_id).await {
                 return;
             }
             let original = match msg.referenced_message.as_deref() {
