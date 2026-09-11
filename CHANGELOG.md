@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.70] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Quiz round scores with a top 3, resume first, six new topics
 ## [0.10.69] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Quiz genre vote every 20 questions
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.69
 ## [0.10.68] - 2026-09-11
 
 ### 🚀 Features
