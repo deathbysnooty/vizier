@@ -3,8 +3,8 @@
 //! One question at a time and the first right answer takes the point. Typed
 //! questions forgive small spelling slips; multiple choice gives each person
 //! one click. There is no time limit: a question stays, moved back to the
-//! bottom of the channel as chat piles up, until someone answers it or enough
-//! people `!skip` it. The quiz stays on across restarts once started.
+//! bottom of the channel as chat piles up, until someone answers it or an
+//! admin `!skip`s it. The quiz stays on across restarts once started.
 //!
 //! Questions live in quiz.db, loaded at every startup from the JSONL files
 //! under `{workspace}/quizbank/`. Points are a log, one row per point, so the
@@ -35,8 +35,6 @@ use crate::dependencies::VizierDependencies;
 use crate::storage::VizierStorage;
 
 const GAP: Duration = Duration::from_secs(4);
-/// `!skip` votes from different members that pass over a question. One admin is enough.
-const SKIPS_NEEDED: usize = 3;
 /// Time between two `!hint`s on the same question.
 const HINT_COOLDOWN: Duration = Duration::from_secs(5);
 /// Wrong options `!hint` may knock out of a multiple-choice question.
@@ -149,9 +147,7 @@ struct Live {
     skipped: bool,
     /// Who has used their one multiple-choice click.
     tried: HashSet<u64>,
-    /// Who has typed `!skip` on this question.
-    skip_votes: HashSet<u64>,
-    /// Passed over by `!skip`.
+    /// Passed over by an admin's `!skip`.
     passed: bool,
     done: Arc<Notify>,
 }
@@ -584,7 +580,7 @@ fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
     match shown {
         Shown::Open { hint } => {
             let how = if q.is_mcq() { "👇 Pick an option, one try each" } else { "✍️ Type your answer" };
-            text.push_str(&format!("\n{} · no time limit · stuck? `!hint` or `!skip`", how));
+            text.push_str(&format!("\n{} · no time limit · stuck? `!hint`", how));
             if let Some(hint) = hint {
                 text.push_str(&format!("\n💡 Hint: `{}`", hint));
             }
@@ -700,10 +696,10 @@ pub async fn start_command(
          ✍️ Typed questions: the first correct answer wins, and small spelling slips are fine.\n\
          👇 Multiple choice: press a button, one try per question.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
-         ⏭️ No time limit: a question stays until someone gets it. Stuck? {} people typing `!skip`, or one admin, moves on.\n\
+         ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
-        count, SKIPS_NEEDED, ROLE_NAME
+        count, ROLE_NAME
     );
     let _ = command
         .create_response(
@@ -785,7 +781,6 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             winner: None,
             skipped: false,
             tried: HashSet::new(),
-            skip_votes: HashSet::new(),
             passed: false,
             done: done.clone(),
         });
@@ -834,7 +829,7 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
         return true;
     }
     if msg.content.trim().eq_ignore_ascii_case("!skip") {
-        vote_skip(ctx, msg).await;
+        admin_skip(ctx, msg).await;
         return true;
     }
     if msg.content.chars().count() > 80 {
@@ -876,37 +871,21 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
     true
 }
 
-/// `!skip`: three different people, or one admin, pass over the open question.
-async fn vote_skip(ctx: &Context, msg: &Message) {
-    let user = msg.author.id.get();
-    let admin = super::admin_ids().contains(&user);
-    let votes = {
-        let mut guard = LIVE.lock();
-        match guard.as_mut() {
-            Some(live) if live.is_open() => {
-                live.skip_votes.insert(user);
-                let count = live.skip_votes.len();
-                if admin || count >= SKIPS_NEEDED {
-                    live.passed = true;
-                    live.done.notify_one();
-                    None
-                } else {
-                    Some(count)
-                }
-            }
-            _ => return,
-        }
-    };
-    if let Some(count) = votes {
-        let text = format!(
-            "⏭️ Skip vote {}/{}. {} more to skip this question.",
-            count,
-            SKIPS_NEEDED,
-            SKIPS_NEEDED - count
-        );
-        let reply = CreateMessage::new().content(text).reference_message(msg).allowed_mentions(CreateAllowedMentions::new());
+/// `!skip`: an admin passes over the open question; everyone else is pointed to `!hint`.
+async fn admin_skip(ctx: &Context, msg: &Message) {
+    if !super::admin_ids().contains(&msg.author.id.get()) {
+        let reply = CreateMessage::new()
+            .content("Only admins can skip a question. Try `!hint`.")
+            .reference_message(msg)
+            .allowed_mentions(CreateAllowedMentions::new());
         let _ = msg.channel_id.send_message(&ctx.http, reply).await;
         note_chatter(ctx, 2);
+        return;
+    }
+    let mut guard = LIVE.lock();
+    if let Some(live) = guard.as_mut().filter(|live| live.is_open()) {
+        live.passed = true;
+        live.done.notify_one();
     }
 }
 
