@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.72] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* Crown each quiz round's winner as that genre's champion
 ## [0.10.71] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* 23 quiz genres, split mixed topics, hand-picked theme moves and drops
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.71
 ## [0.10.70] - 2026-09-11
 
 ### 🚀 Features
