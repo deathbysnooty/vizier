@@ -3,8 +3,9 @@
 //! One question at a time and the first right answer takes the point. Typed
 //! questions forgive small spelling slips; multiple choice gives each person
 //! one click. There is no time limit: a question stays, moved back to the
-//! bottom of the channel as chat piles up, until someone answers it or an
-//! admin `!skip`s it. The quiz stays on across restarts once started.
+//! bottom of the channel as chat piles up, until someone answers it or it is
+//! skipped (one admin or three members typing `!skip`). The quiz stays on
+//! across restarts once started.
 //!
 //! Questions live in quiz.db, loaded at every startup from the JSONL files
 //! under `{workspace}/quizbank/`. Points are a log, one row per point, so the
@@ -37,6 +38,10 @@ use crate::storage::VizierStorage;
 const GAP: Duration = Duration::from_secs(4);
 /// Time between two `!hint`s on the same question.
 const HINT_COOLDOWN: Duration = Duration::from_secs(5);
+/// `!skip` votes from different members that pass over a question. One admin is enough.
+const SKIPS_NEEDED: usize = 3;
+/// After a wrong multiple-choice pick, how long before that member may pick again.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Wrong options `!hint` may knock out of a multiple-choice question.
 const MAX_KNOCKOUTS: usize = 2;
 /// Messages under the question before it is moved back to the bottom of the channel.
@@ -143,9 +148,11 @@ struct Live {
     below: u32,
     last_bump: std::time::Instant,
     winner: Option<u64>,
-    /// Who has used their one multiple-choice click.
-    tried: HashSet<u64>,
-    /// Passed over by an admin's `!skip`.
+    /// Multiple-choice guesses so far: when each member last picked wrong, and which options they ruled out.
+    tried: std::collections::HashMap<u64, (std::time::Instant, HashSet<usize>)>,
+    /// Who has typed `!skip` on this question.
+    skip_votes: HashSet<u64>,
+    /// Passed over by `!skip`.
     passed: bool,
     done: Arc<Notify>,
 }
@@ -576,8 +583,8 @@ fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
     text.push_str(&format!("**{}**\n", q.q));
     match shown {
         Shown::Open { hint } => {
-            let how = if q.is_mcq() { "👇 Pick an option, one try each" } else { "✍️ Type your answer" };
-            text.push_str(&format!("\n{} · no time limit · stuck? `!hint`", how));
+            let how = if q.is_mcq() { "👇 Pick an option · a wrong pick waits 1 min" } else { "✍️ Type your answer" };
+            text.push_str(&format!("\n{} · no time limit · stuck? `!hint` or `!skip`", how));
             if let Some(hint) = hint {
                 text.push_str(&format!("\n💡 Hint: `{}`", hint));
             }
@@ -689,12 +696,12 @@ pub async fn start_command(
     let intro = format!(
         "🧠 **Quiz started!** {} questions ready.\n\
          ✍️ Typed questions: the first correct answer wins, and small spelling slips are fine.\n\
-         👇 Multiple choice: press a button, one try per question.\n\
+         👇 Multiple choice: press a button. A wrong pick means a 1-minute wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
-         ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`.\n\
+         ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
-        count, ROLE_NAME
+        count, SKIPS_NEEDED, ROLE_NAME
     );
     let _ = command
         .create_response(
@@ -801,7 +808,8 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             below: 0,
             last_bump: std::time::Instant::now(),
             winner: None,
-            tried: HashSet::new(),
+            tried: std::collections::HashMap::new(),
+            skip_votes: HashSet::new(),
             passed: false,
             done: done.clone(),
         });
@@ -850,7 +858,7 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
         return true;
     }
     if msg.content.trim().eq_ignore_ascii_case("!skip") {
-        admin_skip(ctx, msg).await;
+        vote_skip(ctx, msg).await;
         return true;
     }
     if msg.content.chars().count() > 80 {
@@ -892,21 +900,37 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
     true
 }
 
-/// `!skip`: an admin passes over the open question; everyone else is pointed to `!hint`.
-async fn admin_skip(ctx: &Context, msg: &Message) {
-    if !super::admin_ids().contains(&msg.author.id.get()) {
-        let reply = CreateMessage::new()
-            .content("Only admins can skip a question. Try `!hint`.")
-            .reference_message(msg)
-            .allowed_mentions(CreateAllowedMentions::new());
+/// `!skip`: one admin, or `SKIPS_NEEDED` different members, pass over the open question.
+async fn vote_skip(ctx: &Context, msg: &Message) {
+    let user = msg.author.id.get();
+    let admin = super::admin_ids().contains(&user);
+    let votes = {
+        let mut guard = LIVE.lock();
+        match guard.as_mut() {
+            Some(live) if live.is_open() => {
+                live.skip_votes.insert(user);
+                let count = live.skip_votes.len();
+                if admin || count >= SKIPS_NEEDED {
+                    live.passed = true;
+                    live.done.notify_one();
+                    None
+                } else {
+                    Some(count)
+                }
+            }
+            _ => return,
+        }
+    };
+    if let Some(count) = votes {
+        let text = format!(
+            "⏭️ Skip vote {}/{}. {} more to skip this question.",
+            count,
+            SKIPS_NEEDED,
+            SKIPS_NEEDED - count
+        );
+        let reply = CreateMessage::new().content(text).reference_message(msg).allowed_mentions(CreateAllowedMentions::new());
         let _ = msg.channel_id.send_message(&ctx.http, reply).await;
         note_chatter(ctx, 2);
-        return;
-    }
-    let mut guard = LIVE.lock();
-    if let Some(live) = guard.as_mut().filter(|live| live.is_open()) {
-        live.passed = true;
-        live.done.notify_one();
     }
 }
 
@@ -1119,7 +1143,8 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Over,
         Gone,
         Own,
-        Again,
+        Ruled,
+        Wait(u64),
         Wrong,
         Right(Question, Vec<String>, usize),
     }
@@ -1127,17 +1152,27 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         let mut guard = LIVE.lock();
         match guard.as_mut() {
             Some(live) if live.round == round && live.is_open() => {
+                let mine = live.tried.get(&user);
+                let wait = mine
+                    .and_then(|(at, _)| RETRY_AFTER.checked_sub(at.elapsed()))
+                    .filter(|left| !left.is_zero());
                 if live.removed.contains(&choice) {
                     Click::Gone
                 } else if live.question.added_by == Some(user) {
                     Click::Own
-                } else if !live.tried.insert(user) {
-                    Click::Again
+                } else if mine.is_some_and(|(_, ruled)| ruled.contains(&choice)) {
+                    Click::Ruled
+                } else if let Some(left) = wait {
+                    Click::Wait(left.as_secs().max(1))
                 } else if choice == live.correct {
                     live.winner = Some(user);
                     live.done.notify_one();
                     Click::Right(live.question.clone(), live.options.clone(), live.correct)
                 } else {
+                    // A wrong pick costs a minute, and that option stays ruled out for them.
+                    let entry = live.tried.entry(user).or_insert_with(|| (std::time::Instant::now(), HashSet::new()));
+                    entry.0 = std::time::Instant::now();
+                    entry.1.insert(choice);
                     Click::Wrong
                 }
             }
@@ -1148,8 +1183,9 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Click::Over => whisper(ctx, component, "This question is already over.").await,
         Click::Gone => whisper(ctx, component, "That option was removed by a hint.").await,
         Click::Own => whisper(ctx, component, "You can't answer your own question 😏").await,
-        Click::Again => whisper(ctx, component, "One try per question. Wait for the next one.").await,
-        Click::Wrong => whisper(ctx, component, "❌ Wrong! That was your one try for this question.").await,
+        Click::Ruled => whisper(ctx, component, "You already tried that one. Pick a different option.").await,
+        Click::Wait(left) => whisper(ctx, component, format!("⏳ You can pick again in {}s.", left)).await,
+        Click::Wrong => whisper(ctx, component, "❌ Wrong! You can pick again in 1 minute.").await,
         Click::Right(q, options, correct) => {
             let total = add_point(user, &q.id);
             let update = CreateInteractionResponseMessage::new()
