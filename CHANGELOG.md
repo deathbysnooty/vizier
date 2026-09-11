@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.71] - 2026-09-11
+
+### 🚀 Features
+
+- *(discord)* 23 quiz genres, split mixed topics, hand-picked theme moves and drops
 ## [0.10.70] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Quiz round scores with a top 3, resume first, six new topics
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.70
 ## [0.10.69] - 2026-09-11
 
 ### 🚀 Features
