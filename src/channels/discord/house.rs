@@ -475,13 +475,17 @@ fn plan_progress() -> (i64, i64) {
 
 /// Works out who goes where, without touching anybody.
 ///
-/// Returns the plan in draft order, plus how many were passed over and why.
-async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)>, usize, usize) {
+/// Only ever plans members who have NO house yet, so running it a second time
+/// tops up the people who were missed instead of re-sorting the whole server.
+///
+/// Returns the plan in draft order, plus how many were passed over: bots, mods,
+/// and those already in a house.
+async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)>, usize, usize, usize) {
     // The role map is fetched ONCE: asking per member would be hundreds of
     // calls just to answer "is this a mod".
     let roles = guild.roles(&ctx.http).await.unwrap_or_default();
     let mut eligible: Vec<Member> = Vec::new();
-    let (mut bots, mut mods) = (0usize, 0usize);
+    let (mut bots, mut mods, mut settled) = (0usize, 0usize, 0usize);
     let mut after: Option<UserId> = None;
     loop {
         let page = match guild.members(&ctx.http, Some(1000), after).await {
@@ -496,6 +500,10 @@ async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)
                 bots += 1;
             } else if is_mod_with(&roles, member) {
                 mods += 1;
+            } else if house_of(member.user.id.get()).is_some() {
+                // Already has a house - leave them alone. This is what makes a
+                // second run a top-up rather than a re-sort of the server.
+                settled += 1;
             } else {
                 eligible.push(member.clone());
             }
@@ -517,20 +525,39 @@ async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)
     }
 
     let order = super::house_draft::ranked(&people);
-    let piles = super::house_draft::snake(&order, HOUSES.len());
-    // Back into draft order, so the run posts strongest first and the houses
-    // fill evenly as it goes.
-    let mut house_of_user: HashMap<u64, &'static House> = HashMap::new();
-    for (index, pile) in piles.iter().enumerate() {
-        if let Some(house) = HOUSES.get(index) {
-            for user in pile {
-                house_of_user.insert(*user, house);
+    let mut held = counts();
+    let plan: Vec<(u64, &'static House)> = if held.values().sum::<i64>() == 0 {
+        // Nobody sorted yet: deal the whole server serpentine, which is what
+        // makes the four houses come out evenly matched rather than merely
+        // equal in size.
+        let piles = super::house_draft::snake(&order, HOUSES.len());
+        let mut house_of_user: HashMap<u64, &'static House> = HashMap::new();
+        for (index, pile) in piles.iter().enumerate() {
+            if let Some(house) = HOUSES.get(index) {
+                for user in pile {
+                    house_of_user.insert(*user, house);
+                }
             }
         }
-    }
-    let plan: Vec<(u64, &'static House)> =
-        order.iter().filter_map(|user| house_of_user.get(user).map(|house| (*user, *house))).collect();
-    (plan, bots, mods)
+        // Back into draft order, so the run posts strongest first.
+        order.iter().filter_map(|user| house_of_user.get(user).map(|house| (*user, *house))).collect()
+    } else {
+        // A top-up. Serpentine is wrong here - it deals as though the houses
+        // were empty - so each newcomer goes to whichever house is behind,
+        // strongest newcomer first.
+        order
+            .iter()
+            .map(|user| {
+                let house = HOUSES
+                    .iter()
+                    .min_by_key(|house| (held.get(house.key).copied().unwrap_or(0), house.key))
+                    .unwrap_or(&HOUSES[0]);
+                *held.entry(house.key).or_insert(0) += 1;
+                (*user, house)
+            })
+            .collect()
+    };
+    (plan, bots, mods, settled)
 }
 
 fn draft_buttons() -> Vec<CreateActionRow> {
@@ -542,7 +569,7 @@ fn draft_buttons() -> Vec<CreateActionRow> {
 }
 
 /// The table for a plan: where everyone would land, and the proof it is even.
-fn draft_preview(plan: &[(u64, &'static House)], bots: usize, mods: usize) -> CreateEmbed {
+fn draft_preview(plan: &[(u64, &'static House)], bots: usize, mods: usize, settled: usize) -> CreateEmbed {
     let order: Vec<u64> = plan.iter().map(|(user, _)| *user).collect();
     let piles: Vec<Vec<u64>> = HOUSES
         .iter()
@@ -565,13 +592,19 @@ fn draft_preview(plan: &[(u64, &'static House)], bots: usize, mods: usize) -> Cr
         _ => 0,
     };
     let first: Vec<String> = plan.iter().take(6).map(|(user, house)| format!("{} <@{}>", house.crest, user)).collect();
+    let already = if settled > 0 {
+        format!("\n-# {} members already have a house and are left exactly as they are.", settled)
+    } else {
+        String::new()
+    };
     text.push_str(&format!(
-        "\n**{}** to sort · {} bots and {} mods passed over\n\
+        "\n**{}** to sort · {} bots and {} mods passed over{}\n\
          -# Strength is the sum of draft positions - the closer those four numbers, the more even the houses. \
          Spread here is {}.\n-# First picks: {}\n-# Roughly {} minutes of posting, one card each.",
         plan.len(),
         bots,
         mods,
+        already,
         spread,
         first.join(" · "),
         (plan.len() as f64 * DRAFT_BEAT.as_secs_f64() / 60.0).ceil() as u64
@@ -600,16 +633,19 @@ pub async fn draft_command(ctx: &Context, command: &CommandInteraction) {
     let thinking = CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
     let _ = command.create_response(&ctx.http, thinking).await;
 
-    let (plan, bots, mods) = build_plan(ctx, guild).await;
+    let (plan, bots, mods, settled) = build_plan(ctx, guild).await;
     if plan.is_empty() {
-        let reply = serenity::all::EditInteractionResponse::new()
-            .content("Nobody to sort - the member list came back empty, or everyone is a bot or a mod.");
-        let _ = command.edit_response(&ctx.http, reply).await;
+        let text = if settled > 0 {
+            format!("Nothing to do - all {} of them already have a house.", settled)
+        } else {
+            "Nobody to sort - the member list came back empty, or everyone is a bot or a mod.".to_string()
+        };
+        let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
         return;
     }
     store_plan(&plan);
     let reply = serenity::all::EditInteractionResponse::new()
-        .embed(draft_preview(&plan, bots, mods))
+        .embed(draft_preview(&plan, bots, mods, settled))
         .components(draft_buttons());
     let _ = command.edit_response(&ctx.http, reply).await;
 }
@@ -950,13 +986,13 @@ async fn draft_component(ctx: &Context, component: &ComponentInteraction, action
         "redraw" => {
             let thinking = CreateInteractionResponse::Acknowledge;
             let _ = component.create_response(&ctx.http, thinking).await;
-            let (plan, bots, mods) = build_plan(ctx, guild).await;
+            let (plan, bots, mods, settled) = build_plan(ctx, guild).await;
             if plan.is_empty() {
                 return;
             }
             store_plan(&plan);
             let edit = serenity::all::EditInteractionResponse::new()
-                .embed(draft_preview(&plan, bots, mods))
+                .embed(draft_preview(&plan, bots, mods, settled))
                 .components(draft_buttons());
             let _ = component.edit_response(&ctx.http, edit).await;
         }
