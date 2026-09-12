@@ -1332,6 +1332,10 @@ impl EventHandler for Handler {
             ));
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
+        let house_draft = CreateCommand::new("housedraft")
+            .description("admin only: work out who goes in which house, and show the plan before anything happens");
+        let _ = Command::create_global_command(ctx.http.clone(), house_draft).await;
+
         let house_roles = CreateCommand::new("houseroles")
             .description("admin only: make the four house roles and put the crests on them");
         let _ = Command::create_global_command(ctx.http.clone(), house_roles).await;
@@ -1363,6 +1367,11 @@ impl EventHandler for Handler {
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
         nudge::spawn(ctx.clone());
 
+        // A sorting interrupted by a restart carries on from where it stopped.
+        if let Some(guild) = ctx.cache.guilds().first().copied() {
+            house::resume_draft(&ctx, guild);
+        }
+
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
         let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
@@ -1392,7 +1401,7 @@ impl EventHandler for Handler {
                 battle::on_component(&ctx, component).await;
                 return;
             }
-            if id.starts_with("houselist:") {
+            if id.starts_with("houselist:") || id.starts_with("housedraft:") {
                 house::on_component(&ctx, component).await;
                 return;
             }
@@ -1861,6 +1870,9 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            if command.data.name == "housedraft" {
+                house::draft_command(&ctx, &command).await;
+            }
             if command.data.name == "houseroles" {
                 house::roles_command(&ctx, &command).await;
             }

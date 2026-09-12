@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
+use std::time::Duration;
 
 use chrono::{Datelike, Utc};
 use parking_lot::Mutex;
@@ -124,6 +125,10 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
              id INTEGER PRIMARY KEY AUTOINCREMENT, house TEXT NOT NULL, points INTEGER NOT NULL,
              reason TEXT NOT NULL, awarded_by INTEGER NOT NULL, ts INTEGER NOT NULL);
          CREATE INDEX IF NOT EXISTS awards_house_ts ON awards (house, ts);
+         CREATE TABLE IF NOT EXISTS draft (
+             user_id INTEGER PRIMARY KEY, house TEXT NOT NULL, seq INTEGER NOT NULL,
+             done INTEGER NOT NULL DEFAULT 0);
+         CREATE INDEX IF NOT EXISTS draft_todo ON draft (done, seq);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     let _ = DB.set(Mutex::new(conn));
@@ -319,11 +324,17 @@ async fn card(sorted: Sorted) -> Option<Vec<u8>> {
 /// Sorts a new arrival, gives them the role, and announces it with the card.
 async fn sort_member(ctx: &Context, guild: GuildId, member: &Member, channel: ChannelId) -> &'static House {
     let _one_at_a_time = SORTING.lock().await;
-    let user = member.user.id.get();
     let house = random_house();
-    remember(user, house, "hat");
-    wear_house(ctx, guild, user, house).await;
+    remember(member.user.id.get(), house, "hat");
+    wear_house(ctx, guild, member.user.id.get(), house).await;
+    announce(ctx, member, house, channel).await;
+    house
+}
 
+/// Gives out the role and posts the card for a house already decided - by the
+/// hat for an arrival, or by the draft for everyone who was already here.
+async fn announce(ctx: &Context, member: &Member, house: &'static House, channel: ChannelId) {
+    let user = member.user.id.get();
     let line = verdict(house);
     let sorted = Sorted {
         name: display(member),
@@ -342,7 +353,6 @@ async fn sort_member(ctx: &Context, guild: GuildId, member: &Member, channel: Ch
     if let Err(err) = channel.send_message(&ctx.http, message).await {
         tracing::warn!("house: sorting card not posted: {}", err);
     }
-    house
 }
 
 // --- commands ---------------------------------------------------------------
@@ -398,6 +408,280 @@ pub async fn roles_command(ctx: &Context, command: &CommandInteraction) {
     );
     let reply = serenity::all::EditInteractionResponse::new().content(format!("**Houses**\n{}", lines.join("\n")));
     let _ = command.edit_response(&ctx.http, reply).await;
+}
+
+// --- the draft --------------------------------------------------------------
+
+/// Between one member and the next. Discord tolerates about a message a
+/// second into one channel, and each member is a role change plus a card.
+const DRAFT_BEAT: Duration = Duration::from_millis(1200);
+/// How often the running total is updated, in members.
+const PROGRESS_EVERY: usize = 25;
+
+/// Writes the plan down, replacing any previous one.
+///
+/// On disk rather than in memory so a restart half way through a twelve-minute
+/// run picks up where it left off instead of sorting people twice.
+fn store_plan(plan: &[(u64, &'static House)]) {
+    if let Some(db) = DB.get() {
+        let mut conn = db.lock();
+        let Ok(tx) = conn.transaction() else {
+            return;
+        };
+        let _ = tx.execute("DELETE FROM draft", []);
+        for (seq, (user, house)) in plan.iter().enumerate() {
+            let _ = tx.execute(
+                "INSERT INTO draft (user_id, house, seq, done) VALUES (?1, ?2, ?3, 0)",
+                params![*user as i64, house.key, seq as i64],
+            );
+        }
+        let _ = tx.commit();
+    }
+}
+
+/// The plan's remaining members, in draft order.
+fn pending_plan() -> Vec<(u64, &'static House)> {
+    let mut out = Vec::new();
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id, house FROM draft WHERE done = 0 ORDER BY seq") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))) {
+                for (user, key) in rows.flatten() {
+                    if let Some(house) = house(&key) {
+                        out.push((user, house));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn mark_drafted(user: u64) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute("UPDATE draft SET done = 1 WHERE user_id = ?1", params![user as i64]);
+    }
+}
+
+/// How many of the plan are done, and how many there are.
+fn plan_progress() -> (i64, i64) {
+    let Some(db) = DB.get() else {
+        return (0, 0);
+    };
+    let conn = db.lock();
+    let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
+    (count("SELECT COUNT(*) FROM draft WHERE done = 1"), count("SELECT COUNT(*) FROM draft"))
+}
+
+/// Works out who goes where, without touching anybody.
+///
+/// Returns the plan in draft order, plus how many were passed over and why.
+async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)>, usize, usize) {
+    // The role map is fetched ONCE: asking per member would be hundreds of
+    // calls just to answer "is this a mod".
+    let roles = guild.roles(&ctx.http).await.unwrap_or_default();
+    let mut eligible: Vec<Member> = Vec::new();
+    let (mut bots, mut mods) = (0usize, 0usize);
+    let mut after: Option<UserId> = None;
+    loop {
+        let page = match guild.members(&ctx.http, Some(1000), after).await {
+            Ok(page) => page,
+            Err(err) => {
+                tracing::warn!("house: member list failed: {}", err);
+                break;
+            }
+        };
+        for member in &page {
+            if member.user.bot {
+                bots += 1;
+            } else if is_mod_with(&roles, member) {
+                mods += 1;
+            } else {
+                eligible.push(member.clone());
+            }
+        }
+        if page.len() < 1000 {
+            break;
+        }
+        after = page.last().map(|m| m.user.id);
+    }
+
+    // Everyone gets a place in the order, whether or not they have ever said
+    // anything: the activity only decides WHERE in the order they land.
+    let since = Utc::now().timestamp() - 60 * 24 * 3600;
+    let measured = super::house_draft::activity(since);
+    let mut people: HashMap<u64, super::house_draft::Activity> = HashMap::new();
+    for member in &eligible {
+        let id = member.user.id.get();
+        people.insert(id, measured.get(&id).copied().unwrap_or_default());
+    }
+
+    let order = super::house_draft::ranked(&people);
+    let piles = super::house_draft::snake(&order, HOUSES.len());
+    // Back into draft order, so the run posts strongest first and the houses
+    // fill evenly as it goes.
+    let mut house_of_user: HashMap<u64, &'static House> = HashMap::new();
+    for (index, pile) in piles.iter().enumerate() {
+        if let Some(house) = HOUSES.get(index) {
+            for user in pile {
+                house_of_user.insert(*user, house);
+            }
+        }
+    }
+    let plan: Vec<(u64, &'static House)> =
+        order.iter().filter_map(|user| house_of_user.get(user).map(|house| (*user, *house))).collect();
+    (plan, bots, mods)
+}
+
+fn draft_buttons() -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
+        CreateButton::new("housedraft:go").label("Sort them").style(ButtonStyle::Success),
+        CreateButton::new("housedraft:redraw").label("Redraw").style(ButtonStyle::Secondary),
+        CreateButton::new("housedraft:cancel").label("Cancel").style(ButtonStyle::Secondary),
+    ])]
+}
+
+/// The table for a plan: where everyone would land, and the proof it is even.
+fn draft_preview(plan: &[(u64, &'static House)], bots: usize, mods: usize) -> CreateEmbed {
+    let order: Vec<u64> = plan.iter().map(|(user, _)| *user).collect();
+    let piles: Vec<Vec<u64>> = HOUSES
+        .iter()
+        .map(|house| plan.iter().filter(|(_, theirs)| theirs.key == house.key).map(|(user, _)| *user).collect())
+        .collect();
+    let weights = super::house_draft::weights(&order, &piles);
+
+    let mut text = String::new();
+    for (index, house) in HOUSES.iter().enumerate() {
+        text.push_str(&format!(
+            "{} **{}** — {} members · strength {}\n",
+            house.crest,
+            house.name,
+            piles.get(index).map(|p| p.len()).unwrap_or(0),
+            weights.get(index).copied().unwrap_or(0)
+        ));
+    }
+    let spread = match (weights.iter().min(), weights.iter().max()) {
+        (Some(low), Some(high)) => high - low,
+        _ => 0,
+    };
+    let first: Vec<String> = plan.iter().take(6).map(|(user, house)| format!("{} <@{}>", house.crest, user)).collect();
+    text.push_str(&format!(
+        "\n**{}** to sort · {} bots and {} mods passed over\n\
+         -# Strength is the sum of draft positions - the closer those four numbers, the more even the houses. \
+         Spread here is {}.\n-# First picks: {}\n-# Roughly {} minutes of posting, one card each.",
+        plan.len(),
+        bots,
+        mods,
+        spread,
+        first.join(" · "),
+        (plan.len() as f64 * DRAFT_BEAT.as_secs_f64() / 60.0).ceil() as u64
+    ));
+    CreateEmbed::new().title("🎩 The Sorting - nothing has happened yet").description(text).colour(0x9B1B1B)
+}
+
+/// `/housedraft` - mods only: work out the plan and show it. Sorts nobody.
+pub async fn draft_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can run the draft.")).await;
+        return;
+    }
+    if meta_get("drafting").as_deref() == Some("on") {
+        let (done, all) = plan_progress();
+        let text = format!("A sorting is already running - {} of {} done.", done, all);
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+    // Walking the roster and reading three databases takes longer than the
+    // three seconds Discord gives a reply.
+    let thinking = CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+    let _ = command.create_response(&ctx.http, thinking).await;
+
+    let (plan, bots, mods) = build_plan(ctx, guild).await;
+    if plan.is_empty() {
+        let reply = serenity::all::EditInteractionResponse::new()
+            .content("Nobody to sort - the member list came back empty, or everyone is a bot or a mod.");
+        let _ = command.edit_response(&ctx.http, reply).await;
+        return;
+    }
+    store_plan(&plan);
+    let reply = serenity::all::EditInteractionResponse::new()
+        .embed(draft_preview(&plan, bots, mods))
+        .components(draft_buttons());
+    let _ = command.edit_response(&ctx.http, reply).await;
+}
+
+/// Sorts everyone in the stored plan, paced, and says so as it goes.
+///
+/// Spawned, never awaited by an interaction: this runs for minutes.
+async fn run_draft(ctx: Context, guild: GuildId, channel: ChannelId) {
+    meta_set("drafting", "on");
+    // From here on an arrival gets the hat too, so nobody joining mid-sorting
+    // is left houseless.
+    meta_set("sorting", "on");
+
+    let plan = pending_plan();
+    let (already, total) = plan_progress();
+    tracing::info!("house: sorting {} members into houses ({} already done)", plan.len(), already);
+
+    let opening = format!("🎩 **The Sorting begins.** {} members to place.", plan.len());
+    let mut progress = channel.send_message(&ctx.http, CreateMessage::new().content(opening)).await.ok();
+
+    let mut placed = already as usize;
+    for (user, house) in plan {
+        if meta_get("drafting").as_deref() != Some("on") {
+            tracing::info!("house: sorting stopped after {} members", placed);
+            break;
+        }
+        match guild.member(&ctx.http, UserId::new(user)).await {
+            Ok(member) => {
+                remember(user, house, "draft");
+                wear_house(&ctx, guild, user, house).await;
+                announce(&ctx, &member, house, channel).await;
+            }
+            // Left between the plan and their turn: skip, don't stall.
+            Err(err) => tracing::warn!("house: {} could not be sorted: {}", user, err),
+        }
+        mark_drafted(user);
+        placed += 1;
+        if placed % PROGRESS_EVERY == 0 {
+            if let Some(message) = &mut progress {
+                let text = format!("🎩 **The Sorting** — {} of {} placed.", placed, total);
+                let edit = serenity::all::EditMessage::new().content(text);
+                let _ = message.edit(&ctx.http, edit).await;
+            }
+        }
+        tokio::time::sleep(DRAFT_BEAT).await;
+    }
+
+    meta_clear("drafting");
+    let counts = counts();
+    let mut tally = String::new();
+    for house in HOUSES {
+        tally.push_str(&format!("{} **{}** — {}\n", house.crest, house.name, counts.get(house.key).copied().unwrap_or(0)));
+    }
+    let finished = CreateEmbed::new()
+        .title("🏰 The Sorting is done")
+        .description(format!("{}\n-# {} members placed. `/houselist` to see a house.", tally, placed))
+        .colour(0x9B1B1B);
+    let _ = channel.send_message(&ctx.http, CreateMessage::new().embed(finished)).await;
+    tracing::info!("house: sorting finished, {} placed", placed);
+}
+
+/// Picks a half-finished sorting back up after a restart.
+pub fn resume_draft(ctx: &Context, guild: GuildId) {
+    if meta_get("drafting").as_deref() != Some("on") {
+        return;
+    }
+    let Some(channel) = cards_channel() else {
+        tracing::warn!("house: a sorting was interrupted but no house channel is set");
+        return;
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move { run_draft(ctx, guild, channel).await });
 }
 
 // --- points -----------------------------------------------------------------
@@ -620,12 +904,82 @@ pub async fn list_command(ctx: &Context, command: &CommandInteraction) {
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }
 
-/// The Back/Next buttons under a house roll.
+/// Buttons under a house roll, and under the draft's preview.
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let mut parts = component.data.custom_id.split(':');
-    if parts.next() != Some("houselist") {
+    match parts.next() {
+        Some("houselist") => list_component(ctx, component, parts).await,
+        Some("housedraft") => draft_component(ctx, component, parts.next().unwrap_or("")).await,
+        _ => {}
+    }
+}
+
+/// Sort them / Redraw / Cancel on the draft preview.
+async fn draft_component(ctx: &Context, component: &ComponentInteraction, action: &str) {
+    let Some(guild) = component.guild_id else {
+        return;
+    };
+    if !super::admin_ids().contains(&component.user.id.get()) {
+        let reply = CreateInteractionResponseMessage::new().content("Only mods can do that.").ephemeral(true);
+        let _ = component.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
         return;
     }
+    match action {
+        "go" => {
+            let plan = pending_plan();
+            if plan.is_empty() {
+                let reply = CreateInteractionResponseMessage::new()
+                    .content("Nothing left to sort - run `/housedraft` again for a fresh plan.")
+                    .components(Vec::new());
+                let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(reply)).await;
+                return;
+            }
+            let channel = cards_channel().unwrap_or(component.channel_id);
+            let text = format!(
+                "🎩 Sorting **{}** members into houses, in <#{}>. Roughly {} minutes.\n\
+                 -# Arrivals from now on get the hat as they join.",
+                plan.len(),
+                channel.get(),
+                (plan.len() as f64 * DRAFT_BEAT.as_secs_f64() / 60.0).ceil() as u64
+            );
+            let reply = CreateInteractionResponseMessage::new().content(text).embeds(Vec::new()).components(Vec::new());
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(reply)).await;
+            let ctx = ctx.clone();
+            tokio::spawn(async move { run_draft(ctx, guild, channel).await });
+        }
+        "redraw" => {
+            let thinking = CreateInteractionResponse::Acknowledge;
+            let _ = component.create_response(&ctx.http, thinking).await;
+            let (plan, bots, mods) = build_plan(ctx, guild).await;
+            if plan.is_empty() {
+                return;
+            }
+            store_plan(&plan);
+            let edit = serenity::all::EditInteractionResponse::new()
+                .embed(draft_preview(&plan, bots, mods))
+                .components(draft_buttons());
+            let _ = component.edit_response(&ctx.http, edit).await;
+        }
+        "cancel" => {
+            if let Some(db) = DB.get() {
+                let _ = db.lock().execute("DELETE FROM draft", []);
+            }
+            let reply = CreateInteractionResponseMessage::new()
+                .content("Dropped. Nobody was sorted.")
+                .embeds(Vec::new())
+                .components(Vec::new());
+            let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(reply)).await;
+        }
+        _ => {}
+    }
+}
+
+/// The Back/Next buttons under a house roll.
+async fn list_component<'a>(
+    ctx: &Context,
+    component: &ComponentInteraction,
+    mut parts: impl Iterator<Item = &'a str>,
+) {
     let Some(house) = parts.next().and_then(house) else {
         return;
     };
@@ -732,6 +1086,15 @@ fn cards_channel() -> Option<ChannelId> {
 /// later no points - they are the ones running the competition. "Mod" means
 /// the bot's own admin list, or any role that can moderate.
 async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
+    match guild.roles(&ctx.http).await {
+        Ok(roles) => is_mod_with(&roles, member),
+        Err(_) => false,
+    }
+}
+
+/// The same test against a role map fetched once. The draft walks hundreds of
+/// members and must not ask Discord for the role list each time.
+fn is_mod_with(roles: &HashMap<RoleId, serenity::all::Role>, member: &Member) -> bool {
     if super::admin_ids().contains(&member.user.id.get()) {
         return true;
     }
@@ -742,9 +1105,6 @@ async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
         | Permissions::KICK_MEMBERS
         | Permissions::BAN_MEMBERS
         | Permissions::MODERATE_MEMBERS;
-    let Ok(roles) = guild.roles(&ctx.http).await else {
-        return false;
-    };
     member.roles.iter().any(|id| roles.get(id).is_some_and(|role| role.permissions.intersects(powers)))
 }
 
