@@ -3,8 +3,8 @@
 //! Everyone on the server belongs to one of four houses, held as a Discord role
 //! and a row in house.db. Nobody picks: the bot assigns. Members already here
 //! are dealt out by the draft, balanced on how active they are, and anyone
-//! arriving afterwards is sorted by the hat on the way in, with a card in the
-//! houses channel. Mods stay out of it altogether, and they name a captain per
+//! arriving afterwards is sorted by the hat on the way in, with a card beside
+//! their welcome. Mods stay out of it altogether, and they name a captain per
 //! house.
 //!
 //! The row in house.db is what makes a returner keep their house: Discord
@@ -1316,18 +1316,31 @@ fn is_mod_with(roles: &HashMap<RoleId, serenity::all::Role>, member: &Member) ->
 
 /// A new arrival gets sorted straight away, card and all. Someone who left and
 /// came back keeps the house they already had - their row outlives the leaving.
-pub async fn on_join(ctx: &Context, member: &Member, fallback: ChannelId) {
-    if !sorting_open() {
+pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
+    if member.user.bot {
         return;
     }
-    if house_of(member.user.id.get()).is_some() || member.user.bot {
+    // Someone coming back. Discord strips every role on the way out and hands
+    // none of them back, so the remembered house has to be PUT BACK ON - the
+    // row alone would leave them counted in a house they cannot see. Not a
+    // sorting: no card, no fanfare, just their colours returned. Deliberately
+    // not behind `sorting_open`, since restoring what someone already had is
+    // never the thing we are holding back.
+    if let Some(house) = house_of(member.user.id.get()) {
+        wear_house(ctx, member.guild_id, member.user.id.get(), house).await;
+        tracing::info!("house: {} came back, {} role restored", member.user.name, house.name);
+        return;
+    }
+    if !sorting_open() {
         return;
     }
     if is_mod(ctx, member.guild_id, member).await {
         tracing::info!("house: {} is a mod, left unsorted", member.user.name);
         return;
     }
-    let house = sort_member(ctx, member.guild_id, member, cards_channel().unwrap_or(fallback)).await;
+    // The card goes where the welcome just went. An arrival is a moment for
+    // the room that greeted them; the houses channel is for the bulk sorting.
+    let house = sort_member(ctx, member.guild_id, member, welcome).await;
     tracing::info!("house: sorted {} into {}", member.user.name, house.name);
 }
 
