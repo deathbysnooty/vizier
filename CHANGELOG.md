@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.78] - 2026-09-12
+
+### 🚀 Features
+
+- *(quiz)* A new round waits for someone to vote
+
+### 🐛 Bug Fixes
+
+- *(quiz)* Riddles and brain teasers stay as they were written
 ## [0.10.77] - 2026-09-12
 
 ### 🚀 Features
 
 - *(quiz)* Every question is multiple choice, and a better question card
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.77
 ## [0.10.76] - 2026-09-12
 
 ### ⚡ Performance
