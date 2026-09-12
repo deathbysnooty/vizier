@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.79] - 2026-09-12
+
+### 🚀 Features
+
+- *(quiz)* A wrong pick costs 20 seconds, not a minute
+
+### 💼 Other
+
+- Options written by hand for the last 195 typed questions
 ## [0.10.78] - 2026-09-12
 
 ### 🚀 Features
@@ -11,6 +20,10 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(quiz)* Riddles and brain teasers stay as they were written
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.78
 ## [0.10.77] - 2026-09-12
 
 ### 🚀 Features
