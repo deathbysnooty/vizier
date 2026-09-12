@@ -24,10 +24,10 @@ use chrono::{Datelike, Utc};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
-    ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
-    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateCommandOption, CreateEmbed,
-    CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditRole, GuildId,
-    Member, Permissions, RoleId, UserId,
+    ButtonStyle, ChannelId, ChannelType, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
+    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateChannel, CreateCommandOption,
+    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditRole, GuildId, Member, PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId, UserId,
 };
 
 use super::house_card::{self, Sorted};
@@ -408,6 +408,176 @@ pub async fn roles_command(ctx: &Context, command: &CommandInteraction) {
     );
     let reply = serenity::all::EditInteractionResponse::new().content(format!("**Houses**\n{}", lines.join("\n")));
     let _ = command.edit_response(&ctx.http, reply).await;
+}
+
+// --- common rooms -----------------------------------------------------------
+
+/// The category the four common rooms live under.
+const COMMON_ROOM_CATEGORY: &str = "The Houses";
+
+/// Each house's own room: channel name and the topic that goes on it. Named
+/// after where the houses actually live in the books.
+const COMMON_ROOMS: [(&str, &str, &str); 4] = [
+    ("gryffindor", "🦁│gryffindor-tower", "Gryffindor only. Behind the portrait of the Fat Lady."),
+    ("slytherin", "🐍│slytherin-dungeons", "Slytherin only. Down past the dungeons, behind the bare stone wall."),
+    ("ravenclaw", "🦅│ravenclaw-library", "Ravenclaw only. Up the spiral staircase, answer the riddle."),
+    ("hufflepuff", "🦡│hufflepuff-kitchens", "Hufflepuff only. Tap the barrel in rhythm, by the kitchens."),
+];
+
+/// What a member of the house may do in their own room.
+fn room_rights() -> Permissions {
+    Permissions::VIEW_CHANNEL
+        | Permissions::SEND_MESSAGES
+        | Permissions::READ_MESSAGE_HISTORY
+        | Permissions::ATTACH_FILES
+        | Permissions::EMBED_LINKS
+        | Permissions::ADD_REACTIONS
+        | Permissions::USE_EXTERNAL_EMOJIS
+}
+
+/// Finds or creates the category the rooms sit under.
+async fn common_room_category(ctx: &Context, guild: GuildId) -> Option<ChannelId> {
+    let channels = guild.channels(&ctx.http).await.ok()?;
+    if let Some(id) = meta_get("category").and_then(|v| v.parse::<u64>().ok()).map(ChannelId::new) {
+        if channels.contains_key(&id) {
+            return Some(id);
+        }
+    }
+    let existing = channels
+        .values()
+        .find(|c| c.kind == ChannelType::Category && c.name.eq_ignore_ascii_case(COMMON_ROOM_CATEGORY))
+        .map(|c| c.id);
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let builder = CreateChannel::new(COMMON_ROOM_CATEGORY).kind(ChannelType::Category);
+            guild.create_channel(&ctx.http, builder).await.ok()?.id
+        }
+    };
+    meta_set("category", &id.get().to_string());
+    Some(id)
+}
+
+/// `/housechannels` - mods only: a private room per house.
+///
+/// Shut to everyone by default and opened only to the house's own role, to
+/// every role that can moderate, and to the bot. Re-running adopts rooms that
+/// already exist and resets their permissions, so it doubles as the repair.
+pub async fn channels_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can make the common rooms.")).await;
+        return;
+    }
+    let thinking = CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+    let _ = command.create_response(&ctx.http, thinking).await;
+
+    let roles = guild.roles(&ctx.http).await.unwrap_or_default();
+    let powers = Permissions::ADMINISTRATOR
+        | Permissions::MANAGE_GUILD
+        | Permissions::MANAGE_ROLES
+        | Permissions::MANAGE_MESSAGES
+        | Permissions::KICK_MEMBERS
+        | Permissions::BAN_MEMBERS
+        | Permissions::MODERATE_MEMBERS;
+    // Mods see every room. Managed roles are bots' own roles - skip those.
+    let mod_roles: Vec<RoleId> = roles
+        .values()
+        .filter(|role| !role.managed && role.permissions.intersects(powers))
+        .map(|role| role.id)
+        .collect();
+    let me = ctx.cache.current_user().id;
+    let category = common_room_category(ctx, guild).await;
+    let existing = guild.channels(&ctx.http).await.unwrap_or_default();
+
+    let mut lines = Vec::new();
+    for (key, name, topic) in COMMON_ROOMS {
+        let Some(house) = house(key) else { continue };
+        let Some(role) = role_for(ctx, guild, house).await else {
+            lines.push(format!("{} **{}** - no role, so no room", house.crest, house.name));
+            continue;
+        };
+
+        // Shut to the server, open to the house, its mods, and me.
+        let mut overwrites = vec![
+            PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::VIEW_CHANNEL,
+                kind: PermissionOverwriteType::Role(RoleId::new(guild.get())),
+            },
+            PermissionOverwrite {
+                allow: room_rights(),
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Role(role),
+            },
+            PermissionOverwrite {
+                allow: room_rights(),
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(me),
+            },
+        ];
+        for id in &mod_roles {
+            overwrites.push(PermissionOverwrite {
+                allow: room_rights() | Permissions::MANAGE_MESSAGES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Role(*id),
+            });
+        }
+
+        let known = meta_get(&format!("room_{}", key)).and_then(|v| v.parse::<u64>().ok()).map(ChannelId::new);
+        let found = known
+            .filter(|id| existing.contains_key(id))
+            .or_else(|| existing.values().find(|c| c.name == name).map(|c| c.id));
+
+        let id = match found {
+            // Already there: just put the permissions back as they should be.
+            Some(id) => {
+                let mut edit = serenity::all::EditChannel::new().permissions(overwrites);
+                if let Some(category) = category {
+                    edit = edit.category(Some(category));
+                }
+                match id.edit(&ctx.http, edit).await {
+                    Ok(_) => Some(id),
+                    Err(err) => {
+                        tracing::warn!("house: {} room not reset: {}", house.name, err);
+                        Some(id)
+                    }
+                }
+            }
+            None => {
+                let mut builder =
+                    CreateChannel::new(name).kind(ChannelType::Text).topic(topic).permissions(overwrites);
+                if let Some(category) = category {
+                    builder = builder.category(category);
+                }
+                match guild.create_channel(&ctx.http, builder).await {
+                    Ok(channel) => Some(channel.id),
+                    Err(err) => {
+                        tracing::warn!("house: {} room not made: {}", house.name, err);
+                        None
+                    }
+                }
+            }
+        };
+        match id {
+            Some(id) => {
+                meta_set(&format!("room_{}", key), &id.get().to_string());
+                lines.push(format!("{} <#{}>", house.crest, id.get()));
+            }
+            None => lines.push(format!("{} **{}** - could not be made", house.crest, house.name)),
+        }
+    }
+
+    let text = format!(
+        "**Common rooms**\n{}\n-# Hidden from everyone but the house itself, {} mod role(s), and me. \
+         Run this again any time to put the permissions back.",
+        lines.join("\n"),
+        mod_roles.len()
+    );
+    let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
 }
 
 // --- the draft --------------------------------------------------------------

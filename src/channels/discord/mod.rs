@@ -1332,6 +1332,10 @@ impl EventHandler for Handler {
             ));
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
+        let house_channels = CreateCommand::new("housechannels")
+            .description("admin only: make a private common room for each house");
+        let _ = Command::create_global_command(ctx.http.clone(), house_channels).await;
+
         let house_draft = CreateCommand::new("housedraft")
             .description("admin only: work out who goes in which house, and show the plan before anything happens");
         let _ = Command::create_global_command(ctx.http.clone(), house_draft).await;
@@ -1870,6 +1874,9 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            if command.data.name == "housechannels" {
+                house::channels_command(&ctx, &command).await;
+            }
             if command.data.name == "housedraft" {
                 house::draft_command(&ctx, &command).await;
             }
