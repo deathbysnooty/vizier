@@ -109,10 +109,12 @@ async fn run(ctx: Context) {
         };
         let mentions =
             if mention { CreateAllowedMentions::new().users(vec![nudge.user]) } else { CreateAllowedMentions::new() };
-        if let Err(err) =
-            nudge.channel.send_message(&ctx.http, CreateMessage::new().content(text).allowed_mentions(mentions)).await
+        // Logged either way: a silent success is indistinguishable from a
+        // thread that died, which cost an evening of guessing once already.
+        match nudge.channel.send_message(&ctx.http, CreateMessage::new().content(text).allowed_mentions(mentions)).await
         {
-            tracing::warn!("nudge: not posted: {}", err);
+            Ok(_) => tracing::info!("nudge: posted about {} at {} hours", nudge.name, hours),
+            Err(err) => tracing::warn!("nudge: not posted: {}", err),
         }
         if returned {
             tracing::info!("nudge: {} is back, stopping", nudge.name);

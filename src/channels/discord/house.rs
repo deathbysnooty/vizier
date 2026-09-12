@@ -1,0 +1,807 @@
+//! The four houses.
+//!
+//! Everyone on the server belongs to one of four houses, held as a Discord role
+//! and a row in house.db. Nobody picks: the bot assigns. Members already here
+//! are dealt out by the draft, balanced on how active they are, and anyone
+//! arriving afterwards is sorted by the hat on the way in, with a card in the
+//! houses channel. Mods stay out of it altogether, and they name a captain per
+//! house.
+//!
+//! The row in house.db is what makes a returner keep their house: Discord
+//! strips every role when someone leaves and hands none of them back.
+//!
+//! Sorting starts SHUT (`sorting_open`), so the commands and the roles ship
+//! first and the server can position the roles and put the artwork on them
+//! before anyone is sorted or anything is posted.
+//!
+//! Points come later: this module only decides who belongs where.
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, OnceLock};
+
+use chrono::{Datelike, Utc};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
+use serenity::all::{
+    ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
+    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateCommandOption, CreateEmbed,
+    CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditRole, GuildId,
+    Member, Permissions, RoleId, UserId,
+};
+
+use super::house_card::{self, Sorted};
+
+/// The most one award may move a house, either way. Discord's option can't
+/// carry a negative floor, so this is the guard against a mistyped award.
+const MAX_AWARD: i64 = 100_000;
+
+/// One captain role shared by all four houses - which house they captain is
+/// already plain from the house role they wear.
+const CAPTAIN_ROLE: &str = "House Captain";
+const CAPTAIN_COLOUR: u32 = 0xE8B923;
+
+pub struct House {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub crest: &'static str,
+    /// Role colour, and the two card colours (primary, secondary).
+    pub colour: u32,
+    pub colours: ([u8; 3], [u8; 3]),
+    /// What the hat says when it lands here.
+    pub verdicts: &'static [&'static str],
+}
+
+pub const HOUSES: &[House] = &[
+    House {
+        key: "gryffindor",
+        name: "Gryffindor",
+        crest: "🦁",
+        colour: 0x9B1B1B,
+        colours: ([155, 27, 27], [232, 185, 35]),
+        verdicts: &[
+            "Brave to the point of trouble. GRYFFINDOR!",
+            "First into the argument, last to back down. GRYFFINDOR!",
+            "Big heart, no plan whatsoever. GRYFFINDOR!",
+        ],
+    },
+    House {
+        key: "slytherin",
+        name: "Slytherin",
+        crest: "🐍",
+        colour: 0x1A6B4A,
+        colours: ([26, 107, 74], [190, 195, 200]),
+        verdicts: &[
+            "Ambition, and the patience to use it. SLYTHERIN!",
+            "Plans first, drama later. SLYTHERIN!",
+            "Says nothing all day, then wins. SLYTHERIN!",
+        ],
+    },
+    House {
+        key: "ravenclaw",
+        name: "Ravenclaw",
+        crest: "🦅",
+        colour: 0x1F4E8C,
+        colours: ([31, 78, 140], [176, 122, 66]),
+        verdicts: &[
+            "A ready mind, and questions for everything. RAVENCLAW!",
+            "Answers before the search engine does. RAVENCLAW!",
+            "Talks less, knows far too much. RAVENCLAW!",
+        ],
+    },
+    House {
+        key: "hufflepuff",
+        name: "Hufflepuff",
+        crest: "🦡",
+        colour: 0xC9A227,
+        colours: ([201, 162, 39], [35, 35, 40]),
+        verdicts: &[
+            "Loyal, patient, and unafraid of the work. HUFFLEPUFF!",
+            "Everyone's friend, everyone's backup. HUFFLEPUFF!",
+            "No fights, just tea. HUFFLEPUFF!",
+        ],
+    },
+];
+
+pub fn house(key: &str) -> Option<&'static House> {
+    HOUSES.iter().find(|h| h.key == key || h.name.eq_ignore_ascii_case(key))
+}
+
+static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+/// One sorting at a time, so two arrivals can't race over the same rows.
+static SORTING: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+pub fn open(workspace: &str) -> anyhow::Result<()> {
+    let dir = crate::utils::build_path(workspace, &[".runtime"]);
+    std::fs::create_dir_all(&dir)?;
+    let conn = Connection::open(dir.join("house.db"))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA busy_timeout=5000;
+         CREATE TABLE IF NOT EXISTS members (
+             user_id INTEGER PRIMARY KEY, house TEXT NOT NULL, sorted_by TEXT NOT NULL, ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS members_house ON members (house);
+         CREATE TABLE IF NOT EXISTS awards (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, house TEXT NOT NULL, points INTEGER NOT NULL,
+             reason TEXT NOT NULL, awarded_by INTEGER NOT NULL, ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS awards_house_ts ON awards (house, ts);
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )?;
+    let _ = DB.set(Mutex::new(conn));
+    Ok(())
+}
+
+fn meta_get(key: &str) -> Option<String> {
+    let db = DB.get()?;
+    db.lock().query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
+}
+
+fn meta_set(key: &str, value: &str) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        );
+    }
+}
+
+/// Whether the hat is open for business. It starts SHUT, so the commands and
+/// the roles can be deployed - and the roles dragged up the list and given
+/// their icons - before a single member is touched. Nothing sorts anyone and
+/// nothing is posted until this is switched on.
+fn sorting_open() -> bool {
+    meta_get("sorting").as_deref() == Some("on")
+}
+
+fn meta_clear(key: &str) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute("DELETE FROM meta WHERE key = ?1", params![key]);
+    }
+}
+
+/// Which house someone is in, if they have been sorted.
+pub fn house_of(user: u64) -> Option<&'static House> {
+    let db = DB.get()?;
+    let key: Option<String> = db
+        .lock()
+        .query_row("SELECT house FROM members WHERE user_id = ?1", params![user as i64], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten();
+    key.as_deref().and_then(house)
+}
+
+fn remember(user: u64, house: &House, sorted_by: &str) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute(
+            "INSERT INTO members (user_id, house, sorted_by, ts) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id) DO UPDATE SET house = excluded.house, sorted_by = excluded.sorted_by, ts = excluded.ts",
+            params![user as i64, house.key, sorted_by, Utc::now().timestamp()],
+        );
+    }
+}
+
+/// How many members each house holds.
+pub fn counts() -> HashMap<&'static str, i64> {
+    let mut counts: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if let Ok(mut stmt) = conn.prepare("SELECT house, COUNT(*) FROM members GROUP BY house") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+                for (key, n) in rows.flatten() {
+                    if let Some(slot) = house(&key).and_then(|h| counts.get_mut(h.key)) {
+                        *slot = n;
+                    }
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// The hat's pick for a new arrival: one of the four at random (the user's
+/// call). A newcomer has no activity to weigh, and the draft is what keeps the
+/// houses even.
+fn random_house() -> &'static House {
+    &HOUSES[rand::random::<u32>() as usize % HOUSES.len()]
+}
+
+fn verdict(house: &'static House) -> String {
+    house.verdicts[rand::random::<u32>() as usize % house.verdicts.len()].to_string()
+}
+
+// --- roles ------------------------------------------------------------------
+
+/// Finds or creates a role by name, remembering its id - so renaming the role
+/// on Discord doesn't make the bot build a second one beside it.
+///
+/// The role is made plain. Icons are attached by hand on the server, which is
+/// also the only way to get artwork nobody has to argue with a program about.
+async fn find_or_create(ctx: &Context, guild: GuildId, key: &str, name: &str, colour: u32) -> Option<RoleId> {
+    let roles = guild.roles(&ctx.http).await.ok()?;
+    if let Some(id) = meta_get(key).and_then(|v| v.parse::<u64>().ok()).map(RoleId::new) {
+        if roles.contains_key(&id) {
+            return Some(id);
+        }
+    }
+    let id = match roles.values().find(|r| r.name.eq_ignore_ascii_case(name)) {
+        Some(role) => role.id,
+        None => {
+            // Hoisted, so the member list groups by house - but NOT
+            // mentionable: @Gryffindor would ping a quarter of the server.
+            let builder = EditRole::new().name(name).colour(colour).hoist(true);
+            guild.create_role(&ctx.http, builder).await.ok()?.id
+        }
+    };
+    meta_set(key, &id.get().to_string());
+    Some(id)
+}
+
+async fn role_for(ctx: &Context, guild: GuildId, house: &'static House) -> Option<RoleId> {
+    find_or_create(ctx, guild, &format!("role_{}", house.key), house.name, house.colour).await
+}
+
+async fn captain_role(ctx: &Context, guild: GuildId) -> Option<RoleId> {
+    find_or_create(ctx, guild, "role_captain", CAPTAIN_ROLE, CAPTAIN_COLOUR).await
+}
+
+/// Which house someone captains, if any.
+fn captain_of(user: u64) -> Option<&'static House> {
+    HOUSES
+        .iter()
+        .find(|h| meta_get(&format!("captain_{}", h.key)).and_then(|v| v.parse::<u64>().ok()) == Some(user))
+}
+
+/// Takes the captain role off someone who no longer captains anything.
+async fn strip_captain_role(ctx: &Context, guild: GuildId, user: u64) {
+    if captain_of(user).is_some() {
+        return;
+    }
+    if let Some(role) = captain_role(ctx, guild).await {
+        if let Ok(member) = guild.member(&ctx.http, UserId::new(user)).await {
+            let _ = member.remove_role(&ctx.http, role).await;
+        }
+    }
+}
+
+/// Changing house costs you the captaincy of the house you left.
+async fn drop_captaincy(ctx: &Context, guild: GuildId, user: u64, moving_to: &'static House) {
+    let Some(was) = captain_of(user) else {
+        return;
+    };
+    if was.key == moving_to.key {
+        return;
+    }
+    meta_clear(&format!("captain_{}", was.key));
+    strip_captain_role(ctx, guild, user).await;
+}
+
+/// Gives the house role and takes away the other three.
+async fn wear_house(ctx: &Context, guild: GuildId, user: u64, house: &'static House) {
+    let member = match guild.member(&ctx.http, UserId::new(user)).await {
+        Ok(member) => member,
+        Err(err) => {
+            tracing::warn!("house: member {} not found: {}", user, err);
+            return;
+        }
+    };
+    for other in HOUSES.iter().filter(|h| h.key != house.key) {
+        if let Some(role) = role_for(ctx, guild, other).await {
+            if member.roles.contains(&role) {
+                let _ = member.remove_role(&ctx.http, role).await;
+            }
+        }
+    }
+    if let Some(role) = role_for(ctx, guild, house).await {
+        if let Err(err) = member.add_role(&ctx.http, role).await {
+            tracing::warn!("house: {} role not given to {}: {}", house.name, user, err);
+        }
+    }
+}
+
+// --- the card ---------------------------------------------------------------
+
+fn display(member: &Member) -> String {
+    let name = member.display_name().to_string();
+    if name.chars().count() > 24 { name.chars().take(23).collect::<String>() + "…" } else { name }
+}
+
+async fn avatar(member: &Member) -> Option<Vec<u8>> {
+    let face = member.face().replace("size=1024", "size=256");
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().ok()?;
+    client.get(face).send().await.ok()?.bytes().await.ok().map(|b| b.to_vec())
+}
+
+/// Drawing is CPU work, so it never runs on the gateway thread.
+async fn card(sorted: Sorted) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || house_card::sorting_png(&sorted)).await.ok().flatten()
+}
+
+/// Sorts a new arrival, gives them the role, and announces it with the card.
+async fn sort_member(ctx: &Context, guild: GuildId, member: &Member, channel: ChannelId) -> &'static House {
+    let _one_at_a_time = SORTING.lock().await;
+    let user = member.user.id.get();
+    let house = random_house();
+    remember(user, house, "hat");
+    wear_house(ctx, guild, user, house).await;
+
+    let line = verdict(house);
+    let sorted = Sorted {
+        name: display(member),
+        avatar: avatar(member).await,
+        house: house.name.to_string(),
+        crest: house.crest.to_string(),
+        colours: house.colours,
+        line: line.clone(),
+    };
+    let png = card(sorted).await;
+    let mut message = CreateMessage::new()
+        .content(format!("🎩 The hat has spoken: <@{}> joins **{} {}**!\n-# {}", user, house.crest, house.name, line));
+    if let Some(png) = png {
+        message = message.add_file(CreateAttachment::bytes(png, "sorted.png"));
+    }
+    if let Err(err) = channel.send_message(&ctx.http, message).await {
+        tracing::warn!("house: sorting card not posted: {}", err);
+    }
+    house
+}
+
+// --- commands ---------------------------------------------------------------
+
+fn whisper(text: impl Into<String>) -> CreateInteractionResponse {
+    CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+}
+
+pub fn house_option(name: &str, about: &str) -> CreateCommandOption {
+    let mut option = CreateCommandOption::new(serenity::all::CommandOptionType::String, name, about);
+    for h in HOUSES {
+        option = option.add_string_choice(format!("{} {}", h.crest, h.name), h.key);
+    }
+    option
+}
+
+/// `/houseroles` - mods only: create the four house roles and the captain
+/// role, and put the crests on them.
+///
+/// The roles appear by themselves the first time someone is sorted, so this
+/// isn't the only way in. It exists because the roles want making - and
+/// dragging up the list - BEFORE anyone is sorted, which is the order the
+/// server actually does it in. It also fixes up roles that already exist
+/// without a crest, which creation alone can't.
+pub async fn roles_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can make the house roles.")).await;
+        return;
+    }
+    // Five roles is more work than the three seconds Discord allows a reply.
+    let thinking = CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+    let _ = command.create_response(&ctx.http, thinking).await;
+
+    let mut lines = Vec::new();
+    for house in HOUSES {
+        match role_for(ctx, guild, house).await {
+            Some(role) => lines.push(format!("{} <@&{}>", house.crest, role.get())),
+            None => lines.push(format!("{} **{}** - could not be made", house.crest, house.name)),
+        }
+    }
+    match captain_role(ctx, guild).await {
+        Some(role) => lines.push(format!("🎖️ <@&{}>", role.get())),
+        None => lines.push(format!("🎖️ **{}** - could not be made", CAPTAIN_ROLE)),
+    }
+    lines.push(
+        "\n-# Add the icons by hand, then drag these above your decorative roles (still under me) - Discord shows \
+         whichever icon and colour sits higher. Nobody is sorted until the hat is opened."
+            .into(),
+    );
+    let reply = serenity::all::EditInteractionResponse::new().content(format!("**Houses**\n{}", lines.join("\n")));
+    let _ = command.edit_response(&ctx.http, reply).await;
+}
+
+// --- points -----------------------------------------------------------------
+
+/// Midnight on the 1st, India time: the month the table is counted over.
+fn month_start() -> i64 {
+    let ist = super::stats::ist();
+    Utc::now()
+        .with_timezone(&ist)
+        .date_naive()
+        .with_day(1)
+        .and_then(|first| first.and_hms_opt(0, 0, 0))
+        .and_then(|midnight| midnight.and_local_timezone(ist).single())
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}
+
+/// Points per house since `since`, or all time for `None`.
+///
+/// Every award is its own row, so a month's table is a sum over a date range,
+/// a mistake is undone by awarding the negative, and nothing has to be reset
+/// when the month turns.
+fn totals(since: Option<i64>) -> HashMap<&'static str, i64> {
+    let mut out: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if let Ok(mut stmt) = conn.prepare("SELECT house, SUM(points) FROM awards WHERE ts >= ?1 GROUP BY house") {
+            let rows = stmt.query_map(params![since.unwrap_or(0)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            });
+            if let Ok(rows) = rows {
+                for (key, sum) in rows.flatten() {
+                    if let Some(slot) = house(&key).and_then(|h| out.get_mut(h.key)) {
+                        *slot = sum;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Records an award and gives back the house's new total for the month.
+fn award(house: &House, points: i64, reason: &str, by: u64) -> i64 {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute(
+            "INSERT INTO awards (house, points, reason, awarded_by, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![house.key, points, reason, by as i64, Utc::now().timestamp()],
+        );
+    }
+    totals(Some(month_start())).get(house.key).copied().unwrap_or(0)
+}
+
+/// `/housepoints <house> <points> [reason]` - mods only. A negative number
+/// takes points away, which is also how a mistaken award is undone.
+pub async fn points_command(ctx: &Context, command: &CommandInteraction) {
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can award points.")).await;
+        return;
+    }
+    let mut chosen = None;
+    let mut points = 0i64;
+    let mut reason = String::new();
+    for option in &command.data.options {
+        match (&option.name[..], &option.value) {
+            ("house", CommandDataOptionValue::String(key)) => chosen = house(key),
+            ("points", CommandDataOptionValue::Integer(n)) => points = *n,
+            ("reason", CommandDataOptionValue::String(text)) => reason = text.trim().to_string(),
+            _ => {}
+        }
+    }
+    let Some(house) = chosen else {
+        let _ = command.create_response(&ctx.http, whisper("Which house? Use `/housepoints`.")).await;
+        return;
+    };
+    if points == 0 {
+        let _ = command.create_response(&ctx.http, whisper("Zero points would do nothing.")).await;
+        return;
+    }
+    // Discord can't express a negative floor on the option, so the bound lives
+    // here: a slip of the keyboard shouldn't put a house on a million points.
+    if !(-MAX_AWARD..=MAX_AWARD).contains(&points) {
+        let text = format!("That's more than {} points - award it in smaller pieces if you mean it.", MAX_AWARD);
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+    let total = award(house, points, &reason, command.user.id.get());
+    let headline = if points > 0 {
+        format!("🏆 **+{}** to {} **{}**", points, house.crest, house.name)
+    } else {
+        format!("📉 **{}** from {} **{}**", points, house.crest, house.name)
+    };
+    let because = if reason.is_empty() { String::new() } else { format!("\n> {}", reason) };
+    let text = format!(
+        "{}{}\n-# {} now on **{}** points this month · awarded by <@{}>",
+        headline,
+        because,
+        house.name,
+        total,
+        command.user.id.get()
+    );
+    let reply = CreateInteractionResponseMessage::new().content(text);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+/// `/houses` - who holds what, and the captains.
+pub async fn houses_command(ctx: &Context, command: &CommandInteraction) {
+    let counts = counts();
+    let points = totals(Some(month_start()));
+    // The table reads as a table: whoever is ahead this month sits on top.
+    let mut order: Vec<&House> = HOUSES.iter().collect();
+    order.sort_by(|a, b| points.get(b.key).cmp(&points.get(a.key)).then(a.name.cmp(b.name)));
+
+    let mut text = String::new();
+    let scoring = points.values().any(|p| *p != 0);
+    for (place, h) in order.iter().enumerate() {
+        let captain = meta_get(&format!("captain_{}", h.key))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|id| format!(" · 🎖️ <@{}>", id))
+            .unwrap_or_default();
+        let lead = if place == 0 && scoring { " 👑" } else { "" };
+        text.push_str(&format!(
+            "{} **{}**{} — **{}** points · {} members{}\n",
+            h.crest,
+            h.name,
+            lead,
+            points.get(h.key).copied().unwrap_or(0),
+            counts.get(h.key).copied().unwrap_or(0),
+            captain
+        ));
+    }
+    let total: i64 = counts.values().sum();
+    text.push_str(&format!("\n-# {} members sorted · points counted from the 1st, India time", total));
+    let embed = CreateEmbed::new()
+        .title("🏰 The four houses")
+        .description(text)
+        .colour(0x9B1B1B)
+        .footer(CreateEmbedFooter::new("Points start counting once the system is switched on"));
+    let reply = CreateInteractionResponseMessage::new().embed(embed);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+/// Members per page in `/houselist`. Thirty mentions is a page you can read
+/// without scrolling, and ~190 members comes to seven pages.
+const LIST_PAGE: usize = 30;
+
+/// Everyone in a house, in the order they were sorted - which for the draft's
+/// intake means strongest first.
+fn members_of(key: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id FROM members WHERE house = ?1 ORDER BY ts, user_id") {
+            if let Ok(rows) = stmt.query_map(params![key], |r| r.get::<_, i64>(0)) {
+                out.extend(rows.flatten().map(|id| id as u64));
+            }
+        }
+    }
+    out
+}
+
+/// One page of a house's roll, and how many pages there are altogether.
+fn list_page(house: &'static House, page: usize) -> (CreateEmbed, usize) {
+    let members = members_of(house.key);
+    let pages = members.len().div_ceil(LIST_PAGE).max(1);
+    let page = page.min(pages - 1);
+    let captain = meta_get(&format!("captain_{}", house.key)).and_then(|v| v.parse::<u64>().ok());
+
+    let mut text = String::new();
+    for (place, user) in members.iter().enumerate().skip(page * LIST_PAGE).take(LIST_PAGE) {
+        let mark = if Some(*user) == captain { " 🎖️" } else { "" };
+        text.push_str(&format!("{}. <@{}>{}\n", place + 1, user, mark));
+    }
+    if members.is_empty() {
+        text.push_str("Nobody yet.");
+    }
+    let embed = CreateEmbed::new()
+        .title(format!("{} {} - {} members", house.crest, house.name, members.len()))
+        .description(text)
+        .colour(house.colour)
+        .footer(CreateEmbedFooter::new(format!("Page {} of {}", page + 1, pages)));
+    (embed, pages)
+}
+
+/// Prev/Next for the roll. Ids carry the house and the page, so the buttons
+/// keep working after a restart with nothing held in memory.
+fn list_buttons(house: &'static House, page: usize, pages: usize) -> Vec<CreateActionRow> {
+    if pages <= 1 {
+        return Vec::new();
+    }
+    let back = CreateButton::new(format!("houselist:{}:{}", house.key, page.saturating_sub(1)))
+        .label("Back")
+        .style(ButtonStyle::Secondary)
+        .disabled(page == 0);
+    let next = CreateButton::new(format!("houselist:{}:{}", house.key, page + 1))
+        .label("Next")
+        .style(ButtonStyle::Secondary)
+        .disabled(page + 1 >= pages);
+    vec![CreateActionRow::Buttons(vec![back, next])]
+}
+
+/// `/houselist <house>` - who is in a house, privately, a page at a time.
+pub async fn list_command(ctx: &Context, command: &CommandInteraction) {
+    let chosen = command.data.options.iter().find_map(|o| match &o.value {
+        CommandDataOptionValue::String(key) => house(key),
+        _ => None,
+    });
+    let Some(house) = chosen else {
+        let _ = command.create_response(&ctx.http, whisper("Which house? Use `/houselist`.")).await;
+        return;
+    };
+    let (embed, pages) = list_page(house, 0);
+    // Ephemeral, and with mentions switched off: a roll of 190 names must not
+    // ping 190 people.
+    let reply = CreateInteractionResponseMessage::new()
+        .embed(embed)
+        .components(list_buttons(house, 0, pages))
+        .allowed_mentions(CreateAllowedMentions::new())
+        .ephemeral(true);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+/// The Back/Next buttons under a house roll.
+pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
+    let mut parts = component.data.custom_id.split(':');
+    if parts.next() != Some("houselist") {
+        return;
+    }
+    let Some(house) = parts.next().and_then(house) else {
+        return;
+    };
+    let page = parts.next().and_then(|p| p.parse::<usize>().ok()).unwrap_or(0);
+    let (embed, pages) = list_page(house, page);
+    let reply = CreateInteractionResponseMessage::new()
+        .embed(embed)
+        .components(list_buttons(house, page.min(pages - 1), pages))
+        .allowed_mentions(CreateAllowedMentions::new());
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(reply)).await;
+}
+
+/// `/housecaptain @member` - mods only. The member keeps their own house.
+pub async fn captain_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can name a captain.")).await;
+        return;
+    }
+    let target = command.data.options.iter().find_map(|o| match o.value {
+        CommandDataOptionValue::User(id) => Some(id.get()),
+        _ => None,
+    });
+    let Some(target) = target else {
+        let _ = command.create_response(&ctx.http, whisper("Who? Use `/housecaptain @member`.")).await;
+        return;
+    };
+    let Some(house) = house_of(target) else {
+        let _ = command
+            .create_response(&ctx.http, whisper("They haven't been sorted yet - they need `/sortme` first."))
+            .await;
+        return;
+    };
+    // Set the new captain first, so the outgoing one is only stripped of the
+    // role if they don't captain some other house.
+    let outgoing = meta_get(&format!("captain_{}", house.key)).and_then(|v| v.parse::<u64>().ok());
+    meta_set(&format!("captain_{}", house.key), &target.to_string());
+    if let Some(outgoing) = outgoing.filter(|old| *old != target) {
+        strip_captain_role(ctx, guild, outgoing).await;
+    }
+    match (captain_role(ctx, guild).await, guild.member(&ctx.http, UserId::new(target)).await) {
+        (Some(role), Ok(member)) => {
+            if let Err(err) = member.add_role(&ctx.http, role).await {
+                tracing::warn!("house: captain role not given to {}: {}", target, err);
+            }
+        }
+        _ => tracing::warn!("house: captain role not given to {}", target),
+    }
+    let _ = command
+        .create_response(
+            &ctx.http,
+            CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!(
+                "🎖️ <@{}> is now captain of **{} {}**.",
+                target, house.crest, house.name
+            ))),
+        )
+        .await;
+}
+
+/// `/sort @member house` - mods only: place or move someone by hand.
+pub async fn sort_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can sort someone by hand.")).await;
+        return;
+    }
+    let mut target = None;
+    let mut chosen = None;
+    for option in &command.data.options {
+        match &option.value {
+            CommandDataOptionValue::User(id) => target = Some(id.get()),
+            CommandDataOptionValue::String(key) => chosen = house(key),
+            _ => {}
+        }
+    }
+    let (Some(target), Some(chosen)) = (target, chosen) else {
+        let _ = command.create_response(&ctx.http, whisper("Use `/sort @member house`.")).await;
+        return;
+    };
+    drop_captaincy(ctx, guild, target, chosen).await;
+    remember(target, chosen, &format!("mod:{}", command.user.id.get()));
+    wear_house(ctx, guild, target, chosen).await;
+    let _ = command
+        .create_response(
+            &ctx.http,
+            whisper(format!("Done - <@{}> is in **{} {}**.", target, chosen.crest, chosen.name)),
+        )
+        .await;
+}
+
+/// Where the sorting cards go. The houses channel if one is set, otherwise
+/// wherever the caller was going to put it.
+fn cards_channel() -> Option<ChannelId> {
+    std::env::var("VIZIER_HOUSE_CHANNEL").ok()?.trim().parse().ok().map(ChannelId::new)
+}
+
+/// Mods stay out of the houses entirely (user's call): no house, no card, and
+/// later no points - they are the ones running the competition. "Mod" means
+/// the bot's own admin list, or any role that can moderate.
+async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
+    if super::admin_ids().contains(&member.user.id.get()) {
+        return true;
+    }
+    let powers = Permissions::ADMINISTRATOR
+        | Permissions::MANAGE_GUILD
+        | Permissions::MANAGE_ROLES
+        | Permissions::MANAGE_MESSAGES
+        | Permissions::KICK_MEMBERS
+        | Permissions::BAN_MEMBERS
+        | Permissions::MODERATE_MEMBERS;
+    let Ok(roles) = guild.roles(&ctx.http).await else {
+        return false;
+    };
+    member.roles.iter().any(|id| roles.get(id).is_some_and(|role| role.permissions.intersects(powers)))
+}
+
+/// A new arrival gets sorted straight away, card and all. Someone who left and
+/// came back keeps the house they already had - their row outlives the leaving.
+pub async fn on_join(ctx: &Context, member: &Member, fallback: ChannelId) {
+    if !sorting_open() {
+        return;
+    }
+    if house_of(member.user.id.get()).is_some() || member.user.bot {
+        return;
+    }
+    if is_mod(ctx, member.guild_id, member).await {
+        tracing::info!("house: {} is a mod, left unsorted", member.user.name);
+        return;
+    }
+    let house = sort_member(ctx, member.guild_id, member, cards_channel().unwrap_or(fallback)).await;
+    tracing::info!("house: sorted {} into {}", member.user.name, house.name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_houses_each_with_a_crest_a_colour_and_verdicts() {
+        assert_eq!(HOUSES.len(), 4);
+        for h in HOUSES {
+            assert!(!h.verdicts.is_empty(), "{} has no verdict", h.name);
+            assert!(h.crest.chars().count() == 1, "{} crest should be one emoji", h.name);
+            assert!(h.colour > 0, "{} has no colour", h.name);
+            assert!(house(h.key).is_some() && house(h.name).is_some(), "{} not findable", h.name);
+        }
+        assert!(house("Hogwarts").is_none());
+    }
+
+    #[test]
+    fn the_points_month_starts_at_midnight_on_the_first_india_time() {
+        use chrono::Timelike;
+        let ist = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("valid offset");
+        let start = chrono::DateTime::from_timestamp(month_start(), 0).expect("a real time").with_timezone(&ist);
+        assert_eq!(start.day(), 1, "the month should start on the 1st");
+        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0), "at midnight");
+        assert!(month_start() <= Utc::now().timestamp(), "the month cannot start in the future");
+    }
+
+    #[test]
+    fn the_hat_can_reach_every_house_and_every_verdict() {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for _ in 0..2_000 {
+            *seen.entry(random_house().key).or_default() += 1;
+            let house = random_house();
+            assert!(house.verdicts.contains(&verdict(house).as_str()), "verdict came from another house");
+        }
+        assert_eq!(seen.len(), HOUSES.len(), "some house is unreachable: {:?}", seen);
+        // Nothing like a strict balance check - it is a coin toss by design -
+        // but a house that never comes up would be a modulo bug.
+        assert!(seen.values().all(|n| *n > 200), "one house is starved: {:?}", seen);
+    }
+}

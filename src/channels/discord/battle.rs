@@ -443,6 +443,26 @@ fn tally(user: u64) -> (i64, i64) {
 }
 
 /// Battles won outright.
+/// Fights and battles won per person, for the house draft. `since` is a unix
+/// time to count from, or `None` for all time. Read-only.
+pub fn wins_per_user(since: Option<i64>) -> std::collections::HashMap<u64, u64> {
+    let mut out = std::collections::HashMap::new();
+    let Some(db) = DB.get() else {
+        return out;
+    };
+    let conn = db.lock();
+    let sql = "SELECT winner, COUNT(*) FROM results WHERE ts >= ?1 GROUP BY winner";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return out;
+    };
+    if let Ok(rows) = stmt.query_map(params![since.unwrap_or(0)], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+    }) {
+        out.extend(rows.flatten());
+    }
+    out
+}
+
 fn crowns(user: u64) -> i64 {
     let Some(db) = DB.get() else {
         return 0;

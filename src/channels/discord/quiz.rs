@@ -1105,6 +1105,26 @@ fn add_point(user: u64, question: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Correct answers per person, for the house draft. `since` is a unix time to
+/// count from, or `None` for all time. Read-only.
+pub fn points_per_user(since: Option<i64>) -> std::collections::HashMap<u64, u64> {
+    let mut out = std::collections::HashMap::new();
+    let Some(db) = DB.get() else {
+        return out;
+    };
+    let conn = db.lock();
+    let sql = "SELECT user_id, COUNT(*) FROM points WHERE ts >= ?1 GROUP BY user_id";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return out;
+    };
+    if let Ok(rows) = stmt.query_map(params![since.unwrap_or(0)], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+    }) {
+        out.extend(rows.flatten());
+    }
+    out
+}
+
 // --- answers ----------------------------------------------------------------
 
 /// Lower case, punctuation gone, a leading "the"/"a"/"an" dropped, spaces removed.

@@ -30,6 +30,9 @@ use crate::utils::remove_think_tags;
 mod awards;
 mod battle;
 mod battle_card;
+mod house;
+mod house_card;
+mod house_draft;
 mod nudge;
 mod awards_card;
 mod quiz;
@@ -65,6 +68,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = battle::open(&self.deps.config.workspace) {
             tracing::warn!("battle: store not opened: {}", err);
+        }
+        if let Err(err) = house::open(&self.deps.config.workspace) {
+            tracing::warn!("house: store not opened: {}", err);
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
@@ -1098,6 +1104,10 @@ impl EventHandler for Handler {
         {
             tracing::error!("failed to post welcome: {:?}", err);
         }
+
+        // Then the hat, right under the welcome. A returner keeps the house
+        // they were sorted into before.
+        house::on_join(&ctx, &member, ChannelId::new(channel)).await;
     }
 
     async fn guild_member_removal(
@@ -1299,6 +1309,57 @@ impl EventHandler for Handler {
         let battle_stop =
             CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
         let _ = Command::create_global_command(ctx.http.clone(), battle_stop).await;
+
+        // The four houses. There is no self-serve sorting command: the bot
+        // assigns everyone, so the only way in is the draft or a mod's hand.
+        let house_points = CreateCommand::new("housepoints")
+            .description("admin only: award points to a house (a negative number takes them away)")
+            .add_option(house::house_option("house", "which house").required(true))
+            .add_option(
+                // No min_int_value: it takes an unsigned number, so a negative
+                // floor can't be expressed here. The handler bounds it instead.
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::Integer,
+                    "points",
+                    "how many points (negative takes them away)",
+                )
+                .required(true),
+            )
+            .add_option(CreateCommandOption::new(
+                serenity::all::CommandOptionType::String,
+                "reason",
+                "what they are for",
+            ));
+        let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
+
+        let house_roles = CreateCommand::new("houseroles")
+            .description("admin only: make the four house roles and put the crests on them");
+        let _ = Command::create_global_command(ctx.http.clone(), house_roles).await;
+
+        let house_list = CreateCommand::new("houselist")
+            .description("who is in a house - shown only to you, a page at a time")
+            .add_option(house::house_option("house", "which house").required(true));
+        let _ = Command::create_global_command(ctx.http.clone(), house_list).await;
+
+        let houses = CreateCommand::new("houses").description("the four houses, their points, sizes and captains");
+        let _ = Command::create_global_command(ctx.http.clone(), houses).await;
+
+        let captain = CreateCommand::new("housecaptain")
+            .description("admin only: make someone captain of their house")
+            .add_option(
+                CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "who becomes captain")
+                    .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), captain).await;
+
+        let sort = CreateCommand::new("sort")
+            .description("admin only: put someone in a house by hand")
+            .add_option(
+                CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "who to sort")
+                    .required(true),
+            )
+            .add_option(house::house_option("house", "which house").required(true));
+        let _ = Command::create_global_command(ctx.http.clone(), sort).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
         nudge::spawn(ctx.clone());
 
@@ -1329,6 +1390,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("battle") || id.starts_with("fight") {
                 battle::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("houselist:") {
+                house::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
@@ -1793,6 +1858,26 @@ impl EventHandler for Handler {
             }
             if command.data.name == "battlestop" {
                 battle::stop_command(&ctx, &command).await;
+            }
+
+            // The four houses.
+            if command.data.name == "houseroles" {
+                house::roles_command(&ctx, &command).await;
+            }
+            if command.data.name == "houselist" {
+                house::list_command(&ctx, &command).await;
+            }
+            if command.data.name == "housepoints" {
+                house::points_command(&ctx, &command).await;
+            }
+            if command.data.name == "houses" {
+                house::houses_command(&ctx, &command).await;
+            }
+            if command.data.name == "housecaptain" {
+                house::captain_command(&ctx, &command).await;
+            }
+            if command.data.name == "sort" {
+                house::sort_command(&ctx, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
