@@ -41,7 +41,7 @@ const HINT_COOLDOWN: Duration = Duration::from_secs(5);
 /// `!skip` votes from different members that pass over a question. One admin is enough.
 const SKIPS_NEEDED: usize = 3;
 /// After a wrong multiple-choice pick, how long before that member may pick again.
-const RETRY_AFTER: Duration = Duration::from_secs(60);
+const RETRY_AFTER: Duration = Duration::from_secs(20);
 /// Wrong options `!hint` may knock out of a multiple-choice question.
 const MAX_KNOCKOUTS: usize = 2;
 /// Messages under the question before it is moved back to the bottom of the channel.
@@ -1389,7 +1389,7 @@ pub async fn start_command(
     let intro = format!(
         "🧠 **Quiz started!** {} questions ready.\n\
          ✍️ Typed questions: the first correct answer wins, and small spelling slips are fine.\n\
-         👇 Multiple choice: press a button. A wrong pick means a 1-minute wait before you can pick again.\n\
+         👇 Press a button to answer. A wrong pick means a 20-second wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
          ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
          🗳️ Rounds of {} questions: each round has its own scores, its winner is crowned that genre's champion (`/quizleaderboard` → Genre champions), then everyone votes on the next round's genre.\n\
@@ -1891,7 +1891,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
                     live.done.notify_one();
                     Click::Right(live.question.clone(), live.options.clone(), live.correct, round_point(user))
                 } else {
-                    // A wrong pick costs a minute, and that option stays ruled out for them.
+                    // A wrong pick costs a short wait, and that option stays ruled out for them.
                     let entry = live.tried.entry(user).or_insert_with(|| (std::time::Instant::now(), HashSet::new()));
                     entry.0 = std::time::Instant::now();
                     entry.1.insert(choice);
@@ -1907,7 +1907,9 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Click::Own => whisper(ctx, component, "You can't answer your own question 😏").await,
         Click::Ruled => whisper(ctx, component, "You already tried that one. Pick a different option.").await,
         Click::Wait(left) => whisper(ctx, component, format!("⏳ You can pick again in {}s.", left)).await,
-        Click::Wrong => whisper(ctx, component, "❌ Wrong! You can pick again in 1 minute.").await,
+        Click::Wrong => {
+            whisper(ctx, component, format!("❌ Wrong! You can pick again in {}s.", RETRY_AFTER.as_secs())).await
+        }
         Click::Right(q, options, correct, this_round) => {
             let total = add_point(user, &q.id);
             let update = CreateInteractionResponseMessage::new()
