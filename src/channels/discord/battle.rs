@@ -35,8 +35,9 @@ const CHAMPION_ROLE: &str = "Battle Champion";
 /// Health both fighters start a fight with.
 const START_HP: i32 = 100;
 /// Exchanges before the fight is called on health left, so nobody waits forever.
-/// Blows land on either side at random, so a fight usually runs about eight.
-const MAX_EXCHANGES: usize = 14;
+/// Blows land on either side at random and a fifth of turns heal, so a fight
+/// usually runs a dozen or so turns.
+const MAX_EXCHANGES: usize = 20;
 /// Between exchanges of one fight. Short, because a battle is many fights.
 const BEAT: Duration = Duration::from_secs(2);
 /// Messages under the fight before it is moved back to the bottom of the channel.
@@ -168,6 +169,71 @@ const HEAL: &[&str] = &[
     "{a} ne Hanuman Chalisa laga di, thodi power aayi",
 ];
 
+/// A sip, a biscuit, a deep breath: barely anything, purely for the joke.
+const SIP: &[&str] = &[
+    "{a} ne ek ghoont chai maari. Bas itna hi. ☕",
+    "{a} ko kahin se ek Parle-G mil gaya 🍪",
+    "{a} ne lamba saans liya aur collar theek kiya",
+    "{a} ne apni DP badal di, confidence +1",
+];
+
+/// The swing comes back at whoever threw it.
+const BACKFIRE: &[&str] = &[
+    "{a} ne chappal feki, wapas aake khud ko lagi 🩴",
+    "{a} apne hi jokes pe has ke gir gaya",
+    "{a} ne block karne ki koshish ki, khud ko block kar liya",
+    "{a} ka screenshot ulta pad gaya, apni hi baat pakdi gayi",
+];
+
+/// {b} loses, {a} gains: the fight's only real comeback move.
+const DRAIN: &[&str] = &[
+    "{a} ne {b} ki plate se samosa utha liya 🥟",
+    "{a} ne {b} ka charger le liya - ab {a} full, {b} khali 🔌",
+    "{a} ne {b} ki chai pi li, seedha energy transfer",
+    "{a} ne {b} ka WiFi password chura liya",
+];
+
+/// Two in a row, before anyone can answer.
+const DOUBLE: &[&str] = &[
+    "{a} ne do baar maara - ek taana, ek screenshot 📸",
+    "{a} ne back to back do meme daag diye",
+    "{a} ne {b} ko group aur DM, dono mein sunaya",
+    "{a} ne double chappal combo lagaya 🩴🩴",
+];
+
+/// Everyone in the frame suffers.
+const CHAOS: &[&str] = &[
+    "Beech mein aunty aa gayi, dono ko daant padi 👵",
+    "Light chali gayi - dono andhere mein gir gaye 💡",
+    "Dono ek hi kele ke chhilke pe phisal gaye 🍌",
+    "Kisi ne dono ka naam mummy ko bata diya 😰",
+];
+
+/// A proper feed: the biggest ordinary heal.
+const SNACK: &[&str] = &[
+    "{a} ne garam samosa khaaya, shakti aa gayi 🥟",
+    "{a} ne biryani ka dabba khol liya, ab mood set hai 🍛",
+    "{a} ne do minute mein Maggi bana li 🍜",
+    "{a} ne thanda Rooh Afza gatak liya 🥤",
+    "{a} ne pani puri ka ek aur round maanga 🥣",
+];
+
+/// Rare, and worth it.
+const BLESSING: &[&str] = &[
+    "{a} ki mummy ne sar pe haath rakh diya - poori jaan wapas 🙏",
+    "{a} ko kisi ne 'jeete raho beta' bol diya, full power up ✨",
+    "{a} ne prasad kha liya, ab kaun rok sakta hai 🪔",
+    "{a} ke papa ne kandha thapthapaya - motivation overload",
+];
+
+/// Both sides gain: the fight pauses for something nicer.
+const CROWD: &[&str] = &[
+    "Crowd ne dono ko cheer kar diya, dono ka mann bhar aaya 📣",
+    "Kisi ne dono ko chai pila di, ladai thodi der ke liye band ☕",
+    "Dono ne ek hi thali se kha liya, dosti ho gayi 🍽️",
+    "Aunty ne dono ko laddoo pakda diya 🍬",
+];
+
 const BYE: &[&str] = &[
     "{a} had nobody to fight this round and went for chai ☕",
     "{a} gets a free pass to the next round",
@@ -193,13 +259,25 @@ fn pick<'a>(pool: &'a [&'a str], seed: &mut u64) -> &'a str {
     pool[roll(seed, pool.len() as u64) as usize]
 }
 
-/// What an exchange turned out to be.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+fn fill(line: &str, a: &str, b: &str) -> String {
+    line.replace("{a}", a).replace("{b}", b).replace("{w}", a).replace("{l}", b)
+}
+
+/// What a turn turned out to be.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Blow {
     Miss,
     Crit,
     Heal,
     Hit,
+    Sip,
+    Backfire,
+    Drain,
+    Double,
+    Chaos,
+    Snack,
+    Blessing,
+    Crowd,
 }
 
 impl Blow {
@@ -209,24 +287,95 @@ impl Blow {
             Blow::Crit => CRIT,
             Blow::Heal => HEAL,
             Blow::Hit => EXCHANGE,
+            Blow::Sip => SIP,
+            Blow::Backfire => BACKFIRE,
+            Blow::Drain => DRAIN,
+            Blow::Double => DOUBLE,
+            Blow::Chaos => CHAOS,
+            Blow::Snack => SNACK,
+            Blow::Blessing => BLESSING,
+            Blow::Crowd => CROWD,
         }
     }
 }
 
-/// One exchange: what happened, the change to health, and who it lands on.
-/// Most swings hurt; a few miss, and now and then someone recovers.
-fn exchange(seed: &mut u64, attacker: usize) -> (Blow, i32, usize) {
-    let other = 1 - attacker;
-    match roll(seed, 100) {
-        0..=9 => (Blow::Miss, 0, other),
-        10..=24 => (Blow::Crit, -(32 + roll(seed, 12) as i32), other),
-        25..=33 => (Blow::Heal, 6 + roll(seed, 7) as i32, attacker),
-        _ => (Blow::Hit, -(18 + roll(seed, 13) as i32), other),
+/// One turn: what happened, and what it did to each side's health.
+struct Swing {
+    blow: Blow,
+    /// Change to health, by side: negative hurts, positive heals.
+    hits: [i32; 2],
+}
+
+impl Swing {
+    /// The numbers that go after the line, e.g. "-24 HP" or "-18 HP · +7 HP".
+    fn tail(&self) -> String {
+        let parts: Vec<String> = self
+            .hits
+            .iter()
+            .filter(|change| **change != 0)
+            .map(|change| format!("{}{} HP", if *change > 0 { "+" } else { "" }, change))
+            .collect();
+        if parts.is_empty() { "no damage".to_string() } else { parts.join(" · ") }
     }
 }
 
-fn fill(line: &str, a: &str, b: &str) -> String {
-    line.replace("{a}", a).replace("{b}", b).replace("{w}", a).replace("{l}", b)
+/// A turn of the fight. Plain trades still carry it, but roughly a fifth of
+/// turns give health back, so a fight lasts a dozen or so turns and can swing
+/// late instead of being a straight slide to zero.
+fn swing(seed: &mut u64, attacker: usize) -> Swing {
+    let other = 1 - attacker;
+    let mut hits = [0i32; 2];
+    let blow = match roll(seed, 100) {
+        0..=4 => Blow::Miss,
+        5..=8 => {
+            hits[attacker] = 1 + roll(seed, 3) as i32;
+            Blow::Sip
+        }
+        9..=13 => {
+            hits[attacker] = -(10 + roll(seed, 9) as i32);
+            Blow::Backfire
+        }
+        14..=20 => {
+            hits[other] = -(16 + roll(seed, 9) as i32);
+            hits[attacker] = 5 + roll(seed, 5) as i32;
+            Blow::Drain
+        }
+        21..=26 => {
+            hits[other] = -(28 + roll(seed, 11) as i32);
+            Blow::Double
+        }
+        27..=32 => {
+            hits[other] = -(32 + roll(seed, 11) as i32);
+            Blow::Crit
+        }
+        33..=36 => {
+            let both = 8 + roll(seed, 7) as i32;
+            hits = [-both, -both];
+            Blow::Chaos
+        }
+        37..=41 => {
+            hits[attacker] = 6 + roll(seed, 7) as i32;
+            Blow::Heal
+        }
+        42..=47 => {
+            hits[attacker] = 10 + roll(seed, 9) as i32;
+            Blow::Snack
+        }
+        48..=50 => {
+            hits[attacker] = 20 + roll(seed, 11) as i32;
+            Blow::Blessing
+        }
+        51..=53 => {
+            let both = 4 + roll(seed, 5) as i32;
+            hits = [both, both];
+            Blow::Crowd
+        }
+        _ => {
+            hits[other] = -(18 + roll(seed, 11) as i32);
+            Blow::Hit
+        }
+    };
+    Swing { blow, hits }
 }
 
 // --- store ------------------------------------------------------------------
@@ -500,15 +649,24 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
         tokio::time::sleep(BEAT).await;
         let attacker = roll(seed, 2) as usize;
         let (x, y) = if attacker == 0 { (a, b) } else { (b, a) };
-        let (blow, delta, target) = exchange(seed, attacker);
-        hp[target] = (hp[target] + delta).clamp(0, START_HP);
-        let line = fill(pick(blow.lines(), seed), &x.name, &y.name);
-        let tail = match delta {
-            0 => "miss".to_string(),
-            d if d > 0 => format!("+{} HP", d),
-            d => format!("{} HP", d),
-        };
-        log.push(format!("{} · **{}**", line, tail));
+        let swing = swing(seed, attacker);
+        let before = hp;
+        for side in 0..2 {
+            hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
+        }
+        // A chaos turn hurts both, so both bars can empty at once. Someone has
+        // to be left standing: whoever was healthier keeps a sliver, and on a
+        // dead tie it goes to the one who swung.
+        if hp == [0, 0] {
+            let standing = match before[0].cmp(&before[1]) {
+                std::cmp::Ordering::Greater => 0,
+                std::cmp::Ordering::Less => 1,
+                std::cmp::Ordering::Equal => attacker,
+            };
+            hp[standing] = 1;
+        }
+        let line = fill(pick(swing.blow.lines(), seed), &x.name, &y.name);
+        log.push(format!("{} · **{}**", line, swing.tail()));
         text = fight_text(&head, &log, a, b, &hp);
         keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref()).await;
     }
@@ -1187,8 +1345,19 @@ mod tests {
         while hp[0] > 0 && hp[1] > 0 && turns < MAX_EXCHANGES {
             turns += 1;
             let attacker = roll(seed, 2) as usize;
-            let (_, delta, target) = exchange(seed, attacker);
-            hp[target] = (hp[target] + delta).clamp(0, START_HP);
+            let swing = swing(seed, attacker);
+            let before = hp;
+            for side in 0..2 {
+                hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
+            }
+            if hp == [0, 0] {
+                let standing = match before[0].cmp(&before[1]) {
+                    std::cmp::Ordering::Greater => 0,
+                    std::cmp::Ordering::Less => 1,
+                    std::cmp::Ordering::Equal => attacker,
+                };
+                hp[standing] = 1;
+            }
         }
         (hp, turns)
     }
@@ -1208,42 +1377,72 @@ mod tests {
             total += turns;
         }
         // Most fights should end with a knockout rather than on health left.
-        assert!(knockouts > 450, "only {} knockouts in 500 fights", knockouts);
+        assert!(knockouts > 400, "only {} knockouts in 500 fights", knockouts);
         let average = total as f64 / 500.0;
-        assert!((5.0..11.0).contains(&average), "fights average {} exchanges", average);
+        assert!((8.0..17.0).contains(&average), "fights average {} exchanges", average);
     }
 
     #[test]
-    fn exchange_bands_stay_within_their_numbers() {
+    fn every_twist_moves_the_right_side_by_the_right_amount() {
+        let mut seen = std::collections::HashMap::new();
         let mut seed = 42u64;
-        let (mut miss, mut crit, mut heal, mut hit) = (0, 0, 0, 0);
-        for _ in 0..4000 {
+        for _ in 0..6000 {
             let attacker = roll(&mut seed, 2) as usize;
-            let (blow, delta, target) = exchange(&mut seed, attacker);
-            match blow {
-                Blow::Miss => {
-                    assert_eq!(delta, 0);
-                    miss += 1;
-                }
-                Blow::Heal => {
-                    assert!((6..=12).contains(&delta), "heal {}", delta);
-                    assert_eq!(target, attacker, "a heal lands on the one who took it");
-                    heal += 1;
-                }
-                Blow::Crit => {
-                    assert!((-43..=-32).contains(&delta), "crit {}", delta);
-                    crit += 1;
-                }
-                Blow::Hit => {
-                    assert!((-30..=-18).contains(&delta), "hit {}", delta);
-                    hit += 1;
-                }
+            let other = 1 - attacker;
+            let swing = swing(&mut seed, attacker);
+            *seen.entry(swing.blow).or_insert(0) += 1;
+            let (me, them) = (swing.hits[attacker], swing.hits[other]);
+            match swing.blow {
+                Blow::Miss => assert_eq!((me, them), (0, 0)),
+                Blow::Sip => assert!((1..=3).contains(&me) && them == 0, "sip {:?}", swing.hits),
+                Blow::Heal => assert!((6..=12).contains(&me) && them == 0, "heal {:?}", swing.hits),
+                // The swing comes back at whoever threw it.
+                Blow::Backfire => assert!((-18..=-10).contains(&me) && them == 0, "backfire {:?}", swing.hits),
+                // The only move that takes from one side and gives to the other.
+                Blow::Drain => assert!(
+                    (5..=9).contains(&me) && (-24..=-16).contains(&them),
+                    "drain {:?}",
+                    swing.hits
+                ),
+                Blow::Double => assert!((-38..=-28).contains(&them) && me == 0, "double {:?}", swing.hits),
+                Blow::Crit => assert!((-42..=-32).contains(&them) && me == 0, "crit {:?}", swing.hits),
+                Blow::Snack => assert!((10..=18).contains(&me) && them == 0, "snack {:?}", swing.hits),
+                Blow::Blessing => assert!((20..=30).contains(&me) && them == 0, "blessing {:?}", swing.hits),
+                // The one turn that is kind to everybody.
+                Blow::Crowd => assert!(me == them && (4..=8).contains(&me), "crowd {:?}", swing.hits),
+                Blow::Chaos => assert!(
+                    me == them && (-14..=-8).contains(&me),
+                    "chaos should hurt both equally {:?}",
+                    swing.hits
+                ),
+                Blow::Hit => assert!((-28..=-18).contains(&them) && me == 0, "hit {:?}", swing.hits),
             }
-            if delta <= 0 {
-                assert_eq!(target, 1 - attacker, "damage lands on the other side");
+            // Only the crowd is generous to the other side.
+            if swing.blow != Blow::Crowd {
+                assert!(them <= 0, "{:?} healed the other side: {:?}", swing.blow, swing.hits);
             }
         }
-        assert!(miss > 200 && crit > 400 && heal > 200 && hit > 2000, "{} {} {} {}", miss, crit, heal, hit);
+        // Every twist should actually turn up, and plain trades stay the norm.
+        for blow in [
+            Blow::Miss, Blow::Sip, Blow::Backfire, Blow::Drain, Blow::Double, Blow::Crit, Blow::Chaos, Blow::Heal,
+            Blow::Snack, Blow::Blessing, Blow::Crowd, Blow::Hit,
+        ] {
+            assert!(seen.get(&blow).copied().unwrap_or(0) > 80, "{:?} barely happens: {:?}", blow, seen.get(&blow));
+        }
+        assert!(seen[&Blow::Hit] > 1800, "plain hits should still be the most common: {}", seen[&Blow::Hit]);
+        let healed: i32 = [Blow::Sip, Blow::Heal, Blow::Snack, Blow::Blessing, Blow::Crowd]
+            .iter()
+            .map(|blow| seen.get(blow).copied().unwrap_or(0))
+            .sum();
+        assert!((900..1600).contains(&healed), "about a fifth of turns should give health back: {}", healed);
+    }
+
+    #[test]
+    fn the_tail_reads_the_numbers_out() {
+        let swing = |hits| Swing { blow: Blow::Hit, hits };
+        assert_eq!(swing([0, -24]).tail(), "-24 HP");
+        assert_eq!(swing([7, -18]).tail(), "+7 HP · -18 HP");
+        assert_eq!(swing([0, 0]).tail(), "no damage");
     }
 
     #[test]
