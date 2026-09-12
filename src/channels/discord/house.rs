@@ -203,11 +203,20 @@ pub fn counts() -> HashMap<&'static str, i64> {
     counts
 }
 
-/// The hat's pick for a new arrival: one of the four at random (the user's
-/// call). A newcomer has no activity to weigh, and the draft is what keeps the
-/// houses even.
-fn random_house() -> &'static House {
-    &HOUSES[rand::random::<u32>() as usize % HOUSES.len()]
+/// The hat's pick for a new arrival: whichever house is smallest, tossing a
+/// coin between any that are tied.
+///
+/// Uniform random was the first cut, and it does not balance anything: three
+/// arrivals in a row went to Ravenclaw, which is precisely what random does
+/// and precisely what nobody wants to watch happen to houses that started
+/// level. Smallest-first corrects drift the moment it appears, and stays
+/// unguessable to the member, who cannot see the counts anyway.
+fn hat_pick() -> &'static House {
+    let counts = counts();
+    let size = |house: &House| counts.get(house.key).copied().unwrap_or(0);
+    let fewest = HOUSES.iter().map(size).min().unwrap_or(0);
+    let tied: Vec<&'static House> = HOUSES.iter().filter(|house| size(house) == fewest).collect();
+    tied.get(rand::random::<u32>() as usize % tied.len().max(1)).copied().unwrap_or(&HOUSES[0])
 }
 
 fn verdict(house: &'static House) -> String {
@@ -324,7 +333,7 @@ async fn card(sorted: Sorted) -> Option<Vec<u8>> {
 /// Sorts a new arrival, gives them the role, and announces it with the card.
 async fn sort_member(ctx: &Context, guild: GuildId, member: &Member, channel: ChannelId) -> &'static House {
     let _one_at_a_time = SORTING.lock().await;
-    let house = random_house();
+    let house = hat_pick();
     remember(member.user.id.get(), house, "hat");
     wear_house(ctx, guild, member.user.id.get(), house).await;
     announce(ctx, member, house, channel).await;
@@ -1372,10 +1381,12 @@ mod tests {
 
     #[test]
     fn the_hat_can_reach_every_house_and_every_verdict() {
+        // With no database open every house reads as empty, so all four are
+        // tied and the coin toss decides - which is what this exercises.
         let mut seen: HashMap<&str, usize> = HashMap::new();
         for _ in 0..2_000 {
-            *seen.entry(random_house().key).or_default() += 1;
-            let house = random_house();
+            *seen.entry(hat_pick().key).or_default() += 1;
+            let house = hat_pick();
             assert!(house.verdicts.contains(&verdict(house).as_str()), "verdict came from another house");
         }
         assert_eq!(seen.len(), HOUSES.len(), "some house is unreachable: {:?}", seen);
