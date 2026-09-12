@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.85] - 2026-09-12
+
+### 🐛 Bug Fixes
+
+- *(discord)* The hat fills the smallest house, it does not roll dice
 ## [0.10.84] - 2026-09-12
 
 ### 🚀 Features
@@ -12,6 +17,10 @@ All notable changes to this project will be documented in this file.
 
 - *(discord)* The draft tops up, it does not re-sort the server
 - *(discord)* Give a returner their house role back
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.84
 ## [0.10.83] - 2026-09-12
 
 ### 🚀 Features
