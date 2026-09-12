@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.77] - 2026-09-12
+
+### 🚀 Features
+
+- *(quiz)* Every question is multiple choice, and a better question card
 ## [0.10.76] - 2026-09-12
 
 ### ⚡ Performance
 
 - *(discord)* A fight uploads two pictures, not six
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.76
 ## [0.10.75] - 2026-09-12
 
 ### 🐛 Bug Fixes
