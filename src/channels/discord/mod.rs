@@ -28,6 +28,8 @@ use crate::transport::VizierTransport;
 use crate::utils::remove_think_tags;
 
 mod awards;
+mod battle;
+mod battle_card;
 mod awards_card;
 mod quiz;
 mod quote;
@@ -59,6 +61,9 @@ impl VizierChannel for DiscordChannelReader {
         // bot down - it only means nothing is counted this run.
         if let Err(err) = stats::open(&self.deps.config.workspace, &allowed_channels()) {
             tracing::error!("stats database unavailable: {}", err);
+        }
+        if let Err(err) = battle::open(&self.deps.config.workspace) {
+            tracing::warn!("battle: store not opened: {}", err);
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
@@ -1262,6 +1267,30 @@ impl EventHandler for Handler {
 
         let quiz_stop = CreateCommand::new("quizstop").description("admin only: stop the quiz until someone runs /quiz again");
         let _ = Command::create_global_command(ctx.http.clone(), quiz_stop).await;
+
+        let fight_cmd = CreateCommand::new("fight")
+            .description("challenge someone to a 1v1 - the fight happens in the fight channel")
+            .add_option(
+                CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "kisse ladna hai")
+                    .required(true),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), fight_cmd).await;
+
+        let battle_cmd = CreateCommand::new("battle")
+            .description("admin only: open a battle royale lobby and ping the warriors")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::Integer,
+                    "minutes",
+                    "how long joining stays open (1-15, default 5)",
+                )
+                .min_int_value(1)
+                .max_int_value(15),
+            );
+        let _ = Command::create_global_command(ctx.http.clone(), battle_cmd).await;
+
+        let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
+        let _ = Command::create_global_command(ctx.http.clone(), warrior_cmd).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
 
         let toggle = CreateCommand::new("nochitthi")
@@ -1287,6 +1316,10 @@ impl EventHandler for Handler {
             let id = component.data.custom_id.clone();
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("battle") || id.starts_with("fight") {
+                battle::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
@@ -1734,6 +1767,17 @@ impl EventHandler for Handler {
             }
             if command.data.name == "quizstop" {
                 quiz::stop_command(&ctx, &command).await;
+            }
+
+            // The arena: open to everyone, admin-only mode included.
+            if command.data.name == "fight" {
+                battle::fight_command(&ctx, &command).await;
+            }
+            if command.data.name == "battle" {
+                battle::battle_command(&ctx, &command).await;
+            }
+            if command.data.name == "warrior" {
+                battle::warrior_command(&ctx, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
