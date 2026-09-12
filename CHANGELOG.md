@@ -2,11 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.84] - 2026-09-12
+
+### 🚀 Features
+
+- *(discord)* A private common room for each house
+
+### 🐛 Bug Fixes
+
+- *(discord)* The draft tops up, it does not re-sort the server
+- *(discord)* Give a returner their house role back
 ## [0.10.83] - 2026-09-12
 
 ### 🚀 Features
 
 - *(discord)* The sorting draft - plan it, show it, then place everyone
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.83
 ## [0.10.82] - 2026-09-12
 
 ### 🚀 Features
