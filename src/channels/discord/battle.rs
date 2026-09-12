@@ -21,7 +21,7 @@ use serenity::all::{
     ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
     CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateEmbed, CreateEmbedFooter,
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditAttachments, EditMessage, EditRole,
-    GuildId, Member, MessageId, RoleId, UserId,
+    GuildId, Member, Message, MessageId, RoleId, UserId,
 };
 
 use super::battle_card::{self, Champion, Fight, Fighter, Outcome};
@@ -39,6 +39,11 @@ const START_HP: i32 = 100;
 const MAX_EXCHANGES: usize = 14;
 /// Between exchanges of one fight. Short, because a battle is many fights.
 const BEAT: Duration = Duration::from_secs(2);
+/// Messages under the fight before it is moved back to the bottom of the channel.
+const STICKY_AFTER: u32 = 4;
+/// How long any one Discord call may take before the fight gives up on it and
+/// carries on. Without this a wedged upload freezes the whole battle.
+const HTTP_WAIT: Duration = Duration::from_secs(20);
 /// Between two fights of the same round.
 const FIGHT_GAP: Duration = Duration::from_secs(3);
 /// Between rounds.
@@ -65,6 +70,8 @@ static BUSY: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet
 /// Last `/fight` per member, for the cooldown.
 static LAST_FIGHT: LazyLock<Mutex<HashMap<u64, std::time::Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Messages posted under the live fight, per channel, for the sticky move.
+static BELOW: LazyLock<Mutex<HashMap<u64, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct Lobby {
     joined: Vec<u64>,
@@ -406,6 +413,47 @@ async fn champion_card(who: Fighter, subtitle: String, line: String) -> Option<V
         .flatten()
 }
 
+/// Puts the fight message back at the bottom once chat has buried it, so the
+/// fight is always the last thing in the channel. The old copy goes away.
+async fn keep_at_bottom(ctx: &Context, channel: ChannelId, message: &mut Message, text: &str, png: Option<Vec<u8>>) {
+    let buried = BELOW.lock().remove(&channel.get()).unwrap_or(0) >= STICKY_AFTER;
+    if !buried {
+        let mut edit = EditMessage::new().content(text);
+        if let Some(png) = png {
+            edit = edit.attachments(EditAttachments::new().add(CreateAttachment::bytes(png, "fight.png")));
+        }
+        if let Err(err) = call(message.edit(&ctx.http, edit)).await {
+            tracing::warn!("battle: fight edit failed: {}", err);
+        }
+        return;
+    }
+    // Rebuilt rather than edited: a message can't move, only be replaced.
+    let mut fresh = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+    if let Some(png) = png {
+        fresh = fresh.add_file(CreateAttachment::bytes(png, "fight.png"));
+    }
+    match call(channel.send_message(&ctx.http, fresh)).await {
+        Ok(posted) => {
+            let old = std::mem::replace(message, posted);
+            let http = ctx.http.clone();
+            tokio::spawn(async move {
+                let _ = channel.delete_message(&http, old.id).await;
+            });
+        }
+        Err(err) => tracing::warn!("battle: fight message not moved down: {}", err),
+    }
+}
+
+/// Every Discord call in a fight goes through here. A request that never comes
+/// back used to freeze the whole battle behind it.
+async fn call<T>(fut: impl std::future::Future<Output = serenity::Result<T>>) -> Result<T, String> {
+    match tokio::time::timeout(HTTP_WAIT, fut).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!("no answer from Discord in {}s", HTTP_WAIT.as_secs())),
+    }
+}
+
 /// One fight: the card goes up, the exchanges land under it, then the result.
 /// Returns the winner.
 async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &Warrior, seed: &mut u64) -> Warrior {
@@ -415,16 +463,18 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
     let head = format!("**{}** · <@{}> vs <@{}>", stage, a.id, b.id);
     let mut log: Vec<String> = Vec::new();
     let mut text = head.clone();
+    tracing::info!("battle: {} - {} vs {}", stage, a.name, b.name);
+    BELOW.lock().insert(channel.get(), 0);
     let mut message = {
         let mut msg = CreateMessage::new().content(&text).allowed_mentions(CreateAllowedMentions::new());
         if let Some(png) = open {
             msg = msg.add_file(CreateAttachment::bytes(png, "fight.png"));
         }
-        match channel.send_message(&ctx.http, msg).await {
+        match call(channel.send_message(&ctx.http, msg)).await {
             Ok(m) => m,
             Err(err) => {
                 tracing::warn!("battle: fight card not sent: {}", err);
-                return if *seed % 2 == 0 { a.clone() } else { b.clone() };
+                return if roll(seed, 2) == 0 { a.clone() } else { b.clone() };
             }
         }
     };
@@ -439,21 +489,30 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
         let (blow, delta, target) = exchange(seed, attacker);
         hp[target] = (hp[target] + delta).clamp(0, START_HP);
         let line = fill(pick(blow.lines(), seed), &x.name, &y.name);
-        let shown = match delta {
-            0 => format!("{} · **miss**", line),
-            d if d > 0 => format!("{} · **+{} HP**", line, d),
-            d => format!("{} · **{} HP**", line, d),
+        let tail = match delta {
+            0 => "miss".to_string(),
+            d if d > 0 => format!("+{} HP", d),
+            d => format!("{} HP", d),
         };
-        log.push(shown.clone());
+        log.push(format!("{} · **{}**", line, tail));
         text = fight_text(&head, &log, a, b, &hp);
-        let card =
-            fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), shown, Outcome::Open, Some((target, delta)))
-                .await;
-        let mut edit = EditMessage::new().content(&text);
-        if let Some(png) = card {
-            edit = edit.attachments(EditAttachments::new().add(CreateAttachment::bytes(png, "fight.png")));
-        }
-        let _ = message.edit(&ctx.http, edit).await;
+        // A fresh picture every beat is a 150KB upload; every other beat keeps
+        // the bars moving without leaning on Discord.
+        let redraw = turns % 2 == 1 || hp[0] == 0 || hp[1] == 0;
+        let card = if redraw {
+            fight_card(
+                stage.to_string(),
+                a.card(hp[0]),
+                b.card(hp[1]),
+                format!("{} · {}", line, tail),
+                Outcome::Open,
+                Some((target, delta)),
+            )
+            .await
+        } else {
+            None
+        };
+        keep_at_bottom(ctx, channel, &mut message, &text, card).await;
     }
 
     let a_wins = hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0);
@@ -464,12 +523,24 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
     let done =
         fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None).await;
     tokio::time::sleep(BEAT).await;
-    let mut edit = EditMessage::new().content(&text);
-    if let Some(png) = done {
-        edit = edit.attachments(EditAttachments::new().add(CreateAttachment::bytes(png, "fight.png")));
-    }
-    let _ = message.edit(&ctx.http, edit).await;
+    keep_at_bottom(ctx, channel, &mut message, &text, done).await;
+    tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
+    // Between fights nobody is watching a message, so stop counting chat.
+    BELOW.lock().remove(&channel.get());
     winner.clone()
+}
+
+/// Counts chat under the live fight so it can be moved back to the bottom.
+/// Returns false for everything else, so the rest of the bot still sees it.
+pub fn note_chat(channel: ChannelId) -> bool {
+    let mut below = BELOW.lock();
+    match below.get_mut(&channel.get()) {
+        Some(count) => {
+            *count += 1;
+            true
+        }
+        None => false,
+    }
 }
 
 /// The message under the card: the health line and the last few exchanges, so a
@@ -883,6 +954,31 @@ async fn toggle_warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<bool
     }
 }
 
+/// `/battlestop` - lets an admin free a channel whose battle died mid-fight,
+/// which otherwise stays "busy" until the bot restarts.
+pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
+    let whisper = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only admins can stop a battle.".into())).await;
+        return;
+    }
+    let arena = match command.guild_id {
+        Some(guild) => arena(ctx, guild, command.channel_id).await,
+        None => command.channel_id,
+    };
+    let freed = BUSY.lock().remove(&arena.get());
+    LOBBIES.lock().clear();
+    BELOW.lock().remove(&arena.get());
+    let text = if freed {
+        "Cleared. A fight that was still running will stop at its next step, and `/battle` works again."
+    } else {
+        "Nothing was running there."
+    };
+    let _ = command.create_response(&ctx.http, whisper(text.into())).await;
+}
+
 // --- /fightboard ------------------------------------------------------------
 
 /// Everyone who has fought, best win count first, with battles won alongside.
@@ -1138,6 +1234,21 @@ mod tests {
             }
         }
         assert!(miss > 200 && crit > 400 && heal > 200 && hit > 2000, "{} {} {} {}", miss, crit, heal, hit);
+    }
+
+    #[test]
+    fn chat_is_only_counted_while_a_fight_is_live() {
+        let channel = ChannelId::new(999);
+        // No fight: the arena ignores the channel entirely.
+        assert!(!note_chat(channel));
+        BELOW.lock().insert(channel.get(), 0);
+        for _ in 0..STICKY_AFTER {
+            assert!(note_chat(channel));
+        }
+        assert_eq!(BELOW.lock().get(&channel.get()).copied(), Some(STICKY_AFTER));
+        // The fight ends and the counter goes with it.
+        BELOW.lock().remove(&channel.get());
+        assert!(!note_chat(channel));
     }
 
     #[test]

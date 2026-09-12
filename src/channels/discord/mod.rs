@@ -1294,6 +1294,10 @@ impl EventHandler for Handler {
 
         let fight_board = CreateCommand::new("fightboard").description("who has won the most fights and battles");
         let _ = Command::create_global_command(ctx.http.clone(), fight_board).await;
+
+        let battle_stop =
+            CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
+        let _ = Command::create_global_command(ctx.http.clone(), battle_stop).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
 
         let toggle = CreateCommand::new("nochitthi")
@@ -1784,6 +1788,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "fightboard" {
                 battle::board_command(&ctx, &command).await;
+            }
+            if command.data.name == "battlestop" {
+                battle::stop_command(&ctx, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
@@ -2555,6 +2562,11 @@ Ye message sirf tumhe dikh raha hai."#,
 
         // The quiz channel belongs to the quiz: answers are checked there, for
         // everyone, and nothing in it ever reaches the model.
+        // Chat under a live fight is only counted, never swallowed: the card
+        // gets moved back to the bottom once enough messages pile on top of it.
+        if !is_dm {
+            battle::note_chat(msg.channel_id);
+        }
         if !is_dm && quiz::on_message(&ctx, &msg).await {
             return;
         }
