@@ -387,6 +387,8 @@ const THEME_FULL: i64 = 100;
 const BLOCK: u32 = 20;
 /// How long the genre vote stays open.
 const VOTE_TIME: Duration = Duration::from_secs(60);
+/// After a vote that arrives once the window has lapsed, how long the others get.
+const VOTE_GRACE: Duration = Duration::from_secs(20);
 const MIX: &str = "mix";
 
 /// A group of themes players can vote for. Member questions are only in the mix.
@@ -999,6 +1001,26 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
         )
         .await;
     tokio::time::sleep(VOTE_TIME).await;
+    // The quiz never starts a round into an empty room: if the window closes
+    // with nobody voting, the buttons stay live until somebody does.
+    if votes_cast() == 0 {
+        if let Ok(message) = &sent {
+            let waiting = EditMessage::new().content(format!(
+                "🗳️ **Still open** — the next {} questions start as soon as one person votes.",
+                BLOCK
+            ));
+            let _ = channel.edit_message(&ctx.http, message.id, waiting).await;
+        }
+        while votes_cast() == 0 {
+            if STOP.load(Ordering::SeqCst) {
+                VOTE.lock().take();
+                return None;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        // Once someone breaks the silence, give the others a moment to join in.
+        tokio::time::sleep(VOTE_GRACE).await;
+    }
     let vote = VOTE.lock().take()?;
     let tally = |key: &str| vote.votes.values().filter(|v| **v == key).count();
     let top = vote.keys.iter().map(|k| tally(k)).max().unwrap_or(0);
@@ -1026,6 +1048,11 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
     let _ = channel.say(&ctx.http, result).await;
     tokio::time::sleep(GAP).await;
     chosen
+}
+
+/// Votes in the open genre vote, if there is one.
+fn votes_cast() -> usize {
+    VOTE.lock().as_ref().map(|vote| vote.votes.len()).unwrap_or(0)
 }
 
 async fn cast_vote(ctx: &Context, component: &ComponentInteraction, rest: &str) {
