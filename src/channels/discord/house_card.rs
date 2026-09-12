@@ -56,6 +56,38 @@ const OUTER: f32 = AV / 2.0 + GAP + RING_OUT + RING_IN;
 const PORTRAIT_CX: f32 = 232.0;
 const PORTRAIT_CY: f32 = 196.0;
 
+/// The house crests, as supplied. Baked into the binary so there is nothing to
+/// copy at deploy time and nothing that can go missing or drift out of step
+/// with the code.
+const CRESTS: [(&str, &[u8]); 4] = [
+    ("gryffindor", include_bytes!("crests/gryffindor.png")),
+    ("slytherin", include_bytes!("crests/slytherin.png")),
+    ("ravenclaw", include_bytes!("crests/ravenclaw.png")),
+    ("hufflepuff", include_bytes!("crests/hufflepuff.png")),
+];
+
+/// Side of the crest artwork on the card. The source is 64px, so this is an
+/// enlargement; kept a little under the badge so the ivory keyline has room.
+const CREST_ART: f32 = 112.0;
+
+/// A house's artwork, square at `side` pixels, or `None` for an unknown house
+/// or bytes that don't decode.
+fn crest_art(house: &str, side: u32) -> Option<Pixmap> {
+    let wanted = house.trim().to_ascii_lowercase();
+    let (_, bytes) = CRESTS.iter().find(|(key, _)| *key == wanted)?;
+    let decoded = image::load_from_memory(bytes).ok()?;
+    // Being enlarged, not reduced: Lanczos keeps these bold outlines crisp
+    // where the default filter would leave them soft.
+    let scaled = decoded.resize_exact(side, side, image::imageops::FilterType::Lanczos3).into_rgba8();
+    let mut px = Pixmap::new(side, side)?;
+    for (slot, pixel) in px.pixels_mut().iter_mut().zip(scaled.pixels()) {
+        let [r, g, b, a] = pixel.0;
+        // tiny-skia keeps its pixels premultiplied; the PNG's are not.
+        *slot = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+    }
+    Some(px)
+}
+
 // The crest badge, on the portrait's lower-right shoulder.
 const CREST_R: f32 = 74.0;
 const CREST_SIZE: f32 = 116.0;
@@ -130,7 +162,7 @@ fn draw(pen: &mut Pen<'_>, s: &Sorted) {
     }
 
     portrait(pen, s.avatar.as_deref(), primary, secondary);
-    crest(pen, s.crest.trim(), secondary);
+    crest(pen, &s.house, s.crest.trim(), secondary);
     type_column(pen, s, secondary);
     foot(pen, s.line.trim());
 }
@@ -186,8 +218,9 @@ fn band(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3]) {
 /// The house emoji on a dark translucent disc. The disc is dark and its
 /// hairline is a lifted secondary, so the badge reads the same on scarlet as
 /// it does on yellow.
-fn crest(pen: &mut Pen<'_>, crest: &str, secondary: [u8; 3]) {
-    if crest.is_empty() {
+fn crest(pen: &mut Pen<'_>, house: &str, crest: &str, secondary: [u8; 3]) {
+    let art = crest_art(house, CREST_ART as u32);
+    if art.is_none() && crest.is_empty() {
         return;
     }
     // 45 degrees down and right of centre, on the portrait's shoulder.
@@ -200,9 +233,17 @@ fn crest(pen: &mut Pen<'_>, crest: &str, secondary: [u8; 3]) {
         let stroke = Stroke { width: 3.0, ..Stroke::default() };
         pen.px.stroke_path(&edge, &paint(lift(secondary, 0.55), 235), &stroke, Transform::identity(), None);
     }
-    // Colour emoji come from whichever installed face has the glyph, so the
-    // weight asked for here only matters to the fallback's starting point.
-    pen.centered(crest, cx, cy + CREST_SIZE * 0.36, CREST_SIZE, Weight::NORMAL, INK);
+    match art {
+        Some(art) => {
+            let corner = |centre: f32| (centre - CREST_ART / 2.0).round() as i32;
+            let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..PixmapPaint::default() };
+            pen.px.draw_pixmap(corner(cx), corner(cy), art.as_ref(), &paint, Transform::identity(), None);
+        }
+        // No artwork for this house: fall back to the emoji rather than an
+        // empty badge. Colour emoji come from whichever installed face has the
+        // glyph, so the weight asked for here only steers the fallback.
+        None => pen.centered(crest, cx, cy + CREST_SIZE * 0.36, CREST_SIZE, Weight::NORMAL, INK),
+    }
 }
 
 /// The eyebrow, the house and the member's name, stacked to the right of the
