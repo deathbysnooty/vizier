@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.74] - 2026-09-12
+
+### 🚀 Features
+
+- *(discord)* Arena results in English, fight records and /fightboard
 ## [0.10.73] - 2026-09-12
 
 ### 🚀 Features
@@ -12,6 +17,10 @@ All notable changes to this project will be documented in this file.
 
 - New genre topics, hand-picked theme moves, reviewed-out questions
 - Bollywood songs topic (98 checked questions), 1942: A Love Story year fix
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.73
 ## [0.10.72] - 2026-09-11
 
 ### 🚀 Features
