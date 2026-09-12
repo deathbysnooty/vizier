@@ -2,11 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.73] - 2026-09-12
+
+### 🚀 Features
+
+- *(discord)* The arena - /fight, /battle and the warrior role
+
+### 💼 Other
+
+- New genre topics, hand-picked theme moves, reviewed-out questions
+- Bollywood songs topic (98 checked questions), 1942: A Love Story year fix
 ## [0.10.72] - 2026-09-11
 
 ### 🚀 Features
 
 - *(discord)* Crown each quiz round's winner as that genre's champion
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.72
 ## [0.10.71] - 2026-09-11
 
 ### 🚀 Features
