@@ -1192,47 +1192,96 @@ fn pretty(cat: &str) -> String {
         .join(" ")
 }
 
-fn embed(round: u64, q: &Question, shown: &Shown) -> CreateEmbed {
-    let mut text = if q.src == "news" { "📰 **Bollywood news**\n".to_string() } else { String::new() };
-    text.push_str(&format!("**{}**\n", q.q));
+/// The genre a question belongs to, for the stripe down the side of the card.
+fn genre_of(theme: &str) -> Option<&'static Genre> {
+    GENRES.iter().find(|g| g.themes.contains(&theme))
+}
+
+/// Each genre gets its own colour, so the channel reads at a glance.
+fn genre_colour(key: &str) -> u32 {
+    match key {
+        "bollywood" | "bollywood_songs" => 0xE84393,
+        "indian_pop" | "music" => 0xFD79A8,
+        "cricket" | "sports" => 0x00B894,
+        "india" | "world_geography" => 0x0984E3,
+        "hollywood" | "tv" => 0x6C5CE7,
+        "games" | "anime" => 0xE17055,
+        "harry_potter" => 0x8E44AD,
+        "game_of_thrones" => 0x636E72,
+        "mcu" => 0xD63031,
+        "pokemon" => 0xFDCB6E,
+        "disney" => 0x74B9FF,
+        "history" | "gk" => 0xB8860B,
+        "science" => 0x00CEC9,
+        "food" => 0xE67E22,
+        "life" => 0x55EFC4,
+        "brain" => 0xA29BFE,
+        _ => 0x5865F2,
+    }
+}
+
+/// The question card. Options are listed in the card as well as on the buttons,
+/// so the question can be read in one go without hunting across the buttons.
+fn embed(round: u64, q: &Question, options: &[String], correct: usize, shown: &Shown) -> CreateEmbed {
+    let genre = genre_of(&q.theme);
+    let mut text = String::new();
+    if q.src == "news" {
+        text.push_str("📰 **This week in Bollywood**\n\n");
+    }
+    text.push_str(&format!("### {}\n", q.q));
+    if !options.is_empty() {
+        text.push('\n');
+        for (i, option) in options.iter().enumerate() {
+            let letter = ['🇦', '🇧', '🇨', '🇩'][i.min(3)];
+            let done = !matches!(shown, Shown::Open { .. });
+            let mark = if done && i == correct { " ✅" } else { "" };
+            let body = if done && i == correct { format!("**{}**", option) } else { option.clone() };
+            text.push_str(&format!("{}  {}{}\n", letter, body, mark));
+        }
+    }
     match shown {
         Shown::Open { hint } => {
-            let how = if q.is_mcq() { "👇 Pick an option · a wrong pick waits 1 min" } else { "✍️ Type your answer" };
-            text.push_str(&format!("\n{} · no time limit · stuck? `!hint` or `!skip`", how));
             if let Some(hint) = hint {
-                text.push_str(&format!("\n💡 Hint: `{}`", hint));
+                text.push_str(&format!("\n💡 `{}`", hint));
             }
         }
-        Shown::Won(user) => text.push_str(&format!("\n✅ <@{}> got it: **{}**", user, q.a)),
-        Shown::Skipped => text.push_str(&format!("\n⏭️ Skipped. The answer was **{}**", q.a)),
+        Shown::Won(user) => {
+            text.push_str(&format!("\n✅ <@{}> got it", user));
+            if options.is_empty() {
+                text.push_str(&format!(" — **{}**", q.a));
+            }
+        }
+        Shown::Skipped => text.push_str(&format!("\n⏭️ Skipped — the answer was **{}**", q.a)),
     }
     if matches!(shown, Shown::Won(_) | Shown::Skipped) && !q.note.is_empty() {
-        text.push_str(&format!("\n_{}_", q.note));
+        text.push_str(&format!("\n-# {}", q.note));
     }
     if let Some(by) = q.added_by {
-        text.push_str(&format!("\n\nQuestion by <@{}>", by));
+        text.push_str(&format!("\n-# Question by <@{}>", by));
     }
     let colour = match shown {
-        Shown::Open { .. } => 0x5865F2,
+        Shown::Open { .. } => genre.map(|g| genre_colour(g.key)).unwrap_or(0x5865F2),
         Shown::Won(_) => 0x57F287,
         Shown::Skipped => 0x95A5A6,
     };
     let flag = if q.region == "india" { "🇮🇳" } else { "🌍" };
-    let mut footer = format!("{} {}", flag, pretty(&q.cat));
+    let topic = genre.map(|g| g.label.to_string()).unwrap_or_else(|| pretty(&q.cat));
+    let mut footer = format!("{} {} · {}", flag, topic, pretty(&q.cat));
     if !q.diff.is_empty() {
         footer.push_str(&format!(" · {}", q.diff));
     }
     {
         let board = BOARD.lock();
         if board.asked > 0 {
-            footer.push_str(&format!(" · {} round {}/{}", board.label, board.asked, BLOCK));
+            footer.push_str(&format!(" · question {} of {}", board.asked, BLOCK));
         }
     }
-    CreateEmbed::new()
-        .title(format!("Question #{}", round))
-        .description(text)
-        .colour(colour)
-        .footer(CreateEmbedFooter::new(footer))
+    let title = match shown {
+        Shown::Open { .. } if options.is_empty() => format!("Question #{} · type your answer", round),
+        Shown::Open { .. } => format!("Question #{} · pick one", round),
+        _ => format!("Question #{}", round),
+    };
+    CreateEmbed::new().title(title).description(text).colour(colour).footer(CreateEmbedFooter::new(footer))
 }
 
 fn components(
@@ -1263,9 +1312,6 @@ fn components(
             rows.push(CreateActionRow::Buttons(vec![button]));
         }
     }
-    rows.push(CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("quizflag:{}", q.id)).label("🚩 Report question").style(ButtonStyle::Secondary),
-    ]));
     rows
 }
 
@@ -1422,7 +1468,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             .send_message(
                 &ctx.http,
                 CreateMessage::new()
-                    .embed(embed(round, &question, &Shown::Open { hint: None }))
+                    .embed(embed(round, &question, &options, correct, &Shown::Open { hint: None }))
                     .components(components(round, &question, &options, correct, true, &[])),
             )
             .await;
@@ -1472,7 +1518,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
                 &ctx.http,
                 live.message,
                 EditMessage::new()
-                    .embed(embed(round, &question, &shown))
+                    .embed(embed(round, &question, &options, correct, &shown))
                     .components(components(round, &question, &options, correct, false, &[])),
             )
             .await;
@@ -1625,7 +1671,7 @@ async fn move_question_down(ctx: &Context, round: u64) {
     };
     let hint = (!question.is_mcq() && hints > 0).then(|| hint_at(&question.a, hints));
     let copy = CreateMessage::new()
-        .embed(embed(round, &question, &Shown::Open { hint }))
+        .embed(embed(round, &question, &options, correct, &Shown::Open { hint }))
         .components(components(round, &question, &options, correct, true, &removed));
     let Ok(new) = channel.send_message(&ctx.http, copy).await else {
         return;
@@ -1709,7 +1755,7 @@ async fn give_hint(ctx: &Context, msg: &Message) {
     match (hint, snap) {
         (Hint::Letters(shown), Some(s)) => {
             let open = Shown::Open { hint: Some(shown.clone()) };
-            let _ = s.channel.edit_message(&ctx.http, s.message, EditMessage::new().embed(embed(s.round, &s.question, &open))).await;
+            let _ = s.channel.edit_message(&ctx.http, s.message, EditMessage::new().embed(embed(s.round, &s.question, &s.options, s.correct, &open))).await;
             let _ = msg.channel_id.send_message(&ctx.http, reply(format!("💡 `{}`", shown))).await;
         }
         (Hint::Knocked(option), Some(s)) => {
@@ -1765,8 +1811,6 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         news_finish(ctx, component, batch, true).await;
     } else if let Some(batch) = id.strip_prefix("quiznewsno:") {
         news_finish(ctx, component, batch, false).await;
-    } else if let Some(qid) = id.strip_prefix("quizflag:") {
-        flag(ctx, component, qid).await;
     } else if let Some(qid) = id.strip_prefix("quizretire:") {
         report_decision(ctx, component, qid, true).await;
     } else if let Some(qid) = id.strip_prefix("quizkeep:") {
@@ -1840,7 +1884,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Click::Right(q, options, correct, this_round) => {
             let total = add_point(user, &q.id);
             let update = CreateInteractionResponseMessage::new()
-                .embed(embed(round, &q, &Shown::Won(user)))
+                .embed(embed(round, &q, &options, correct, &Shown::Won(user)))
                 .components(components(round, &q, &options, correct, false, &[]));
             let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(update)).await;
             let note = CreateMessage::new()
@@ -1850,58 +1894,6 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
             if let Some(guild) = component.guild_id {
                 spawn_leader(ctx, guild, component.channel_id);
             }
-        }
-    }
-}
-
-/// 🚩 on a question: recorded, and never skips or removes it by itself - a
-/// report must not be a free skip. The first report of each question goes to
-/// the reviewers by DM, to keep it or remove it for the future.
-async fn flag(ctx: &Context, component: &ComponentInteraction, qid: &str) {
-    let user = component.user.id.get();
-    let Some(db) = DB.get() else {
-        return;
-    };
-    let (count, first, body) = {
-        let conn = db.lock();
-        let added = conn
-            .execute("INSERT OR IGNORE INTO flags (question_id, user_id) VALUES (?1, ?2)", params![qid, user as i64])
-            .unwrap_or(0)
-            > 0;
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM flags WHERE question_id = ?1", params![qid], |r| r.get(0))
-            .unwrap_or(0);
-        let body: Option<String> = conn
-            .query_row("SELECT body FROM questions WHERE id = ?1", params![qid], |r| r.get(0))
-            .optional()
-            .ok()
-            .flatten();
-        (count, added && count == 1, body)
-    };
-    tracing::info!("quiz: question {} reported by {} ({} reports so far)", qid, user, count);
-    whisper(ctx, component, "🚩 Thanks, reported. An admin will check this question.").await;
-
-    let (true, Some(q)) = (first, body.and_then(|b| serde_json::from_str::<Question>(&b).ok())) else {
-        return;
-    };
-    let mut text = format!("**Question:** {}\n**Answer:** {}", q.q, q.a);
-    if !q.alt.is_empty() {
-        text.push_str(&format!("\n**Also accepted:** {}", q.alt.join(", ")));
-    }
-    if q.is_mcq() {
-        let wrong: Vec<&str> = q.options.iter().filter(|o| **o != q.a).map(|o| o.as_str()).collect();
-        text.push_str(&format!("\n**Wrong options:** {}", wrong.join(" / ")));
-    }
-    text.push_str(&format!("\n\nReported by <@{}> · {} · `{}`", user, pretty(&q.cat), q.id));
-    let card = CreateMessage::new()
-        .embed(CreateEmbed::new().title("🚩 Quiz question reported").description(text).colour(0xED4245))
-        .components(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(format!("quizretire:{}", q.id)).label("🗑️ Remove question").style(ButtonStyle::Danger),
-            CreateButton::new(format!("quizkeep:{}", q.id)).label("✅ Keep").style(ButtonStyle::Secondary),
-        ])]);
-    for reviewer in reviewers() {
-        if let Err(err) = UserId::new(reviewer).direct_message(&ctx.http, card.clone()).await {
-            tracing::warn!("quiz report for {} not sent to {}: {}", q.id, reviewer, err);
         }
     }
 }
@@ -2852,6 +2844,44 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "themes in no genre: {:?}", missing);
+    }
+
+    #[test]
+    fn the_question_card_lists_its_options_and_marks_the_answer() {
+        let q = Question {
+            id: "t-1".into(),
+            kind: "mcq".into(),
+            q: "Which city is the capital of Karnataka?".into(),
+            a: "Bengaluru".into(),
+            alt: vec![],
+            options: vec!["Mysuru".into(), "Bengaluru".into(), "Hubballi".into(), "Mangaluru".into()],
+            cat: "india_map".into(),
+            region: "india".into(),
+            diff: "easy".into(),
+            note: "Also called the Garden City.".into(),
+            src: "ai".into(),
+            added_by: None,
+            theme: "india_map".into(),
+            theme_region: "india".into(),
+        };
+        let options = q.options.clone();
+        let open = format!("{:?}", embed(7, &q, &options, 1, &Shown::Open { hint: None }));
+        for option in &options {
+            assert!(open.contains(option.as_str()), "option {} missing: {}", option, open);
+        }
+        assert!(open.contains("pick one") && open.contains("🇦"), "{}", open);
+        // While it is open nothing gives the answer away, and the note stays back.
+        assert!(!open.contains('✅') && !open.contains("Garden City"), "{}", open);
+
+        let won = format!("{:?}", embed(7, &q, &options, 1, &Shown::Won(42)));
+        assert!(won.contains("✅") && won.contains("<@42>") && won.contains("Garden City"), "{}", won);
+
+        // A question the converter left typed still reads properly.
+        let typed = Question { kind: "text".into(), options: vec![], ..q };
+        let card = format!("{:?}", embed(7, &typed, &[], 0, &Shown::Open { hint: None }));
+        assert!(card.contains("type your answer"), "{}", card);
+        let done = format!("{:?}", embed(7, &typed, &[], 0, &Shown::Skipped));
+        assert!(done.contains("Bengaluru"), "{}", done);
     }
 
     #[test]
