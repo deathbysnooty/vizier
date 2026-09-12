@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.75] - 2026-09-12
+
+### 🐛 Bug Fixes
+
+- *(discord)* A stuck upload can no longer freeze a battle
 ## [0.10.74] - 2026-09-12
 
 ### 🚀 Features
 
 - *(discord)* Arena results in English, fight records and /fightboard
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.74
 ## [0.10.73] - 2026-09-12
 
 ### 🚀 Features
