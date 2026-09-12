@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.80] - 2026-09-12
+
+### 🐛 Bug Fixes
+
+- *(agents)* Take discord ids as strings, not numbers
 ## [0.10.79] - 2026-09-12
 
 ### 🚀 Features
@@ -11,6 +16,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Options written by hand for the last 195 typed questions
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.79
 ## [0.10.78] - 2026-09-12
 
 ### 🚀 Features
