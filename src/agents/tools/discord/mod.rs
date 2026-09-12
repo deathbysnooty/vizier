@@ -14,6 +14,48 @@ struct ChannelState {
     active_topic: Option<TopicId>,
 }
 
+/// A Discord id, taken as a string OR a number.
+///
+/// Discord ids are 19 digits, which is more precision than a double carries, and
+/// some providers pass tool arguments through floating point: a channel id came
+/// back as ...593500 instead of ...593443 and the message went to the wrong
+/// place. Quoting the id keeps every digit, so the schema asks for a string and
+/// a bare number is still accepted for older callers.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Snowflake(u64);
+
+impl Snowflake {
+    fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Snowflake {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(text) => {
+                text.trim().parse::<u64>().map(Snowflake).map_err(serde::de::Error::custom)
+            }
+            serde_json::Value::Number(number) => number
+                .as_u64()
+                .map(Snowflake)
+                .ok_or_else(|| serde::de::Error::custom(format!("{} is not a discord id", number))),
+            other => Err(serde::de::Error::custom(format!("expected a discord id, got {}", other))),
+        }
+    }
+}
+
+impl schemars::JsonSchema for Snowflake {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Snowflake".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Advertised as a string so the id arrives with all 19 digits intact.
+        String::json_schema(generator)
+    }
+}
+
 pub fn new_discord_tools(
     discord_token: String,
     agent_id: AgentId,
@@ -37,8 +79,8 @@ pub struct SendDiscordMessage {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SendDiscoedMessageArgs {
-    #[schemars(description = "id of target discord channel")]
-    channel_id: u64,
+    #[schemars(description = "id of target discord channel, as a string")]
+    channel_id: Snowflake,
 
     #[schemars(description = "content of the message")]
     content: String,
@@ -58,7 +100,7 @@ impl VizierTool for SendDiscordMessage {
     }
 
     async fn call(&self, args: Self::Input, _ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
-        let channel_id = args.channel_id;
+        let channel_id = args.channel_id.get();
         let content = args.content.clone();
 
         crate::utils::discord::send_message(
@@ -99,11 +141,11 @@ pub struct ReactDiscordMessage {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReactDiscoedMessageArgs {
-    #[schemars(description = "id of the target discord channel")]
-    channel_id: u64,
+    #[schemars(description = "id of the target discord channel, as a string")]
+    channel_id: Snowflake,
 
-    #[schemars(description = "id of the target discord message")]
-    message_id: u64,
+    #[schemars(description = "id of the target discord message, as a string")]
+    message_id: Snowflake,
 
     #[schemars(description = "an emoji")]
     emoji: char,
@@ -123,8 +165,8 @@ impl VizierTool for ReactDiscordMessage {
     }
 
     async fn call(&self, args: Self::Input, _ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
-        let channel = ChannelId::new(args.channel_id);
-        let message_id = MessageId::new(args.message_id);
+        let channel = ChannelId::new(args.channel_id.get());
+        let message_id = MessageId::new(args.message_id.get());
 
         let message = channel
             .message(self.http.clone(), message_id)
@@ -136,7 +178,7 @@ impl VizierTool for ReactDiscordMessage {
             .await
             .map_err(|err| VizierError(err.to_string()))?;
 
-        Ok(format!("Reacted with {} to message {}", args.emoji, args.message_id))
+        Ok(format!("Reacted with {} to message {}", args.emoji, args.message_id.get()))
     }
 }
 
@@ -146,11 +188,11 @@ pub struct GetDiscordMessage {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GetDiscordMessageArgs {
-    #[schemars(description = "id of the target discord channel")]
-    channel_id: u64,
+    #[schemars(description = "id of the target discord channel, as a string")]
+    channel_id: Snowflake,
 
-    #[schemars(description = "id of the target discord message")]
-    message_id: u64,
+    #[schemars(description = "id of the target discord message, as a string")]
+    message_id: Snowflake,
 }
 
 #[async_trait::async_trait]
@@ -167,8 +209,8 @@ impl VizierTool for GetDiscordMessage {
     }
 
     async fn call(&self, args: Self::Input, _ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
-        let channel = ChannelId::new(args.channel_id);
-        let message_id = MessageId::new(args.message_id);
+        let channel = ChannelId::new(args.channel_id.get());
+        let message_id = MessageId::new(args.message_id.get());
 
         let response = channel.message(self.http.clone(), message_id).await;
 
