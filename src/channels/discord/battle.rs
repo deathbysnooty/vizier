@@ -41,6 +41,8 @@ const MAX_EXCHANGES: usize = 14;
 const BEAT: Duration = Duration::from_secs(2);
 /// Messages under the fight before it is moved back to the bottom of the channel.
 const STICKY_AFTER: u32 = 4;
+/// Blocks in a health bar.
+const BAR_BLOCKS: usize = 14;
 /// How long any one Discord call may take before the fight gives up on it and
 /// carries on. Without this a wedged upload freezes the whole battle.
 const HTTP_WAIT: Duration = Duration::from_secs(20);
@@ -415,11 +417,20 @@ async fn champion_card(who: Fighter, subtitle: String, line: String) -> Option<V
 
 /// Puts the fight message back at the bottom once chat has buried it, so the
 /// fight is always the last thing in the channel. The old copy goes away.
-async fn keep_at_bottom(ctx: &Context, channel: ChannelId, message: &mut Message, text: &str, png: Option<Vec<u8>>) {
-    let buried = BELOW.lock().remove(&channel.get()).unwrap_or(0) >= STICKY_AFTER;
+/// `set` attaches a new picture; `carry` is the one already on the message, kept
+/// when the fight has to be reposted lower down.
+async fn keep_at_bottom(
+    ctx: &Context,
+    channel: ChannelId,
+    message: &mut Message,
+    text: &str,
+    set: Option<Vec<u8>>,
+    carry: Option<&Vec<u8>>,
+) {
+    let buried = BELOW.lock().get(&channel.get()).copied().unwrap_or(0) >= STICKY_AFTER;
     if !buried {
         let mut edit = EditMessage::new().content(text);
-        if let Some(png) = png {
+        if let Some(png) = set {
             edit = edit.attachments(EditAttachments::new().add(CreateAttachment::bytes(png, "fight.png")));
         }
         if let Err(err) = call(message.edit(&ctx.http, edit)).await {
@@ -429,11 +440,12 @@ async fn keep_at_bottom(ctx: &Context, channel: ChannelId, message: &mut Message
     }
     // Rebuilt rather than edited: a message can't move, only be replaced.
     let mut fresh = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
-    if let Some(png) = png {
+    if let Some(png) = set.or_else(|| carry.cloned()) {
         fresh = fresh.add_file(CreateAttachment::bytes(png, "fight.png"));
     }
     match call(channel.send_message(&ctx.http, fresh)).await {
         Ok(posted) => {
+            BELOW.lock().insert(channel.get(), 0);
             let old = std::mem::replace(message, posted);
             let http = ctx.http.clone();
             tokio::spawn(async move {
@@ -458,16 +470,18 @@ async fn call<T>(fut: impl std::future::Future<Output = serenity::Result<T>>) ->
 /// Returns the winner.
 async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &Warrior, seed: &mut u64) -> Warrior {
     let mut hp = [START_HP; 2];
-    let open =
+    // One picture at the start, one at the end: the blow-by-blow rides on the
+    // text, which edits without an upload.
+    let opening =
         fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), String::new(), Outcome::Open, None).await;
     let head = format!("**{}** · <@{}> vs <@{}>", stage, a.id, b.id);
     let mut log: Vec<String> = Vec::new();
-    let mut text = head.clone();
+    let mut text = fight_text(&head, &log, a, b, &hp);
     tracing::info!("battle: {} - {} vs {}", stage, a.name, b.name);
     BELOW.lock().insert(channel.get(), 0);
     let mut message = {
         let mut msg = CreateMessage::new().content(&text).allowed_mentions(CreateAllowedMentions::new());
-        if let Some(png) = open {
+        if let Some(png) = opening.clone() {
             msg = msg.add_file(CreateAttachment::bytes(png, "fight.png"));
         }
         match call(channel.send_message(&ctx.http, msg)).await {
@@ -496,23 +510,7 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
         };
         log.push(format!("{} · **{}**", line, tail));
         text = fight_text(&head, &log, a, b, &hp);
-        // A fresh picture every beat is a 150KB upload; every other beat keeps
-        // the bars moving without leaning on Discord.
-        let redraw = turns % 2 == 1 || hp[0] == 0 || hp[1] == 0;
-        let card = if redraw {
-            fight_card(
-                stage.to_string(),
-                a.card(hp[0]),
-                b.card(hp[1]),
-                format!("{} · {}", line, tail),
-                Outcome::Open,
-                Some((target, delta)),
-            )
-            .await
-        } else {
-            None
-        };
-        keep_at_bottom(ctx, channel, &mut message, &text, card).await;
+        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref()).await;
     }
 
     let a_wins = hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0);
@@ -523,7 +521,7 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
     let done =
         fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None).await;
     tokio::time::sleep(BEAT).await;
-    keep_at_bottom(ctx, channel, &mut message, &text, done).await;
+    keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref()).await;
     tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
     // Between fights nobody is watching a message, so stop counting chat.
     BELOW.lock().remove(&channel.get());
@@ -543,11 +541,23 @@ pub fn note_chat(channel: ChannelId) -> bool {
     }
 }
 
-/// The message under the card: the health line and the last few exchanges, so a
-/// long fight never runs past Discord's message limit.
+/// Health as blocks, so the bar moves on a plain message edit with nothing to upload.
+fn bar(hp: i32) -> String {
+    let full = ((hp.clamp(0, START_HP) as f32 / START_HP as f32) * BAR_BLOCKS as f32).round() as usize;
+    // Anything still standing keeps one block, so a bar never reads as empty too early.
+    let full = if hp > 0 { full.max(1) } else { 0 };
+    format!("{}{}", "█".repeat(full), "░".repeat(BAR_BLOCKS - full))
+}
+
+/// The message under the card: both bars and the last few exchanges, trimmed so
+/// a long fight never runs past Discord's message limit.
 fn fight_text(head: &str, log: &[String], a: &Warrior, b: &Warrior, hp: &[i32; 2]) -> String {
-    let recent = log.iter().rev().take(4).rev().cloned().collect::<Vec<_>>().join("\n");
-    format!("{}\n❤️ **{}** {} — {} **{}**\n{}", head, a.name, hp[0].max(0), hp[1].max(0), b.name, recent)
+    let side = |who: &Warrior, hp: i32| {
+        let name: String = who.name.chars().take(14).collect();
+        format!("`{:<14}` `{}` **{:>3}**", name, bar(hp), hp.max(0))
+    };
+    let recent = log.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join("\n");
+    format!("{}\n❤️ {}\n💙 {}\n{}", head, side(a, hp[0]), side(b, hp[1]), recent)
 }
 
 // --- /fight -----------------------------------------------------------------
@@ -1252,14 +1262,28 @@ mod tests {
     }
 
     #[test]
-    fn fight_text_keeps_only_the_last_few_lines() {
+    fn health_bars_fill_and_empty_with_the_numbers() {
+        assert_eq!(bar(100), "█".repeat(BAR_BLOCKS));
+        assert_eq!(bar(0), "░".repeat(BAR_BLOCKS));
+        assert_eq!(bar(50).chars().filter(|c| *c == '█').count(), BAR_BLOCKS / 2);
+        // One block left while alive, none once out, and always the same width.
+        assert_eq!(bar(1).chars().filter(|c| *c == '█').count(), 1);
+        for hp in 0..=START_HP {
+            assert_eq!(bar(hp).chars().count(), BAR_BLOCKS, "hp {}", hp);
+        }
+    }
+
+    #[test]
+    fn fight_text_shows_both_bars_and_only_the_last_few_lines() {
         let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None };
         let (a, b) = (warrior(1, "Ravi"), warrior(2, "Sneha"));
         let log: Vec<String> = (1..=6).map(|i| format!("line {}", i)).collect();
         let text = fight_text("head", &log, &a, &b, &[62, 0]);
-        assert!(text.contains("❤️ **Ravi** 62 — 0 **Sneha**"), "{}", text);
-        assert!(text.contains("line 6") && text.contains("line 3"), "{}", text);
-        assert!(!text.contains("line 2"), "{}", text);
+        assert!(text.contains("Ravi") && text.contains("Sneha"), "{}", text);
+        assert!(text.contains(&bar(62)) && text.contains(&bar(0)), "{}", text);
+        assert!(text.contains("**  0**"), "the one who is out shows zero: {}", text);
+        assert!(text.contains("line 6") && text.contains("line 4"), "{}", text);
+        assert!(!text.contains("line 3"), "{}", text);
     }
 
     #[test]
