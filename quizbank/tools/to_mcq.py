@@ -720,10 +720,15 @@ GENERATORS = {
 # ---------------------------------------------------------------- bank loading
 
 
+# Options give a riddle away, so these files keep whatever the writers chose and
+# are never converted, in any mode.
+NEVER_CONVERT = {"riddles", "brain_teasers"}
+
+
 def bank_files(which=REWRITE):
     out = []
     for src in which:
-        out += sorted(p for p in (BANK / src).glob("*.jsonl"))
+        out += sorted(p for p in (BANK / src).glob("*.jsonl") if p.stem not in NEVER_CONVERT)
     return out
 
 
