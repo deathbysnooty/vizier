@@ -2,12 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.82] - 2026-09-12
+
+### 🚀 Features
+
+- *(discord)* The four houses - roles, points and rolls, hat still shut
+- *(discord)* The house crests on the sorting card
 ## [0.10.81] - 2026-09-12
 
 ### 🚀 Features
 
 - *(discord)* The hourly nudge posts itself, no model involved
 - *(discord)* Twists in a fight, and more daft ways to get health back
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.81
 ## [0.10.80] - 2026-09-12
 
 ### 🐛 Bug Fixes
