@@ -30,6 +30,7 @@ use crate::utils::remove_think_tags;
 mod awards;
 mod battle;
 mod battle_card;
+mod nudge;
 mod awards_card;
 mod quiz;
 mod quote;
@@ -1299,6 +1300,7 @@ impl EventHandler for Handler {
             CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
         let _ = Command::create_global_command(ctx.http.clone(), battle_stop).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
+        nudge::spawn(ctx.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
