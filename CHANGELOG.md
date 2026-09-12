@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.76] - 2026-09-12
+
+### ⚡ Performance
+
+- *(discord)* A fight uploads two pictures, not six
 ## [0.10.75] - 2026-09-12
 
 ### 🐛 Bug Fixes
 
 - *(discord)* A stuck upload can no longer freeze a battle
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.75
 ## [0.10.74] - 2026-09-12
 
 ### 🚀 Features
