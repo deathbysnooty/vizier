@@ -1291,6 +1291,9 @@ impl EventHandler for Handler {
 
         let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
         let _ = Command::create_global_command(ctx.http.clone(), warrior_cmd).await;
+
+        let fight_board = CreateCommand::new("fightboard").description("who has won the most fights and battles");
+        let _ = Command::create_global_command(ctx.http.clone(), fight_board).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
 
         let toggle = CreateCommand::new("nochitthi")
@@ -1778,6 +1781,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "warrior" {
                 battle::warrior_command(&ctx, &command).await;
+            }
+            if command.data.name == "fightboard" {
+                battle::board_command(&ctx, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;

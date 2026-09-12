@@ -127,16 +127,16 @@ const EXCHANGE: &[&str] = &[
 ];
 
 const FINISH: &[&str] = &[
-    "{w} ne {l} ko bola 'ja beta ja, jee le apni zindagi' 🏆",
-    "{l} out. {w} ne bina pasina bahaye jeet liya",
-    "{w} ki jeet, {l} ka 'main next round mein aata hoon' wala excuse",
-    "{l} ne dramatic exit liya, {w} ne wave karke bhej diya",
-    "{w} bacha, {l} gaya - aur haan, screenshot le liya gaya hai",
-    "{l} ka game over. {w} ne victory dance bhi kar liya",
-    "{w} ne finishing move maara: silent treatment. {l} khatam",
-    "{l} ne haar maan li, {w} ne chai ka cup uthaya",
-    "{w} jeeta. {l} ab commentary karega",
-    "{l} ko {w} ne exit ka darwaza dikha diya 🚪",
+    "{w} won. {l} is out 🏆",
+    "{l} is down — {w} took it without breaking a sweat",
+    "{w} wins, and {l} already has an excuse ready",
+    "{l} made a dramatic exit, {w} waved them off",
+    "{w} survives. {l} is out, and yes, someone screenshotted it",
+    "Game over for {l}. {w} threw in a victory dance",
+    "{w} landed the finisher: the silent treatment. {l} is done",
+    "{l} gave up, {w} picked the chai back up",
+    "{w} won. {l} moves to commentary",
+    "{w} showed {l} the exit 🚪",
 ];
 
 const CRIT: &[&str] = &[
@@ -160,16 +160,16 @@ const HEAL: &[&str] = &[
 ];
 
 const BYE: &[&str] = &[
-    "{a} ko is round mein koi mila hi nahi, chai peene chala gaya ☕",
-    "{a} free pass le ke agle round mein, kismat wala hai",
-    "{a} ka opponent aaya hi nahi, walkover",
+    "{a} had nobody to fight this round and went for chai ☕",
+    "{a} gets a free pass to the next round",
+    "{a}'s opponent never turned up — walkover",
 ];
 
 const CHAMPION_LINE: &[&str] = &[
-    "Poore server ko akele nipta diya 👑",
-    "Sabko chappal dikha ke taj pehen liya",
-    "Aaj ka don yahi hai. Baaki sab commentary box mein",
-    "Undisputed. Baaki log next battle ka wait karein",
+    "Took on the whole server and won 👑",
+    "Last one standing, crown and all",
+    "Today's champion. Everyone else is on commentary",
+    "Undisputed. The rest can wait for the next battle",
 ];
 
 /// A tiny xorshift keeps rolls spread without dragging rand into here.
@@ -233,6 +233,11 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
              id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
              beat INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL);
          CREATE INDEX IF NOT EXISTS wins_user ON wins (user_id, kind);
+         CREATE TABLE IF NOT EXISTS results (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, winner INTEGER NOT NULL,
+             loser INTEGER, ts INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS results_winner ON results (winner);
+         CREATE INDEX IF NOT EXISTS results_loser ON results (loser);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     let _ = DB.set(Mutex::new(conn));
@@ -254,20 +259,41 @@ fn meta_set(key: &str, value: &str) {
     }
 }
 
-/// Records a win and returns how many of that kind the winner now has.
-fn record_win(user: u64, kind: &str, beat: usize) -> i64 {
+/// Logs one finished fight. `loser` is `None` for a battle championship, where
+/// the whole field lost rather than one person.
+fn record(kind: &str, winner: u64, loser: Option<u64>) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute(
+            "INSERT INTO results (kind, winner, loser, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![kind, winner as i64, loser.map(|u| u as i64), Utc::now().timestamp()],
+        );
+    }
+}
+
+/// Fights fought and fights won, counting every 1v1 - the ones inside a battle too.
+fn tally(user: u64) -> (i64, i64) {
+    let Some(db) = DB.get() else {
+        return (0, 0);
+    };
+    let conn = db.lock();
+    let count = |sql: &str| conn.query_row(sql, params![user as i64], |r| r.get::<_, i64>(0)).unwrap_or(0);
+    let fights = count(
+        "SELECT COUNT(*) FROM results WHERE kind != 'champion' AND (winner = ?1 OR loser = ?1)",
+    );
+    let wins = count("SELECT COUNT(*) FROM results WHERE kind != 'champion' AND winner = ?1");
+    (fights, wins)
+}
+
+/// Battles won outright.
+fn crowns(user: u64) -> i64 {
     let Some(db) = DB.get() else {
         return 0;
     };
-    let conn = db.lock();
-    let _ = conn.execute(
-        "INSERT INTO wins (user_id, kind, beat, ts) VALUES (?1, ?2, ?3, ?4)",
-        params![user as i64, kind, beat as i64, Utc::now().timestamp()],
-    );
-    conn.query_row("SELECT COUNT(*) FROM wins WHERE user_id = ?1 AND kind = ?2", params![user as i64, kind], |r| {
-        r.get(0)
-    })
-    .unwrap_or(0)
+    db.lock()
+        .query_row("SELECT COUNT(*) FROM results WHERE kind = 'champion' AND winner = ?1", params![user as i64], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0)
 }
 
 // --- channel and roles ------------------------------------------------------
@@ -460,7 +486,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
     };
     let Some(guild) = command.guild_id else {
-        let _ = command.create_response(&ctx.http, whisper("Ye server mein chalta hai.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.".into())).await;
         return;
     };
     let target = command.data.options.iter().find_map(|o| match o.value {
@@ -468,22 +494,22 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         _ => None,
     });
     let Some(target) = target else {
-        let _ = command.create_response(&ctx.http, whisper("Kisko challenge karna hai? `/fight @naam`".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("Who do you want to fight? Use `/fight @name`.".into())).await;
         return;
     };
     let me = command.user.id.get();
     let them = target.get();
     let refusal = if them == me {
-        Some("Khud se ladega? Doctor se mil.".to_string())
+        Some("You can't fight yourself.".to_string())
     } else if ctx.cache.user(target).map(|u| u.bot).unwrap_or(false) {
-        Some("Bot ko chhod, insaan dhoondh.".to_string())
+        Some("Pick a human, not a bot.".to_string())
     } else {
         LAST_FIGHT
             .lock()
             .get(&me)
             .and_then(|at| FIGHT_COOLDOWN.checked_sub(at.elapsed()))
             .filter(|left| !left.is_zero())
-            .map(|left| format!("Thoda saans le. {}s baad phir challenge kar.", left.as_secs().max(1)))
+            .map(|left| format!("Take a breather — you can challenge again in {}s.", left.as_secs().max(1)))
     };
     if let Some(text) = refusal {
         let _ = command.create_response(&ctx.http, whisper(text)).await;
@@ -495,7 +521,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     let _ = command.defer_ephemeral(&ctx.http).await;
     let (Some(a), Some(b)) = (warrior(ctx, guild, me).await, warrior(ctx, guild, them).await) else {
         let _ = command
-            .edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content("Member nahi mila."))
+            .edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content("Couldn't find that member."))
             .await;
         return;
     };
@@ -511,18 +537,15 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     )
     .await;
     let content = format!(
-        "⚔️ <@{}> ne <@{}> ko challenge kiya!\n<@{}>, accept karega ya bhaagega? {} mein challenge apne aap khatam.",
-        me,
-        them,
-        them,
-        "2 minute"
+        "⚔️ <@{}> has challenged <@{}>!\n<@{}>, accept or decline — the challenge expires in 2 minutes.",
+        me, them, them
     );
     let mut msg = CreateMessage::new()
         .content(content)
         .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(them)]))
         .components(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new("fightyes:0").label("⚔️ Ladna hai").style(ButtonStyle::Success),
-            CreateButton::new("fightno:0").label("🏃 Bhaag jaao").style(ButtonStyle::Secondary),
+            CreateButton::new("fightyes:0").label("⚔️ Accept").style(ButtonStyle::Success),
+            CreateButton::new("fightno:0").label("🏃 Decline").style(ButtonStyle::Secondary),
         ])]);
     if let Some(png) = card {
         msg = msg.add_file(CreateAttachment::bytes(png, "challenge.png"));
@@ -531,7 +554,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         let _ = command
             .edit_response(
                 &ctx.http,
-                serenity::all::EditInteractionResponse::new().content("Fight channel mein message nahi ja paya."),
+                serenity::all::EditInteractionResponse::new().content("Couldn't post in the fight channel."),
             )
             .await;
         return;
@@ -540,8 +563,8 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     // The buttons carry the message id, so the handler finds this challenge.
     let id = posted.id.get();
     let rows = vec![CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("fightyes:{}", id)).label("⚔️ Ladna hai").style(ButtonStyle::Success),
-        CreateButton::new(format!("fightno:{}", id)).label("🏃 Bhaag jaao").style(ButtonStyle::Secondary),
+        CreateButton::new(format!("fightyes:{}", id)).label("⚔️ Accept").style(ButtonStyle::Success),
+        CreateButton::new(format!("fightno:{}", id)).label("🏃 Decline").style(ButtonStyle::Secondary),
     ])];
     let mut posted = posted;
     let _ = posted.edit(&ctx.http, EditMessage::new().components(rows)).await;
@@ -550,11 +573,11 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
 
     let link = posted.link();
     let note = if arena == here {
-        format!("Challenge bhej diya: {}", link)
+        format!("Challenge sent: {}", link)
     } else {
-        format!("⚔️ <@{}> ne <@{}> ko challenge kiya → {}", me, them, link)
+        format!("⚔️ <@{}> challenged <@{}> → {}", me, them, link)
     };
-    let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content("Bhej diya.")).await;
+    let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content("Challenge sent.")).await;
     if arena != here {
         let _ =
             here.send_message(&ctx.http, CreateMessage::new().content(note).allowed_mentions(CreateAllowedMentions::new()))
@@ -577,16 +600,21 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     match answer {
         Some(true) => {
             if !BUSY.lock().insert(arena.get()) {
-                let _ = arena.say(&ctx.http, "Ek fight already chal rahi hai, thodi der mein.").await;
+                let _ = arena.say(&ctx.http, "A fight is already running here — try again in a moment.").await;
                 return;
             }
             let winner = play(ctx, arena, "Challenge", &a, &b, &mut seed).await;
-            let wins = record_win(winner.id, "fight", 1);
+            let loser = if winner.id == a.id { b.id } else { a.id };
+            record("fight", winner.id, Some(loser));
+            let (fights, wins) = tally(winner.id);
             let _ = arena
                 .send_message(
                     &ctx.http,
                     CreateMessage::new()
-                        .content(format!("🏆 <@{}> jeet gaya! Total fight wins: **{}**", winner.id, wins))
+                        .content(format!(
+                            "🏆 **{}** won! That is **{}** wins from **{}** fights. `/fightboard` for the rest.",
+                            winner.name, wins, fights
+                        ))
                         .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await;
@@ -597,7 +625,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 .send_message(
                     &ctx.http,
                     CreateMessage::new()
-                        .content(format!("🏃 <@{}> ne challenge se muh mod liya.", them))
+                        .content(format!("🏃 <@{}> declined the challenge.", them))
                         .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await;
@@ -607,7 +635,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 .send_message(
                     &ctx.http,
                     CreateMessage::new()
-                        .content(format!("⌛ <@{}> ne challenge ignore kar diya. Fight cancel.", them))
+                        .content(format!("⌛ <@{}> never answered. Challenge cancelled.", them))
                         .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await;
@@ -622,11 +650,11 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
     };
     let Some(guild) = command.guild_id else {
-        let _ = command.create_response(&ctx.http, whisper("Ye server mein chalta hai.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.".into())).await;
         return;
     };
     if !super::admin_ids().contains(&command.user.id.get()) {
-        let _ = command.create_response(&ctx.http, whisper("Battle sirf admin shuru kar sakta hai.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("Only admins can start a battle.".into())).await;
         return;
     }
     let minutes = command
@@ -643,17 +671,17 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
     let here = command.channel_id;
     let arena = arena(ctx, guild, here).await;
     if !BUSY.lock().insert(arena.get()) {
-        let _ = command.create_response(&ctx.http, whisper("Ek battle already chal rahi hai.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("A battle is already running.".into())).await;
         return;
     }
-    let _ = command.create_response(&ctx.http, whisper(format!("Battle khol di, {} minute ka time.", minutes))).await;
+    let _ = command.create_response(&ctx.http, whisper(format!("Lobby open for {} minutes.", minutes))).await;
 
     let ends = Utc::now().timestamp() + minutes * 60;
     let role = warrior_role(ctx, guild).await;
     let ping = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
     let embed = lobby_embed(&[], ends, minutes);
     let msg = CreateMessage::new()
-        .content(format!("{} — battle royale khul gayi! Join karo 👇", ping))
+        .content(format!("{} — a battle royale is starting! Join below 👇", ping))
         .allowed_mentions(CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
         .embed(embed)
         .components(lobby_buttons(0, true));
@@ -672,7 +700,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         let _ = here
             .send_message(
                 &ctx.http,
-                CreateMessage::new().content(format!("⚔️ Battle royale yahan chal rahi hai → {}", posted.link())),
+                CreateMessage::new().content(format!("⚔️ The battle royale is running here → {}", posted.link())),
             )
             .await;
     }
@@ -694,7 +722,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
 
     if joined.len() < MIN_PLAYERS {
         let _ = arena
-            .say(&ctx.http, format!("Sirf {} log aaye. Battle cancel - agli baar {} chahiye.", joined.len(), MIN_PLAYERS))
+            .say(&ctx.http, format!("Only {} joined. Battle cancelled — {} are needed.", joined.len(), MIN_PLAYERS))
             .await;
         BUSY.lock().remove(&arena.get());
         return;
@@ -718,15 +746,15 @@ fn lobby_buttons(id: u64, open: bool) -> Vec<CreateActionRow> {
 
 fn lobby_embed(names: &[String], ends: i64, minutes: i64) -> CreateEmbed {
     let list = if names.is_empty() {
-        "Abhi koi nahi. Pehla kaun?".to_string()
+        "Nobody yet. Who's first?".to_string()
     } else {
         names.iter().map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n")
     };
     CreateEmbed::new()
         .title("⚔️ Battle Royale")
         .description(format!(
-            "Join dabao aur ladne ke liye taiyar raho. Jeetne wale ko **{}** role milega.\n\n\
-             ⏳ Band hoga <t:{}:R> ({} min)\n👥 **{}** joined (kam se kam {} chahiye)\n\n{}",
+            "Hit Join and get ready to fight. The winner takes the **{}** role.\n\n\
+             ⏳ Closes <t:{}:R> ({} min)\n👥 **{}** joined (at least {} needed)\n\n{}",
             CHAMPION_ROLE,
             ends,
             minutes,
@@ -735,7 +763,7 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64) -> CreateEmbed {
             list
         ))
         .colour(0xE67E22)
-        .footer(CreateEmbedFooter::new("Har fight ka result sikka uchhal ke - bas maza lo"))
+        .footer(CreateEmbedFooter::new("Every fight is a coin toss — just here for the banter"))
 }
 
 /// Knockout rounds until one is left.
@@ -748,7 +776,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         }
     }
     if fighters.len() < MIN_PLAYERS {
-        let _ = arena.say(&ctx.http, "Itne log nahi mile. Battle cancel.").await;
+        let _ = arena.say(&ctx.http, "Not enough fighters could be loaded. Battle cancelled.").await;
         return;
     }
     let started = fighters.len();
@@ -757,7 +785,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         shuffle(&mut fighters, &mut seed);
         let stage = stage_name(fighters.len(), round);
         let _ = arena
-            .say(&ctx.http, format!("**{}** — {} warriors bache hain.", stage, fighters.len()))
+            .say(&ctx.http, format!("**{}** — {} warriors left.", stage, fighters.len()))
             .await;
         tokio::time::sleep(FIGHT_GAP).await;
         let mut next = Vec::new();
@@ -766,6 +794,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
             match pair {
                 [a, b] => {
                     let winner = play(ctx, arena, &stage, a, b, &mut seed).await;
+                    record("battle", winner.id, Some(if winner.id == a.id { b.id } else { a.id }));
                     next.push(winner);
                     tokio::time::sleep(FIGHT_GAP).await;
                 }
@@ -787,15 +816,16 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     let Some(champion) = fighters.into_iter().next() else {
         return;
     };
-    let wins = record_win(champion.id, "battle", started.saturating_sub(1));
+    record("champion", champion.id, None);
+    let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
     let subtitle = format!("{} warriors · {} rounds · 1 champion", started, round - 1);
     let line = pick(CHAMPION_LINE, &mut seed).to_string();
     let card = champion_card(champion.card(START_HP), subtitle, line).await;
     let mut msg = CreateMessage::new()
         .content(format!(
-            "👑 <@{}> is the **{}**! Battle wins: **{}**",
-            champion.id, CHAMPION_ROLE, wins
+            "👑 <@{}> is the **{}**! Battles won: **{}**",
+            champion.id, CHAMPION_ROLE, won
         ))
         .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(champion.id)]));
     if let Some(png) = card {
@@ -829,13 +859,13 @@ pub async fn warrior_command(ctx: &Context, command: &CommandInteraction) {
         CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
     };
     let Some(guild) = command.guild_id else {
-        let _ = command.create_response(&ctx.http, whisper("Ye server mein chalta hai.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.".into())).await;
         return;
     };
     let text = match toggle_warrior(ctx, guild, command.user.id.get()).await {
-        Some(true) => format!("🔔 {} role mil gaya. Ab har battle pe ping aayega.", WARRIOR_ROLE),
-        Some(false) => format!("🔕 {} role hata diya. Ab ping nahi aayega.", WARRIOR_ROLE),
-        None => "Role set nahi kar paya - bot ke paas Manage Roles nahi hai shayad.".to_string(),
+        Some(true) => format!("🔔 You have the {} role. You will be pinged for every battle.", WARRIOR_ROLE),
+        Some(false) => format!("🔕 {} role removed. No more battle pings.", WARRIOR_ROLE),
+        None => "Could not set the role — the bot may not have Manage Roles.".to_string(),
     };
     let _ = command.create_response(&ctx.http, whisper(text)).await;
 }
@@ -853,6 +883,69 @@ async fn toggle_warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<bool
     }
 }
 
+// --- /fightboard ------------------------------------------------------------
+
+/// Everyone who has fought, best win count first, with battles won alongside.
+fn top_fighters(limit: usize) -> Vec<(u64, i64, i64, i64)> {
+    let Some(db) = DB.get() else {
+        return Vec::new();
+    };
+    let conn = db.lock();
+    // Each fight puts its winner and its loser in the same pile, so one pass
+    // counts both what someone won and how often they turned up.
+    let rows: Vec<(i64, i64, i64)> = conn
+        .prepare(
+            "SELECT who, SUM(won) AS wins, COUNT(*) AS fights FROM (
+                 SELECT winner AS who, 1 AS won FROM results WHERE kind != 'champion'
+                 UNION ALL
+                 SELECT loser AS who, 0 AS won FROM results WHERE kind != 'champion' AND loser IS NOT NULL)
+             GROUP BY who ORDER BY wins DESC, fights ASC LIMIT ?1",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+        })
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|(who, wins, fights)| {
+            let crowns: i64 = conn
+                .query_row("SELECT COUNT(*) FROM results WHERE kind = 'champion' AND winner = ?1", params![who], |r| {
+                    r.get(0)
+                })
+                .unwrap_or(0);
+            (who as u64, fights, wins, crowns)
+        })
+        .collect()
+}
+
+pub async fn board_command(ctx: &Context, command: &CommandInteraction) {
+    let rows = top_fighters(10);
+    let mut text = String::new();
+    if rows.is_empty() {
+        text.push_str("No fights yet. Challenge someone with `/fight @name`.");
+    }
+    for (i, (user, fights, wins, crowns)) in rows.iter().enumerate() {
+        let place = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            _ => format!("`{:>2}.`", i + 1),
+        };
+        let crown = if *crowns > 0 { format!(" 👑×{}", crowns) } else { String::new() };
+        text.push_str(&format!("{} <@{}>{} · **{}** won / {} fought\n", place, user, crown, wins, fights));
+    }
+    let (fights, wins) = tally(command.user.id.get());
+    if fights > 0 {
+        text.push_str(&format!("\n-# You: **{}** won out of **{}** fights", wins, fights));
+    }
+    let embed = CreateEmbed::new()
+        .title("⚔️ Arena board")
+        .description(text)
+        .colour(0xE67E22)
+        .footer(CreateEmbedFooter::new("👑 = battles won · every 1v1 counts, battle fights included"));
+    let reply = CreateInteractionResponseMessage::new().embed(embed);
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
 // --- buttons ----------------------------------------------------------------
 
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
@@ -865,11 +958,11 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     } else if id.starts_with("battlewarrior:") {
         let text = match component.guild_id {
             Some(guild) => match toggle_warrior(ctx, guild, component.user.id.get()).await {
-                Some(true) => format!("🔔 {} role mil gaya.", WARRIOR_ROLE),
-                Some(false) => format!("🔕 {} role hata diya.", WARRIOR_ROLE),
-                None => "Role set nahi ho paya.".to_string(),
+                Some(true) => format!("🔔 You have the {} role.", WARRIOR_ROLE),
+                Some(false) => format!("🔕 {} role removed.", WARRIOR_ROLE),
+                None => "Could not set the role.".to_string(),
             },
-            None => "Ye server mein chalta hai.".to_string(),
+            None => "This only works in a server.".to_string(),
         };
         let _ = component.create_response(&ctx.http, whisper(&text)).await;
     } else if let Some(rest) = id.strip_prefix("fightyes:") {
@@ -911,19 +1004,19 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
     };
     match result {
         "joined" => {
-            let _ = component.create_response(&ctx.http, whisper("⚔️ Tu andar hai. Taiyar reh.")).await;
+            let _ = component.create_response(&ctx.http, whisper("⚔️ You are in. Get ready.")).await;
             // Everyone should see the roster fill up, countdown untouched.
             let mut message = component.message.clone();
             let _ = message.edit(&ctx.http, EditMessage::new().embed(lobby_embed(&names, ends, minutes))).await;
         }
         "already" => {
-            let _ = component.create_response(&ctx.http, whisper("Tu already andar hai.")).await;
+            let _ = component.create_response(&ctx.http, whisper("You are already in.")).await;
         }
         "full" => {
-            let _ = component.create_response(&ctx.http, whisper("Lobby full hai.")).await;
+            let _ = component.create_response(&ctx.http, whisper("The lobby is full.")).await;
         }
         _ => {
-            let _ = component.create_response(&ctx.http, whisper("Ye battle band ho chuki hai.")).await;
+            let _ = component.create_response(&ctx.http, whisper("That battle is closed.")).await;
         }
     }
 }
@@ -947,10 +1040,10 @@ async fn answer(ctx: &Context, component: &ComponentInteraction, rest: &str, yes
         }
     };
     if allowed {
-        let text = if yes { "⚔️ Chalo, ho jaaye." } else { "🏃 Theek hai, bhaag ja." };
+        let text = if yes { "⚔️ Let's go." } else { "🏃 Fine, backing out." };
         let _ = component.create_response(&ctx.http, whisper(text)).await;
     } else {
-        let _ = component.create_response(&ctx.http, whisper("Ye challenge tere liye nahi hai.")).await;
+        let _ = component.create_response(&ctx.http, whisper("That challenge is not yours.")).await;
     }
 }
 
