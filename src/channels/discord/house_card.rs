@@ -151,10 +151,6 @@ struct Headline<'t> {
     name_base: f32,
 }
 
-/// The number on a points card. It is the whole point of that card, so it
-/// takes the width a house name would, instead of sitting small in it.
-const POINTS_SIZE: f32 = 118.0;
-
 /// PNG bytes of the sorting card, or `None` if drawing failed.
 pub fn sorting_png(sorted: &Sorted) -> Option<Vec<u8>> {
     let headline = Headline {
@@ -167,29 +163,6 @@ pub fn sorting_png(sorted: &Sorted) -> Option<Vec<u8>> {
         name_base: NAME_BASE,
     };
     render(sorted, &headline, true)
-}
-
-/// PNG bytes of a points award to a member's house: their picture in the
-/// house's colours, the points as the headline, and `sorted.line` in the foot.
-/// The same card as the sorting, so the two read as one family.
-pub fn points_png(sorted: &Sorted, points: i64) -> Option<Vec<u8>> {
-    let house = sorted.house.trim().to_uppercase();
-    let eyebrow = if points < 0 { format!("POINTS FROM {}", house) } else { format!("POINTS FOR {}", house) };
-    let hero = format!("{:+}", points);
-    // A number that big needs the whole column re-spaced around it: at the
-    // sorting card's baselines its caps would run into the eyebrow.
-    let headline = Headline {
-        eyebrow: &eyebrow,
-        hero: &hero,
-        hero_size: POINTS_SIZE,
-        tracked: false,
-        eyebrow_base: 112.0,
-        hero_base: 232.0,
-        name_base: 290.0,
-    };
-    // No hat: the hat is the sorting's mark, and on an award it just says
-    // "you were sorted" again.
-    render(sorted, &headline, false)
 }
 
 fn render(sorted: &Sorted, headline: &Headline<'_>, with_hat: bool) -> Option<Vec<u8>> {
@@ -754,30 +727,6 @@ mod tests {
             crest: crest.to_string(),
             colours: (primary, secondary),
             line: line.to_string(),
-        }
-    }
-
-    #[test]
-    fn a_points_award_draws_for_every_house_either_way() {
-        for i in 0..4 {
-            let s = card(i, "Aarav", Some(fake_avatar([214, 96, 92])), "Now on 410 points this month");
-            for points in [25, -5, 100_000] {
-                let png = points_png(&s, points).expect("a points card should draw");
-                assert_eq!(&png[..4], b"\x89PNG", "not a png at {} points", points);
-            }
-        }
-    }
-
-    /// `HOUSE_CARD_PREVIEW=<dir> cargo test house_card -- --ignored`
-    #[test]
-    #[ignore]
-    fn points_preview() {
-        let Ok(dir) = std::env::var("HOUSE_CARD_PREVIEW") else { return };
-        for (i, name) in ["gryffindor", "slytherin", "ravenclaw", "hufflepuff"].into_iter().enumerate() {
-            let line = "For winning the quiz round · now on 410 points this month";
-            let s = card(i, "Aarav Sharma 🔥", Some(fake_avatar([206, 120, 96])), line);
-            let png = points_png(&s, 25).expect("draws");
-            std::fs::write(format!("{}/points_{}.png", dir, name), png).expect("write the preview");
         }
     }
 

@@ -33,6 +33,7 @@ mod battle_card;
 mod house;
 mod house_card;
 mod house_draft;
+mod points;
 mod nudge;
 mod awards_card;
 mod quiz;

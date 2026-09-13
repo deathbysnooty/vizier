@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
-use chrono::{Datelike, Utc};
+use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
@@ -132,8 +132,17 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
          CREATE TABLE IF NOT EXISTS optouts (user_id INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
+    // The points ledger shares this database, and the old house-only awards
+    // are folded into it - safely on every start, as each lands only once.
+    conn.execute_batch(super::points::SCHEMA)?;
+    conn.execute_batch(super::points::MIGRATE_AWARDS)?;
     let _ = DB.set(Mutex::new(conn));
     Ok(())
+}
+
+/// The houses database, for the points ledger that lives in it.
+pub(super) fn db() -> Option<&'static Mutex<Connection>> {
+    DB.get()
 }
 
 fn meta_get(key: &str) -> Option<String> {
@@ -483,7 +492,6 @@ fn parse_points(text: &str) -> Option<(i64, String)> {
 /// reply to the message that earned them.
 async fn award_member(
     ctx: &Context,
-    guild: GuildId,
     target: &serenity::all::User,
     points: i64,
     reason: &str,
@@ -507,55 +515,33 @@ async fn award_member(
         return Err(format!("<@{}> isn't in a house yet.", user));
     };
 
-    let total = award(house, points, reason, by);
-    let member = guild.member(&ctx.http, target.id).await.ok();
-    let standing = format!("{} now on {} points this month", house.name, total);
-    let line = if reason.is_empty() { standing } else { format!("{} · {}", reason, standing) };
-    let sorted = Sorted {
-        name: member.as_ref().map(display).unwrap_or_else(|| target.name.clone()),
-        avatar: match &member {
-            Some(member) => avatar(member).await,
-            None => None,
-        },
-        house: house.name.to_string(),
-        crest: house.crest.to_string(),
-        colours: house.colours,
-        line,
-    };
-    // Drawing is CPU work, so it never runs on the gateway thread.
-    let png = tokio::task::spawn_blocking(move || house_card::points_png(&sorted, points)).await.ok().flatten();
+    // Recorded against the PERSON as well as the house, which the Nitro draw
+    // needs. Mod awards are never capped.
+    if award_person(user, super::points::Source::Mod, points, reason, Some(by), None, None).is_none() {
+        return Err(format!("<@{}>'s points couldn't be recorded - try again.", user));
+    }
+    let total = totals(Some(month_start())).get(house.key).copied().unwrap_or(0);
 
+    // A plain line, no card and no copy elsewhere: the hourly summary in the
+    // houses channel already shows where points came from (the user's call).
+    let because = if reason.is_empty() { String::new() } else { format!(" · {}", reason) };
     let text = if points > 0 {
-        format!("🏆 <@{}> earned **+{}** for {} **{}**", user, points, house.crest, house.name)
+        format!(
+            "🛡️ <@{}> gave <@{}> **+{}** for {} **{}**{}\n-# {} now on {} points this month",
+            by, user, points, house.crest, house.name, because, house.name, total
+        )
     } else {
-        format!("📉 <@{}> cost {} **{}** **{}** points", user, house.crest, house.name, -points)
+        format!(
+            "🛡️ <@{}> took **{}** from <@{}> ({} **{}**){}\n-# {} now on {} points this month",
+            by, -points, user, house.crest, house.name, because, house.name, total
+        )
     };
-    let mut message = CreateMessage::new()
-        .content(text.clone())
+    // Only the member is pinged, never the mod who gave the points.
+    let message = CreateMessage::new()
+        .content(text)
         .reference_message(earned)
         .allowed_mentions(CreateAllowedMentions::new().users(vec![target.id]));
-    if let Some(png) = &png {
-        message = message.add_file(CreateAttachment::bytes(png.clone(), "points.png"));
-    }
     earned.channel_id.send_message(&ctx.http, message).await.map_err(|err| err.to_string())?;
-
-    // And a copy in the houses channel, so every award in the server lands in
-    // one place to scroll back through - unless it was earned right there,
-    // where a second card would just be a duplicate.
-    if let Some(board) = cards_channel().filter(|board| *board != earned.channel_id) {
-        let link = format!("https://discord.com/channels/{}/{}/{}", guild.get(), earned.channel_id.get(), earned.id.get());
-        // Already pinged under the message that earned it: the copy is a
-        // record, not a second notification.
-        let mut copy = CreateMessage::new()
-            .content(format!("{}\n-# earned in {}", text, link))
-            .allowed_mentions(CreateAllowedMentions::new());
-        if let Some(png) = png {
-            copy = copy.add_file(CreateAttachment::bytes(png, "points.png"));
-        }
-        if let Err(err) = board.send_message(&ctx.http, copy).await {
-            tracing::warn!("house: points card not copied to the houses channel: {}", err);
-        }
-    }
     tracing::info!("house: {} points to {} via {} (by {})", points, house.name, user, by);
     Ok(())
 }
@@ -576,10 +562,10 @@ pub async fn on_reply_points(ctx: &Context, msg: &serenity::all::Message) -> boo
     if !super::admin_ids().contains(&msg.author.id.get()) {
         return false;
     }
-    let Some(guild) = msg.guild_id else {
+    if msg.guild_id.is_none() {
         return false;
-    };
-    match award_member(ctx, guild, &earned.author, points, &reason, msg.author.id.get(), earned).await {
+    }
+    match award_member(ctx, &earned.author, points, &reason, msg.author.id.get(), earned).await {
         // The card now hangs off the message that earned it, so the mod's
         // "points 10" is clutter.
         Ok(()) => {
@@ -1204,15 +1190,7 @@ pub fn resume_draft(ctx: &Context, guild: GuildId) {
 
 /// Midnight on the 1st, India time: the month the table is counted over.
 fn month_start() -> i64 {
-    let ist = super::stats::ist();
-    Utc::now()
-        .with_timezone(&ist)
-        .date_naive()
-        .with_day(1)
-        .and_then(|first| first.and_hms_opt(0, 0, 0))
-        .and_then(|midnight| midnight.and_local_timezone(ist).single())
-        .map(|t| t.timestamp())
-        .unwrap_or(0)
+    super::points::month_start(Utc::now().timestamp())
 }
 
 /// Points per house since `since`, or all time for `None`.
@@ -1221,34 +1199,59 @@ fn month_start() -> i64 {
 /// a mistake is undone by awarding the negative, and nothing has to be reset
 /// when the month turns.
 fn totals(since: Option<i64>) -> HashMap<&'static str, i64> {
-    let mut out: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
-    if let Some(db) = DB.get() {
-        let conn = db.lock();
-        if let Ok(mut stmt) = conn.prepare("SELECT house, SUM(points) FROM awards WHERE ts >= ?1 GROUP BY house") {
-            let rows = stmt.query_map(params![since.unwrap_or(0)], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            });
-            if let Ok(rows) = rows {
-                for (key, sum) in rows.flatten() {
-                    if let Some(slot) = house(&key).and_then(|h| out.get_mut(h.key)) {
-                        *slot = sum;
-                    }
-                }
-            }
-        }
-    }
-    out
+    DB.get()
+        .and_then(|db| super::points::house_totals(&db.lock(), since.unwrap_or(0)).ok())
+        .unwrap_or_else(|| HOUSES.iter().map(|h| (h.key, 0)).collect())
 }
 
 /// Records an award and gives back the house's new total for the month.
 fn award(house: &House, points: i64, reason: &str, by: u64) -> i64 {
     if let Some(db) = DB.get() {
-        let _ = db.lock().execute(
-            "INSERT INTO awards (house, points, reason, awarded_by, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![house.key, points, reason, by as i64, Utc::now().timestamp()],
-        );
+        let entry = super::points::Entry {
+            user: None,
+            house,
+            source: super::points::Source::Mod,
+            scope: None,
+            points,
+            reason,
+            by: Some(by),
+            dedupe: None,
+        };
+        if let Err(err) = super::points::write(&db.lock(), &entry, Utc::now().timestamp()) {
+            tracing::warn!("house: award to {} not recorded: {}", house.name, err);
+        }
     }
     totals(Some(month_start())).get(house.key).copied().unwrap_or(0)
+}
+
+/// Awards points to a person's house through the ledger.
+///
+/// The one door every source uses, so nothing can skip the checks: someone
+/// who isn't sorted, or has stepped out of the houses, earns nothing. The
+/// source's cap and the dedupe key are applied inside the ledger. `None` when
+/// the person can't earn at all.
+pub(super) fn award_person(
+    user: u64,
+    source: super::points::Source,
+    points: i64,
+    reason: &str,
+    by: Option<u64>,
+    dedupe: Option<String>,
+    scope: Option<String>,
+) -> Option<(&'static House, super::points::Outcome)> {
+    if opted_out(user) {
+        return None;
+    }
+    let house = house_of(user)?;
+    let db = DB.get()?;
+    let entry = super::points::Entry { user: Some(user), house, source, scope, points, reason, by, dedupe };
+    match super::points::write(&db.lock(), &entry, Utc::now().timestamp()) {
+        Ok(outcome) => Some((house, outcome)),
+        Err(err) => {
+            tracing::warn!("house: {} points for {} not recorded: {}", source.key(), user, err);
+            None
+        }
+    }
 }
 
 /// `/housepoints <house> <points> [reason]` - mods only. A negative number
@@ -1335,7 +1338,7 @@ pub async fn houses_command(ctx: &Context, command: &CommandInteraction) {
         .title("🏰 The four houses")
         .description(text)
         .colour(0x9B1B1B)
-        .footer(CreateEmbedFooter::new("Points start counting once the system is switched on"));
+        .footer(CreateEmbedFooter::new("Every house starts from zero on the 1st of each month"));
     let reply = CreateInteractionResponseMessage::new().embed(embed);
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }
@@ -1694,7 +1697,7 @@ mod tests {
 
     #[test]
     fn the_points_month_starts_at_midnight_on_the_first_india_time() {
-        use chrono::Timelike;
+        use chrono::{Datelike, Timelike};
         let ist = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("valid offset");
         let start = chrono::DateTime::from_timestamp(month_start(), 0).expect("a real time").with_timezone(&ist);
         assert_eq!(start.day(), 1, "the month should start on the 1st");
