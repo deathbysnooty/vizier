@@ -888,10 +888,318 @@ const WRESTLING: Lines = Lines {
     champion: WRESTLING_CHAMPION,
 };
 
-// --- counter-strike 2 and elden ring (placeholders until written: they reuse classic) ---
+// --- counter-strike 2 ---------------------------------------------------------
+// Utility, eco rounds and team chat. Rank jokes stay light; no skins or betting.
 
-const TACTICAL: Lines = CLASSIC;
-const TARNISHED: Lines = CLASSIC;
+const TACTICAL_EXCHANGE: &[&str] = &[
+    "{a} tapped {b} through mid doors. Nice shot 🎯",
+    "{a} peeked {b} with a Deagle and landed two",
+    "{b} walked into {a}'s crosshair like it was planned",
+    "{a} sprayed down {b} with an AK. Recoil control: acceptable",
+    "{a} caught {b} rotating and got the damage in",
+    "{b} got pre-fired by {a} around the corner",
+    "{a} jiggle-peeked and chipped {b} with a Glock",
+    "{a} landed an HE grenade right at {b}'s feet 💣",
+    "{b} was reloading in the open. {a} said thank you",
+    "{a} wall-banged {b} through a crate. Lucky? Maybe",
+    "{a} held the angle, {b} ran straight into it",
+    "{b} got tagged by {a} while bunny hopping down long",
+    "{a} threw a molotov into {b}'s corner. Time to move 🔥",
+    "{a} dinked {b} with a Scout from across the map",
+    "{b} was camping in a corner, and {a} knew exactly which one",
+    "{a} out-aimed {b} on an eco with a P250",
+    "{a} spotted {b} on the radar and swung first",
+    "{b} tried to fake the defuse. {a} did not fall for it",
+    "{a} hit {b} with a Zeus zap on the way past ⚡",
+];
+
+const TACTICAL_CRIT: &[&str] = &[
+    "{a} no-scoped {b} with the AWP. Clip it 🎯",
+    "Headshot! {a} one-tapped {b} before they even peeked",
+    "{a} flicked onto {b} like a Global Elite on a good day",
+    "{a} ninja-crept behind {b} and pulled the knife",
+    "{a} landed a perfect molotov and {b} had nowhere to go 🔥",
+    "{a} AWPed {b} through the smoke. Pure instinct",
+];
+
+const TACTICAL_MISS: &[&str] = &[
+    "{a} whiffed the whole spray. Blames the 200 ping 📶",
+    "{a} had {b} dead to rights. Packet loss said no",
+    "{a} no-scoped and hit the sky",
+    "{a} peeked, froze, and forgot which button shoots",
+];
+
+const TACTICAL_HEAL: &[&str] = &[
+    "{a} jabbed a medi-shot and got a bit of health back 💉",
+    "{a} bought fresh armor at the start of the round",
+    "{a} hid behind the boxes to calm down",
+    "{a} took a timeout and got the nerves back",
+];
+
+/// Barely anything, purely for the joke.
+const TACTICAL_SIP: &[&str] = &[
+    "{a} typed 'nice shot' in team chat. Morale +1",
+    "{a} inspected the knife for a while. Very useful",
+    "{a} bought a defuse kit on the T side. It does nothing",
+    "{a} spun the crosshair colour to pink. +1 confidence",
+];
+
+/// The swing comes back at whoever threw it.
+const TACTICAL_BACKFIRE: &[&str] = &[
+    "{a} threw a flashbang and flashed only themselves 😵",
+    "{a} walked right into their own molotov 🔥",
+    "{a} bunny-hopped off the ledge on Vertigo",
+    "{a} bought a Negev and started the round broke and slow",
+];
+
+/// {b} loses, {a} gains.
+const TACTICAL_DRAIN: &[&str] = &[
+    "{a} picked up {b}'s dropped AWP and turned it on {b}",
+    "{a} took {b}'s bomb and ran it to the site 💣",
+    "{a} stole the kill from {b} and all the round money with it",
+    "{a} grabbed {b}'s defuse kit and {b}'s moment of glory",
+];
+
+/// Two in a row, before anyone can answer.
+const TACTICAL_DOUBLE: &[&str] = &[
+    "{a} tapped {b} twice with the Deagle. Double ding",
+    "{a} flashed {b}, then swung with the rifle",
+    "{a} smoked {b} out, then caught them leaving the smoke",
+    "{a} hit {b} with the HE and followed up with the spray 💣",
+];
+
+/// Everyone in the frame suffers.
+const TACTICAL_CHAOS: &[&str] = &[
+    "A stray flashbang blinded everybody in the room 😵",
+    "Someone typed 'rush B no stop' and both of them got caught",
+    "The bomb went off with both of them still arguing on site 💣",
+    "The server lagged out and both lost a chunk of health",
+];
+
+/// The biggest ordinary heal.
+const TACTICAL_SNACK: &[&str] = &[
+    "{a} survived to the next round and bought full kevlar + helmet 🛡️",
+    "{a} grabbed a medi-shot and hid behind a smoke",
+    "{a} won the round and the bank looks good for a full buy 💰",
+    "{a} took a tactical timeout and reset completely",
+    "{a} found a healthshot on the floor of Dust II",
+];
+
+/// Rare, and worth it.
+const TACTICAL_BLESSING: &[&str] = &[
+    "{a} clutched a 1v5 and got a brand new round 🏆",
+    "{a} ninja-defused with 0.1 seconds left. Fully revived",
+    "The whole team chanted {a}'s name in voice chat 📣",
+    "The round timer ran out and {a} was reset to full health ⏱️",
+];
+
+/// Both sides gain: the fight pauses for something nicer.
+const TACTICAL_CROWD: &[&str] = &[
+    "Both dropped a rifle for a teammate on eco. Wholesome 🤝",
+    "Halftime! Both sides swapped and took a breather",
+    "Everyone typed 'gl hf' and the lobby calmed down",
+    "Tech timeout. Both got a moment to reset",
+];
+
+const TACTICAL_FINISH: &[&str] = &[
+    "{w} one-tapped {l}. Round over 🎯",
+    "Counter-Terrorists win: {w} defused while {l} was reloading",
+    "{w} clutched it and {l} is already typing in all chat",
+    "{l} called a surrender vote. {w} said no, and won anyway",
+    "{w} AWPed {l} mid. Nothing more to say",
+    "{l} rushed B with no stop. {w} was waiting 💣",
+    "{w} knifed {l} for the last kill. That's going in the highlights",
+    "{l} blames the ping. {w} blames nothing, {w} won",
+    "{w} wins, and {l} is spectating the rest of the half",
+    "{w} typed 'gg' and {l} typed 'ez'. Wrong order",
+];
+
+const TACTICAL_BYE: &[&str] = &[
+    "{a}'s opponent disconnected. Free round",
+    "{a} held an angle for the whole round. Nobody came",
+    "{a} gets a bye while the other player reconnects 📶",
+];
+
+const TACTICAL_CHAMPION: &[&str] = &[
+    "Ace. The whole server, one round 🎯",
+    "Clutched the whole bracket",
+    "Global Elite of the server",
+    "MVP of every round, no eco needed",
+];
+
+const TACTICAL: Lines = Lines {
+    exchange: TACTICAL_EXCHANGE,
+    crit: TACTICAL_CRIT,
+    miss: TACTICAL_MISS,
+    heal: TACTICAL_HEAL,
+    sip: TACTICAL_SIP,
+    backfire: TACTICAL_BACKFIRE,
+    drain: TACTICAL_DRAIN,
+    double: TACTICAL_DOUBLE,
+    chaos: TACTICAL_CHAOS,
+    snack: TACTICAL_SNACK,
+    blessing: TACTICAL_BLESSING,
+    crowd: TACTICAL_CROWD,
+    finish: TACTICAL_FINISH,
+    bye: TACTICAL_BYE,
+    champion: TACTICAL_CHAMPION,
+};
+
+// --- elden ring ---------------------------------------------------------------
+// Rolls, flasks, bosses and player messages. Every death is a lesson, apparently.
+
+const TARNISHED_EXCHANGE: &[&str] = &[
+    "{a} landed a jump attack on {b}. Textbook ⚔️",
+    "{b} rolled a second too early and ate {a}'s greatsword",
+    "{a} parried {b} and went straight into a riposte",
+    "{a} hit {b} with a charged heavy. Poise broken",
+    "{b} got chipped by {a}'s bleed build. The bar is filling",
+    "{a} flung a Glintstone Pebble at {b} ✨",
+    "{a} charged {b} on Torrent and swung on the way past 🐴",
+    "{b} greedily went for one more hit. {a} punished it",
+    "{a} backstabbed {b} while {b} was reading a message",
+    "{a} threw a Fire Pot at {b}. Crude, but effective 🔥",
+    "{b} got staggered by {a}'s shield bash",
+    "{a} cast Rock Sling and {b} got pelted",
+    "{a} used a guard counter on {b}. Nicely timed",
+    "{b} fell for {a}'s delayed swing. Everyone does",
+    "{a} sniped {b} with a crossbow from the ramparts 🏹",
+    "{a} buffed the weapon with grease and smacked {b}",
+    "{b} tried to heal right in front of {a}. Big mistake",
+    "{a} used Storm Stomp and knocked {b} off balance",
+    "Foul {b}! {a} shouted it, then swung",
+];
+
+const TARNISHED_CRIT: &[&str] = &[
+    "{a} unleashed Waterfowl Dance. {b} could not dodge it 🌸",
+    "{a} landed a critical riposte on {b}. Huge numbers",
+    "{a} two-handed a Colossal Sword onto {b}. The ground cracked",
+    "{b} got hit by {a}'s Comet Azur from across the field ☄️",
+    "{a} proc'd bleed on {b} and the whole bar vanished",
+    "{a} grabbed {b} like a Crucible Knight. Pure pain",
+];
+
+const TARNISHED_MISS: &[&str] = &[
+    "{a} rolled straight into a wall",
+    "{a} swung, but {b} was already behind them",
+    "{a} tried a jump attack and just jumped",
+    "{a} mistimed the parry and hit only air",
+];
+
+const TARNISHED_HEAL: &[&str] = &[
+    "{a} sipped a Flask of Crimson Tears 🍷",
+    "{a} munched a Boiled Crab. Surprisingly helpful 🦀",
+    "{a} cast Heal and the grass glowed a bit",
+    "{a} read 'try rest' on the floor and did it",
+];
+
+/// Barely anything, purely for the joke.
+const TARNISHED_SIP: &[&str] = &[
+    "{a} ate a Rowa Raisin. +1 HP",
+    "{a} did the 'Rest' gesture mid-fight. Bold",
+    "{a} appraised a message that said 'try hope'",
+    "{a} found a Golden Rune [1] and felt rich",
+];
+
+/// The swing comes back at whoever threw it.
+const TARNISHED_BACKFIRE: &[&str] = &[
+    "{a} rolled off a cliff. YOU DIED 💀",
+    "{a} opened a chest and got teleported into a mine",
+    "{a} followed a message saying 'jump here'. Liar ahead",
+    "{a} walked into Scarlet Rot and slowly regretted it",
+];
+
+/// {b} loses, {a} gains.
+const TARNISHED_DRAIN: &[&str] = &[
+    "{a} picked up {b}'s dropped runes. Finders keepers",
+    "{a} used Blood Tax on {b} and pocketed the HP",
+    "{a} stole {b}'s Flask charge right out of the belt",
+    "{a} invaded {b}'s world and took the victory runes",
+];
+
+/// Two in a row, before anyone can answer.
+const TARNISHED_DOUBLE: &[&str] = &[
+    "{a} and the Mimic Tear both swung at {b} 🪞",
+    "{a} did two jump attacks on {b} with paired swords",
+    "{a} parried {b}, then parried {b} again. Show-off",
+    "{a} summoned wolves, and the pack chased {b} twice 🐺",
+];
+
+/// Everyone in the frame suffers.
+const TARNISHED_CHAOS: &[&str] = &[
+    "Radahn fell from the sky and flattened both of them ☄️",
+    "Margit showed up uninvited and hit everyone",
+    "Both rolled into the Scarlet Rot swamp. Nobody enjoyed that",
+    "A giant crab crashed the duel and pinched both",
+];
+
+/// The biggest ordinary heal.
+const TARNISHED_SNACK: &[&str] = &[
+    "{a} drank a full-strength Flask of Crimson Tears 🍷",
+    "{a} ate a Fire Grease-soaked Boiled Crab 🦀",
+    "{a} found a Sacred Tear and powered up the flask",
+    "{a} used Great Heal and felt much better",
+    "{a} rode away on Torrent and sipped in peace 🐴",
+];
+
+/// Rare, and worth it.
+const TARNISHED_BLESSING: &[&str] = &[
+    "{a} rested at a Site of Grace. Flasks refilled, HP full ✨",
+    "{a} levelled up at grace and felt brand new",
+    "{a} got a golden sign saying 'Let Me Solo Them' 🌟",
+    "{a} found a Great Rune and the Roundtable Hold blessed it",
+];
+
+/// Both sides gain: the fight pauses for something nicer.
+const TARNISHED_CROWD: &[&str] = &[
+    "Both bowed before the duel. Honour restored 🙇",
+    "Everyone rested at the same Site of Grace for a moment",
+    "Blaidd showed up and shared some meat with both of them",
+    "Both left 'praise the duel' messages. Everyone felt a bit better",
+];
+
+const TARNISHED_FINISH: &[&str] = &[
+    "{l}: YOU DIED. {w}: ENEMY FELLED 💀",
+    "{w} parried {l} and never looked back",
+    "{l} rolled at the wrong time, one last time. {w} wins",
+    "{w} wins, and {l} is off to the nearest Site of Grace",
+    "{l} dropped every rune. {w} is not giving them back",
+    "{w} waterfowl-danced all over {l}. Duel over 🌸",
+    "{l} tried to heal in {w}'s face. That's the game",
+    "{w} is Elden Lord for today. {l} is back at Limgrave",
+    "{l} left a message: 'fort, night'. {w} won the duel",
+];
+
+const TARNISHED_BYE: &[&str] = &[
+    "{a} waited at the summoning pool. Nobody answered",
+    "{a}'s duel partner fell off Torrent on the way. Free pass 🐴",
+    "{a} rested at grace this round while the other player got lost",
+];
+
+const TARNISHED_CHAMPION: &[&str] = &[
+    "Elden Lord of the whole server 👑",
+    "Let Me Solo Them. Did.",
+    "No summons, no flasks left, still won",
+    "Felled every Tarnished in sight",
+];
+
+const TARNISHED: Lines = Lines {
+    exchange: TARNISHED_EXCHANGE,
+    crit: TARNISHED_CRIT,
+    miss: TARNISHED_MISS,
+    heal: TARNISHED_HEAL,
+    sip: TARNISHED_SIP,
+    backfire: TARNISHED_BACKFIRE,
+    drain: TARNISHED_DRAIN,
+    double: TARNISHED_DOUBLE,
+    chaos: TARNISHED_CHAOS,
+    snack: TARNISHED_SNACK,
+    blessing: TARNISHED_BLESSING,
+    crowd: TARNISHED_CROWD,
+    finish: TARNISHED_FINISH,
+    bye: TARNISHED_BYE,
+    champion: TARNISHED_CHAMPION,
+};
 
 #[cfg(test)]
 mod tests {
