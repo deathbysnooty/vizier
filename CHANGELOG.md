@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.88] - 2026-09-13
+
+### 🚀 Features
+
+- *(discord)* People who step out of the houses become Muggles
 ## [0.10.87] - 2026-09-13
 
 ### 🚀 Features
 
 - *(discord)* Every points card is also copied to the houses channel
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.87
 ## [0.10.86] - 2026-09-13
 
 ### 🚀 Features
