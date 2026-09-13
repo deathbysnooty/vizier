@@ -420,11 +420,34 @@ fn meta_set(key: &str, value: &str) {
 /// Logs one finished fight. `loser` is `None` for a battle championship, where
 /// the whole field lost rather than one person.
 fn record(kind: &str, winner: u64, loser: Option<u64>) {
+    let now = Utc::now().timestamp();
     if let Some(db) = DB.get() {
         let _ = db.lock().execute(
             "INSERT INTO results (kind, winner, loser, ts) VALUES (?1, ?2, ?3, ?4)",
-            params![kind, winner as i64, loser.map(|u| u as i64), Utc::now().timestamp()],
+            params![kind, winner as i64, loser.map(|u| u as i64), now],
         );
+    }
+    // House points for a 1v1 challenge: 1 to the winner. The dedupe key is the
+    // PAIR and the day, not the winner, so two friends fighting over and over earn
+    // only their first fight of the day - whoever wins it. Fights inside a battle
+    // royale score through `award_royale` instead.
+    if let ("fight", Some(loser)) = (kind, loser) {
+        let (low, high) = if winner < loser { (winner, loser) } else { (loser, winner) };
+        let key = format!("arena:{}:{}:{}", super::points::ist_day(now), low, high);
+        super::house::award_person(winner, super::points::Source::Arena, 1, "won a 1v1", None, Some(key), None);
+    }
+}
+
+/// House points for a battle royale: 8 to the champion, 3 to the runner-up.
+fn award_royale(champion: u64, runner_up: Option<u64>) {
+    let battle = Utc::now().timestamp();
+    let give = |user: u64, amount: i64, reason: &str| {
+        let key = format!("royale:{}:{}", battle, user);
+        super::house::award_person(user, super::points::Source::Royale, amount, reason, None, Some(key), None);
+    };
+    give(champion, 8, "won the battle royale");
+    if let Some(user) = runner_up {
+        give(user, 3, "runner-up in the battle royale");
     }
 }
 
@@ -1040,6 +1063,9 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     }
     let started = fighters.len();
     let mut round = 1;
+    // The loser of the last fight fought is the runner-up: the final is always
+    // the battle's last fight, however many byes came before it.
+    let mut runner_up: Option<u64> = None;
     while fighters.len() > 1 {
         shuffle(&mut fighters, &mut seed);
         let stage = stage_name(fighters.len(), round);
@@ -1053,7 +1079,9 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
             match pair {
                 [a, b] => {
                     let winner = play(ctx, arena, &stage, a, b, &mut seed).await;
-                    record("battle", winner.id, Some(if winner.id == a.id { b.id } else { a.id }));
+                    let loser = if winner.id == a.id { b.id } else { a.id };
+                    record("battle", winner.id, Some(loser));
+                    runner_up = Some(loser);
                     next.push(winner);
                     tokio::time::sleep(FIGHT_GAP).await;
                 }
@@ -1076,6 +1104,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         return;
     };
     record("champion", champion.id, None);
+    award_royale(champion.id, runner_up);
     let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
     let subtitle = format!("{} warriors · {} rounds · 1 champion", started, round - 1);

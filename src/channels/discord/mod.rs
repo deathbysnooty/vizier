@@ -34,6 +34,7 @@ mod house;
 mod house_card;
 mod house_draft;
 mod points;
+mod standings;
 mod nudge;
 mod awards_card;
 mod quiz;
@@ -1333,6 +1334,9 @@ impl EventHandler for Handler {
             ));
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
+        let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
+
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
         let _ = Command::create_global_command(ctx.http.clone(), house_opt).await;
@@ -1382,6 +1386,8 @@ impl EventHandler for Handler {
             // Anyone who stepped out before the Muggles role existed gets it.
             house::sync_muggles(&ctx, guild);
         }
+        // The hourly house points summary in the houses channel.
+        standings::spawn(ctx.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1881,6 +1887,12 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            if command.data.name == "mypoints" {
+                standings::mypoints_command(&ctx, &command).await;
+            }
+            if command.data.name == "housedraw" {
+                standings::draw_command(&ctx, &command).await;
+            }
             if command.data.name == "houseopt" {
                 house::opt_command(&ctx, &command).await;
             }

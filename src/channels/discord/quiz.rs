@@ -630,6 +630,32 @@ fn round_summary(board: &Board, crowns: Option<i64>) -> String {
 
 /// Saves a finished round for the genre champions board. Returns how many
 /// rounds of this genre its winner has now won, or `None` if nobody scored.
+/// House points for a finished round's top three: 2, 1, 1.
+///
+/// `standings` already breaks ties in favour of whoever reached the score first,
+/// so the podium matches the round summary players see. The ledger caps quiz
+/// points at 6 a day per person. The dedupe key uses the finishing moment: a
+/// round ends exactly once, and a restart starts a fresh round rather than
+/// replaying this one.
+fn award_podium(board: &Board) {
+    let finished_at = Utc::now().timestamp();
+    for (place, (user, scored, _)) in standings(&board.scores).into_iter().take(3).enumerate() {
+        if scored == 0 {
+            continue;
+        }
+        let reason = format!("{} round, place {}", board.label, place + 1);
+        super::house::award_person(
+            user,
+            super::points::Source::Quiz,
+            [2, 1, 1][place],
+            &reason,
+            None,
+            Some(format!("quiz:{}:{}", finished_at, user)),
+            None,
+        );
+    }
+}
+
 fn record_round(conn: &Connection, board: &Board) -> Option<i64> {
     let rows = standings(&board.scores);
     let answered: u32 = rows.iter().map(|r| r.1).sum();
@@ -1490,6 +1516,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
         if in_block >= BLOCK {
             let finished = std::mem::take(&mut *BOARD.lock());
             let crowns = DB.get().and_then(|db| record_round(&db.lock(), &finished));
+            award_podium(&finished);
             let summary = round_summary(&finished, crowns);
             let _ = channel
                 .send_message(&ctx.http, CreateMessage::new().content(summary).allowed_mentions(CreateAllowedMentions::new()))

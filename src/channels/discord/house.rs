@@ -16,7 +16,7 @@
 //!
 //! Points come later: this module only decides who belongs where.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
@@ -145,12 +145,12 @@ pub(super) fn db() -> Option<&'static Mutex<Connection>> {
     DB.get()
 }
 
-fn meta_get(key: &str) -> Option<String> {
+pub(super) fn meta_get(key: &str) -> Option<String> {
     let db = DB.get()?;
     db.lock().query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional().ok().flatten()
 }
 
-fn meta_set(key: &str, value: &str) {
+pub(super) fn meta_set(key: &str, value: &str) {
     if let Some(db) = DB.get() {
         let _ = db.lock().execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -178,7 +178,7 @@ fn meta_clear(key: &str) {
 /// A separate table rather than a column on `members`, because the live
 /// database already has that table: CREATE TABLE IF NOT EXISTS would never add
 /// the column, and a new table needs no migration at all.
-fn opted_out(user: u64) -> bool {
+pub(super) fn opted_out(user: u64) -> bool {
     let Some(db) = DB.get() else {
         return false;
     };
@@ -202,6 +202,26 @@ fn set_opted_out(user: u64, out: bool) {
             conn.execute("DELETE FROM optouts WHERE user_id = ?1", params![user as i64])
         };
     }
+}
+
+/// Everyone who has stepped out, read in one go - for callers about to take the
+/// database lock themselves, who must not call `opted_out` while holding it.
+pub(super) fn optout_set() -> HashSet<u64> {
+    let mut out = HashSet::new();
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id FROM optouts") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+                out.extend(rows.flatten().map(|id| id as u64));
+            }
+        }
+    }
+    out
+}
+
+/// A house's captain, if the mods have named one.
+pub(super) fn captain_id(key: &str) -> Option<u64> {
+    meta_get(&format!("captain_{}", key)).and_then(|v| v.parse::<u64>().ok())
 }
 
 /// Which house someone is in, if they have been sorted.
