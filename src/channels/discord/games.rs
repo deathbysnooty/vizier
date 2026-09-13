@@ -472,6 +472,13 @@ static CAT_CATCH: LazyLock<Regex> = LazyLock::new(|| {
 fn parse_cat(text: &str) -> Option<Catch> {
     let c = CAT_CATCH.captures(text)?;
     let name = unescape(c[1].trim());
+    // Cat Bot also talks about catches in general ("anyone who cought ..."),
+    // which names nobody; only a line naming the catcher pays.
+    let lower = name.to_lowercase();
+    let general = ["anyone", "everyone", "everybody", "nobody", "no one", "someone", "whoever", "you"];
+    if general.iter().any(|g| lower == *g || lower.starts_with(&format!("{} ", g))) {
+        return None;
+    }
     let kind = c[3].to_string();
     // Without the emoji the words before "cat" are less certain; a filler word
     // is not a type, and an unknown type still pays the minimum.
@@ -522,6 +529,13 @@ mod tests {
 
     fn tiles(word: &str) -> String {
         word.chars().map(|c| format!("<:y_{}:11{}>", c.to_ascii_lowercase(), c as u32)).collect()
+    }
+
+    #[test]
+    fn a_cat_line_about_anyone_names_no_catcher() {
+        assert!(parse_cat("anyone who cought a Fine cat gets a bonus").is_none());
+        assert!(parse_cat("Everyone cought <:fine:123> Fine cat!").is_none());
+        assert!(parse_cat("youngster\\_07 cought <:fine:123> Fine cat!").is_some(), "a name that only starts with 'you' is a person");
     }
 
     #[test]
