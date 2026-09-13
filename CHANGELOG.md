@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.86] - 2026-09-13
+
+### 🚀 Features
+
+- *(discord)* Step out of the houses, and award points by replying
 ## [0.10.85] - 2026-09-12
 
 ### 🐛 Bug Fixes
 
 - *(discord)* The hat fills the smallest house, it does not roll dice
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.85
 ## [0.10.84] - 2026-09-12
 
 ### 🚀 Features
