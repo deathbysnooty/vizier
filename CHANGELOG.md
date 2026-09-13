@@ -2,11 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.89] - 2026-09-13
+
+### 🚀 Features
+
+- *(discord)* A points ledger that knows who earned what
+- *(discord)* Quiz and arena earn house points, and the houses can see the score
+- *(discord)* The Snitch - catch it with an accio reply for house points
 ## [0.10.88] - 2026-09-13
 
 ### 🚀 Features
 
 - *(discord)* People who step out of the houses become Muggles
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.88
 ## [0.10.87] - 2026-09-13
 
 ### 🚀 Features
