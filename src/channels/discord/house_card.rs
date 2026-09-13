@@ -137,33 +137,91 @@ const SPARKS: [(f32, f32, f32, u8); 6] = [
     (-20.0, -70.0, 3.0, 105),
 ];
 
+/// What the type column says, and how it sits: a small spaced line, then the
+/// big one, then the member's name.
+struct Headline<'t> {
+    eyebrow: &'t str,
+    hero: &'t str,
+    /// Where the big line starts; it still shrinks to fit if it has to.
+    hero_size: f32,
+    /// A house name reads well letter-spaced. A number goes gappy - "+ 2 5".
+    tracked: bool,
+    eyebrow_base: f32,
+    hero_base: f32,
+    name_base: f32,
+}
+
+/// The number on a points card. It is the whole point of that card, so it
+/// takes the width a house name would, instead of sitting small in it.
+const POINTS_SIZE: f32 = 118.0;
+
 /// PNG bytes of the sorting card, or `None` if drawing failed.
 pub fn sorting_png(sorted: &Sorted) -> Option<Vec<u8>> {
+    let headline = Headline {
+        eyebrow: "SORTED INTO",
+        hero: &sorted.house,
+        hero_size: HOUSE_SIZE,
+        tracked: true,
+        eyebrow_base: EYEBROW_BASE,
+        hero_base: HOUSE_BASE,
+        name_base: NAME_BASE,
+    };
+    render(sorted, &headline, true)
+}
+
+/// PNG bytes of a points award to a member's house: their picture in the
+/// house's colours, the points as the headline, and `sorted.line` in the foot.
+/// The same card as the sorting, so the two read as one family.
+pub fn points_png(sorted: &Sorted, points: i64) -> Option<Vec<u8>> {
+    let house = sorted.house.trim().to_uppercase();
+    let eyebrow = if points < 0 { format!("POINTS FROM {}", house) } else { format!("POINTS FOR {}", house) };
+    let hero = format!("{:+}", points);
+    // A number that big needs the whole column re-spaced around it: at the
+    // sorting card's baselines its caps would run into the eyebrow.
+    let headline = Headline {
+        eyebrow: &eyebrow,
+        hero: &hero,
+        hero_size: POINTS_SIZE,
+        tracked: false,
+        eyebrow_base: 112.0,
+        hero_base: 232.0,
+        name_base: 290.0,
+    };
+    // No hat: the hat is the sorting's mark, and on an award it just says
+    // "you were sorted" again.
+    render(sorted, &headline, false)
+}
+
+fn render(sorted: &Sorted, headline: &Headline<'_>, with_hat: bool) -> Option<Vec<u8>> {
     let mut fs = super::awards::fonts().lock();
     // cosmic-text panics rather than drawing with no fonts at all.
     if fs.db().len() == 0 {
         return None;
     }
     let mut pen = Pen::new(W, H, &mut fs)?;
-    draw(&mut pen, sorted);
+    draw(&mut pen, sorted, headline, with_hat);
     pen.px.encode_png().ok()
 }
 
-fn draw(pen: &mut Pen<'_>, s: &Sorted) {
+fn draw(pen: &mut Pen<'_>, s: &Sorted, headline: &Headline<'_>, with_hat: bool) {
     let (primary, secondary) = s.colours;
     ground(&mut pen.px, primary);
     // The glow behind the portrait is the secondary colour, so both house
     // colours are in the ground before anything is drawn on top of it.
     glow(&mut pen.px, PORTRAIT_CX, PORTRAIT_CY, OUTER + 230.0, lift(secondary, 0.32), 92);
     vignette(&mut pen.px, 168);
-    hat(&mut pen.px, lift(primary, 0.80));
-    for (dx, dy, r, alpha) in SPARKS {
-        sparkle(&mut pen.px, HAT_CX + dx, HAT_BASE + dy, r, lift(secondary, 0.78), alpha);
+    // The sparkles are composed around the hat's tip; without the hat they
+    // float in empty space belonging to nothing, so they go with it.
+    if with_hat {
+        hat(&mut pen.px, lift(primary, 0.80));
+        for (dx, dy, r, alpha) in SPARKS {
+            sparkle(&mut pen.px, HAT_CX + dx, HAT_BASE + dy, r, lift(secondary, 0.78), alpha);
+        }
     }
 
     portrait(pen, s.avatar.as_deref(), primary, secondary);
     crest(pen, &s.house, s.crest.trim(), secondary);
-    type_column(pen, s, secondary);
+    type_column(pen, s, headline, secondary);
     foot(pen, s.line.trim());
 }
 
@@ -248,30 +306,32 @@ fn crest(pen: &mut Pen<'_>, house: &str, crest: &str, secondary: [u8; 3]) {
 
 /// The eyebrow, the house and the member's name, stacked to the right of the
 /// portrait and optically centred against it.
-fn type_column(pen: &mut Pen<'_>, s: &Sorted, secondary: [u8; 3]) {
+fn type_column(pen: &mut Pen<'_>, s: &Sorted, headline: &Headline<'_>, secondary: [u8; 3]) {
     pen.label(Label {
-        text: &spaced("SORTED INTO"),
+        text: &spaced(headline.eyebrow),
         x: TEXT_X,
-        baseline: EYEBROW_BASE,
+        baseline: headline.eyebrow_base,
         size: 16.0,
         weight: Weight::SEMIBOLD,
         ink: lift(secondary, 0.62),
         edge: 1.5,
     });
 
-    let house = s.house.trim().to_uppercase();
-    let house = spaced(if house.is_empty() { "UNSORTED" } else { &house });
+    let hero = headline.hero.trim().to_uppercase();
+    let hero = if hero.is_empty() { "UNSORTED".to_string() } else { hero };
+    let hero = if headline.tracked { spaced(&hero) } else { hero };
     // The biggest type on the card, so it shrinks to fit rather than being cut
     // short: an ellipsised house name would read as a drawing bug.
-    let (house, size) = pen.shrink(&house, HOUSE_SIZE, HOUSE_FLOOR, Weight::EXTRA_BOLD, TEXT_W);
+    let (hero, size) = pen.shrink(&hero, headline.hero_size, HOUSE_FLOOR, Weight::EXTRA_BOLD, TEXT_W);
     pen.label(Label {
-        text: &house,
+        text: &hero,
         x: TEXT_X,
-        baseline: HOUSE_BASE,
+        baseline: headline.hero_base,
         size,
         weight: Weight::EXTRA_BOLD,
         ink: INK,
-        edge: 3.0,
+        // The outline scales with the type, or a 118px number wears a hairline.
+        edge: (3.0 * size / HOUSE_SIZE).max(3.0),
     });
 
     let name = s.name.trim();
@@ -282,7 +342,7 @@ fn type_column(pen: &mut Pen<'_>, s: &Sorted, secondary: [u8; 3]) {
     pen.label(Label {
         text: &name,
         x: TEXT_X,
-        baseline: NAME_BASE,
+        baseline: headline.name_base,
         size: NAME_SIZE,
         weight: Weight::BOLD,
         ink: SUB,
@@ -694,6 +754,30 @@ mod tests {
             crest: crest.to_string(),
             colours: (primary, secondary),
             line: line.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_points_award_draws_for_every_house_either_way() {
+        for i in 0..4 {
+            let s = card(i, "Aarav", Some(fake_avatar([214, 96, 92])), "Now on 410 points this month");
+            for points in [25, -5, 100_000] {
+                let png = points_png(&s, points).expect("a points card should draw");
+                assert_eq!(&png[..4], b"\x89PNG", "not a png at {} points", points);
+            }
+        }
+    }
+
+    /// `HOUSE_CARD_PREVIEW=<dir> cargo test house_card -- --ignored`
+    #[test]
+    #[ignore]
+    fn points_preview() {
+        let Ok(dir) = std::env::var("HOUSE_CARD_PREVIEW") else { return };
+        for (i, name) in ["gryffindor", "slytherin", "ravenclaw", "hufflepuff"].into_iter().enumerate() {
+            let line = "For winning the quiz round · now on 410 points this month";
+            let s = card(i, "Aarav Sharma 🔥", Some(fake_avatar([206, 120, 96])), line);
+            let png = points_png(&s, 25).expect("draws");
+            std::fs::write(format!("{}/points_{}.png", dir, name), png).expect("write the preview");
         }
     }
 

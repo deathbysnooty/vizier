@@ -129,6 +129,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
              user_id INTEGER PRIMARY KEY, house TEXT NOT NULL, seq INTEGER NOT NULL,
              done INTEGER NOT NULL DEFAULT 0);
          CREATE INDEX IF NOT EXISTS draft_todo ON draft (done, seq);
+         CREATE TABLE IF NOT EXISTS optouts (user_id INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
     let _ = DB.set(Mutex::new(conn));
@@ -163,6 +164,37 @@ fn meta_clear(key: &str) {
     }
 }
 
+/// Whether someone has stepped out of the houses.
+///
+/// A separate table rather than a column on `members`, because the live
+/// database already has that table: CREATE TABLE IF NOT EXISTS would never add
+/// the column, and a new table needs no migration at all.
+fn opted_out(user: u64) -> bool {
+    let Some(db) = DB.get() else {
+        return false;
+    };
+    db.lock()
+        .query_row("SELECT 1 FROM optouts WHERE user_id = ?1", params![user as i64], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn set_opted_out(user: u64, out: bool) {
+    if let Some(db) = DB.get() {
+        let conn = db.lock();
+        let _ = if out {
+            conn.execute(
+                "INSERT OR REPLACE INTO optouts (user_id, ts) VALUES (?1, ?2)",
+                params![user as i64, Utc::now().timestamp()],
+            )
+        } else {
+            conn.execute("DELETE FROM optouts WHERE user_id = ?1", params![user as i64])
+        };
+    }
+}
+
 /// Which house someone is in, if they have been sorted.
 pub fn house_of(user: u64) -> Option<&'static House> {
     let db = DB.get()?;
@@ -190,7 +222,10 @@ pub fn counts() -> HashMap<&'static str, i64> {
     let mut counts: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
     if let Some(db) = DB.get() {
         let conn = db.lock();
-        if let Ok(mut stmt) = conn.prepare("SELECT house, COUNT(*) FROM members GROUP BY house") {
+        // Those who stepped out keep their house on record but don't count
+        // towards it - and must not skew the hat towards filling their gap.
+        let sql = "SELECT house, COUNT(*) FROM members WHERE user_id NOT IN (SELECT user_id FROM optouts) GROUP BY house";
+        if let Ok(mut stmt) = conn.prepare(sql) {
             if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
                 for (key, n) in rows.flatten() {
                     if let Some(slot) = house(&key).and_then(|h| counts.get_mut(h.key)) {
@@ -417,6 +452,191 @@ pub async fn roles_command(ctx: &Context, command: &CommandInteraction) {
     );
     let reply = serenity::all::EditInteractionResponse::new().content(format!("**Houses**\n{}", lines.join("\n")));
     let _ = command.edit_response(&ctx.http, reply).await;
+}
+
+// --- points by reply --------------------------------------------------------
+
+/// Reads a mod's reply: `points 10`, `house points -5`, `housepoints 25 for
+/// the quiz`. Returns the points and the reason, or `None` for anything else.
+///
+/// Strict on purpose. It only runs on a mod's reply, but even so the message
+/// must START with the word and have a number straight after it, so "those
+/// points are fair" or "points?" never award anything.
+fn parse_points(text: &str) -> Option<(i64, String)> {
+    let mut words = text.split_whitespace();
+    let mut word = words.next()?;
+    if word.eq_ignore_ascii_case("house") {
+        word = words.next()?;
+    }
+    let joined = word.eq_ignore_ascii_case("housepoints");
+    if !joined && !word.eq_ignore_ascii_case("points") && !word.eq_ignore_ascii_case("point") {
+        return None;
+    }
+    let points: i64 = words.next()?.parse().ok()?;
+    let reason = words.collect::<Vec<_>>().join(" ");
+    // "points 10 for the quiz" - the card says it, so the "for" is noise.
+    let reason = reason.strip_prefix("for ").unwrap_or(&reason).trim().to_string();
+    Some((points, reason))
+}
+
+/// Awards points to whichever house `target` is in and posts the card, as a
+/// reply to the message that earned them.
+async fn award_member(
+    ctx: &Context,
+    guild: GuildId,
+    target: &serenity::all::User,
+    points: i64,
+    reason: &str,
+    by: u64,
+    earned: &serenity::all::Message,
+) -> Result<(), String> {
+    let user = target.id.get();
+    if target.bot {
+        return Err("Bots aren't in a house.".into());
+    }
+    if points == 0 {
+        return Err("Zero points would do nothing.".into());
+    }
+    if !(-MAX_AWARD..=MAX_AWARD).contains(&points) {
+        return Err(format!("That's more than {} points - award it in smaller pieces if you mean it.", MAX_AWARD));
+    }
+    if opted_out(user) {
+        return Err(format!("<@{}> has stepped out of the houses, so there's no house to award.", user));
+    }
+    let Some(house) = house_of(user) else {
+        return Err(format!("<@{}> isn't in a house yet.", user));
+    };
+
+    let total = award(house, points, reason, by);
+    let member = guild.member(&ctx.http, target.id).await.ok();
+    let standing = format!("{} now on {} points this month", house.name, total);
+    let line = if reason.is_empty() { standing } else { format!("{} · {}", reason, standing) };
+    let sorted = Sorted {
+        name: member.as_ref().map(display).unwrap_or_else(|| target.name.clone()),
+        avatar: match &member {
+            Some(member) => avatar(member).await,
+            None => None,
+        },
+        house: house.name.to_string(),
+        crest: house.crest.to_string(),
+        colours: house.colours,
+        line,
+    };
+    // Drawing is CPU work, so it never runs on the gateway thread.
+    let png = tokio::task::spawn_blocking(move || house_card::points_png(&sorted, points)).await.ok().flatten();
+
+    let text = if points > 0 {
+        format!("🏆 <@{}> earned **+{}** for {} **{}**", user, points, house.crest, house.name)
+    } else {
+        format!("📉 <@{}> cost {} **{}** **{}** points", user, house.crest, house.name, -points)
+    };
+    let mut message = CreateMessage::new()
+        .content(text)
+        .reference_message(earned)
+        .allowed_mentions(CreateAllowedMentions::new().users(vec![target.id]));
+    if let Some(png) = png {
+        message = message.add_file(CreateAttachment::bytes(png, "points.png"));
+    }
+    earned.channel_id.send_message(&ctx.http, message).await.map_err(|err| err.to_string())?;
+    tracing::info!("house: {} points to {} via {} (by {})", points, house.name, user, by);
+    Ok(())
+}
+
+/// A mod replying to someone's message with `points 10` awards that person's
+/// house. Returns true when the message was one of these, so the caller stops.
+///
+/// A slash command can't do this: Discord never tells a slash command which
+/// message it was typed under. A plain reply does carry that.
+pub async fn on_reply_points(ctx: &Context, msg: &serenity::all::Message) -> bool {
+    let Some(earned) = msg.referenced_message.as_deref() else {
+        return false;
+    };
+    let Some((points, reason)) = parse_points(&msg.content) else {
+        return false;
+    };
+    // Anyone else typing "points 10" is just talking.
+    if !super::admin_ids().contains(&msg.author.id.get()) {
+        return false;
+    }
+    let Some(guild) = msg.guild_id else {
+        return false;
+    };
+    match award_member(ctx, guild, &earned.author, points, &reason, msg.author.id.get(), earned).await {
+        // The card now hangs off the message that earned it, so the mod's
+        // "points 10" is clutter.
+        Ok(()) => {
+            let _ = msg.delete(&ctx.http).await;
+        }
+        Err(why) => {
+            let _ = msg.reply(&ctx.http, why).await;
+        }
+    }
+    true
+}
+
+// --- stepping out -----------------------------------------------------------
+
+/// Takes every house role off someone, whichever they happen to wear.
+async fn take_off_houses(ctx: &Context, guild: GuildId, user: u64) {
+    let Ok(member) = guild.member(&ctx.http, UserId::new(user)).await else {
+        return;
+    };
+    for house in HOUSES {
+        if let Some(role) = role_for(ctx, guild, house).await {
+            if member.roles.contains(&role) {
+                let _ = member.remove_role(&ctx.http, role).await;
+            }
+        }
+    }
+}
+
+/// `/houseopt` - step out of the houses, or back in. Anyone can.
+///
+/// Stepping out takes the role away, so the member is never pinged for the
+/// house and can't see its room. Their house is kept on record, so stepping
+/// back in returns them to the SAME house rather than rolling them again.
+pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    let user = command.user.id.get();
+
+    if opted_out(user) {
+        set_opted_out(user, false);
+        // Back to where they were. Someone who stepped out before ever being
+        // sorted gets placed now, as an arrival would.
+        let house = match house_of(user) {
+            Some(house) => house,
+            None => {
+                let house = hat_pick();
+                remember(user, house, "hat");
+                house
+            }
+        };
+        wear_house(ctx, guild, user, house).await;
+        let text = format!("Welcome back to **{} {}**. Your role is back on.", house.crest, house.name);
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+
+    set_opted_out(user, true);
+    // A captain who steps out stops being captain - clear it first, so the
+    // role check below sees they captain nothing.
+    if let Some(captained) = captain_of(user) {
+        meta_clear(&format!("captain_{}", captained.key));
+        strip_captain_role(ctx, guild, user).await;
+    }
+    take_off_houses(ctx, guild, user).await;
+    let text = match house_of(user) {
+        Some(house) => format!(
+            "You're out of the houses. Your **{} {}** role is gone, so you won't be pinged for it and its room is \
+             hidden. The bot still remembers you as {} - run `/houseopt` again any time to step back in.",
+            house.crest, house.name, house.name
+        ),
+        None => "You're out of the houses and won't be sorted. Run `/houseopt` again any time to join in.".into(),
+    };
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
 }
 
 // --- common rooms -----------------------------------------------------------
@@ -679,7 +899,7 @@ async fn build_plan(ctx: &Context, guild: GuildId) -> (Vec<(u64, &'static House)
                 bots += 1;
             } else if is_mod_with(&roles, member) {
                 mods += 1;
-            } else if house_of(member.user.id.get()).is_some() {
+            } else if house_of(member.user.id.get()).is_some() || opted_out(member.user.id.get()) {
                 // Already has a house - leave them alone. This is what makes a
                 // second run a top-up rather than a re-sort of the server.
                 settled += 1;
@@ -1049,7 +1269,9 @@ fn members_of(key: &str) -> Vec<u64> {
     let mut out = Vec::new();
     if let Some(db) = DB.get() {
         let conn = db.lock();
-        if let Ok(mut stmt) = conn.prepare("SELECT user_id FROM members WHERE house = ?1 ORDER BY ts, user_id") {
+        let sql = "SELECT user_id FROM members WHERE house = ?1 \
+                   AND user_id NOT IN (SELECT user_id FROM optouts) ORDER BY ts, user_id";
+        if let Ok(mut stmt) = conn.prepare(sql) {
             if let Ok(rows) = stmt.query_map(params![key], |r| r.get::<_, i64>(0)) {
                 out.extend(rows.flatten().map(|id| id as u64));
             }
@@ -1329,6 +1551,10 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
     if member.user.bot {
         return;
     }
+    // Someone who stepped out stays out, however they come back.
+    if opted_out(member.user.id.get()) {
+        return;
+    }
     // Someone coming back. Discord strips every role on the way out and hands
     // none of them back, so the remembered house has to be PUT BACK ON - the
     // row alone would leave them counted in a house they cannot see. Not a
@@ -1367,6 +1593,19 @@ mod tests {
             assert!(house(h.key).is_some() && house(h.name).is_some(), "{} not findable", h.name);
         }
         assert!(house("Hogwarts").is_none());
+    }
+
+    #[test]
+    fn a_mods_reply_only_awards_when_it_is_exactly_the_right_shape() {
+        assert_eq!(parse_points("points 10"), Some((10, String::new())));
+        assert_eq!(parse_points("Points +25"), Some((25, String::new())));
+        assert_eq!(parse_points("house points -5"), Some((-5, String::new())));
+        assert_eq!(parse_points("housepoints 25 for the quiz"), Some((25, "the quiz".into())));
+        assert_eq!(parse_points("points 10 winning the arena"), Some((10, "winning the arena".into())));
+        // Ordinary chat that happens to mention points must never award.
+        for chat in ["those points are fair", "points?", "points", "10 points", "house", "", "points ten", "my points 5"] {
+            assert_eq!(parse_points(chat), None, "{:?} should not award", chat);
+        }
     }
 
     #[test]

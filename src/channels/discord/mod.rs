@@ -1332,6 +1332,10 @@ impl EventHandler for Handler {
             ));
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
+        let house_opt = CreateCommand::new("houseopt")
+            .description("step out of the houses (no role, no pings) - or back in to the same house");
+        let _ = Command::create_global_command(ctx.http.clone(), house_opt).await;
+
         let house_channels = CreateCommand::new("housechannels")
             .description("admin only: make a private common room for each house");
         let _ = Command::create_global_command(ctx.http.clone(), house_channels).await;
@@ -1874,6 +1878,9 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            if command.data.name == "houseopt" {
+                house::opt_command(&ctx, &command).await;
+            }
             if command.data.name == "housechannels" {
                 house::channels_command(&ctx, &command).await;
             }
@@ -2672,6 +2679,11 @@ Ye message sirf tumhe dikh raha hai."#,
         // gets moved back to the bottom once enough messages pile on top of it.
         if !is_dm {
             battle::note_chat(msg.channel_id);
+        }
+        // A mod replying "points 10" to someone awards their house. Sits before
+        // the allowlist, like the quote trigger, so it works in every channel.
+        if !is_dm && house::on_reply_points(&ctx, &msg).await {
+            return;
         }
         if !is_dm && quiz::on_message(&ctx, &msg).await {
             return;
