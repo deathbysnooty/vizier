@@ -2772,6 +2772,10 @@ Ye message sirf tumhe dikh raha hai."#,
         if !is_dm && quiz::on_message(&ctx, &msg).await {
             return;
         }
+        // Auto-responses from the panel: react to or answer messages with set words.
+        if !is_dm && control::on("VIZIER_AUTOREPLIES", true) {
+            control::autoreplies::on_message(&ctx, &msg);
+        }
 
         // The channel allowlist governs server channels. A DM has no place on
         // that list, so it must not be filtered by it.

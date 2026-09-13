@@ -678,6 +678,23 @@ pub fn sections() -> Vec<Section> {
             settings: vec![],
             commands: vec![],
         },
+        Section {
+            id: "autoreplies",
+            title: "Auto-responses",
+            icon: "💬",
+            about: "Rules made on the Auto-responses page that react to or answer messages containing set words or \
+                    phrases: anywhere in the message, as a whole word, the exact message, how it starts, or a pattern. \
+                    Each rule can add emoji reactions and/or reply with one of several messages picked at random \
+                    ({user} mentions the author, {name} is their name), work in chosen channels only, wait a cooldown \
+                    before firing again in the same channel, and fire only a percentage of the time. Bots are ignored, \
+                    as are quiz answers and Snitch catches.",
+            settings: vec![toggle(
+                "VIZIER_AUTOREPLIES",
+                "Auto-responses on",
+                "Master switch for every auto-response rule. Off stops them all at once without deleting any.",
+            )],
+            commands: vec![],
+        },
     ]
 }
 

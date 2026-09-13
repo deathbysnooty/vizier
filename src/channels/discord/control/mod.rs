@@ -10,6 +10,7 @@
 //!
 //! control.db also holds the panel's audit trail, its sign-in links and sessions.
 
+pub mod autoreplies;
 pub mod catalog;
 pub mod reminders;
 pub mod scheduler;
@@ -52,6 +53,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(SCHEMA)?;
     reminders::migrate(&conn)?;
+    autoreplies::migrate(&conn)?;
     let loaded = {
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
