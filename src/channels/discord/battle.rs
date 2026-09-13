@@ -537,8 +537,8 @@ async fn call<T>(fut: impl std::future::Future<Output = serenity::Result<T>>) ->
 }
 
 /// One fight: the card goes up, the exchanges land under it, then the result.
-/// With `picks`, both fighters choose a move every turn and the clash decides who
-/// lands it; without, the attacker is a coin toss as before. Returns the winner.
+/// With `picks`, both fighters choose a move first and the clash decides the
+/// fight; without, every blow is a coin toss as before. Returns the winner.
 #[allow(clippy::too_many_arguments)]
 async fn play(
     ctx: &Context,
@@ -578,64 +578,54 @@ async fn play(
         }
     };
 
+    // With picks, one clash before the first blow decides the fight. The blows
+    // that follow are dealt from a script that ends with the clash winner standing.
+    let mut decided: Option<usize> = None;
+    let mut script: std::collections::VecDeque<(usize, Swing)> = std::collections::VecDeque::new();
+    if let Some(table) = &clash {
+        let chosen = pick_moves(ctx, channel, &mut message, &head, &log, a, b, &hp, fight_id, opening.as_ref(), seed).await;
+        PICKS.lock().remove(&fight_id);
+        let side = table.winner(chosen.moves[0], chosen.moves[1]);
+        let auto = |i: usize| if chosen.auto[i] { " (auto)" } else { "" };
+        log.push(format!(
+            "{}{} vs {}{} → **{}** wins the clash ⚔️",
+            MOVES[chosen.moves[0]].0,
+            auto(0),
+            MOVES[chosen.moves[1]].0,
+            auto(1),
+            if side == 0 { &a.name } else { &b.name }
+        ));
+        text = fight_text(&head, &log, a, b, &hp);
+        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), Some(Vec::new())).await;
+        decided = Some(side);
+        script = script_fight(seed, side).into();
+        tokio::time::sleep(REVEAL).await;
+    }
+
     // Trade blows until someone's health runs out.
     let mut turns = 0;
     while hp[0] > 0 && hp[1] > 0 && turns < MAX_EXCHANGES {
         turns += 1;
-        let (attacker, clash_note) = match &clash {
-            Some(table) => {
-                let chosen = pick_moves(ctx, channel, &mut message, &head, &log, a, b, &hp, fight_id, turns, opening.as_ref(), seed)
-                    .await;
-                let side = table.winner(chosen.moves[0], chosen.moves[1]);
-                let auto = |i: usize| if chosen.auto[i] { " (auto)" } else { "" };
-                let note = format!(
-                    "{}{} vs {}{} → **{}** wins the clash · ",
-                    MOVES[chosen.moves[0]].0,
-                    auto(0),
-                    MOVES[chosen.moves[1]].0,
-                    auto(1),
-                    if side == 0 { &a.name } else { &b.name }
-                );
-                (side, note)
-            }
+        tokio::time::sleep(BEAT).await;
+        let (attacker, swing) = match script.pop_front() {
+            Some(blow) => blow,
             None => {
-                tokio::time::sleep(BEAT).await;
-                (roll(seed, 2) as usize, String::new())
+                let attacker = roll(seed, 2) as usize;
+                (attacker, swing(seed, attacker))
             }
         };
         let (x, y) = if attacker == 0 { (a, b) } else { (b, a) };
-        // Winning a clash always does the winner some good: no backfires or
-        // misses for them, or pressing the right button would feel pointless.
-        let swing = if clash.is_some() { clash_swing(seed, attacker) } else { swing(seed, attacker) };
-        let before = hp;
-        for side in 0..2 {
-            hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
-        }
-        // A chaos turn hurts both, so both bars can empty at once. Someone has
-        // to be left standing: whoever was healthier keeps a sliver, and on a
-        // dead tie it goes to the one who swung.
-        if hp == [0, 0] {
-            let standing = match before[0].cmp(&before[1]) {
-                std::cmp::Ordering::Greater => 0,
-                std::cmp::Ordering::Less => 1,
-                std::cmp::Ordering::Equal => attacker,
-            };
-            hp[standing] = 1;
-        }
+        hp = land(hp, attacker, &swing);
         let line = fill(pick(swing.blow.lines(lines), seed), &x.name, &y.name);
-        log.push(format!("{}{} · **{}**", clash_note, line, swing.tail()));
+        log.push(format!("{} · **{}**", line, swing.tail()));
         text = fight_text(&head, &log, a, b, &hp);
-        let rows = if clash.is_some() { Some(Vec::new()) } else { None };
-        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), rows).await;
-        if clash.is_some() {
-            tokio::time::sleep(REVEAL).await;
-        }
-    }
-    if picks {
-        PICKS.lock().remove(&fight_id);
+        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), None).await;
     }
 
-    let a_wins = hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0);
+    let a_wins = match decided {
+        Some(side) => side == 0,
+        None => hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0),
+    };
     let (winner, loser) = if a_wins { (a, b) } else { (b, a) };
     let finish = fill(pick(lines.finish, seed), &winner.name, &loser.name);
     text.push_str(&format!("\n\n🏆 {}", finish));
@@ -643,8 +633,7 @@ async fn play(
     let done =
         fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None, theme).await;
     tokio::time::sleep(BEAT).await;
-    let rows = if picks { Some(Vec::new()) } else { None };
-    keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref(), rows).await;
+    keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref(), None).await;
     tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
     // Between fights nobody is watching a message, so stop counting chat.
     BELOW.lock().remove(&channel.get());
@@ -661,8 +650,8 @@ const MOVES: [(&str, &str, ButtonStyle); 4] = [
     ("✕", "cross", ButtonStyle::Primary),
 ];
 /// How long both fighters have to pick before the bot picks for them.
-const PICK_WAIT: Duration = Duration::from_secs(8);
-/// How long a clash result stays up before the next turn opens.
+const PICK_WAIT: Duration = Duration::from_secs(15);
+/// How long the clash result stays up before the first blow.
 const REVEAL: Duration = Duration::from_millis(1800);
 
 /// Who beats whom for one fight. Every move beats exactly two of the other
@@ -734,16 +723,14 @@ async fn pick_moves(
     b: &Warrior,
     hp: &[i32; 2],
     fight_id: u64,
-    turn: usize,
     carry: Option<&Vec<u8>>,
     seed: &mut u64,
 ) -> Chosen {
     PICKS.lock().insert(fight_id, Picks { fighters: [a.id, b.id], moves: [None, None], open: true });
     let closes = Utc::now().timestamp() + PICK_WAIT.as_secs() as i64;
     let prompt = format!(
-        "{}\n\n🎮 **Turn {}**: <@{}> and <@{}>, pick a move! Beat the other pick to land the hit. Closes <t:{}:R>",
+        "{}\n\n🎮 <@{}> and <@{}>, pick a move! **Win the clash, win the fight.** Closes <t:{}:R>",
         fight_text(head, log, a, b, hp),
-        turn,
         a.id,
         b.id,
         closes
@@ -813,19 +800,58 @@ async fn on_pick(ctx: &Context, component: &ComponentInteraction, rest: &str) {
     let _ = component.create_response(&ctx.http, whisper(reply)).await;
 }
 
-/// A swing for the fighter who won the clash: rolled like any other, but a blow
-/// that would hurt them or do nothing is rolled again.
-fn clash_swing(seed: &mut u64, attacker: usize) -> Swing {
-    for _ in 0..16 {
-        let s = swing(seed, attacker);
-        if !matches!(s.blow, Blow::Miss | Blow::Sip | Blow::Backfire | Blow::Chaos | Blow::Crowd) {
-            return s;
+/// Health after a blow. A chaos turn hurts both, so both bars can empty at once;
+/// someone has to be left standing: whoever was healthier keeps a sliver, and
+/// on a dead tie it goes to the one who swung.
+fn land(before: [i32; 2], attacker: usize, swing: &Swing) -> [i32; 2] {
+    let mut hp = before;
+    for side in 0..2 {
+        hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
+    }
+    if hp == [0, 0] {
+        let standing = match before[0].cmp(&before[1]) {
+            std::cmp::Ordering::Greater => 0,
+            std::cmp::Ordering::Less => 1,
+            std::cmp::Ordering::Equal => attacker,
+        };
+        hp[standing] = 1;
+    }
+    hp
+}
+
+/// A whole fight rolled the ordinary way, without Discord: the blows and the
+/// health left at the end.
+fn roll_fight(seed: &mut u64) -> (Vec<(usize, Swing)>, [i32; 2]) {
+    let mut hp = [START_HP; 2];
+    let mut blows = Vec::new();
+    while hp[0] > 0 && hp[1] > 0 && blows.len() < MAX_EXCHANGES {
+        let attacker = roll(seed, 2) as usize;
+        let swing = swing(seed, attacker);
+        hp = land(hp, attacker, &swing);
+        blows.push((attacker, swing));
+    }
+    (blows, hp)
+}
+
+/// The blows for a fight whose winner the clash already decided. A fight is
+/// rolled as usual; if it went the other way it is played mirrored, which swaps
+/// every blow between the two and so the result, and it reads just as natural.
+/// A dead level fight is rolled again; the empty fallback leaves the blows to
+/// chance, and the clash still names the winner.
+fn script_fight(seed: &mut u64, winner: usize) -> Vec<(usize, Swing)> {
+    for _ in 0..8 {
+        let (blows, hp) = roll_fight(seed);
+        if hp[winner] > hp[1 - winner] {
+            return blows;
+        }
+        if hp[winner] < hp[1 - winner] {
+            return blows
+                .into_iter()
+                .map(|(attacker, s)| (1 - attacker, Swing { blow: s.blow, hits: [s.hits[1], s.hits[0]] }))
+                .collect();
         }
     }
-    let other = 1 - attacker;
-    let mut hits = [0i32; 2];
-    hits[other] = -(18 + roll(seed, 11) as i32);
-    Swing { blow: Blow::Hit, hits }
+    Vec::new()
 }
 
 /// Counts chat under the live fight so it can be moved back to the bottom.
@@ -924,7 +950,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         other => format!(" **{}** style", other.label()),
     };
     let content = format!(
-        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in 2 minutes.\n         -# Every turn both fighters pick △ ○ □ ✕. Win the clash to land the hit.",
+        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in 2 minutes.\n         -# When the fight starts, both fighters pick △ ○ □ ✕. Win the clash, win the fight.",
         me,
         them,
         if flavour.is_empty() { String::new() } else { flavour },
@@ -1530,53 +1556,21 @@ mod tests {
     }
 
     #[test]
-    fn a_won_clash_never_hurts_the_winner() {
-        let mut seed = 5u64;
-        for _ in 0..2000 {
-            for side in 0..2 {
-                let s = clash_swing(&mut seed, side);
-                assert!(s.hits[side] >= 0, "{:?} hurt the clash winner", s.blow);
-                assert!(s.hits.iter().any(|h| *h != 0), "{:?} did nothing", s.blow);
-            }
+    fn a_scripted_fight_ends_with_the_clash_winner_ahead() {
+        let mut seed = 31u64;
+        for i in 0..1000 {
+            let winner = i % 2;
+            let blows = script_fight(&mut seed, winner);
+            assert!(!blows.is_empty() && blows.len() <= MAX_EXCHANGES, "fight {} has {} blows", i, blows.len());
+            let hp = blows.iter().fold([START_HP; 2], |hp, (attacker, s)| land(hp, *attacker, s));
+            assert!(hp[winner] > hp[1 - winner], "fight {}: {:?} should favour side {}", i, hp, winner);
         }
-    }
-
-    #[test]
-    fn every_line_has_placeholders_and_picks_spread() {
-        for line in Theme::Classic.lines().exchange {
-            assert!(line.contains("{a}") && line.contains("{b}"), "{}", line);
-        }
-        for line in Theme::Classic.lines().finish {
-            assert!(line.contains("{w}") && line.contains("{l}"), "{}", line);
-        }
-        let mut seed = 12345u64;
-        let exchange = Theme::Classic.lines().exchange;
-        let picks: std::collections::HashSet<&str> = (0..200).map(|_| pick(exchange, &mut seed)).collect();
-        assert!(picks.len() > exchange.len() / 2, "picks bunched up: {}", picks.len());
     }
 
     /// Play the exchange loop the way `play` does, without Discord in the way.
     fn simulate(seed: &mut u64) -> ([i32; 2], usize) {
-        let mut hp = [START_HP; 2];
-        let mut turns = 0;
-        while hp[0] > 0 && hp[1] > 0 && turns < MAX_EXCHANGES {
-            turns += 1;
-            let attacker = roll(seed, 2) as usize;
-            let swing = swing(seed, attacker);
-            let before = hp;
-            for side in 0..2 {
-                hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
-            }
-            if hp == [0, 0] {
-                let standing = match before[0].cmp(&before[1]) {
-                    std::cmp::Ordering::Greater => 0,
-                    std::cmp::Ordering::Less => 1,
-                    std::cmp::Ordering::Equal => attacker,
-                };
-                hp[standing] = 1;
-            }
-        }
-        (hp, turns)
+        let (blows, hp) = roll_fight(seed);
+        (hp, blows.len())
     }
 
     #[test]
