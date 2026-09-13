@@ -36,6 +36,9 @@ mod house_draft;
 mod points;
 mod snitch;
 mod standings;
+mod activity;
+mod games;
+mod weekly;
 mod nudge;
 mod awards_card;
 mod quiz;
@@ -77,6 +80,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = snitch::open(&self.deps.config.workspace) {
             tracing::warn!("snitch: store not opened: {}", err);
+        }
+        if let Err(err) = weekly::open(&self.deps.config.workspace) {
+            tracing::warn!("weekly: store not opened: {}", err);
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
@@ -1131,6 +1137,17 @@ impl EventHandler for Handler {
     }
 
 
+    async fn message_update(
+        &self,
+        ctx: Context,
+        _old: Option<Message>,
+        _new: Option<Message>,
+        event: serenity::all::MessageUpdateEvent,
+    ) {
+        // Koto edits one card per game; the solved edit names the winner.
+        games::on_message_update(&ctx, &event);
+    }
+
     async fn ready(&self, ctx: Context, _ready: Ready) {
         // A running quiz comes back first: registering the slash commands below
         // takes the better part of a minute, and players notice the silence.
@@ -1339,6 +1356,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
 
@@ -1395,6 +1413,10 @@ impl EventHandler for Handler {
         standings::spawn(ctx.clone());
         // Snitch drops: restores cards left live by a restart, then schedules.
         snitch::spawn(ctx.clone());
+        // Daily chat and voice points, settled from the stats tables.
+        activity::spawn(&ctx);
+        // The Sunday evening scan of the discussion channels.
+        weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1419,6 +1441,10 @@ impl EventHandler for Handler {
             let id = component.data.custom_id.clone();
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("weekly") {
+                weekly::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("battle") || id.starts_with("fight") {
@@ -1929,6 +1955,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "sort" {
                 house::sort_command(&ctx, &command).await;
+            }
+            if command.data.name == "weeklyscan" {
+                weekly::scan_command(&ctx, &self.1, &agent_id, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
@@ -2648,6 +2677,8 @@ Ye message sirf tumhe dikh raha hai."#,
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
+        // Koto, Anagram and Cat Bot results pay house points; these come from bots.
+        games::on_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {

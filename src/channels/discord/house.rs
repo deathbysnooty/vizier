@@ -1259,13 +1259,34 @@ pub(super) fn award_person(
     dedupe: Option<String>,
     scope: Option<String>,
 ) -> Option<(&'static House, super::points::Outcome)> {
+    award_person_at(user, source, points, reason, by, dedupe, scope, Utc::now().timestamp())
+}
+
+/// `award_person`, dated to when the points were EARNED rather than now.
+///
+/// The ledger counts caps by the day a row is dated. A chat or voice day that is
+/// only settled after midnight - a sitting crossing midnight closes when its
+/// leave arrives - has to be dated inside that day, or it would fill TODAY's
+/// cap and the person's real point for today would be written as a zero and
+/// lost for good. Everything else earns "now" and should use `award_person`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn award_person_at(
+    user: u64,
+    source: super::points::Source,
+    points: i64,
+    reason: &str,
+    by: Option<u64>,
+    dedupe: Option<String>,
+    scope: Option<String>,
+    at: i64,
+) -> Option<(&'static House, super::points::Outcome)> {
     if opted_out(user) {
         return None;
     }
     let house = house_of(user)?;
     let db = DB.get()?;
     let entry = super::points::Entry { user: Some(user), house, source, scope, points, reason, by, dedupe };
-    match super::points::write(&db.lock(), &entry, Utc::now().timestamp()) {
+    match super::points::write(&db.lock(), &entry, at) {
         Ok(outcome) => Some((house, outcome)),
         Err(err) => {
             tracing::warn!("house: {} points for {} not recorded: {}", source.key(), user, err);
