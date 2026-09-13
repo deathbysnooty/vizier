@@ -34,6 +34,7 @@ mod house;
 mod house_card;
 mod house_draft;
 mod points;
+mod snitch;
 mod standings;
 mod nudge;
 mod awards_card;
@@ -73,6 +74,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = house::open(&self.deps.config.workspace) {
             tracing::warn!("house: store not opened: {}", err);
+        }
+        if let Err(err) = snitch::open(&self.deps.config.workspace) {
+            tracing::warn!("snitch: store not opened: {}", err);
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
@@ -1334,6 +1338,7 @@ impl EventHandler for Handler {
             ));
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
+        let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
 
@@ -1388,6 +1393,8 @@ impl EventHandler for Handler {
         }
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
+        // Snitch drops: restores cards left live by a restart, then schedules.
+        snitch::spawn(ctx.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1887,6 +1894,9 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            if command.data.name == "snitchdrop" {
+                snitch::drop_command(&ctx, &command).await;
+            }
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
             }
@@ -2694,6 +2704,15 @@ Ye message sirf tumhe dikh raha hai."#,
         // gets moved back to the bottom once enough messages pile on top of it.
         if !is_dm {
             battle::note_chat(msg.channel_id);
+        }
+        // The Snitch: note who is chatting where (drops only land in a channel
+        // with people in it), then catch "accio" replies. Before the allowlist,
+        // since drops can land in channels the chat side doesn't read.
+        if !is_dm {
+            snitch::note_message(&msg);
+        }
+        if !is_dm && snitch::on_message(&ctx, &msg).await {
+            return;
         }
         // A mod replying "points 10" to someone awards their house. Sits before
         // the allowlist, like the quote trigger, so it works in every channel.
