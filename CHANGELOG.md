@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.92] - 2026-09-13
+
+### 💼 Other
+
+- Fighters wear their house crest on fight and champion cards
 ## [0.10.91] - 2026-09-13
 
 ### 💼 Other
 
 - A Cat Bot line about anyone names no catcher
 - One-off drop on start; games: Koto card shapes back to debug
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.91
 ## [0.10.90] - 2026-09-13
 
 ### 💼 Other
