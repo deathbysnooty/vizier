@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.98] - 2026-09-13
+
+### 💼 Other
+
+- Unlimited royale, quick rounds until the quarter-finals
 ## [0.10.97] - 2026-09-13
 
 ### 💼 Other
@@ -9,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Bracket module interface
 - Royale on a fixed bracket draw, posted before each round
 - Draw the royale bracket for 4 to 32 entrants
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.97
 ## [0.10.96] - 2026-09-13
 
 ### 💼 Other
