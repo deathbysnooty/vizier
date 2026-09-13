@@ -34,9 +34,16 @@ const RING: usize = 30;
 /// was sent while we were offline - so nobody is paid rather than the wrong person.
 const FRESH_MS: u64 = 20_000;
 
-const KOTO_WIN: i64 = 3;
-const KOTO_PLAYED: i64 = 1;
-const ANAGRAM_WIN: i64 = 3;
+/// Points per game, overridable from the panel.
+const KOTO_WIN: u64 = 3;
+const KOTO_PLAYED: u64 = 1;
+const ANAGRAM_WIN: u64 = 3;
+
+/// `VIZIER_GAME_POINTS`: off stops every payout here. Humans are still noted,
+/// so switching back on pays the very next solve.
+fn paying() -> bool {
+    super::control::on("VIZIER_GAME_POINTS", true)
+}
 
 #[derive(Clone, Debug)]
 struct Seen {
@@ -95,6 +102,9 @@ pub fn on_message(ctx: &Context, msg: &Message) {
         note_human(msg);
         return;
     }
+    if !paying() {
+        return;
+    }
     match msg.author.id.get() {
         KOTO_BOT => {
             tracing::debug!(
@@ -119,6 +129,9 @@ pub fn on_message(ctx: &Context, msg: &Message) {
 /// Koto announces a win by editing its game card, so edits are where Koto is
 /// watched. Returns at once; any fetch and the awards run in their own task.
 pub fn on_message_update(ctx: &Context, event: &MessageUpdateEvent) {
+    if !paying() {
+        return;
+    }
     // Most edits are people fixing typos. Drop them before any work.
     let author = event
         .author
@@ -301,6 +314,9 @@ fn replied_to(msg: &Message) -> Option<u64> {
 
 /// The ledger calls are quick but take a lock; keep them off the event path.
 fn pay(user: u64, source: Source, points: i64, reason: String, dedupe: String) {
+    if points <= 0 {
+        return;
+    }
     tokio::task::spawn_blocking(move || {
         match super::house::award_person(user, source, points, &reason, None, Some(dedupe.clone()), None) {
             Some((house, outcome)) => {
@@ -399,9 +415,11 @@ fn pay_koto(channel: ChannelId, win: KotoWin) {
         win.winner,
         win.others.len()
     );
-    pay(win.winner, Source::Koto, KOTO_WIN, format!("solved Koto #{}", win.game), koto_key(win.game, win.winner));
+    let won = super::control::number("VIZIER_POINTS_KOTO_WIN", KOTO_WIN) as i64;
+    let played = super::control::number("VIZIER_POINTS_KOTO_PLAYED", KOTO_PLAYED) as i64;
+    pay(win.winner, Source::Koto, won, format!("solved Koto #{}", win.game), koto_key(win.game, win.winner));
     for &user in &win.others {
-        pay(user, Source::Koto, KOTO_PLAYED, format!("played Koto #{}", win.game), koto_key(win.game, user));
+        pay(user, Source::Koto, played, format!("played Koto #{}", win.game), koto_key(win.game, user));
     }
     let mut done = KOTO_DONE.lock();
     if done.len() > 1000 {
@@ -471,7 +489,7 @@ fn on_anagram(ctx: &Context, msg: &Message) {
             pay(
                 solver,
                 Source::Anagram,
-                ANAGRAM_WIN,
+                super::control::number("VIZIER_POINTS_ANAGRAM", ANAGRAM_WIN) as i64,
                 "solved an anagram".to_string(),
                 format!("anagram:{}", msg.id.get()),
             );
@@ -516,12 +534,13 @@ fn parse_cat(text: &str) -> Option<Catch> {
 }
 
 fn cat_points(kind: &str) -> i64 {
-    match kind.trim().to_lowercase().as_str() {
-        "rare" | "sus" | "rickroll" | "wild" => 2,
-        "superior" | "mythic" | "legendary" => 3,
+    let points = match kind.trim().to_lowercase().as_str() {
+        "rare" | "sus" | "rickroll" | "wild" => super::control::number("VIZIER_POINTS_CAT_RARE", 2),
+        "superior" | "mythic" | "legendary" => super::control::number("VIZIER_POINTS_CAT_TOP", 3),
         // Fine, Nice, Good, Gremlin, and anything new or unreadable.
-        _ => 1,
-    }
+        _ => super::control::number("VIZIER_POINTS_CAT_COMMON", 1),
+    };
+    points as i64
 }
 
 fn on_cat(ctx: &Context, msg: &Message) {

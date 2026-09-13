@@ -52,11 +52,14 @@ const SAFE_CORNER: u64 = 1543162777642868736;
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
-/// Sunday 20:00, counted from Monday 00:00 in India.
+/// Sunday 20:00, counted from Monday 00:00 in India. `VIZIER_WEEKLY_DAY` and
+/// `VIZIER_WEEKLY_TIME` move it.
 const DUE_AFTER_MONDAY: i64 = 6 * DAY + 20 * HOUR;
 /// How late a missed Sunday run may still happen. Past this the week is
 /// skipped: a Thursday catch-up would judge a window nobody expects.
+/// `VIZIER_WEEKLY_CATCH_UP_HOURS`.
 const CATCH_UP_GRACE: i64 = 36 * HOUR;
+const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
 /// 100 messages a page; bounds one very busy channel to 5,000 messages.
@@ -249,15 +252,9 @@ fn verify_prompt(channel: &str, safe: bool, t: &Transcript, proposals: &[Grounde
 
 // --- configuration ----------------------------------------------------------------------
 
-fn parse_ids(raw: &str) -> Vec<u64> {
-    raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect()
-}
-
 /// `VIZIER_WEEKLY_CHANNELS` (comma-separated ids), or the eight chosen by the owner.
 fn channels() -> Vec<u64> {
-    std::env::var("VIZIER_WEEKLY_CHANNELS")
-        .ok()
-        .map(|raw| parse_ids(&raw))
+    Some(super::control::ids("VIZIER_WEEKLY_CHANNELS"))
         .filter(|ids| !ids.is_empty())
         .unwrap_or_else(|| DEFAULT_CHANNELS.to_vec())
 }
@@ -265,10 +262,34 @@ fn channels() -> Vec<u64> {
 /// Who gets the approval DM and may press its buttons: `VIZIER_WEEKLY_REVIEWERS`,
 /// then the quiz reviewers, then the bot admins.
 fn reviewers() -> Vec<u64> {
-    ["VIZIER_WEEKLY_REVIEWERS", "VIZIER_QUIZ_REVIEWERS"]
-        .iter()
-        .find_map(|key| std::env::var(key).ok().map(|raw| parse_ids(&raw)).filter(|ids| !ids.is_empty()))
+    [super::control::ids("VIZIER_WEEKLY_REVIEWERS"), super::control::ids("VIZIER_QUIZ_REVIEWERS")]
+        .into_iter()
+        .find(|ids| !ids.is_empty())
         .unwrap_or_else(super::admin_ids)
+}
+
+/// When the scheduled scan is due, counted from Monday 00:00 India time: the
+/// day and "HH:MM" from the settings, Sunday 20:00 when they don't read.
+fn due_after_monday() -> i64 {
+    due_offset(super::control::var("VIZIER_WEEKLY_DAY").as_deref(), super::control::var("VIZIER_WEEKLY_TIME").as_deref())
+}
+
+fn due_offset(day: Option<&str>, time: Option<&str>) -> i64 {
+    let day = day
+        .and_then(|d| DAYS.iter().position(|name| d.trim().to_lowercase().starts_with(name)))
+        .unwrap_or(6) as i64;
+    let minutes = time
+        .and_then(|t| {
+            let (h, m) = t.trim().split_once(':')?;
+            let (h, m) = (h.trim().parse::<i64>().ok()?, m.trim().parse::<i64>().ok()?);
+            ((0..24).contains(&h) && (0..60).contains(&m)).then_some(h * 60 + m)
+        })
+        .unwrap_or(20 * 60);
+    day * DAY + minutes * MINUTE
+}
+
+fn catch_up_grace() -> i64 {
+    super::control::number("VIZIER_WEEKLY_CATCH_UP_HOURS", (CATCH_UP_GRACE / HOUR) as u64) as i64 * HOUR
 }
 
 fn is_safe_corner(channel: u64, name: &str) -> bool {
@@ -329,7 +350,7 @@ fn monday_midnight(ts: i64) -> i64 {
 
 /// The latest Sunday 20:00 India time at or before `now`.
 fn last_due(now: i64) -> i64 {
-    let due = monday_midnight(now) + DUE_AFTER_MONDAY;
+    let due = monday_midnight(now) + due_after_monday();
     if now >= due { due } else { due - 7 * DAY }
 }
 
@@ -338,7 +359,7 @@ fn last_due(now: i64) -> i64 {
 fn due_week(now: i64, done: Option<&str>) -> Option<(String, i64)> {
     let due = last_due(now);
     let key = super::points::week_start_day(due);
-    (done != Some(key.as_str()) && now - due <= CATCH_UP_GRACE).then_some((key, due))
+    (done != Some(key.as_str()) && now - due <= catch_up_grace()).then_some((key, due))
 }
 
 /// Which week a scan's awards belong to: the week most of its window lies in.
@@ -1488,7 +1509,7 @@ pub fn spawn(ctx: Context, deps: VizierDependencies, agent_id: String) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1800)).await;
-            if std::env::var("VIZIER_WEEKLY").is_ok_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+            if !super::control::on("VIZIER_WEEKLY", true) {
                 continue;
             }
             if RUNNING.load(Ordering::SeqCst) {
@@ -1709,6 +1730,9 @@ Hope that helps."#;
         assert_eq!(ist_text(monday_midnight_), "Mon 2026-09-14 00:00");
         let due = monday_midnight_ + DUE_AFTER_MONDAY;
         assert_eq!(ist_text(due), "Sun 2026-09-20 20:00");
+        assert_eq!(due_offset(None, None), DUE_AFTER_MONDAY, "unset reads as Sunday 20:00");
+        assert_eq!(due_offset(Some("Wednesday"), Some("09:30")), 2 * DAY + 9 * HOUR + 30 * MINUTE);
+        assert_eq!(due_offset(Some("sun"), Some("25:00")), DUE_AFTER_MONDAY, "a time that can't be is ignored");
 
         // Before Sunday 20:00: last week's run is long past its grace, so nothing.
         assert_eq!(due_week(due - 60, None), None);
@@ -1823,7 +1847,6 @@ Hope that helps."#;
         let lines: Vec<String> = (0..40).map(|i| line_text(i + 1, &draft(i as u64, 5, 2))).collect();
         let chunks = chunk_messages("intro", &lines);
         assert!(chunks.len() > 1 && chunks.iter().all(|c| c.len() <= DM_CHUNK));
-        assert_eq!(parse_ids(" 1, x,2 ,,3"), vec![1, 2, 3]);
         assert_eq!(flag_for(&["try steroids bro", "fine"]), "mentions \"steroids\"");
         assert_eq!(flag_for(&["a solid progressive overload plan"]), "");
     }

@@ -22,10 +22,19 @@ use serenity::all::{Context, UserId};
 use super::points::Source;
 use super::stats;
 
-/// Messages in one India day that make it a chat day.
+/// Messages in one India day that make it a chat day, `VIZIER_CHAT_DAY_MESSAGES`.
 pub const CHAT_DAY_MESSAGES: i64 = 20;
-/// Seconds of real voice time in one India day that make it a voice day.
+/// Seconds of real voice time in one India day that make it a voice day,
+/// `VIZIER_VOICE_DAY_MINUTES` in minutes.
 pub const VOICE_DAY_SECS: i64 = 60 * 60;
+
+fn chat_day_messages() -> i64 {
+    super::control::number("VIZIER_CHAT_DAY_MESSAGES", CHAT_DAY_MESSAGES as u64).max(1) as i64
+}
+
+fn voice_day_secs() -> i64 {
+    super::control::number("VIZIER_VOICE_DAY_MINUTES", (VOICE_DAY_SECS / 60) as u64).max(1) as i64 * 60
+}
 /// The same bar as awards.rs: a gap longer than this means a leave was never
 /// logged, and the whole stretch counts for nothing.
 const MAX_SITTING: i64 = 12 * 3600;
@@ -110,6 +119,11 @@ fn add_indexes(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
+    // Switched off: nothing is paid, and a day earned meanwhile is paid when it
+    // comes back on while that day (or the day after) is still being checked.
+    if !super::control::on("VIZIER_ACTIVITY_POINTS", true) {
+        return;
+    }
     let now = Utc::now().timestamp();
     let Some(today) = ist_date(now) else { return };
     let mut days = vec![today];
@@ -118,8 +132,8 @@ async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
             days.push(yesterday);
         }
     }
-    let exclude = env_ids("VIZIER_STATS_EXCLUDE_CHANNELS");
-    let afk: Option<u64> = std::env::var("VIZIER_VOICE_AFK_CHANNEL").ok().and_then(|v| v.trim().parse().ok());
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
     // Until Dyno's log has been read to the end, today's voice is the part
     // still missing. It is picked up on a later pass; nothing is lost.
     let voice = stats::voice_caught_up();
@@ -185,10 +199,6 @@ async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
         }
         Err(err) => tracing::warn!("activity: award task failed: {}", err),
     }
-}
-
-fn env_ids(key: &str) -> HashSet<u64> {
-    std::env::var(key).unwrap_or_default().split(',').filter_map(|s| s.trim().parse().ok()).collect()
 }
 
 fn ist_date(ts: i64) -> Option<NaiveDate> {
@@ -264,7 +274,8 @@ fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> Vec<u64> {
             *per_user.entry(user).or_insert(0) += count;
         }
     }
-    let mut out: Vec<u64> = per_user.into_iter().filter(|&(_, n)| n >= CHAT_DAY_MESSAGES).map(|(u, _)| u).collect();
+    let bar = chat_day_messages();
+    let mut out: Vec<u64> = per_user.into_iter().filter(|&(_, n)| n >= bar).map(|(u, _)| u).collect();
     out.sort_unstable();
     out
 }
@@ -337,18 +348,18 @@ fn plan(day: NaiveDate, chat: &[u64], voice: &HashMap<u64, i64>) -> Vec<Award> {
         .map(|&user| Award {
             user,
             source: Source::Chat,
-            reason: format!("{}+ messages on {}", CHAT_DAY_MESSAGES, day),
+            reason: format!("{}+ messages on {}", chat_day_messages(), day),
             dedupe: format!("chat:{}:{}", day, user),
             at,
         })
         .collect();
-    let mut voiced: Vec<u64> =
-        voice.iter().filter(|&(&u, &s)| u != 0 && s >= VOICE_DAY_SECS).map(|(&u, _)| u).collect();
+    let bar = voice_day_secs();
+    let mut voiced: Vec<u64> = voice.iter().filter(|&(&u, &s)| u != 0 && s >= bar).map(|(&u, _)| u).collect();
     voiced.sort_unstable();
     out.extend(voiced.into_iter().map(|user| Award {
         user,
         source: Source::Voice,
-        reason: format!("{}+ minutes in voice on {}", VOICE_DAY_SECS / 60, day),
+        reason: format!("{}+ minutes in voice on {}", bar / 60, day),
         dedupe: format!("voice:{}:{}", day, user),
         at,
     }));

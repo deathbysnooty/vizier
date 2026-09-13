@@ -17,7 +17,11 @@
 //! restart or a replayed message can never score twice. snitch.db only holds
 //! what this module needs to survive a restart - today's plan and the live card.
 //!
-//! The scheduled drops are off unless `VIZIER_SNITCH_CHANNELS` is set.
+//! The scheduled drops are off unless `VIZIER_SNITCH_CHANNELS` is set, and
+//! `VIZIER_SNITCH` switches them off without forgetting the channels. The
+//! numbers below are the defaults; each has a `VIZIER_SNITCH_…` setting, read
+//! when it is needed. A day's plan is made once, so how many drops and when
+//! only changes from the next plan.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +38,7 @@ use serenity::all::{
     MessageReferenceKind,
 };
 
+use super::control;
 use super::house::House;
 use super::points::{Outcome, Source};
 
@@ -44,11 +49,14 @@ const DEFAULT_CHANNELS: &[(u64, u32)] = &[(1516492867642593443, 3), (15211363857
 const LIFETIME: i64 = 120;
 /// The least time between two scheduled drops.
 const MIN_GAP: i64 = 2 * 3600;
-/// Drops happen between these India times, as seconds after midnight. The day
-/// ends early by a Snitch's lifetime so a late card has flown by midnight and its
-/// points land on the day it was dropped.
-const WINDOW_START: i64 = 10 * 3600;
-const WINDOW_END: i64 = 24 * 3600 - LIFETIME;
+/// Drops happen between these India hours. The day ends early by a Snitch's
+/// lifetime so a late card has flown by midnight and its points land on the day
+/// it was dropped.
+const START_HOUR: u64 = 10;
+const END_HOUR: u64 = 24;
+/// Scheduled drops a day, picked at random between the two.
+const DROPS_MIN: u64 = 3;
+const DROPS_MAX: u64 = 4;
 /// A channel counts as awake if a person spoke in it this recently.
 const QUIET_AFTER: i64 = 5 * 60;
 /// A scheduled Snitch that flies away uncaught gets a second chance this long
@@ -57,6 +65,9 @@ const REMATCH_MIN: i64 = 20 * 60;
 const REMATCH_MAX: i64 = 40 * 60;
 /// Second chances a day, so a quiet day can't turn into a Snitch every half hour.
 const REMATCHES_PER_DAY: usize = 3;
+/// About 1 in this many drops is golden, and 1 in the next is silver.
+const GOLDEN_ONE_IN: u64 = 12;
+const SILVER_ONE_IN: u64 = 4;
 /// When a drop is due but every channel is quiet, look again after this long.
 const RETRY_AFTER: i64 = 3 * 60;
 /// How often the scheduler wakes to see whether a drop is due.
@@ -74,6 +85,54 @@ const FLY_RETRIES: [u64; 3] = [0, 10, 60];
 const FLOWN_COLOUR: u32 = 0x4E5058;
 const FLOWN_FILE: &str = "flown.png";
 const FLOWN_PNG: &[u8] = include_bytes!("snitch/flown.png");
+
+// --- settings ---------------------------------------------------------------
+
+fn lifetime() -> i64 {
+    control::number("VIZIER_SNITCH_CATCH_SECS", LIFETIME as u64).clamp(10, 3600) as i64
+}
+
+fn min_gap() -> i64 {
+    control::number("VIZIER_SNITCH_GAP_MINUTES", (MIN_GAP / 60) as u64).max(1) as i64 * 60
+}
+
+fn window_start() -> i64 {
+    control::number("VIZIER_SNITCH_START_HOUR", START_HOUR).min(23) as i64 * 3600
+}
+
+fn window_end() -> i64 {
+    control::number("VIZIER_SNITCH_END_HOUR", END_HOUR).clamp(1, 24) as i64 * 3600 - lifetime()
+}
+
+fn quiet_after() -> i64 {
+    control::number("VIZIER_SNITCH_QUIET_MINUTES", (QUIET_AFTER / 60) as u64) as i64 * 60
+}
+
+/// The second-chance delay range, in seconds, lowest first.
+fn rematch_range() -> (i64, i64) {
+    let low = control::number("VIZIER_SNITCH_SECOND_CHANCE_MIN_MINUTES", (REMATCH_MIN / 60) as u64) as i64 * 60;
+    let high = control::number("VIZIER_SNITCH_SECOND_CHANCE_MAX_MINUTES", (REMATCH_MAX / 60) as u64) as i64 * 60;
+    (low.min(high), low.max(high))
+}
+
+fn rematches_per_day() -> usize {
+    if !control::on("VIZIER_SNITCH_SECOND_CHANCE", true) {
+        return 0;
+    }
+    control::number("VIZIER_SNITCH_SECOND_CHANCES", REMATCHES_PER_DAY as u64) as usize
+}
+
+/// Scheduled drops a day, lowest first.
+fn drops_per_day() -> (usize, usize) {
+    let low = control::number("VIZIER_SNITCH_DROPS_MIN", DROPS_MIN) as usize;
+    let high = control::number("VIZIER_SNITCH_DROPS_MAX", DROPS_MAX) as usize;
+    (low.min(high), low.max(high))
+}
+
+/// The odds of `n` in "1 in n"; 0 means never.
+fn one_in(n: u64) -> f64 {
+    if n == 0 { 0.0 } else { 1.0 / n as f64 }
+}
 
 // --- the Snitch itself ------------------------------------------------------
 
@@ -117,11 +176,24 @@ impl Kind {
 
     /// Points for first, second and third.
     fn points(self) -> [i64; 3] {
-        match self {
-            Kind::Bronze => [2, 1, 1],
-            Kind::Silver => [3, 2, 1],
-            Kind::Golden => [6, 4, 2],
-        }
+        let places = match self {
+            Kind::Bronze => [
+                control::number("VIZIER_SNITCH_BRONZE_1ST", 2),
+                control::number("VIZIER_SNITCH_BRONZE_2ND", 1),
+                control::number("VIZIER_SNITCH_BRONZE_3RD", 1),
+            ],
+            Kind::Silver => [
+                control::number("VIZIER_SNITCH_SILVER_1ST", 3),
+                control::number("VIZIER_SNITCH_SILVER_2ND", 2),
+                control::number("VIZIER_SNITCH_SILVER_3RD", 1),
+            ],
+            Kind::Golden => [
+                control::number("VIZIER_SNITCH_GOLDEN_1ST", 6),
+                control::number("VIZIER_SNITCH_GOLDEN_2ND", 4),
+                control::number("VIZIER_SNITCH_GOLDEN_3RD", 2),
+            ],
+        };
+        places.map(|p| p as i64)
     }
 
     /// The Golden Snitch is the jackpot, so it books to the uncapped source.
@@ -153,9 +225,11 @@ impl Kind {
 /// silver, and bronze the rest. At three or four drops a day that is a golden
 /// one two or three times a week.
 fn choose_kind(roll: f64) -> Kind {
-    if roll < 1.0 / 12.0 {
+    let golden = one_in(control::number("VIZIER_SNITCH_GOLDEN_ONE_IN", GOLDEN_ONE_IN));
+    let silver = one_in(control::number("VIZIER_SNITCH_SILVER_ONE_IN", SILVER_ONE_IN));
+    if roll < golden {
         Kind::Golden
-    } else if roll < 1.0 / 12.0 + 1.0 / 4.0 {
+    } else if roll < golden + silver {
         Kind::Silver
     } else {
         Kind::Bronze
@@ -233,7 +307,12 @@ fn live_description(fact: &str) -> String {
 
 fn live_footer(kind: Kind) -> String {
     let [first, second, third] = kind.points();
-    format!("First 3 catchers score {} · {} · {} • Flies away in 2 minutes", first, second, third)
+    let flies = match lifetime() {
+        60 => "1 minute".to_string(),
+        secs if secs % 60 == 0 => format!("{} minutes", secs / 60),
+        secs => format!("{} seconds", secs),
+    };
+    format!("First 3 catchers score {} · {} · {} • Flies away in {}", first, second, third, flies)
 }
 
 fn live_embed(kind: Kind, fact: &str) -> CreateEmbed {
@@ -266,6 +345,8 @@ struct Flight {
     channel: u64,
     kind: Kind,
     dropped_at: i64,
+    /// How long this one stays catchable, fixed when it drops.
+    lifetime: i64,
     /// People who took a place, in order.
     catchers: Vec<u64>,
     /// People who tried and could not score (capped). Kept so a second
@@ -282,11 +363,11 @@ struct Catch {
 
 impl Flight {
     fn new(message: u64, channel: u64, kind: Kind, dropped_at: i64) -> Flight {
-        Flight { message, channel, kind, dropped_at, catchers: Vec::new(), tried: HashSet::new() }
+        Flight { message, channel, kind, dropped_at, lifetime: lifetime(), catchers: Vec::new(), tried: HashSet::new() }
     }
 
     fn open_at(&self, now: i64) -> bool {
-        now >= self.dropped_at && now < self.dropped_at + LIFETIME
+        now >= self.dropped_at && now < self.dropped_at + self.lifetime
     }
 
     /// Someone replied `accio` at `now`. `award` books the points and says what
@@ -356,7 +437,7 @@ fn parse_channels(raw: Option<&str>) -> Option<Vec<(u64, u32)>> {
 }
 
 fn channels() -> Option<Vec<(u64, u32)>> {
-    parse_channels(std::env::var("VIZIER_SNITCH_CHANNELS").ok().as_deref())
+    parse_channels(control::var("VIZIER_SNITCH_CHANNELS").as_deref())
 }
 
 /// Picks where a drop goes from a roll in `[0, 1)`, by weight. A quiet pick falls
@@ -386,7 +467,8 @@ fn choose_channel(channels: &[(u64, u32)], roll: f64, awake: impl Fn(u64) -> boo
 static LAST_SEEN: LazyLock<Mutex<HashMap<u64, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn awake(channel: u64, now: i64) -> bool {
-    LAST_SEEN.lock().get(&channel).is_some_and(|seen| now - seen <= QUIET_AFTER)
+    let quiet = quiet_after();
+    LAST_SEEN.lock().get(&channel).is_some_and(|seen| now - seen <= quiet)
 }
 
 // --- the day's plan ---------------------------------------------------------
@@ -398,7 +480,7 @@ fn ist_midnight(ts: i64) -> i64 {
 
 fn in_window(ts: i64) -> bool {
     let into_day = ts - ist_midnight(ts);
-    (WINDOW_START..=WINDOW_END).contains(&into_day)
+    (window_start()..=window_end()).contains(&into_day)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,12 +502,13 @@ fn spread(start: i64, end: i64, want: usize, mut roll: impl FnMut() -> f64) -> V
     if end < start {
         return Vec::new();
     }
-    let fits = 1 + ((end - start) / MIN_GAP) as usize;
+    let gap = min_gap();
+    let fits = 1 + ((end - start) / gap) as usize;
     let n = want.min(fits);
-    let slack = (end - start) - MIN_GAP * n.saturating_sub(1) as i64;
+    let slack = (end - start) - gap * n.saturating_sub(1) as i64;
     let mut offsets: Vec<i64> = (0..n).map(|_| (roll().clamp(0.0, 1.0) * slack as f64) as i64).collect();
     offsets.sort_unstable();
-    offsets.iter().enumerate().map(|(i, offset)| start + (*offset).min(slack) + MIN_GAP * i as i64).collect()
+    offsets.iter().enumerate().map(|(i, offset)| start + (*offset).min(slack) + gap * i as i64).collect()
 }
 
 /// Today's plan: the stored one if it is today's, otherwise a fresh one. A plan
@@ -438,8 +521,10 @@ fn plan_for(now: i64, stored: Option<Plan>, mut roll: impl FnMut() -> f64) -> Pl
         return plan;
     }
     let midnight = ist_midnight(now);
-    let want = if roll() < 0.5 { 3 } else { 4 };
-    let times = spread((midnight + WINDOW_START).max(now), midnight + WINDOW_END, want, roll);
+    let (low, high) = drops_per_day();
+    // One roll, so the default 3-or-4 is still a coin toss.
+    let want = (low + (roll().clamp(0.0, 1.0) * (high - low + 1) as f64) as usize).min(high);
+    let times = spread((midnight + window_start()).max(now), midnight + window_end(), want, roll);
     Plan { day, times, done: 0, last_drop }
 }
 
@@ -447,8 +532,9 @@ fn plan_for(now: i64, stored: Option<Plan>, mut roll: impl FnMut() -> f64) -> Pl
 /// between `REMATCH_MIN` and `REMATCH_MAX` after it flew, or none if the day's
 /// second chances are used up or the time falls outside the drop hours.
 fn rematch_time(flew: i64, used: usize, roll: f64) -> Option<i64> {
-    let at = flew + REMATCH_MIN + (roll.clamp(0.0, 1.0) * (REMATCH_MAX - REMATCH_MIN) as f64) as i64;
-    (used < REMATCHES_PER_DAY && in_window(at) && ist_midnight(at) == ist_midnight(flew)).then_some(at)
+    let (low, high) = rematch_range();
+    let at = flew + low + (roll.clamp(0.0, 1.0) * (high - low) as f64) as i64;
+    (used < rematches_per_day() && in_window(at) && ist_midnight(at) == ist_midnight(flew)).then_some(at)
 }
 
 /// Whether the next drop should go now. A slot that slipped - quiet chat, a
@@ -458,7 +544,7 @@ fn due(plan: &Plan, now: i64) -> bool {
     let Some(next) = plan.times.get(plan.done) else {
         return false;
     };
-    now >= *next && in_window(now) && plan.last_drop.is_none_or(|last| now - last >= MIN_GAP)
+    now >= *next && in_window(now) && plan.last_drop.is_none_or(|last| now - last >= min_gap())
 }
 
 // --- store ------------------------------------------------------------------
@@ -606,15 +692,15 @@ async fn release(ctx: &Context, channel: ChannelId, kind: Kind) -> Option<Flight
         }
     }
     LIVE.lock().insert(flight.message, flight.clone());
-    arm(ctx.clone(), flight.message, flight.channel, flight.dropped_at);
+    arm(ctx.clone(), flight.message, flight.channel, flight.dropped_at + flight.lifetime);
     tracing::info!("snitch: {} Snitch dropped in {} ({})", kind.key(), channel, flight.message);
     Some(flight)
 }
 
-/// Flies the Snitch away exactly `LIFETIME` after its drop.
-fn arm(ctx: Context, message: u64, channel: u64, dropped_at: i64) {
+/// Flies the Snitch away at `closes`, its drop plus its lifetime.
+fn arm(ctx: Context, message: u64, channel: u64, closes: i64) {
     tokio::spawn(async move {
-        let wait = (dropped_at + LIFETIME - Utc::now().timestamp()).max(0) as u64;
+        let wait = (closes - Utc::now().timestamp()).max(0) as u64;
         tokio::time::sleep(Duration::from_secs(wait)).await;
         fly_away(&ctx, message, channel, false).await;
     });
@@ -729,13 +815,13 @@ pub fn spawn(ctx: Context) {
     }
     recover(&ctx);
     drop_once(&ctx);
+    // The scheduler always runs, so setting the channels or flipping the switch
+    // later starts the drops without a restart.
     match channels() {
-        Some(channels) => {
-            tracing::info!("snitch: dropping into {:?}", channels);
-            tokio::spawn(schedule(ctx, channels));
-        }
-        None => tracing::info!("snitch: VIZIER_SNITCH_CHANNELS not set, no scheduled drops"),
+        Some(channels) => tracing::info!("snitch: dropping into {:?}", channels),
+        None => tracing::info!("snitch: VIZIER_SNITCH_CHANNELS not set, no scheduled drops until it is"),
     }
+    tokio::spawn(schedule(ctx));
 }
 
 /// A one-off drop asked for from outside the bot: a channel id stored under the
@@ -781,7 +867,7 @@ fn recover(ctx: &Context) {
     let now = Utc::now().timestamp();
     for flight in flights {
         if flight.open_at(now) {
-            arm(ctx.clone(), flight.message, flight.channel, flight.dropped_at);
+            arm(ctx.clone(), flight.message, flight.channel, flight.dropped_at + flight.lifetime);
             LIVE.lock().insert(flight.message, flight);
         } else {
             let ctx = ctx.clone();
@@ -790,7 +876,7 @@ fn recover(ctx: &Context) {
     }
 }
 
-async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
+async fn schedule(ctx: Context) {
     let mut plan: Option<Plan> = DB.get().and_then(|db| load_plan(&db.lock()));
     let mut retry_at = 0i64;
     // Second chances live in memory: a restart just skips a pending one.
@@ -801,6 +887,12 @@ async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
     let mut last_any = 0i64;
     loop {
         tokio::time::sleep(TICK).await;
+        let Some(channels) = channels().filter(|_| control::on("VIZIER_SNITCH", true)) else {
+            // Off: nothing pending carries over to when it comes back on.
+            watching = None;
+            rematch_at = None;
+            continue;
+        };
         let now = Utc::now().timestamp();
         let before = plan.as_ref().map(|p| p.day.clone());
         let stored = plan.take();
@@ -831,7 +923,7 @@ async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
             continue;
         }
         let rematch_due = rematch_at.is_some_and(|at| now >= at && in_window(now));
-        let scheduled_due = due(current, now) && now - last_any >= REMATCH_MIN;
+        let scheduled_due = due(current, now) && now - last_any >= rematch_range().0;
         if rematch_at.is_some_and(|at| !in_window(at.max(now))) {
             rematch_at = None;
         }

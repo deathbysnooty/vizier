@@ -444,10 +444,6 @@ fn cache() -> &'static Mutex<HashMap<View, Cached>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn env_ids(key: &str) -> HashSet<u64> {
-    std::env::var(key).unwrap_or_default().split(',').filter_map(|s| s.trim().parse().ok()).collect()
-}
-
 fn day_label(d: NaiveDate) -> String {
     d.format("%-d %b").to_string().to_uppercase()
 }
@@ -465,8 +461,8 @@ pub async fn card_png(ctx: &Context, guild: GuildId, view: View) -> Result<(Arc<
         .guild(guild)
         .map(|g| g.channels.values().filter(|c| c.kind == ChannelType::Voice).map(|c| c.id.get()).collect())
         .unwrap_or_default();
-    let exclude = env_ids("VIZIER_STATS_EXCLUDE_CHANNELS");
-    let afk: Option<u64> = std::env::var("VIZIER_VOICE_AFK_CHANNEL").ok().and_then(|v| v.trim().parse().ok());
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
     let members = members(ctx, guild).await;
     if members.is_empty() {
         return Err("could not read the member list".into());

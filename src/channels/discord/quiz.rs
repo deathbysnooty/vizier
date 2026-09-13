@@ -38,18 +38,42 @@ use crate::storage::VizierStorage;
 const GAP: Duration = Duration::from_secs(4);
 /// Time between two `!hint`s on the same question.
 const HINT_COOLDOWN: Duration = Duration::from_secs(5);
-/// `!skip` votes from different members that pass over a question. One admin is enough.
-const SKIPS_NEEDED: usize = 3;
-/// After a wrong multiple-choice pick, how long before that member may pick again.
-const RETRY_AFTER: Duration = Duration::from_secs(20);
+/// `!skip` votes from different members that pass over a question. One admin
+/// is enough. `VIZIER_QUIZ_SKIPS`.
+const SKIPS_NEEDED: u64 = 3;
+/// After a wrong multiple-choice pick, how long before that member may pick
+/// again, `VIZIER_QUIZ_WRONG_WAIT_SECS`.
+const RETRY_AFTER: u64 = 20;
 /// Wrong options `!hint` may knock out of a multiple-choice question.
 const MAX_KNOCKOUTS: usize = 2;
 /// Messages under the question before it is moved back to the bottom of the channel.
 const STICKY_AFTER: u32 = 4;
 /// Least time between two such moves, to stay clear of rate limits.
 const STICKY_GAP: Duration = Duration::from_secs(6);
-/// Pending /quizadd submissions one member may have waiting at once.
-const MAX_PENDING: i64 = 5;
+/// Pending /quizadd submissions one member may have waiting at once,
+/// `VIZIER_QUIZ_MAX_PENDING`.
+const MAX_PENDING: u64 = 5;
+
+fn skips_needed() -> usize {
+    super::control::number("VIZIER_QUIZ_SKIPS", SKIPS_NEEDED).max(1) as usize
+}
+
+fn retry_after() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_QUIZ_WRONG_WAIT_SECS", RETRY_AFTER))
+}
+
+fn max_pending() -> i64 {
+    super::control::number("VIZIER_QUIZ_MAX_PENDING", MAX_PENDING) as i64
+}
+
+/// Questions per round of the genre vote.
+fn block() -> u32 {
+    super::control::number("VIZIER_QUIZ_ROUND_QUESTIONS", BLOCK as u64).clamp(1, 1000) as u32
+}
+
+fn vote_time() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_QUIZ_VOTE_SECS", VOTE_TIME).max(10))
+}
 const ROLE_NAME: &str = "Quiz Leader";
 const CREDITS: &str =
     "Questions: Open Trivia DB (CC BY-SA 4.0) · The Trivia API (CC BY-NC 4.0) · Wikidata · MLCI members";
@@ -187,27 +211,19 @@ impl Drop for Running {
 
 /// How many questions come from the India pool, `VIZIER_QUIZ_INDIA_SHARE` (0 to 1).
 fn india_share() -> f64 {
-    std::env::var("VIZIER_QUIZ_INDIA_SHARE")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| (0.0..=1.0).contains(v))
-        .unwrap_or(0.7)
+    Some(super::control::float("VIZIER_QUIZ_INDIA_SHARE", 0.7)).filter(|v| (0.0..=1.0).contains(v)).unwrap_or(0.7)
 }
 
 /// Who gets the approval DMs for member and news questions, and may press
 /// their buttons: `VIZIER_QUIZ_REVIEWERS` (comma-separated user ids), or the
 /// bot admins when unset.
 fn reviewers() -> Vec<u64> {
-    std::env::var("VIZIER_QUIZ_REVIEWERS")
-        .ok()
-        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect::<Vec<_>>())
-        .filter(|ids| !ids.is_empty())
-        .unwrap_or_else(super::admin_ids)
+    Some(super::control::ids("VIZIER_QUIZ_REVIEWERS")).filter(|ids| !ids.is_empty()).unwrap_or_else(super::admin_ids)
 }
 
 /// The quiz channel, from `VIZIER_QUIZ_CHANNEL`.
 pub fn channel() -> Option<ChannelId> {
-    std::env::var("VIZIER_QUIZ_CHANNEL").ok()?.trim().parse::<u64>().ok().map(ChannelId::new)
+    super::control::id("VIZIER_QUIZ_CHANNEL").map(ChannelId::new)
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -383,10 +399,10 @@ fn import_bank(conn: &mut Connection, dir: &Path) -> anyhow::Result<usize> {
 /// every few rounds.
 const THEME_FULL: i64 = 100;
 
-/// Questions per round of the genre vote.
+/// Questions per round of the genre vote, `VIZIER_QUIZ_ROUND_QUESTIONS`.
 const BLOCK: u32 = 20;
-/// How long the genre vote stays open.
-const VOTE_TIME: Duration = Duration::from_secs(60);
+/// How long the genre vote stays open, `VIZIER_QUIZ_VOTE_SECS`.
+const VOTE_TIME: u64 = 60;
 /// After a vote that arrives once the window has lapsed, how long the others get.
 const VOTE_GRACE: Duration = Duration::from_secs(20);
 const MIX: &str = "mix";
@@ -644,10 +660,18 @@ fn award_podium(board: &Board) {
             continue;
         }
         let reason = format!("{} round, place {}", board.label, place + 1);
+        let points = [
+            super::control::number("VIZIER_POINTS_QUIZ_1ST", 2),
+            super::control::number("VIZIER_POINTS_QUIZ_2ND", 1),
+            super::control::number("VIZIER_POINTS_QUIZ_3RD", 1),
+        ][place] as i64;
+        if points == 0 {
+            continue;
+        }
         super::house::award_person(
             user,
             super::points::Source::Quiz,
-            [2, 1, 1][place],
+            points,
             &reason,
             None,
             Some(format!("quiz:{}:{}", finished_at, user)),
@@ -1015,10 +1039,12 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
     }
     let id = rand::random::<u32>();
     *VOTE.lock() = Some(Vote { id, keys: keys.clone(), votes: Default::default() });
-    let ends = Utc::now().timestamp() + VOTE_TIME.as_secs() as i64;
+    let vote_time = vote_time();
+    let ends = Utc::now().timestamp() + vote_time.as_secs() as i64;
     let invite = format!(
         "🗳️ **Vote for the next {} questions!** Voting closes <t:{}:R>. Most votes wins; a tie is settled at random.",
-        BLOCK, ends
+        block(),
+        ends
     );
     let sent = channel
         .send_message(
@@ -1026,14 +1052,14 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
             CreateMessage::new().content(invite).components(vote_buttons(id, &keys, &Default::default(), true)),
         )
         .await;
-    tokio::time::sleep(VOTE_TIME).await;
+    tokio::time::sleep(vote_time).await;
     // The quiz never starts a round into an empty room: if the window closes
     // with nobody voting, the buttons stay live until somebody does.
     if votes_cast() == 0 {
         if let Ok(message) = &sent {
             let waiting = EditMessage::new().content(format!(
                 "🗳️ **Still open** — the next {} questions start as soon as one person votes.",
-                BLOCK
+                block()
             ));
             let _ = channel.edit_message(&ctx.http, message.id, waiting).await;
         }
@@ -1063,12 +1089,12 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
     let plural = if top == 1 { "" } else { "s" };
     let chosen = winner.and_then(genre);
     let result = match (winner, chosen) {
-        (None, _) => format!("Nobody voted, so the next {} questions are a mix of everything.", BLOCK),
+        (None, _) => format!("Nobody voted, so the next {} questions are a mix of everything.", block()),
         (Some(_), Some(g)) => {
-            format!("{} wins with **{}** vote{}! The next {} questions are {}.", g.label, top, plural, BLOCK, g.about)
+            format!("{} wins with **{}** vote{}! The next {} questions are {}.", g.label, top, plural, block(), g.about)
         }
         (Some(_), None) => {
-            format!("🎲 **Mix** wins with **{}** vote{}! The next {} questions are from everything.", top, plural, BLOCK)
+            format!("🎲 **Mix** wins with **{}** vote{}! The next {} questions are from everything.", top, plural, block())
         }
     };
     let _ = channel.say(&ctx.http, result).await;
@@ -1346,7 +1372,7 @@ fn embed(round: u64, q: &Question, options: &[String], correct: usize, shown: &S
     {
         let board = BOARD.lock();
         if board.asked > 0 {
-            footer.push_str(&format!(" · question {} of {}", board.asked, BLOCK));
+            footer.push_str(&format!(" · question {} of {}", board.asked, block()));
         }
     }
     let title = match shown {
@@ -1435,13 +1461,17 @@ pub async fn start_command(
     let intro = format!(
         "🧠 **Quiz started!** {} questions ready.\n\
          ✍️ Typed questions: the first correct answer wins, and small spelling slips are fine.\n\
-         👇 Press a button to answer. A wrong pick means a 20-second wait before you can pick again.\n\
+         👇 Press a button to answer. A wrong pick means a {}-second wait before you can pick again.\n\
          💡 Type `!hint`: one more letter on a typed question, one wrong option removed on multiple choice.\n\
          ⏭️ No time limit: a question stays until someone gets it. Stuck? Try `!hint`, or skip it: {} people typing `!skip`, or one admin.\n\
          🗳️ Rounds of {} questions: each round has its own scores, its winner is crowned that genre's champion (`/quizleaderboard` → Genre champions), then everyone votes on the next round's genre.\n\
          Every correct answer = **+1 point** · `/quizleaderboard` · the top scorer gets 👑 **{}**\n\
          -# Send in your own question with `/quizadd`",
-        count, SKIPS_NEEDED, BLOCK, ROLE_NAME
+        count,
+        retry_after().as_secs(),
+        skips_needed(),
+        block(),
+        ROLE_NAME
     );
     let _ = command
         .create_response(
@@ -1513,7 +1543,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             tokio::time::sleep(Duration::from_secs(60)).await;
             continue;
         }
-        if in_block >= BLOCK {
+        if in_block >= block() {
             let finished = std::mem::take(&mut *BOARD.lock());
             let crowns = DB.get().and_then(|db| record_round(&db.lock(), &finished));
             award_podium(&finished);
@@ -1660,8 +1690,9 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
     true
 }
 
-/// `!skip`: one admin, or `SKIPS_NEEDED` different members, pass over the open question.
+/// `!skip`: one admin, or `skips_needed()` different members, pass over the open question.
 async fn vote_skip(ctx: &Context, msg: &Message) {
+    let needed = skips_needed();
     let user = msg.author.id.get();
     let admin = super::admin_ids().contains(&user);
     let votes = {
@@ -1670,7 +1701,7 @@ async fn vote_skip(ctx: &Context, msg: &Message) {
             Some(live) if live.is_open() => {
                 live.skip_votes.insert(user);
                 let count = live.skip_votes.len();
-                if admin || count >= SKIPS_NEEDED {
+                if admin || count >= needed {
                     live.passed = true;
                     live.done.notify_one();
                     None
@@ -1685,8 +1716,8 @@ async fn vote_skip(ctx: &Context, msg: &Message) {
         let text = format!(
             "⏭️ Skip vote {}/{}. {} more to skip this question.",
             count,
-            SKIPS_NEEDED,
-            SKIPS_NEEDED - count
+            needed,
+            needed - count
         );
         let reply = CreateMessage::new().content(text).reference_message(msg).allowed_mentions(CreateAllowedMentions::new());
         let _ = msg.channel_id.send_message(&ctx.http, reply).await;
@@ -1923,7 +1954,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
             Some(live) if live.round == round && live.is_open() => {
                 let mine = live.tried.get(&user);
                 let wait = mine
-                    .and_then(|(at, _)| RETRY_AFTER.checked_sub(at.elapsed()))
+                    .and_then(|(at, _)| retry_after().checked_sub(at.elapsed()))
                     .filter(|left| !left.is_zero());
                 if live.removed.contains(&choice) {
                     Click::Gone
@@ -1955,7 +1986,7 @@ async fn choose(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         Click::Ruled => whisper(ctx, component, "You already tried that one. Pick a different option.").await,
         Click::Wait(left) => whisper(ctx, component, format!("⏳ You can pick again in {}s.", left)).await,
         Click::Wrong => {
-            whisper(ctx, component, format!("❌ Wrong! You can pick again in {}s.", RETRY_AFTER.as_secs())).await
+            whisper(ctx, component, format!("❌ Wrong! You can pick again in {}s.", retry_after().as_secs())).await
         }
         Click::Right(q, options, correct, this_round) => {
             let total = add_point(user, &q.id);
@@ -2067,7 +2098,7 @@ fn champions() -> CreateEmbed {
     if lines.is_empty() {
         text.push_str(&format!(
             "No rounds won yet. After every {} questions, the round's top scorer is crowned that genre's champion.",
-            BLOCK
+            block()
         ));
     } else {
         text.push_str(&lines.join("\n"));
@@ -2243,7 +2274,7 @@ pub async fn add_command(ctx: &Context, command: &CommandInteraction) {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        if pending >= MAX_PENDING {
+        if pending >= max_pending() {
             None
         } else {
             let body = serde_json::to_string(&question).unwrap_or_default();
@@ -2256,7 +2287,7 @@ pub async fn add_command(ctx: &Context, command: &CommandInteraction) {
         }
     };
     let Some(sid) = saved else {
-        let text = format!("You already have {} questions waiting for approval. Try again once they're reviewed.", MAX_PENDING);
+        let text = format!("You already have {} questions waiting for approval. Try again once they're reviewed.", max_pending());
         let _ = command.create_response(&ctx.http, respond(text)).await;
         return;
     };
@@ -2373,7 +2404,7 @@ const NEWS_FEEDS: &[&str] = &[
 const NEWS_MAX_ITEMS: usize = 90;
 const NEWS_MAX_QUESTIONS: usize = 15;
 /// Monday, this many hours after midnight in India.
-const NEWS_HOUR: i64 = 11;
+const NEWS_HOUR: u64 = 11;
 
 /// Gossip, tragedy, courts and politics: the news a quiz must not turn into points.
 static SENSITIVE: LazyLock<Regex> = LazyLock::new(|| {
@@ -2480,8 +2511,7 @@ fn parse_feed(xml: &str) -> Vec<NewsItem> {
 
 /// The last week's entertainment headlines, newest first, with the sensitive ones left out.
 async fn fetch_news() -> Vec<NewsItem> {
-    let feeds: Vec<String> = std::env::var("VIZIER_QUIZ_NEWS_FEEDS")
-        .ok()
+    let feeds: Vec<String> = super::control::var("VIZIER_QUIZ_NEWS_FEEDS")
         .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         .filter(|v: &Vec<String>| !v.is_empty())
         .unwrap_or_else(|| NEWS_FEEDS.iter().map(|s| s.to_string()).collect());
@@ -2822,11 +2852,12 @@ pub fn spawn_weekly_news(ctx: Context, deps: VizierDependencies, agent_id: Strin
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1800)).await;
-            if std::env::var("VIZIER_QUIZ_NEWS").is_ok_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+            if !super::control::on("VIZIER_QUIZ_NEWS", true) {
                 continue;
             }
             let week = week_start();
-            let due = Utc::now().timestamp() >= week + NEWS_HOUR * 3600
+            let hour = super::control::number("VIZIER_QUIZ_NEWS_HOUR", NEWS_HOUR).min(23) as i64;
+            let due = Utc::now().timestamp() >= week + hour * 3600
                 && DB.get().is_some_and(|db| {
                     let conn = db.lock();
                     let fresh = meta_get(&conn, "news_week").as_deref() != Some(week.to_string().as_str());

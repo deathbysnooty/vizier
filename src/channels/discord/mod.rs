@@ -42,7 +42,6 @@ mod standings;
 mod activity;
 mod games;
 mod weekly;
-mod nudge;
 mod awards_card;
 mod quiz;
 mod quote;
@@ -70,6 +69,11 @@ impl DiscordChannelReader {
 #[async_trait::async_trait]
 impl VizierChannel for DiscordChannelReader {
     async fn run(&self) -> Result<()> {
+        // Settings first: everything opened below may read one, and a value
+        // saved from the panel has to win over the environment from the start.
+        if let Err(err) = control::open(&self.deps.config.workspace) {
+            tracing::warn!("control: store not opened: {}", err);
+        }
         // Activity counts for /awards. Failing to open them must not take the
         // bot down - it only means nothing is counted this run.
         if let Err(err) = stats::open(&self.deps.config.workspace, &allowed_channels()) {
@@ -80,9 +84,6 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = house::open(&self.deps.config.workspace) {
             tracing::warn!("house: store not opened: {}", err);
-        }
-        if let Err(err) = control::open(&self.deps.config.workspace) {
-            tracing::warn!("control: store not opened: {}", err);
         }
         if let Err(err) = snitch::open(&self.deps.config.workspace) {
             tracing::warn!("snitch: store not opened: {}", err);
@@ -170,14 +171,7 @@ async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str)
 /// (comma-separated ids). Empty or unset means every channel it can view,
 /// which is the upstream behaviour.
 fn allowed_channels() -> Vec<u64> {
-    std::env::var("VIZIER_DISCORD_CHANNELS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|s| s.trim().parse::<u64>().ok())
-                .collect::<Vec<u64>>()
-        })
-        .unwrap_or_default()
+    control::ids("VIZIER_DISCORD_CHANNELS")
 }
 
 /// State key holding the agent-wide admin-only flag.
@@ -226,36 +220,32 @@ fn kalesh_state() -> &'static std::sync::Mutex<HashMap<u64, ChannelWindow>> {
     KALESH_STATE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
-}
-
 fn kalesh_role_id() -> Option<u64> {
-    std::env::var("VIZIER_KALESH_ROLE_ID").ok()?.trim().parse().ok()
+    control::id("VIZIER_KALESH_ROLE_ID")
 }
 
 /// Channels to watch for kalesh. Unset means the feature is off entirely.
 fn kalesh_channels() -> Vec<u64> {
-    std::env::var("VIZIER_KALESH_CHANNELS")
-        .ok()
-        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).collect())
-        .unwrap_or_default()
+    control::ids("VIZIER_KALESH_CHANNELS")
 }
 
 /// Record a message and report the recent window if it looks like a fight.
-/// Returns None when the shape is unremarkable, the channel is not watched, or
-/// the cooldown is still running.
+/// Returns None when the shape is unremarkable, the channel is not watched, the
+/// detector is switched off, or the cooldown is still running.
 fn note_message_and_check(msg: &Message) -> Option<Vec<SeenMessage>> {
+    if !control::on("VIZIER_KALESH", true) {
+        return None;
+    }
     let channel = msg.channel_id.get();
     if !kalesh_channels().contains(&channel) {
         return None;
     }
 
-    let window_secs = env_u64("VIZIER_KALESH_WINDOW_SECS", 90);
-    let min_msgs = env_u64("VIZIER_KALESH_MIN_MSGS", 10) as usize;
-    let max_authors = env_u64("VIZIER_KALESH_MAX_AUTHORS", 4) as usize;
-    let min_replies = env_u64("VIZIER_KALESH_MIN_REPLIES", 4) as usize;
-    let cooldown_secs = env_u64("VIZIER_KALESH_COOLDOWN_SECS", 900);
+    let window_secs = control::number("VIZIER_KALESH_WINDOW_SECS", 90);
+    let min_msgs = control::number("VIZIER_KALESH_MIN_MSGS", 10) as usize;
+    let max_authors = control::number("VIZIER_KALESH_MAX_AUTHORS", 4) as usize;
+    let min_replies = control::number("VIZIER_KALESH_MIN_REPLIES", 4) as usize;
+    let cooldown_secs = control::number("VIZIER_KALESH_COOLDOWN_SECS", 900);
 
     let now = std::time::Instant::now();
     let mut guard = kalesh_state().lock().ok()?;
@@ -306,8 +296,8 @@ fn note_message_and_check(msg: &Message) -> Option<Vec<SeenMessage>> {
 /// it with. Returns the line only when it says yes.
 async fn classify_kalesh(window: &[SeenMessage]) -> Option<String> {
     let api_key = std::env::var("OPENROUTER_API_KEY").ok()?;
-    let model = std::env::var("VIZIER_KALESH_MODEL")
-        .unwrap_or_else(|_| "google/gemini-2.5-flash-lite".to_string());
+    let model = control::var("VIZIER_KALESH_MODEL")
+        .unwrap_or_else(|| "google/gemini-2.5-flash-lite".to_string());
 
     let transcript = window
         .iter()
@@ -600,7 +590,14 @@ async fn inbox_push(storage: &Arc<crate::storage::VizierStorage>, user_id: u64, 
 }
 
 fn letters_channel() -> Option<u64> {
-    std::env::var("VIZIER_LETTERS_CHANNEL").ok()?.trim().parse().ok()
+    control::id("VIZIER_LETTERS_CHANNEL")
+}
+
+/// Where new letters and replies go: `None` when letters are switched off or no
+/// channel is set, and either way they are not available. Opening a letter
+/// already sent, and its clean-up, don't ask the switch.
+fn sending_channel() -> Option<u64> {
+    letters_channel().filter(|_| control::on("VIZIER_LETTERS", true))
 }
 
 /// Per-sender send times, for the rate limit. In memory on purpose: a restart
@@ -610,7 +607,7 @@ static LETTER_RL: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, Vec<std::tim
 
 /// True when the sender is within their allowance, recording the send if so.
 fn letter_rate_ok(user: u64) -> bool {
-    let max = env_u64("VIZIER_LETTERS_PER_HOUR", 5) as usize;
+    let max = control::number("VIZIER_LETTERS_PER_HOUR", 5) as usize;
     let now = std::time::Instant::now();
     let Ok(mut guard) = LETTER_RL
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
@@ -686,7 +683,7 @@ fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
 }
 
 fn letter_log_channel() -> Option<u64> {
-    std::env::var("VIZIER_LETTER_LOG_CHANNEL").ok()?.trim().parse().ok()
+    control::id("VIZIER_LETTER_LOG_CHANNEL")
 }
 
 /// Write a letter to the moderator log, if one is configured.
@@ -838,7 +835,7 @@ async fn handle_letter_command(
     command: &serenity::all::CommandInteraction,
     storage: &Arc<crate::storage::VizierStorage>,
 ) -> String {
-    let Some(channel) = letters_channel() else {
+    let Some(channel) = sending_channel() else {
         return "Anonymous letters are not set up on this server yet.".to_string();
     };
 
@@ -1061,7 +1058,7 @@ async fn joinlog_bump(
 }
 
 fn welcome_channel() -> Option<u64> {
-    std::env::var("VIZIER_WELCOME_CHANNEL").ok()?.trim().parse().ok()
+    control::id("VIZIER_WELCOME_CHANNEL")
 }
 
 /// Lines for someone arriving for the first time.
@@ -1104,6 +1101,11 @@ impl EventHandler for Handler {
         let Some(channel) = welcome_channel() else {
             return;
         };
+        // With the welcome switched off the channel still takes the sorting card.
+        if !control::on("VIZIER_WELCOME", true) {
+            house::on_join(&ctx, &member, ChannelId::new(channel)).await;
+            return;
+        }
         // joins is now the count including this arrival, so >1 means a returner.
         let text = if log.joins > 1 {
             let pool = WELCOME_BACK;
@@ -1168,7 +1170,7 @@ impl EventHandler for Handler {
                 let http = ctx.http.clone();
                 tokio::spawn(async move { stats::catch_up(http, channel).await });
             }
-            match std::env::var("VIZIER_VOICE_LOG_CHANNEL").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+            match control::id("VIZIER_VOICE_LOG_CHANNEL") {
                 Some(log) => {
                     let http = ctx.http.clone();
                     tokio::spawn(async move { stats::follow_voice_log(http, log).await });
@@ -1323,10 +1325,14 @@ impl EventHandler for Handler {
                 CreateCommandOption::new(
                     serenity::all::CommandOptionType::Integer,
                     "minutes",
-                    "how long joining stays open (1-15, default 5)",
+                    format!(
+                        "how long joining stays open (1-{}, default {})",
+                        battle::max_lobby_minutes(),
+                        battle::default_lobby_minutes()
+                    ),
                 )
                 .min_int_value(1)
-                .max_int_value(15),
+                .max_int_value(battle::max_lobby_minutes() as u64),
             )
             .add_option(battle::theme_command_option());
         let _ = Command::create_global_command(ctx.http.clone(), battle_cmd).await;
@@ -1410,7 +1416,8 @@ impl EventHandler for Handler {
             .add_option(house::house_option("house", "which house").required(true));
         let _ = Command::create_global_command(ctx.http.clone(), sort).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
-        nudge::spawn(ctx.clone());
+        // Reminders made on the panel, posted on their schedules.
+        control::scheduler::spawn(ctx.clone());
 
         // A sorting interrupted by a restart carries on from where it stopped.
         if let Some(guild) = ctx.cache.guilds().first().copied() {
@@ -1537,7 +1544,7 @@ impl EventHandler for Handler {
                             let http = ctx.http.clone();
                             let this_id = l.id.clone();
                             tokio::spawn(async move {
-                                let delay = env_u64("VIZIER_LETTER_CLEANUP_SECS", 120);
+                                let delay = control::number("VIZIER_LETTER_CLEANUP_SECS", 120);
                                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
 
                                 // A later open restamps the root, which makes this
@@ -1658,7 +1665,7 @@ impl EventHandler for Handler {
                     .unwrap_or_default();
 
                 let sender = modal.user.id.get();
-                let text = match (letters_channel(), load_letter(&self.1.storage, orig_id).await) {
+                let text = match (sending_channel(), load_letter(&self.1.storage, orig_id).await) {
                     (None, _) => "Anonymous letters are not set up on this server.".to_string(),
                     (_, None) => "That letter has gone missing.".to_string(),
                     (Some(channel), Some(orig)) => {

@@ -19,11 +19,12 @@ const IST_OFFSET: i64 = 5 * 3600 + 30 * 60;
 
 /// The hourly summary covers hours starting 10:00 through 23:00 India time: the
 /// 10-11 summary goes out at 11:00, the last one at midnight. Nothing overnight.
-const FIRST_HOUR: i64 = 10;
-const LAST_HOUR: i64 = 23;
+/// `VIZIER_HOUSE_SUMMARY_FIRST_HOUR` and `VIZIER_HOUSE_SUMMARY_LAST_HOUR` move them.
+const FIRST_HOUR: u64 = 10;
+const LAST_HOUR: u64 = 23;
 
 fn houses_channel() -> Option<ChannelId> {
-    std::env::var("VIZIER_HOUSE_CHANNEL").ok()?.trim().parse().ok().map(ChannelId::new)
+    super::control::id("VIZIER_HOUSE_CHANNEL").map(ChannelId::new)
 }
 
 /// The start of the India hour a moment falls in.
@@ -108,8 +109,13 @@ pub fn spawn(ctx: Context) {
 }
 
 async fn post_hour(ctx: &Context, start: i64, end: i64) {
+    if !super::control::on("VIZIER_HOUSE_SUMMARY", true) {
+        return;
+    }
     let hour = ist_hour(start);
-    if !(FIRST_HOUR..=LAST_HOUR).contains(&hour) {
+    let first = super::control::number("VIZIER_HOUSE_SUMMARY_FIRST_HOUR", FIRST_HOUR) as i64;
+    let last = super::control::number("VIZIER_HOUSE_SUMMARY_LAST_HOUR", LAST_HOUR) as i64;
+    if !(first..=last).contains(&hour) {
         return;
     }
     // Once per hour even across a restart: remember the last hour posted.
@@ -243,7 +249,7 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)]) -> String {
         let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
         text.push_str(&format!("\n{}", parts.join(" · ")));
     }
-    let short = ledger::DRAW_MINIMUM - total;
+    let short = ledger::draw_minimum() - total;
     text.push_str(&if short > 0 {
         format!("\n-# {} more to be in this month's Nitro draw.", short)
     } else {
@@ -292,7 +298,7 @@ fn draw_text(month_label: &str, result: &DrawResult) -> String {
             let captain = captain.map(|c| format!("<@{}>", c)).unwrap_or_else(|| "no captain named".into());
             let member = match member {
                 Some(m) => format!("<@{}> (drawn from {} eligible)", m, pool),
-                None => "nobody - no one else in the house reached 10 points".into(),
+                None => format!("nobody - no one else in the house reached {} points", ledger::draw_minimum()),
             };
             format!(
                 "🏆 **{}** won **{}** with **{}** points.\n🎁 Nitro to the captain: {}\n🎲 Nitro to a random member: {}",

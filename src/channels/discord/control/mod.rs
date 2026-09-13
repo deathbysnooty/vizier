@@ -12,6 +12,7 @@
 
 pub mod catalog;
 pub mod reminders;
+pub mod scheduler;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};

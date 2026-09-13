@@ -53,24 +53,69 @@ const HTTP_WAIT: Duration = Duration::from_secs(20);
 const FIGHT_GAP: Duration = Duration::from_secs(3);
 /// Between rounds.
 const ROUND_GAP: Duration = Duration::from_secs(6);
-/// A challenge nobody answers expires.
-const CHALLENGE_WAIT: Duration = Duration::from_secs(120);
-/// Between two `/fight`s by the same member.
-const FIGHT_COOLDOWN: Duration = Duration::from_secs(60);
-/// Lobby length an admin may ask for.
+/// A challenge nobody answers expires, `VIZIER_FIGHT_EXPIRY_SECS`.
+const CHALLENGE_WAIT: u64 = 120;
+/// Between two `/fight`s by the same member, `VIZIER_FIGHT_COOLDOWN_SECS`.
+const FIGHT_COOLDOWN: u64 = 60;
+/// Lobby length an admin may ask for: at least a minute, at most
+/// `VIZIER_BATTLE_LOBBY_MAX_MINUTES`, `VIZIER_BATTLE_LOBBY_MINUTES` if not said.
 const MIN_WAIT: i64 = 1;
-const MAX_WAIT: i64 = 15;
-/// Fewer joiners than this and the battle is called off.
+const MAX_WAIT: u64 = 15;
+const DEFAULT_WAIT: u64 = 5;
+/// Fewer joiners than this and the battle is called off, `VIZIER_BATTLE_MIN_PLAYERS`.
 const MIN_PLAYERS: usize = 4;
 /// Discord takes a while over each card, so keep a battle under a few minutes.
 /// Rounds with more matches than this are quick rounds: every match decided at
-/// once and posted as a list. From the quarter-finals on, fights play out.
+/// once and posted as a list. From the quarter-finals on, fights play out -
+/// `VIZIER_BATTLE_FULL_FIGHTS_FROM` moves that to the semi-finals or the round of 16.
 const FULL_FIGHTS_UP_TO: usize = 4;
 /// The bracket picture covers the draw from the round with this many matches
 /// (the round of 16); anything bigger would be unreadable.
 const CHART_FROM: usize = 8;
-/// Names shown in the lobby before it says how many more joined.
-const LOBBY_NAMES: usize = 40;
+/// Names shown in the lobby before it says how many more joined, `VIZIER_BATTLE_LOBBY_NAMES`.
+const LOBBY_NAMES: u64 = 40;
+
+fn challenge_wait() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_FIGHT_EXPIRY_SECS", CHALLENGE_WAIT).max(10))
+}
+
+fn fight_cooldown() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_FIGHT_COOLDOWN_SECS", FIGHT_COOLDOWN))
+}
+
+pub fn max_lobby_minutes() -> i64 {
+    super::control::number("VIZIER_BATTLE_LOBBY_MAX_MINUTES", MAX_WAIT).clamp(1, 60) as i64
+}
+
+pub fn default_lobby_minutes() -> i64 {
+    (super::control::number("VIZIER_BATTLE_LOBBY_MINUTES", DEFAULT_WAIT) as i64).clamp(MIN_WAIT, max_lobby_minutes())
+}
+
+fn min_players() -> usize {
+    (super::control::number("VIZIER_BATTLE_MIN_PLAYERS", MIN_PLAYERS as u64) as usize).max(2)
+}
+
+/// The biggest round whose fights are played out in full.
+fn full_fights_up_to() -> usize {
+    match super::control::var("VIZIER_BATTLE_FULL_FIGHTS_FROM").as_deref() {
+        Some("semi") => 2,
+        Some("r16") => 8,
+        _ => FULL_FIGHTS_UP_TO,
+    }
+}
+
+fn lobby_names() -> usize {
+    super::control::number("VIZIER_BATTLE_LOBBY_NAMES", LOBBY_NAMES) as usize
+}
+
+/// "2 minutes", "1 minute", "90 seconds".
+fn span(secs: u64) -> String {
+    match secs {
+        60 => "1 minute".to_string(),
+        s if s % 60 == 0 => format!("{} minutes", s / 60),
+        s => format!("{} seconds", s),
+    }
+}
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 /// Open lobbies, by the lobby message id.
@@ -311,7 +356,10 @@ fn record(kind: &str, winner: u64, loser: Option<u64>) {
     if let ("fight", Some(loser)) = (kind, loser) {
         let (low, high) = if winner < loser { (winner, loser) } else { (loser, winner) };
         let key = format!("arena:{}:{}:{}", super::points::ist_day(now), low, high);
-        super::house::award_person(winner, super::points::Source::Arena, 1, "won a 1v1", None, Some(key), None);
+        let points = super::control::number("VIZIER_POINTS_ARENA_WIN", 1) as i64;
+        if points > 0 {
+            super::house::award_person(winner, super::points::Source::Arena, points, "won a 1v1", None, Some(key), None);
+        }
     }
 }
 
@@ -319,12 +367,15 @@ fn record(kind: &str, winner: u64, loser: Option<u64>) {
 fn award_royale(champion: u64, runner_up: Option<u64>) {
     let battle = Utc::now().timestamp();
     let give = |user: u64, amount: i64, reason: &str| {
+        if amount <= 0 {
+            return;
+        }
         let key = format!("royale:{}:{}", battle, user);
         super::house::award_person(user, super::points::Source::Royale, amount, reason, None, Some(key), None);
     };
-    give(champion, 8, "won the battle royale");
+    give(champion, super::control::number("VIZIER_POINTS_ROYALE_CHAMPION", 8) as i64, "won the battle royale");
     if let Some(user) = runner_up {
-        give(user, 3, "runner-up in the battle royale");
+        give(user, super::control::number("VIZIER_POINTS_ROYALE_RUNNER_UP", 3) as i64, "runner-up in the battle royale");
     }
 }
 
@@ -379,7 +430,7 @@ fn crowns(user: u64) -> i64 {
 /// The arena channel: `VIZIER_FIGHT_CHANNEL`, else the channel named
 /// `fight-fight-fight`, else wherever the command was used.
 async fn arena(ctx: &Context, guild: GuildId, fallback: ChannelId) -> ChannelId {
-    if let Some(id) = std::env::var("VIZIER_FIGHT_CHANNEL").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+    if let Some(id) = super::control::id("VIZIER_FIGHT_CHANNEL") {
         return ChannelId::new(id);
     }
     if let Ok(channels) = guild.channels(&ctx.http).await {
@@ -676,8 +727,9 @@ const MOVES: [(&str, &str, ButtonStyle); 4] = [
     ("□", "square", ButtonStyle::Secondary),
     ("✕", "cross", ButtonStyle::Primary),
 ];
-/// How long both fighters have to pick before the bot picks for them.
-const PICK_WAIT: Duration = Duration::from_secs(15);
+/// How long both fighters have to pick before the bot picks for them,
+/// `VIZIER_FIGHT_PICK_SECS`.
+const PICK_WAIT: u64 = 15;
 /// How long the clash result stays up before the first blow.
 const REVEAL: Duration = Duration::from_millis(1800);
 
@@ -754,7 +806,8 @@ async fn pick_moves(
     seed: &mut u64,
 ) -> Chosen {
     PICKS.lock().insert(fight_id, Picks { fighters: [a.id, b.id], moves: [None, None], open: true });
-    let closes = Utc::now().timestamp() + PICK_WAIT.as_secs() as i64;
+    let pick_wait = Duration::from_secs(super::control::number("VIZIER_FIGHT_PICK_SECS", PICK_WAIT).max(3));
+    let closes = Utc::now().timestamp() + pick_wait.as_secs() as i64;
     let prompt = format!(
         "{}\n\n🎮 <@{}> and <@{}>, pick a move! **Win the clash, win the fight.** Closes <t:{}:R>",
         fight_text(head, log, a, b, hp),
@@ -763,7 +816,7 @@ async fn pick_moves(
         closes
     );
     keep_at_bottom(ctx, channel, message, &prompt, None, carry, Some(pick_rows(fight_id))).await;
-    let deadline = tokio::time::Instant::now() + PICK_WAIT;
+    let deadline = tokio::time::Instant::now() + pick_wait;
     loop {
         let both = PICKS.lock().get(&fight_id).is_some_and(|p| p.moves.iter().all(Option::is_some));
         if both || tokio::time::Instant::now() >= deadline {
@@ -942,7 +995,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         LAST_FIGHT
             .lock()
             .get(&me)
-            .and_then(|at| FIGHT_COOLDOWN.checked_sub(at.elapsed()))
+            .and_then(|at| fight_cooldown().checked_sub(at.elapsed()))
             .filter(|left| !left.is_zero())
             .map(|left| format!("Take a breather — you can challenge again in {}s.", left.as_secs().max(1)))
     };
@@ -976,12 +1029,14 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         Theme::Classic => String::new(),
         other => format!(" **{}** style", other.label()),
     };
+    let wait = challenge_wait();
     let content = format!(
-        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in 2 minutes.\n         -# When the fight starts, both fighters pick △ ○ □ ✕. Win the clash, win the fight.",
+        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in {}.\n         -# When the fight starts, both fighters pick △ ○ □ ✕. Win the clash, win the fight.",
         me,
         them,
         if flavour.is_empty() { String::new() } else { flavour },
-        them
+        them,
+        span(wait.as_secs())
     );
     let mut msg = CreateMessage::new()
         .content(content)
@@ -1028,7 +1083,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     }
 
     // Wait for the answer, then either fight or let the challenge lapse.
-    let deadline = std::time::Instant::now() + CHALLENGE_WAIT;
+    let deadline = std::time::Instant::now() + wait;
     let answer = loop {
         if let Some(answer) = CHALLENGES.lock().get(&id).and_then(|c| c.accepted) {
             break Some(answer);
@@ -1108,8 +1163,8 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
             CommandDataOptionValue::Integer(n) => Some(n),
             _ => None,
         })
-        .unwrap_or(5)
-        .clamp(MIN_WAIT, MAX_WAIT);
+        .unwrap_or_else(default_lobby_minutes)
+        .clamp(MIN_WAIT, max_lobby_minutes());
     let theme = theme_option(&command.data.options);
 
     let here = command.channel_id;
@@ -1164,9 +1219,10 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
     let _ = posted.edit(&ctx.http, EditMessage::new().components(lobby_buttons(lobby_id, false))).await;
     LOBBIES.lock().remove(&lobby_id);
 
-    if joined.len() < MIN_PLAYERS {
+    let needed = min_players();
+    if joined.len() < needed {
         let _ = arena
-            .say(&ctx.http, format!("Only {} joined. Battle cancelled — {} are needed.", joined.len(), MIN_PLAYERS))
+            .say(&ctx.http, format!("Only {} joined. Battle cancelled — {} are needed.", joined.len(), needed))
             .await;
         BUSY.lock().remove(&arena.get());
         return;
@@ -1192,9 +1248,10 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
     let list = if names.is_empty() {
         "Nobody yet. Who's first?".to_string()
     } else {
-        let mut list = names.iter().take(LOBBY_NAMES).map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n");
-        if names.len() > LOBBY_NAMES {
-            list.push_str(&format!("\n…and **{}** more", names.len() - LOBBY_NAMES));
+        let shown = lobby_names();
+        let mut list = names.iter().take(shown).map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n");
+        if names.len() > shown {
+            list.push_str(&format!("\n…and **{}** more", names.len() - shown));
         }
         list
     };
@@ -1210,7 +1267,7 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
             ends,
             minutes,
             names.len(),
-            MIN_PLAYERS,
+            min_players(),
             list
         ))
         .colour(0xE67E22)
@@ -1227,7 +1284,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
             fighters.push(w);
         }
     }
-    if fighters.len() < MIN_PLAYERS {
+    if fighters.len() < min_players() {
         let _ = arena.say(&ctx.http, "Not enough fighters could be loaded. Battle cancelled.").await;
         return;
     }
@@ -1240,6 +1297,8 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     let mut entrants: Option<Arc<Vec<Entrant>>> = None;
     // The final's loser is the runner-up.
     let mut runner_up: Option<u64> = None;
+    // Read once, so a change mid-battle can't turn a played-out round back into a list.
+    let full_fights_up_to = full_fights_up_to();
     for r in 0..total {
         let matches = rounds[r].len();
         let title = title_case(&round_title(matches));
@@ -1273,7 +1332,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         }
         tokio::time::sleep(FIGHT_GAP).await;
 
-        if matches > FULL_FIGHTS_UP_TO {
+        if matches > full_fights_up_to {
             // A quick round: every match settled at once, posted as a list.
             let mut results = Vec::new();
             for j in 0..matches {

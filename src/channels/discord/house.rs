@@ -603,7 +603,7 @@ pub async fn on_reply_points(ctx: &Context, msg: &serenity::all::Message) -> boo
 /// The Muggles role, worn by everyone who has stepped out of the houses. Off
 /// unless VIZIER_MUGGLE_ROLE is set.
 fn muggle_role() -> Option<RoleId> {
-    std::env::var("VIZIER_MUGGLE_ROLE").ok()?.trim().parse().ok().map(RoleId::new)
+    super::control::id("VIZIER_MUGGLE_ROLE").map(RoleId::new)
 }
 
 /// Puts the Muggles role on someone, or takes it off. Does nothing when they
@@ -1641,7 +1641,7 @@ pub async fn sort_command(ctx: &Context, command: &CommandInteraction) {
 /// Where the sorting cards go. The houses channel if one is set, otherwise
 /// wherever the caller was going to put it.
 fn cards_channel() -> Option<ChannelId> {
-    std::env::var("VIZIER_HOUSE_CHANNEL").ok()?.trim().parse().ok().map(ChannelId::new)
+    super::control::id("VIZIER_HOUSE_CHANNEL").map(ChannelId::new)
 }
 
 /// Mods stay out of the houses entirely (user's call): no house, no card, and
@@ -1694,7 +1694,9 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
         tracing::info!("house: {} came back, {} role restored", member.user.name, house.name);
         return;
     }
-    if !sorting_open() {
+    // `VIZIER_HOUSE_SORT_NEW` off leaves arrivals unsorted until a mod uses
+    // `/sort` or the next draft; a returner above still gets their house back.
+    if !sorting_open() || !super::control::on("VIZIER_HOUSE_SORT_NEW", true) {
         return;
     }
     if is_mod(ctx, member.guild_id, member).await {

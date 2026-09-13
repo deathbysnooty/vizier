@@ -97,13 +97,20 @@ impl Source {
         }
     }
 
+    /// Read from the settings at the moment of writing, so a changed limit
+    /// applies to the very next award.
     pub fn cap(self) -> Cap {
+        let day = |limit: u64| Cap::PerDay(limit as i64);
         match self {
-            Source::Chat | Source::Voice => Cap::PerDay(1),
-            Source::Quiz | Source::Anagram | Source::Snitch => Cap::PerDay(6),
-            Source::Koto => Cap::PerDay(4),
-            Source::Cat | Source::Arena => Cap::PerDay(3),
-            Source::Weekly => Cap::PerWeekPerChannel(3),
+            Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 1)),
+            Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 1)),
+            Source::Quiz => day(super::control::number("VIZIER_CAP_QUIZ", 6)),
+            Source::Anagram => day(super::control::number("VIZIER_CAP_ANAGRAM", 6)),
+            Source::Snitch => day(super::control::number("VIZIER_CAP_SNITCH", 6)),
+            Source::Koto => day(super::control::number("VIZIER_CAP_KOTO", 4)),
+            Source::Cat => day(super::control::number("VIZIER_CAP_CAT", 3)),
+            Source::Arena => day(super::control::number("VIZIER_CAP_ARENA", 3)),
+            Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.
             Source::Royale | Source::GoldenSnitch | Source::Mod => Cap::None,
@@ -347,8 +354,13 @@ pub enum DrawResult {
     },
 }
 
-/// The minimum a member needs in the month to be in the Nitro draw.
-pub const DRAW_MINIMUM: i64 = 10;
+/// The minimum a member needs in the month to be in the Nitro draw,
+/// `VIZIER_DRAW_MINIMUM`.
+pub const DRAW_MINIMUM: u64 = 10;
+
+pub fn draw_minimum() -> i64 {
+    super::control::number("VIZIER_DRAW_MINIMUM", DRAW_MINIMUM) as i64
+}
 
 /// Works out the month's winning house and draws its random Nitro winner.
 ///
@@ -384,7 +396,7 @@ pub fn draw(
          GROUP BY user_id HAVING SUM(points) >= ?4 ORDER BY user_id",
     )?;
     let pool: Vec<u64> = stmt
-        .query_map(params![winner.key, since, until, DRAW_MINIMUM], |r| r.get::<_, i64>(0))?
+        .query_map(params![winner.key, since, until, draw_minimum()], |r| r.get::<_, i64>(0))?
         .flatten()
         .map(|id| id as u64)
         .filter(|u| Some(*u) != captain && can_win(*u))

@@ -131,7 +131,7 @@ fn controls(id: &str, current: Style) -> Vec<CreateActionRow> {
 }
 
 fn quotes_channel(ctx: &Context, guild: GuildId) -> Option<ChannelId> {
-    if let Some(id) = std::env::var("VIZIER_QUOTES_CHANNEL").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+    if let Some(id) = super::control::id("VIZIER_QUOTES_CHANNEL") {
         return Some(ChannelId::new(id));
     }
     ctx.cache

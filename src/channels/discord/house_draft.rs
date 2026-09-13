@@ -105,7 +105,7 @@ pub fn weights(ranked: &[u64], piles: &[Vec<u64>]) -> Vec<usize> {
 
 /// Channels left out of the message count, from the same setting /awards uses.
 fn excluded_channels() -> Vec<i64> {
-    std::env::var("VIZIER_STATS_EXCLUDE_CHANNELS")
+    super::control::var("VIZIER_STATS_EXCLUDE_CHANNELS")
         .unwrap_or_default()
         .split(|c: char| !c.is_ascii_digit())
         .filter_map(|piece| piece.parse::<i64>().ok())
