@@ -14,10 +14,22 @@ pub enum Theme {
     Wizard,
     Saiyan,
     Wrestling,
+    /// Counter-Strike 2.
+    Tactical,
+    /// Elden Ring.
+    Tarnished,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 5] = [Theme::Classic, Theme::Pokemon, Theme::Wizard, Theme::Saiyan, Theme::Wrestling];
+    pub const ALL: [Theme; 7] = [
+        Theme::Classic,
+        Theme::Pokemon,
+        Theme::Wizard,
+        Theme::Saiyan,
+        Theme::Wrestling,
+        Theme::Tactical,
+        Theme::Tarnished,
+    ];
 
     /// The value stored in the command choice.
     pub fn key(self) -> &'static str {
@@ -27,6 +39,8 @@ impl Theme {
             Theme::Wizard => "harrypotter",
             Theme::Saiyan => "dbz",
             Theme::Wrestling => "wwe",
+            Theme::Tactical => "cs2",
+            Theme::Tarnished => "eldenring",
         }
     }
 
@@ -43,6 +57,8 @@ impl Theme {
             Theme::Wizard => "Harry Potter",
             Theme::Saiyan => "Dragon Ball Z",
             Theme::Wrestling => "WWE",
+            Theme::Tactical => "Counter-Strike 2",
+            Theme::Tarnished => "Elden Ring",
         }
     }
 
@@ -53,6 +69,8 @@ impl Theme {
             Theme::Wizard => &WIZARD,
             Theme::Saiyan => &SAIYAN,
             Theme::Wrestling => &WRESTLING,
+            Theme::Tactical => &TACTICAL,
+            Theme::Tarnished => &TARNISHED,
         }
     }
 }
@@ -869,6 +887,11 @@ const WRESTLING: Lines = Lines {
     bye: WRESTLING_BYE,
     champion: WRESTLING_CHAMPION,
 };
+
+// --- counter-strike 2 and elden ring (placeholders until written: they reuse classic) ---
+
+const TACTICAL: Lines = CLASSIC;
+const TARNISHED: Lines = CLASSIC;
 
 #[cfg(test)]
 mod tests {

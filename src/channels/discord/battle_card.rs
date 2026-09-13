@@ -161,6 +161,8 @@ fn look(theme: Theme) -> Look {
     };
     match theme {
         Theme::Classic => classic,
+        // Placeholders until their looks are drawn.
+        Theme::Tactical | Theme::Tarnished => classic,
         Theme::Pokemon => Look {
             floor: &[(0.0, [24, 50, 92]), (0.48, [15, 20, 32]), (1.0, [16, 42, 30])],
             left: [239, 68, 68],
@@ -702,7 +704,7 @@ fn backdrop(px: &mut Pixmap, theme: Theme, look: &Look) {
     let mid = FIGHT_W / 2.0;
     let edge = AV / 2.0 + GAP + RING;
     match theme {
-        Theme::Classic => {}
+        Theme::Classic | Theme::Tactical | Theme::Tarnished => {}
         Theme::Pokemon => {
             poke_ball(px, mid, FIGHT_CY + 28.0, 140.0);
             for cx in [LEFT_CX, RIGHT_CX] {
