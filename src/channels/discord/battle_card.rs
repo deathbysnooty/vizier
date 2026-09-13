@@ -21,6 +21,7 @@ use tiny_skia::{
 };
 
 use super::awards_card::{avatar_pixmap, blend_rect, fill_circle, paint, rrect};
+pub use super::battle_theme::Theme;
 
 /// One side of a fight. `avatar` is the raw bytes of the member's profile
 /// picture, already downloaded; `None` draws a blank silhouette.
@@ -54,6 +55,7 @@ pub struct Fight<'a> {
     /// The exchange just shown: which side was hit (0 left, 1 right) and the
     /// change to their HP - negative for damage, positive for a heal.
     pub hit: Option<(usize, i32)>,
+    pub theme: Theme,
 }
 
 pub struct Champion<'a> {
@@ -61,6 +63,7 @@ pub struct Champion<'a> {
     /// "12 warriors, 4 rounds, 1 champion".
     pub subtitle: String,
     pub line: String,
+    pub theme: Theme,
 }
 
 const BG: [u8; 3] = [15, 16, 20];
@@ -1066,6 +1069,7 @@ mod tests {
                 line: "Gaali nahi, bas ek chappal".to_string(),
                 outcome,
                 hit,
+                theme: Theme::Classic,
             };
             let png = fight_png(&fight).expect("fight card");
             assert_eq!(&png[..4], &PNG_MAGIC);
@@ -1087,6 +1091,7 @@ mod tests {
                 line: String::new(),
                 outcome: Outcome::Open,
                 hit,
+                theme: Theme::Classic,
             };
             assert_eq!(&fight_png(&fight).expect("fight card")[..4], &PNG_MAGIC);
         }
@@ -1097,10 +1102,11 @@ mod tests {
             line: String::new(),
             outcome: Outcome::Won(1),
             hit: None,
+            theme: Theme::Classic,
         };
         assert_eq!(&fight_png(&fight).expect("fight card")[..4], &PNG_MAGIC);
         let champ =
-            Champion { who: &a, subtitle: "12 warriors, 4 rounds, 1 champion".to_string(), line: String::new() };
+            Champion { who: &a, subtitle: "12 warriors, 4 rounds, 1 champion".to_string(), line: String::new(), theme: Theme::Classic };
         assert_eq!(&champion_png(&champ).expect("champion card")[..4], &PNG_MAGIC);
     }
 
@@ -1111,6 +1117,7 @@ mod tests {
             who: &a,
             subtitle: "12 warriors, 4 rounds, 1 champion".to_string(),
             line: "Rohit ne Meera ko block kar diya, aur crown utha liya".to_string(),
+            theme: Theme::Classic,
         };
         let png = champion_png(&champ).expect("champion card");
         assert_eq!(&png[..4], &PNG_MAGIC);
@@ -1130,6 +1137,7 @@ mod tests {
             line: "Rohit ne Meera ko block kar diya, aur bola: gaali nahi, bas ek chappal".to_string(),
             outcome: Outcome::Open,
             hit: Some((1, -27)),
+            theme: Theme::Classic,
         };
         let done = Fighter { name: "Meera".to_string(), avatar: b.avatar.clone(), hp: 0, max_hp: 100, house: b.house };
         let over = Fight {
@@ -1139,11 +1147,13 @@ mod tests {
             line: "Meera gir gayi, Rohit ne chappal hawa mein ghuma di".to_string(),
             outcome: Outcome::Won(0),
             hit: None,
+            theme: Theme::Classic,
         };
         let champ = Champion {
             who: &a,
             subtitle: "12 warriors, 4 rounds, 1 champion".to_string(),
             line: "Sab ro rahe hain, Rohit chappal ghuma raha hai".to_string(),
+            theme: Theme::Classic,
         };
         let cards = [
             ("fight_preview.png", fight_png(&mid)),

@@ -25,6 +25,7 @@ use serenity::all::{
 };
 
 use super::battle_card::{self, Champion, Fight, Fighter, Outcome};
+use super::battle_theme::{Lines, Theme};
 
 /// Fight channel, from `VIZIER_FIGHT_CHANNEL`; otherwise found by name.
 const CHANNEL_NAME: &str = "fight-fight-fight";
@@ -83,6 +84,7 @@ struct Lobby {
     /// Kept so a join can redraw the lobby with its own countdown.
     ends: i64,
     minutes: i64,
+    theme: Theme,
 }
 
 struct Challenge {
@@ -111,143 +113,6 @@ impl Warrior {
         }
     }
 }
-
-// --- lines ------------------------------------------------------------------
-// Roasts stay on the fight itself: nothing about looks, family, caste or faith.
-
-const EXCHANGE: &[&str] = &[
-    "{a} ne {b} ko chappal dikhayi 🩴",
-    "{b} ne {a} ki DP screenshot kar li, blackmail ki taiyari",
-    "{a} ne {b} ko ek dum se 'bhai sun' bola aur block kar diya",
-    "{b} ne {a} pe pura jug paani daal diya",
-    "{a} ne {b} ki keyboard ke keycaps nikaal diye",
-    "{b} ne {a} ko VC mein ghaseet liya, mic mute karke",
-    "{a} ne {b} ko 'seen' kar diya, reply nahi bheja",
-    "{b} ne {a} ka WiFi router unplug kar diya",
-    "{a} ne {b} pe tagda meme daga",
-    "{b} ne {a} ko typing... typing... pe 10 minute rakha",
-    "{a} ne {b} ki maggi bina namak ke bana di",
-    "{b} ne {a} ko 'tera match to Jio pe hi atka hai' bola",
-    "{a} ne {b} ka phone 1% battery pe chhod diya",
-    "{b} ne {a} ki chai mein cheeni double kar di",
-    "{a} ne {b} ko group se remove karke wapas add kiya, sirf dikhane ke liye",
-    "{b} ne {a} ka last seen chhupa diya",
-    "{a} ne {b} ko ludo mein teen baar chhakka maar ke hara diya",
-    "{b} ne {a} ki playlist mein sirf sad songs bhar diye",
-    "{a} ne {b} ka chair khinch liya, classic",
-    "{b} ne {a} ko 'aur bata' bolke mool baat hi nahi batayi",
-];
-
-const FINISH: &[&str] = &[
-    "{w} won. {l} is out 🏆",
-    "{l} is down — {w} took it without breaking a sweat",
-    "{w} wins, and {l} already has an excuse ready",
-    "{l} made a dramatic exit, {w} waved them off",
-    "{w} survives. {l} is out, and yes, someone screenshotted it",
-    "Game over for {l}. {w} threw in a victory dance",
-    "{w} landed the finisher: the silent treatment. {l} is done",
-    "{l} gave up, {w} picked the chai back up",
-    "{w} won. {l} moves to commentary",
-    "{w} showed {l} the exit 🚪",
-];
-
-const CRIT: &[&str] = &[
-    "{a} ne {b} pe poora combo chala diya, bina saans liye 💥",
-    "{a} ka jhakaas headshot - {b} ka WiFi tak hil gaya",
-    "{a} ne {b} ko ek hi taane mein udaa diya",
-    "{a} ne {b} ki puri chat history nikal ke padh di 😳",
-    "{a} ne {b} ko uske hi meme se maara",
-];
-
-const MISS: &[&str] = &[
-    "{a} ne haath ghumaya... aur hawa mein reh gaya",
-    "{a} ka taana miss, {b} ne duck kar liya",
-    "{a} laga raha tha ki ye landega - nahi landa",
-];
-
-const HEAL: &[&str] = &[
-    "{a} ne chai ka ghoont liya, thodi jaan wapas aayi ☕",
-    "{a} ne maggi khaayi aur fresh ho gaya 🍜",
-    "{a} ne Hanuman Chalisa laga di, thodi power aayi",
-];
-
-/// A sip, a biscuit, a deep breath: barely anything, purely for the joke.
-const SIP: &[&str] = &[
-    "{a} ne ek ghoont chai maari. Bas itna hi. ☕",
-    "{a} ko kahin se ek Parle-G mil gaya 🍪",
-    "{a} ne lamba saans liya aur collar theek kiya",
-    "{a} ne apni DP badal di, confidence +1",
-];
-
-/// The swing comes back at whoever threw it.
-const BACKFIRE: &[&str] = &[
-    "{a} ne chappal feki, wapas aake khud ko lagi 🩴",
-    "{a} apne hi jokes pe has ke gir gaya",
-    "{a} ne block karne ki koshish ki, khud ko block kar liya",
-    "{a} ka screenshot ulta pad gaya, apni hi baat pakdi gayi",
-];
-
-/// {b} loses, {a} gains: the fight's only real comeback move.
-const DRAIN: &[&str] = &[
-    "{a} ne {b} ki plate se samosa utha liya 🥟",
-    "{a} ne {b} ka charger le liya - ab {a} full, {b} khali 🔌",
-    "{a} ne {b} ki chai pi li, seedha energy transfer",
-    "{a} ne {b} ka WiFi password chura liya",
-];
-
-/// Two in a row, before anyone can answer.
-const DOUBLE: &[&str] = &[
-    "{a} ne do baar maara - ek taana, ek screenshot 📸",
-    "{a} ne back to back do meme daag diye",
-    "{a} ne {b} ko group aur DM, dono mein sunaya",
-    "{a} ne double chappal combo lagaya 🩴🩴",
-];
-
-/// Everyone in the frame suffers.
-const CHAOS: &[&str] = &[
-    "Beech mein aunty aa gayi, dono ko daant padi 👵",
-    "Light chali gayi - dono andhere mein gir gaye 💡",
-    "Dono ek hi kele ke chhilke pe phisal gaye 🍌",
-    "Kisi ne dono ka naam mummy ko bata diya 😰",
-];
-
-/// A proper feed: the biggest ordinary heal.
-const SNACK: &[&str] = &[
-    "{a} ne garam samosa khaaya, shakti aa gayi 🥟",
-    "{a} ne biryani ka dabba khol liya, ab mood set hai 🍛",
-    "{a} ne do minute mein Maggi bana li 🍜",
-    "{a} ne thanda Rooh Afza gatak liya 🥤",
-    "{a} ne pani puri ka ek aur round maanga 🥣",
-];
-
-/// Rare, and worth it.
-const BLESSING: &[&str] = &[
-    "{a} ki mummy ne sar pe haath rakh diya - poori jaan wapas 🙏",
-    "{a} ko kisi ne 'jeete raho beta' bol diya, full power up ✨",
-    "{a} ne prasad kha liya, ab kaun rok sakta hai 🪔",
-    "{a} ke papa ne kandha thapthapaya - motivation overload",
-];
-
-/// Both sides gain: the fight pauses for something nicer.
-const CROWD: &[&str] = &[
-    "Crowd ne dono ko cheer kar diya, dono ka mann bhar aaya 📣",
-    "Kisi ne dono ko chai pila di, ladai thodi der ke liye band ☕",
-    "Dono ne ek hi thali se kha liya, dosti ho gayi 🍽️",
-    "Aunty ne dono ko laddoo pakda diya 🍬",
-];
-
-const BYE: &[&str] = &[
-    "{a} had nobody to fight this round and went for chai ☕",
-    "{a} gets a free pass to the next round",
-    "{a}'s opponent never turned up — walkover",
-];
-
-const CHAMPION_LINE: &[&str] = &[
-    "Took on the whole server and won 👑",
-    "Last one standing, crown and all",
-    "Today's champion. Everyone else is on commentary",
-    "Undisputed. The rest can wait for the next battle",
-];
 
 /// A tiny xorshift keeps rolls spread without dragging rand into here.
 fn roll(seed: &mut u64, n: u64) -> u64 {
@@ -283,20 +148,20 @@ enum Blow {
 }
 
 impl Blow {
-    fn lines(self) -> &'static [&'static str] {
+    fn lines(self, l: &'static Lines) -> &'static [&'static str] {
         match self {
-            Blow::Miss => MISS,
-            Blow::Crit => CRIT,
-            Blow::Heal => HEAL,
-            Blow::Hit => EXCHANGE,
-            Blow::Sip => SIP,
-            Blow::Backfire => BACKFIRE,
-            Blow::Drain => DRAIN,
-            Blow::Double => DOUBLE,
-            Blow::Chaos => CHAOS,
-            Blow::Snack => SNACK,
-            Blow::Blessing => BLESSING,
-            Blow::Crowd => CROWD,
+            Blow::Miss => l.miss,
+            Blow::Crit => l.crit,
+            Blow::Heal => l.heal,
+            Blow::Hit => l.exchange,
+            Blow::Sip => l.sip,
+            Blow::Backfire => l.backfire,
+            Blow::Drain => l.drain,
+            Blow::Double => l.double,
+            Blow::Chaos => l.chaos,
+            Blow::Snack => l.snack,
+            Blow::Blessing => l.blessing,
+            Blow::Crowd => l.crowd,
         }
     }
 }
@@ -595,17 +460,18 @@ async fn fight_card(
     line: String,
     outcome: Outcome,
     hit: Option<(usize, i32)>,
+    theme: Theme,
 ) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        battle_card::fight_png(&Fight { stage, left: &left, right: &right, line, outcome, hit })
+        battle_card::fight_png(&Fight { stage, left: &left, right: &right, line, outcome, hit, theme })
     })
     .await
     .ok()
     .flatten()
 }
 
-async fn champion_card(who: Fighter, subtitle: String, line: String) -> Option<Vec<u8>> {
-    tokio::task::spawn_blocking(move || battle_card::champion_png(&Champion { who: &who, subtitle, line }))
+async fn champion_card(who: Fighter, subtitle: String, line: String, theme: Theme) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || battle_card::champion_png(&Champion { who: &who, subtitle, line, theme }))
         .await
         .ok()
         .flatten()
@@ -622,10 +488,15 @@ async fn keep_at_bottom(
     text: &str,
     set: Option<Vec<u8>>,
     carry: Option<&Vec<u8>>,
+    // Buttons to show: `Some(vec![])` clears them, `None` leaves them as they are.
+    rows: Option<Vec<CreateActionRow>>,
 ) {
     let buried = BELOW.lock().get(&channel.get()).copied().unwrap_or(0) >= STICKY_AFTER;
     if !buried {
         let mut edit = EditMessage::new().content(text);
+        if let Some(rows) = rows {
+            edit = edit.components(rows);
+        }
         if let Some(png) = set {
             edit = edit.attachments(EditAttachments::new().add(CreateAttachment::bytes(png, "fight.png")));
         }
@@ -636,6 +507,9 @@ async fn keep_at_bottom(
     }
     // Rebuilt rather than edited: a message can't move, only be replaced.
     let mut fresh = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+    if let Some(rows) = rows.filter(|r| !r.is_empty()) {
+        fresh = fresh.components(rows);
+    }
     if let Some(png) = set.or_else(|| carry.cloned()) {
         fresh = fresh.add_file(CreateAttachment::bytes(png, "fight.png"));
     }
@@ -663,15 +537,30 @@ async fn call<T>(fut: impl std::future::Future<Output = serenity::Result<T>>) ->
 }
 
 /// One fight: the card goes up, the exchanges land under it, then the result.
-/// Returns the winner.
-async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &Warrior, seed: &mut u64) -> Warrior {
+/// With `picks`, both fighters choose a move every turn and the clash decides who
+/// lands it; without, the attacker is a coin toss as before. Returns the winner.
+#[allow(clippy::too_many_arguments)]
+async fn play(
+    ctx: &Context,
+    channel: ChannelId,
+    stage: &str,
+    a: &Warrior,
+    b: &Warrior,
+    seed: &mut u64,
+    theme: Theme,
+    picks: bool,
+) -> Warrior {
+    let lines = theme.lines();
     let mut hp = [START_HP; 2];
     // One picture at the start, one at the end: the blow-by-blow rides on the
     // text, which edits without an upload.
     let opening =
-        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), String::new(), Outcome::Open, None).await;
+        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), String::new(), Outcome::Open, None, theme).await;
     let head = format!("**{}** · <@{}> vs <@{}>", stage, a.id, b.id);
     let mut log: Vec<String> = Vec::new();
+    // The clash table is dealt once, so a fighter can learn it as the fight goes.
+    let clash = picks.then(|| Clash::deal(seed));
+    let fight_id = if picks { roll(seed, u64::MAX >> 12) + 1 } else { 0 };
     let mut text = fight_text(&head, &log, a, b, &hp);
     tracing::info!("battle: {} - {} vs {}", stage, a.name, b.name);
     BELOW.lock().insert(channel.get(), 0);
@@ -689,14 +578,35 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
         }
     };
 
-    // Trade blows until someone's health runs out. What lands is luck, not skill.
+    // Trade blows until someone's health runs out.
     let mut turns = 0;
     while hp[0] > 0 && hp[1] > 0 && turns < MAX_EXCHANGES {
         turns += 1;
-        tokio::time::sleep(BEAT).await;
-        let attacker = roll(seed, 2) as usize;
+        let (attacker, clash_note) = match &clash {
+            Some(table) => {
+                let chosen = pick_moves(ctx, channel, &mut message, &head, &log, a, b, &hp, fight_id, turns, opening.as_ref(), seed)
+                    .await;
+                let side = table.winner(chosen.moves[0], chosen.moves[1]);
+                let auto = |i: usize| if chosen.auto[i] { " (auto)" } else { "" };
+                let note = format!(
+                    "{}{} vs {}{} → **{}** wins the clash · ",
+                    MOVES[chosen.moves[0]].0,
+                    auto(0),
+                    MOVES[chosen.moves[1]].0,
+                    auto(1),
+                    if side == 0 { &a.name } else { &b.name }
+                );
+                (side, note)
+            }
+            None => {
+                tokio::time::sleep(BEAT).await;
+                (roll(seed, 2) as usize, String::new())
+            }
+        };
         let (x, y) = if attacker == 0 { (a, b) } else { (b, a) };
-        let swing = swing(seed, attacker);
+        // Winning a clash always does the winner some good: no backfires or
+        // misses for them, or pressing the right button would feel pointless.
+        let swing = if clash.is_some() { clash_swing(seed, attacker) } else { swing(seed, attacker) };
         let before = hp;
         for side in 0..2 {
             hp[side] = (hp[side] + swing.hits[side]).clamp(0, START_HP);
@@ -712,25 +622,210 @@ async fn play(ctx: &Context, channel: ChannelId, stage: &str, a: &Warrior, b: &W
             };
             hp[standing] = 1;
         }
-        let line = fill(pick(swing.blow.lines(), seed), &x.name, &y.name);
-        log.push(format!("{} · **{}**", line, swing.tail()));
+        let line = fill(pick(swing.blow.lines(lines), seed), &x.name, &y.name);
+        log.push(format!("{}{} · **{}**", clash_note, line, swing.tail()));
         text = fight_text(&head, &log, a, b, &hp);
-        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref()).await;
+        let rows = if clash.is_some() { Some(Vec::new()) } else { None };
+        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), rows).await;
+        if clash.is_some() {
+            tokio::time::sleep(REVEAL).await;
+        }
+    }
+    if picks {
+        PICKS.lock().remove(&fight_id);
     }
 
     let a_wins = hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0);
     let (winner, loser) = if a_wins { (a, b) } else { (b, a) };
-    let finish = fill(pick(FINISH, seed), &winner.name, &loser.name);
+    let finish = fill(pick(lines.finish, seed), &winner.name, &loser.name);
     text.push_str(&format!("\n\n🏆 {}", finish));
     let side = if a_wins { 0 } else { 1 };
     let done =
-        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None).await;
+        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None, theme).await;
     tokio::time::sleep(BEAT).await;
-    keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref()).await;
+    let rows = if picks { Some(Vec::new()) } else { None };
+    keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref(), rows).await;
     tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
     // Between fights nobody is watching a message, so stop counting chat.
     BELOW.lock().remove(&channel.get());
     winner.clone()
+}
+
+// --- clash picks ------------------------------------------------------------
+
+/// The four moves: the symbol shown, the button's name, and its colour.
+const MOVES: [(&str, &str, ButtonStyle); 4] = [
+    ("△", "triangle", ButtonStyle::Success),
+    ("○", "circle", ButtonStyle::Danger),
+    ("□", "square", ButtonStyle::Secondary),
+    ("✕", "cross", ButtonStyle::Primary),
+];
+/// How long both fighters have to pick before the bot picks for them.
+const PICK_WAIT: Duration = Duration::from_secs(8);
+/// How long a clash result stays up before the next turn opens.
+const REVEAL: Duration = Duration::from_millis(1800);
+
+/// Who beats whom for one fight. Every move beats exactly two of the other
+/// side's moves and loses to the other two, for both fighters, so no button is
+/// ever better than another: each side wins a turn half the time, whatever
+/// they press, until they start reading the pattern.
+struct Clash {
+    left: [usize; 4],
+    right: [usize; 4],
+}
+
+impl Clash {
+    fn deal(seed: &mut u64) -> Clash {
+        let mut perm = |seed: &mut u64| {
+            let mut p = [0, 1, 2, 3];
+            for i in (1..4).rev() {
+                p.swap(i, roll(seed, i as u64 + 1) as usize);
+            }
+            p
+        };
+        let left = perm(seed);
+        let right = perm(seed);
+        Clash { left, right }
+    }
+
+    /// 0 if the left fighter's move wins the clash, 1 if the right's does.
+    fn winner(&self, left_move: usize, right_move: usize) -> usize {
+        if (self.left[left_move % 4] + self.right[right_move % 4]) % 4 < 2 { 0 } else { 1 }
+    }
+}
+
+/// One turn's picks, filled in by the buttons.
+struct Picks {
+    fighters: [u64; 2],
+    moves: [Option<usize>; 2],
+    open: bool,
+}
+
+/// Open picks, by fight.
+static PICKS: LazyLock<Mutex<HashMap<u64, Picks>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct Chosen {
+    moves: [usize; 2],
+    /// Which side the bot picked for.
+    auto: [bool; 2],
+}
+
+fn pick_rows(fight_id: u64) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(
+        MOVES
+            .iter()
+            .enumerate()
+            .map(|(i, (symbol, _, style))| {
+                CreateButton::new(format!("fightpick:{}:{}", fight_id, i)).label(*symbol).style(*style)
+            })
+            .collect(),
+    )]
+}
+
+/// Opens a turn, waits for both picks or the timer, and fills in whoever didn't press.
+#[allow(clippy::too_many_arguments)]
+async fn pick_moves(
+    ctx: &Context,
+    channel: ChannelId,
+    message: &mut Message,
+    head: &str,
+    log: &[String],
+    a: &Warrior,
+    b: &Warrior,
+    hp: &[i32; 2],
+    fight_id: u64,
+    turn: usize,
+    carry: Option<&Vec<u8>>,
+    seed: &mut u64,
+) -> Chosen {
+    PICKS.lock().insert(fight_id, Picks { fighters: [a.id, b.id], moves: [None, None], open: true });
+    let closes = Utc::now().timestamp() + PICK_WAIT.as_secs() as i64;
+    let prompt = format!(
+        "{}\n\n🎮 **Turn {}**: <@{}> and <@{}>, pick a move! Beat the other pick to land the hit. Closes <t:{}:R>",
+        fight_text(head, log, a, b, hp),
+        turn,
+        a.id,
+        b.id,
+        closes
+    );
+    keep_at_bottom(ctx, channel, message, &prompt, None, carry, Some(pick_rows(fight_id))).await;
+    let deadline = tokio::time::Instant::now() + PICK_WAIT;
+    loop {
+        let both = PICKS.lock().get(&fight_id).is_some_and(|p| p.moves.iter().all(Option::is_some));
+        if both || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let taken = {
+        let mut picks = PICKS.lock();
+        match picks.get_mut(&fight_id) {
+            Some(p) => {
+                p.open = false;
+                p.moves
+            }
+            None => [None, None],
+        }
+    };
+    let mut chosen = Chosen { moves: [0, 0], auto: [false, false] };
+    for side in 0..2 {
+        match taken[side] {
+            Some(m) => chosen.moves[side] = m,
+            None => {
+                chosen.moves[side] = roll(seed, 4) as usize;
+                chosen.auto[side] = true;
+            }
+        }
+    }
+    chosen
+}
+
+/// A move button. Only the two fighters can press, once per turn, while it is open.
+async fn on_pick(ctx: &Context, component: &ComponentInteraction, rest: &str) {
+    let whisper = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    let mut parts = rest.split(':');
+    let (Some(Ok(fight_id)), Some(Ok(choice))) =
+        (parts.next().map(str::parse::<u64>), parts.next().map(str::parse::<usize>))
+    else {
+        return;
+    };
+    let user = component.user.id.get();
+    let reply = {
+        let mut picks = PICKS.lock();
+        match picks.get_mut(&fight_id) {
+            None => "This fight is over.".to_string(),
+            Some(p) => match p.fighters.iter().position(|f| *f == user) {
+                None => "This isn't your fight. Grab some popcorn 🍿".to_string(),
+                Some(_) if !p.open => "Too late, this turn is already done.".to_string(),
+                Some(side) => match p.moves[side] {
+                    Some(m) => format!("You already picked {} this turn.", MOVES[m].0),
+                    None if choice < MOVES.len() => {
+                        p.moves[side] = Some(choice);
+                        format!("You picked {}. Waiting for the clash…", MOVES[choice].0)
+                    }
+                    None => "That isn't a move.".to_string(),
+                },
+            },
+        }
+    };
+    let _ = component.create_response(&ctx.http, whisper(reply)).await;
+}
+
+/// A swing for the fighter who won the clash: rolled like any other, but a blow
+/// that would hurt them or do nothing is rolled again.
+fn clash_swing(seed: &mut u64, attacker: usize) -> Swing {
+    for _ in 0..16 {
+        let s = swing(seed, attacker);
+        if !matches!(s.blow, Blow::Miss | Blow::Sip | Blow::Backfire | Blow::Chaos | Blow::Crowd) {
+            return s;
+        }
+    }
+    let other = 1 - attacker;
+    let mut hits = [0i32; 2];
+    hits[other] = -(18 + roll(seed, 11) as i32);
+    Swing { blow: Blow::Hit, hits }
 }
 
 /// Counts chat under the live fight so it can be moved back to the bottom.
@@ -779,6 +874,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         CommandDataOptionValue::User(id) => Some(id),
         _ => None,
     });
+    let theme = theme_option(&command.data.options);
     let Some(target) = target else {
         let _ = command.create_response(&ctx.http, whisper("Who do you want to fight? Use `/fight @name`.".into())).await;
         return;
@@ -820,11 +916,19 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         format!("{} vs {}", a.name, b.name),
         Outcome::Open,
         None,
+        theme,
     )
     .await;
+    let flavour = match theme {
+        Theme::Classic => String::new(),
+        other => format!(" **{}** style", other.label()),
+    };
     let content = format!(
-        "⚔️ <@{}> has challenged <@{}>!\n<@{}>, accept or decline — the challenge expires in 2 minutes.",
-        me, them, them
+        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in 2 minutes.\n         -# Every turn both fighters pick △ ○ □ ✕. Win the clash to land the hit.",
+        me,
+        them,
+        if flavour.is_empty() { String::new() } else { flavour },
+        them
     );
     let mut msg = CreateMessage::new()
         .content(content)
@@ -889,7 +993,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 let _ = arena.say(&ctx.http, "A fight is already running here — try again in a moment.").await;
                 return;
             }
-            let winner = play(ctx, arena, "Challenge", &a, &b, &mut seed).await;
+            let winner = play(ctx, arena, "Challenge", &a, &b, &mut seed, theme, true).await;
             let loser = if winner.id == a.id { b.id } else { a.id };
             record("fight", winner.id, Some(loser));
             let (fights, wins) = tally(winner.id);
@@ -953,6 +1057,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         })
         .unwrap_or(5)
         .clamp(MIN_WAIT, MAX_WAIT);
+    let theme = theme_option(&command.data.options);
 
     let here = command.channel_id;
     let arena = arena(ctx, guild, here).await;
@@ -965,7 +1070,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
     let ends = Utc::now().timestamp() + minutes * 60;
     let role = warrior_role(ctx, guild).await;
     let ping = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
-    let embed = lobby_embed(&[], ends, minutes);
+    let embed = lobby_embed(&[], ends, minutes, theme);
     let msg = CreateMessage::new()
         .content(format!("{} — a battle royale is starting! Join below 👇", ping))
         .allowed_mentions(CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
@@ -981,7 +1086,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
     let _ = posted.edit(&ctx.http, EditMessage::new().components(rows)).await;
     LOBBIES
         .lock()
-        .insert(lobby_id, Lobby { joined: Vec::new(), names: HashMap::new(), open: true, ends, minutes });
+        .insert(lobby_id, Lobby { joined: Vec::new(), names: HashMap::new(), open: true, ends, minutes, theme });
     if arena != here {
         let _ = here
             .send_message(
@@ -1013,7 +1118,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         BUSY.lock().remove(&arena.get());
         return;
     }
-    run_battle(ctx, guild, arena, joined).await;
+    run_battle(ctx, guild, arena, joined, theme).await;
     BUSY.lock().remove(&arena.get());
 }
 
@@ -1030,14 +1135,17 @@ fn lobby_buttons(id: u64, open: bool) -> Vec<CreateActionRow> {
     ])]
 }
 
-fn lobby_embed(names: &[String], ends: i64, minutes: i64) -> CreateEmbed {
+fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> CreateEmbed {
     let list = if names.is_empty() {
         "Nobody yet. Who's first?".to_string()
     } else {
         names.iter().map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n")
     };
     CreateEmbed::new()
-        .title("⚔️ Battle Royale")
+        .title(match theme {
+            Theme::Classic => "⚔️ Battle Royale".to_string(),
+            other => format!("⚔️ Battle Royale · {} edition", other.label()),
+        })
         .description(format!(
             "Hit Join and get ready to fight. The winner takes the **{}** role.\n\n\
              ⏳ Closes <t:{}:R> ({} min)\n👥 **{}** joined (at least {} needed)\n\n{}",
@@ -1053,7 +1161,7 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64) -> CreateEmbed {
 }
 
 /// Knockout rounds until one is left.
-async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>) {
+async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>, theme: Theme) {
     let mut seed = Utc::now().timestamp_millis() as u64 | 1;
     let mut fighters: Vec<Warrior> = Vec::new();
     for id in joined.into_iter().take(MAX_PLAYERS) {
@@ -1082,7 +1190,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         while let Some(pair) = pairs.next() {
             match pair {
                 [a, b] => {
-                    let winner = play(ctx, arena, &stage, a, b, &mut seed).await;
+                    let winner = play(ctx, arena, &stage, a, b, &mut seed, theme, false).await;
                     let loser = if winner.id == a.id { b.id } else { a.id };
                     record("battle", winner.id, Some(loser));
                     runner_up = Some(loser);
@@ -1090,7 +1198,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
                     tokio::time::sleep(FIGHT_GAP).await;
                 }
                 [alone] => {
-                    let line = fill(pick(BYE, &mut seed), &alone.name, "");
+                    let line = fill(pick(theme.lines().bye, &mut seed), &alone.name, "");
                     let _ = arena.say(&ctx.http, format!("☕ {}", line)).await;
                     next.push(alone.clone());
                 }
@@ -1112,8 +1220,8 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
     let subtitle = format!("{} warriors · {} rounds · 1 champion", started, round - 1);
-    let line = pick(CHAMPION_LINE, &mut seed).to_string();
-    let card = champion_card(champion.card(START_HP), subtitle, line).await;
+    let line = pick(theme.lines().champion, &mut seed).to_string();
+    let card = champion_card(champion.card(START_HP), subtitle, line, theme).await;
     let mut msg = CreateMessage::new()
         .content(format!(
             "👑 <@{}> is the **{}**! Battles won: **{}**",
@@ -1124,6 +1232,30 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         msg = msg.add_file(CreateAttachment::bytes(png, "champion.png"));
     }
     let _ = arena.send_message(&ctx.http, msg).await;
+}
+
+/// The `type` option of /fight and /battle; classic when left out.
+fn theme_option(options: &[serenity::all::CommandDataOption]) -> Theme {
+    options
+        .iter()
+        .find_map(|o| match (o.name.as_str(), &o.value) {
+            ("type", CommandDataOptionValue::String(key)) => Theme::from_key(key),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The `type` option, to add to /fight and /battle.
+pub fn theme_command_option() -> serenity::all::CreateCommandOption {
+    let mut option = serenity::all::CreateCommandOption::new(
+        serenity::all::CommandOptionType::String,
+        "type",
+        "fight style (classic if left out)",
+    );
+    for theme in Theme::ALL {
+        option = option.add_string_choice(theme.label(), theme.key());
+    }
+    option
 }
 
 fn stage_name(left: usize, round: u32) -> String {
@@ -1282,6 +1414,8 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
             None => "This only works in a server.".to_string(),
         };
         let _ = component.create_response(&ctx.http, whisper(&text)).await;
+    } else if let Some(rest) = id.strip_prefix("fightpick:") {
+        on_pick(ctx, component, rest).await;
     } else if let Some(rest) = id.strip_prefix("fightyes:") {
         answer(ctx, component, rest, true).await;
     } else if let Some(rest) = id.strip_prefix("fightno:") {
@@ -1302,20 +1436,20 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         .as_ref()
         .map(|m| display(m))
         .unwrap_or_else(|| component.user.name.clone());
-    let (result, names, ends, minutes) = {
+    let (result, names, ends, minutes, theme) = {
         let mut lobbies = LOBBIES.lock();
         let roster = |lobby: &Lobby| -> Vec<String> {
             lobby.joined.iter().filter_map(|u| lobby.names.get(u).cloned()).collect()
         };
         match lobbies.get_mut(&lobby_id) {
-            None => ("closed", Vec::new(), 0, 0),
-            Some(lobby) if !lobby.open => ("closed", Vec::new(), lobby.ends, lobby.minutes),
-            Some(lobby) if lobby.joined.contains(&user) => ("already", roster(lobby), lobby.ends, lobby.minutes),
-            Some(lobby) if lobby.joined.len() >= MAX_PLAYERS => ("full", Vec::new(), lobby.ends, lobby.minutes),
+            None => ("closed", Vec::new(), 0, 0, Theme::Classic),
+            Some(lobby) if !lobby.open => ("closed", Vec::new(), lobby.ends, lobby.minutes, lobby.theme),
+            Some(lobby) if lobby.joined.contains(&user) => ("already", roster(lobby), lobby.ends, lobby.minutes, lobby.theme),
+            Some(lobby) if lobby.joined.len() >= MAX_PLAYERS => ("full", Vec::new(), lobby.ends, lobby.minutes, lobby.theme),
             Some(lobby) => {
                 lobby.joined.push(user);
                 lobby.names.insert(user, name);
-                ("joined", roster(lobby), lobby.ends, lobby.minutes)
+                ("joined", roster(lobby), lobby.ends, lobby.minutes, lobby.theme)
             }
         }
     };
@@ -1324,7 +1458,7 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
             let _ = component.create_response(&ctx.http, whisper("⚔️ You are in. Get ready.")).await;
             // Everyone should see the roster fill up, countdown untouched.
             let mut message = component.message.clone();
-            let _ = message.edit(&ctx.http, EditMessage::new().embed(lobby_embed(&names, ends, minutes))).await;
+            let _ = message.edit(&ctx.http, EditMessage::new().embed(lobby_embed(&names, ends, minutes, theme))).await;
         }
         "already" => {
             let _ = component.create_response(&ctx.http, whisper("You are already in.")).await;
@@ -1379,16 +1513,46 @@ mod tests {
     }
 
     #[test]
+    fn every_clash_is_fifty_fifty_whatever_is_pressed() {
+        let mut seed = 99u64;
+        let mut tables = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let clash = Clash::deal(&mut seed);
+            tables.insert((clash.left, clash.right));
+            for mine in 0..4 {
+                let left_wins = (0..4).filter(|theirs| clash.winner(mine, *theirs) == 0).count();
+                assert_eq!(left_wins, 2, "left move {} wins {} of 4", mine, left_wins);
+                let right_wins = (0..4).filter(|theirs| clash.winner(*theirs, mine) == 1).count();
+                assert_eq!(right_wins, 2, "right move {} wins {} of 4", mine, right_wins);
+            }
+        }
+        assert!(tables.len() > 50, "fights keep getting the same table: {}", tables.len());
+    }
+
+    #[test]
+    fn a_won_clash_never_hurts_the_winner() {
+        let mut seed = 5u64;
+        for _ in 0..2000 {
+            for side in 0..2 {
+                let s = clash_swing(&mut seed, side);
+                assert!(s.hits[side] >= 0, "{:?} hurt the clash winner", s.blow);
+                assert!(s.hits.iter().any(|h| *h != 0), "{:?} did nothing", s.blow);
+            }
+        }
+    }
+
+    #[test]
     fn every_line_has_placeholders_and_picks_spread() {
-        for line in EXCHANGE {
+        for line in Theme::Classic.lines().exchange {
             assert!(line.contains("{a}") && line.contains("{b}"), "{}", line);
         }
-        for line in FINISH {
+        for line in Theme::Classic.lines().finish {
             assert!(line.contains("{w}") && line.contains("{l}"), "{}", line);
         }
         let mut seed = 12345u64;
-        let picks: std::collections::HashSet<&str> = (0..200).map(|_| pick(EXCHANGE, &mut seed)).collect();
-        assert!(picks.len() > EXCHANGE.len() / 2, "picks bunched up: {}", picks.len());
+        let exchange = Theme::Classic.lines().exchange;
+        let picks: std::collections::HashSet<&str> = (0..200).map(|_| pick(exchange, &mut seed)).collect();
+        assert!(picks.len() > exchange.len() / 2, "picks bunched up: {}", picks.len());
     }
 
     /// Play the exchange loop the way `play` does, without Discord in the way.

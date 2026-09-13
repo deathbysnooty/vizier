@@ -30,6 +30,7 @@ use crate::utils::remove_think_tags;
 mod awards;
 mod battle;
 mod battle_card;
+mod battle_theme;
 mod house;
 mod house_card;
 mod house_draft;
@@ -1307,7 +1308,8 @@ impl EventHandler for Handler {
             .add_option(
                 CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "kisse ladna hai")
                     .required(true),
-            );
+            )
+            .add_option(battle::theme_command_option());
         let _ = Command::create_global_command(ctx.http.clone(), fight_cmd).await;
 
         let battle_cmd = CreateCommand::new("battle")
@@ -1320,7 +1322,8 @@ impl EventHandler for Handler {
                 )
                 .min_int_value(1)
                 .max_int_value(15),
-            );
+            )
+            .add_option(battle::theme_command_option());
         let _ = Command::create_global_command(ctx.http.clone(), battle_cmd).await;
 
         let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
