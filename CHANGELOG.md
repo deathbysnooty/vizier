@@ -2,11 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.93] - 2026-09-13
+
+### 💼 Other
+
+- Fight types for /fight and /battle, and clash picks in 1v1s
+- English lines for the Pokemon, Harry Potter, DBZ and WWE fight types
+- /housetop lists a house's top 10 scorers for this month, last month or all time
+- Themed fight and champion cards for Pokemon, Harry Potter, DBZ and WWE
 ## [0.10.92] - 2026-09-13
 
 ### 💼 Other
 
 - Fighters wear their house crest on fight and champion cards
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.92
 ## [0.10.91] - 2026-09-13
 
 ### 💼 Other
