@@ -51,6 +51,12 @@ const WINDOW_START: i64 = 10 * 3600;
 const WINDOW_END: i64 = 24 * 3600 - LIFETIME;
 /// A channel counts as awake if a person spoke in it this recently.
 const QUIET_AFTER: i64 = 5 * 60;
+/// A scheduled Snitch that flies away uncaught gets a second chance this long
+/// after it flew, picked at random - sooner than the two-hour gap.
+const REMATCH_MIN: i64 = 20 * 60;
+const REMATCH_MAX: i64 = 40 * 60;
+/// Second chances a day, so a quiet day can't turn into a Snitch every half hour.
+const REMATCHES_PER_DAY: usize = 3;
 /// When a drop is due but every channel is quiet, look again after this long.
 const RETRY_AFTER: i64 = 3 * 60;
 /// How often the scheduler wakes to see whether a drop is due.
@@ -437,6 +443,14 @@ fn plan_for(now: i64, stored: Option<Plan>, mut roll: impl FnMut() -> f64) -> Pl
     Plan { day, times, done: 0, last_drop }
 }
 
+/// When a second chance for an uncaught Snitch should drop: a random time
+/// between `REMATCH_MIN` and `REMATCH_MAX` after it flew, or none if the day's
+/// second chances are used up or the time falls outside the drop hours.
+fn rematch_time(flew: i64, used: usize, roll: f64) -> Option<i64> {
+    let at = flew + REMATCH_MIN + (roll.clamp(0.0, 1.0) * (REMATCH_MAX - REMATCH_MIN) as f64) as i64;
+    (used < REMATCHES_PER_DAY && in_window(at) && ist_midnight(at) == ist_midnight(flew)).then_some(at)
+}
+
 /// Whether the next drop should go now. A slot that slipped - quiet chat, a
 /// restart - still waits out the full gap after the drop before it, so the day's
 /// drops can run late but never bunch up.
@@ -450,6 +464,8 @@ fn due(plan: &Plan, now: i64) -> bool {
 // --- store ------------------------------------------------------------------
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+/// Snitches that flew away with nobody catching them, for the scheduler to see.
+static UNCAUGHT: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// Snitches in the air, by message id.
 static LIVE: LazyLock<Mutex<HashMap<u64, Flight>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -609,7 +625,10 @@ fn arm(ctx: Context, message: u64, channel: u64, dropped_at: i64) {
 /// start to try again, unless this already is that start - a card whose message
 /// was deleted must not be retried on every restart forever.
 async fn fly_away(ctx: &Context, message: u64, channel: u64, give_up_after: bool) {
-    LIVE.lock().remove(&message);
+    let flown = LIVE.lock().remove(&message);
+    if flown.is_some_and(|f| f.catchers.is_empty()) {
+        UNCAUGHT.lock().insert(message);
+    }
     let mut edited = false;
     for wait in FLY_RETRIES {
         tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -747,6 +766,12 @@ fn recover(ctx: &Context) {
 async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
     let mut plan: Option<Plan> = DB.get().and_then(|db| load_plan(&db.lock()));
     let mut retry_at = 0i64;
+    // Second chances live in memory: a restart just skips a pending one.
+    let mut watching: Option<u64> = None;
+    let mut rematch_at: Option<i64> = None;
+    let mut rematches = (String::new(), 0usize);
+    // Any drop, scheduled or second chance, so the two never land back to back.
+    let mut last_any = 0i64;
     loop {
         tokio::time::sleep(TICK).await;
         let now = Utc::now().timestamp();
@@ -757,7 +782,33 @@ async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
             tracing::info!("snitch: {} drops planned for {}", current.times.len(), current.day);
             persist(current);
         }
-        if now < retry_at || !due(current, now) {
+        if rematches.0 != current.day {
+            rematches = (current.day.clone(), 0);
+        }
+        {
+            // Mods' test drops land here too, and nobody waits on them.
+            let mut uncaught = UNCAUGHT.lock();
+            if uncaught.len() > 50 {
+                uncaught.retain(|id| Some(*id) == watching);
+            }
+        }
+        if let Some(id) = watching.filter(|id| UNCAUGHT.lock().remove(id)) {
+            watching = None;
+            rematch_at = rematch_time(now, rematches.1, rand::random::<f64>());
+            match rematch_at {
+                Some(at) => tracing::info!("snitch: {} flew away uncaught, another comes in {} min", id, (at - now) / 60),
+                None => tracing::info!("snitch: {} flew away uncaught, no second chance left today", id),
+            }
+        }
+        if now < retry_at {
+            continue;
+        }
+        let rematch_due = rematch_at.is_some_and(|at| now >= at && in_window(now));
+        let scheduled_due = due(current, now) && now - last_any >= REMATCH_MIN;
+        if rematch_at.is_some_and(|at| !in_window(at.max(now))) {
+            rematch_at = None;
+        }
+        if !rematch_due && !scheduled_due {
             continue;
         }
         // A channel with a card already in the air counts as unavailable, so a
@@ -770,9 +821,17 @@ async fn schedule(ctx: Context, channels: Vec<(u64, u32)>) {
         };
         match release(&ctx, ChannelId::new(channel), choose_kind(rand::random::<f64>())).await {
             Some(flight) => {
-                current.done += 1;
-                current.last_drop = Some(flight.dropped_at);
-                persist(current);
+                // A scheduled drop takes the place of any pending second chance.
+                if scheduled_due {
+                    current.done += 1;
+                    current.last_drop = Some(flight.dropped_at);
+                    persist(current);
+                } else {
+                    rematches.1 += 1;
+                }
+                rematch_at = None;
+                watching = Some(flight.message);
+                last_any = flight.dropped_at;
             }
             None => retry_at = now + RETRY_AFTER,
         }
@@ -998,6 +1057,16 @@ mod tests {
         assert_eq!(tomorrow.day, "2026-09-15");
         assert_eq!(tomorrow.done, 0);
         assert_eq!(tomorrow.last_drop, Some(MIDNIGHT + 15 * HOUR), "the gap is remembered across midnight");
+    }
+
+    #[test]
+    fn an_uncaught_snitch_gets_a_second_chance_within_the_hour() {
+        let noon = MIDNIGHT + 12 * HOUR;
+        assert_eq!(rematch_time(noon, 0, 0.0), Some(noon + REMATCH_MIN));
+        assert_eq!(rematch_time(noon, 0, 1.0), Some(noon + REMATCH_MAX));
+        assert_eq!(rematch_time(noon, REMATCHES_PER_DAY, 0.5), None, "the day's second chances are used up");
+        assert_eq!(rematch_time(MIDNIGHT + 23 * HOUR + 50 * 60, 0, 0.0), None, "too late: past the drop hours");
+        assert_eq!(rematch_time(MIDNIGHT + 9 * HOUR, 0, 0.0), None, "before the drop hours");
     }
 
     #[test]
