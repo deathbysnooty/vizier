@@ -25,6 +25,7 @@ use serenity::all::{
 };
 
 use super::battle_card::{self, Champion, Fight, Fighter, Outcome};
+use super::battle_bracket::{self, Bracket, Entrant, Slot, round_title};
 use super::battle_theme::{Lines, Theme};
 
 /// Fight channel, from `VIZIER_FIGHT_CHANNEL`; otherwise found by name.
@@ -549,7 +550,7 @@ async fn play(
     seed: &mut u64,
     theme: Theme,
     picks: bool,
-) -> Warrior {
+) -> (Warrior, i32) {
     let lines = theme.lines();
     let mut hp = [START_HP; 2];
     // One picture at the start, one at the end: the blow-by-blow rides on the
@@ -573,7 +574,7 @@ async fn play(
             Ok(m) => m,
             Err(err) => {
                 tracing::warn!("battle: fight card not sent: {}", err);
-                return if roll(seed, 2) == 0 { a.clone() } else { b.clone() };
+                return (if roll(seed, 2) == 0 { a.clone() } else { b.clone() }, START_HP);
             }
         }
     };
@@ -637,7 +638,7 @@ async fn play(
     tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
     // Between fights nobody is watching a message, so stop counting chat.
     BELOW.lock().remove(&channel.get());
-    winner.clone()
+    (winner.clone(), hp[if a_wins { 0 } else { 1 }].max(0))
 }
 
 // --- clash picks ------------------------------------------------------------
@@ -1019,7 +1020,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 let _ = arena.say(&ctx.http, "A fight is already running here — try again in a moment.").await;
                 return;
             }
-            let winner = play(ctx, arena, "Challenge", &a, &b, &mut seed, theme, true).await;
+            let (winner, _) = play(ctx, arena, "Challenge", &a, &b, &mut seed, theme, true).await;
             let loser = if winner.id == a.id { b.id } else { a.id };
             record("fight", winner.id, Some(loser));
             let (fights, wins) = tally(winner.id);
@@ -1186,7 +1187,8 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
         .footer(CreateEmbedFooter::new("Every fight is a coin toss — just here for the banter"))
 }
 
-/// Knockout rounds until one is left.
+/// Knockout rounds until one is left, on a draw fixed at the start: winners
+/// meet the winner beside them, and the bracket goes up before every round.
 async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>, theme: Theme) {
     let mut seed = Utc::now().timestamp_millis() as u64 | 1;
     let mut fighters: Vec<Warrior> = Vec::new();
@@ -1199,53 +1201,64 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         let _ = arena.say(&ctx.http, "Not enough fighters could be loaded. Battle cancelled.").await;
         return;
     }
+    shuffle(&mut fighters, &mut seed);
     let started = fighters.len();
-    let mut round = 1;
-    // The loser of the last fight fought is the runner-up: the final is always
-    // the battle's last fight, however many byes came before it.
+    let entrants: Arc<Vec<Entrant>> = Arc::new(
+        fighters.iter().map(|w| Entrant { name: w.name.clone(), avatar: w.avatar.clone(), house: w.house }).collect(),
+    );
+    let mut rounds = draw_bracket(started, &mut seed);
+    let total = rounds.len();
+    // The final's loser is the runner-up.
     let mut runner_up: Option<u64> = None;
-    while fighters.len() > 1 {
-        shuffle(&mut fighters, &mut seed);
-        let stage = stage_name(fighters.len(), round);
-        let _ = arena
-            .say(&ctx.http, format!("**{}** — {} warriors left.", stage, fighters.len()))
+    for r in 0..total {
+        let matches = rounds[r].len();
+        let title = round_title(matches);
+        let subtitle = format!("{} warriors · {}", started, title_case(&title));
+        post_bracket(ctx, arena, &entrants, &rounds, subtitle, theme, &format!("🗺️ **{}**: here's the bracket", title_case(&title)))
             .await;
-        tokio::time::sleep(FIGHT_GAP).await;
-        let mut next = Vec::new();
-        let mut pairs = fighters.chunks(2);
-        while let Some(pair) = pairs.next() {
-            match pair {
-                [a, b] => {
-                    let winner = play(ctx, arena, &stage, a, b, &mut seed, theme, false).await;
-                    let loser = if winner.id == a.id { b.id } else { a.id };
-                    record("battle", winner.id, Some(loser));
-                    runner_up = Some(loser);
-                    next.push(winner);
-                    tokio::time::sleep(FIGHT_GAP).await;
-                }
-                [alone] => {
-                    let line = fill(pick(theme.lines().bye, &mut seed), &alone.name, "");
-                    let _ = arena.say(&ctx.http, format!("☕ {}", line)).await;
-                    next.push(alone.clone());
-                }
-                _ => {}
-            }
+        let passes: Vec<&str> =
+            rounds[r].iter().filter(|m| m.bye).filter_map(|m| m.a).map(|i| fighters[i].name.as_str()).collect();
+        if !passes.is_empty() {
+            let _ = arena
+                .send_message(
+                    &ctx.http,
+                    CreateMessage::new()
+                        .content(format!("☕ Free pass to the next round: {}", passes.join(", ")))
+                        .allowed_mentions(CreateAllowedMentions::new()),
+                )
+                .await;
         }
-        fighters = next;
-        round += 1;
-        if fighters.len() > 1 {
+        tokio::time::sleep(FIGHT_GAP).await;
+        let stage = stage_title(matches);
+        for j in 0..matches {
+            let (Some(ai), Some(bi), false) = (rounds[r][j].a, rounds[r][j].b, rounds[r][j].bye) else {
+                continue;
+            };
+            let (a, b) = (&fighters[ai], &fighters[bi]);
+            let (winner, hp) = play(ctx, arena, &stage, a, b, &mut seed, theme, false).await;
+            let (side, loser) = if winner.id == a.id { (0, b.id) } else { (1, a.id) };
+            record("battle", winner.id, Some(loser));
+            runner_up = Some(loser);
+            rounds[r][j].winner = Some(side);
+            rounds[r][j].hp = Some(hp);
+            advance(&mut rounds, r, j);
+            tokio::time::sleep(FIGHT_GAP).await;
+        }
+        if r + 1 < total {
             tokio::time::sleep(ROUND_GAP).await;
         }
     }
 
-    let Some(champion) = fighters.into_iter().next() else {
+    let Some(champion) = champion_of(&rounds).map(|i| fighters[i].clone()) else {
         return;
     };
+    let subtitle = format!("{} warriors · {} rounds · 👑 {}", started, total, champion.name);
+    post_bracket(ctx, arena, &entrants, &rounds, subtitle, theme, "🗺️ **The final bracket**").await;
     record("champion", champion.id, None);
     award_royale(champion.id, runner_up);
     let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
-    let subtitle = format!("{} warriors · {} rounds · 1 champion", started, round - 1);
+    let subtitle = format!("{} warriors · {} rounds · 1 champion", started, total);
     let line = pick(theme.lines().champion, &mut seed).to_string();
     let card = champion_card(champion.card(START_HP), subtitle, line, theme).await;
     let mut msg = CreateMessage::new()
@@ -1258,6 +1271,118 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         msg = msg.add_file(CreateAttachment::bytes(png, "champion.png"));
     }
     let _ = arena.send_message(&ctx.http, msg).await;
+}
+
+/// Draws the bracket off the gateway thread and posts it.
+#[allow(clippy::too_many_arguments)]
+async fn post_bracket(
+    ctx: &Context,
+    arena: ChannelId,
+    entrants: &Arc<Vec<Entrant>>,
+    rounds: &[Vec<Slot>],
+    subtitle: String,
+    theme: Theme,
+    caption: &str,
+) {
+    let (entrants, rounds) = (entrants.clone(), rounds.to_vec());
+    let png = tokio::task::spawn_blocking(move || {
+        battle_bracket::bracket_png(&Bracket { entrants: &entrants, rounds: &rounds, subtitle, theme })
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(png) = png else {
+        return;
+    };
+    let msg = CreateMessage::new()
+        .content(caption)
+        .allowed_mentions(CreateAllowedMentions::new())
+        .add_file(CreateAttachment::bytes(png, "bracket.png"));
+    if let Err(err) = call(arena.send_message(&ctx.http, msg)).await {
+        tracing::warn!("battle: bracket not posted: {}", err);
+    }
+}
+
+/// The opening draw for `n` entrants, in the order they were shuffled. The
+/// bracket is the next power of two in size; the spare places are free passes,
+/// spread at random over the first round, each pairing one entrant with nobody.
+/// Free passes are already moved on to round two.
+fn draw_bracket(n: usize, seed: &mut u64) -> Vec<Vec<Slot>> {
+    let size = n.next_power_of_two().max(2);
+    let first = size / 2;
+    let mut bye = vec![false; first];
+    for pass in bye.iter_mut().take(size - n) {
+        *pass = true;
+    }
+    shuffle(&mut bye, seed);
+    let mut next = 0;
+    let opening: Vec<Slot> = bye
+        .iter()
+        .map(|&pass| {
+            let slot = if pass {
+                Slot { a: Some(next), winner: Some(0), bye: true, ..Slot::default() }
+            } else {
+                Slot { a: Some(next), b: Some(next + 1), ..Slot::default() }
+            };
+            next += if pass { 1 } else { 2 };
+            slot
+        })
+        .collect();
+    let mut rounds = vec![opening];
+    while rounds.last().is_some_and(|r| r.len() > 1) {
+        let len = rounds.last().map_or(0, Vec::len) / 2;
+        rounds.push(vec![Slot::default(); len]);
+    }
+    for j in 0..first {
+        if rounds[0][j].bye {
+            advance(&mut rounds, 0, j);
+        }
+    }
+    rounds
+}
+
+/// Moves match `j` of round `r`'s winner into their place in the next round.
+fn advance(rounds: &mut [Vec<Slot>], r: usize, j: usize) {
+    let m = &rounds[r][j];
+    let who = match m.winner {
+        Some(0) => m.a,
+        Some(1) => m.b,
+        _ => None,
+    };
+    if let Some(next) = rounds.get_mut(r + 1).and_then(|round| round.get_mut(j / 2)) {
+        if j % 2 == 0 {
+            next.a = who;
+        } else {
+            next.b = who;
+        }
+    }
+}
+
+/// Whoever won the final, once it has been fought.
+fn champion_of(rounds: &[Vec<Slot>]) -> Option<usize> {
+    let last = rounds.last()?.first()?;
+    match last.winner {
+        Some(0) => last.a,
+        Some(1) => last.b,
+        _ => None,
+    }
+}
+
+/// The stage on a fight card, by how many matches its round has.
+fn stage_title(matches: usize) -> String {
+    match matches {
+        1 => "Final".to_string(),
+        2 => "Semi-final".to_string(),
+        4 => "Quarter-final".to_string(),
+        n => format!("Round of {}", n * 2),
+    }
+}
+
+/// "QUARTER-FINALS" as "Quarter-finals".
+fn title_case(upper: &str) -> String {
+    let lower = upper.to_lowercase();
+    let mut chars = lower.chars();
+    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
 /// The `type` option of /fight and /battle; classic when left out.
@@ -1284,16 +1409,7 @@ pub fn theme_command_option() -> serenity::all::CreateCommandOption {
     option
 }
 
-fn stage_name(left: usize, round: u32) -> String {
-    match left {
-        2 => "Final".to_string(),
-        3..=4 => "Semi-final".to_string(),
-        5..=8 => "Quarter-final".to_string(),
-        _ => format!("Round {}", round),
-    }
-}
-
-fn shuffle(list: &mut [Warrior], seed: &mut u64) {
+fn shuffle<T>(list: &mut [T], seed: &mut u64) {
     for i in (1..list.len()).rev() {
         *seed ^= *seed << 13;
         *seed ^= *seed >> 7;
@@ -1532,10 +1648,51 @@ mod tests {
     fn lines_fill_both_names_and_stages_read_right() {
         let line = fill("{a} ne {b} ko chappal dikhayi", "Ravi", "Sneha");
         assert_eq!(line, "Ravi ne Sneha ko chappal dikhayi");
-        assert_eq!(stage_name(2, 4), "Final");
-        assert_eq!(stage_name(4, 3), "Semi-final");
-        assert_eq!(stage_name(8, 2), "Quarter-final");
-        assert_eq!(stage_name(16, 1), "Round 1");
+        assert_eq!(stage_title(1), "Final");
+        assert_eq!(stage_title(2), "Semi-final");
+        assert_eq!(stage_title(4), "Quarter-final");
+        assert_eq!(stage_title(8), "Round of 16");
+        assert_eq!(title_case("QUARTER-FINALS"), "Quarter-finals");
+    }
+
+    #[test]
+    fn the_draw_seats_everyone_once_and_byes_move_straight_on() {
+        let mut seed = 77u64;
+        for n in MIN_PLAYERS..=MAX_PLAYERS {
+            let rounds = draw_bracket(n, &mut seed);
+            let size = n.next_power_of_two();
+            assert_eq!(rounds[0].len(), size / 2, "{} entrants", n);
+            assert_eq!(rounds.last().map(Vec::len), Some(1));
+            let mut seated: Vec<usize> = rounds[0].iter().flat_map(|m| [m.a, m.b]).flatten().collect();
+            seated.sort_unstable();
+            assert_eq!(seated, (0..n).collect::<Vec<_>>(), "{} entrants", n);
+            let byes = rounds[0].iter().filter(|m| m.bye).count();
+            assert_eq!(byes, size - n);
+            if rounds.len() > 1 {
+                for (j, m) in rounds[0].iter().enumerate() {
+                    let next = &rounds[1][j / 2];
+                    let placed = if j % 2 == 0 { next.a } else { next.b };
+                    assert_eq!(placed, if m.bye { m.a } else { None }, "{} entrants, match {}", n, j);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn winners_climb_the_bracket_to_a_champion() {
+        let mut seed = 3u64;
+        let mut rounds = draw_bracket(11, &mut seed);
+        for r in 0..rounds.len() {
+            for j in 0..rounds[r].len() {
+                if rounds[r][j].bye {
+                    continue;
+                }
+                assert!(rounds[r][j].a.is_some() && rounds[r][j].b.is_some(), "round {} match {} not filled", r, j);
+                rounds[r][j].winner = Some(j % 2);
+                advance(&mut rounds, r, j);
+            }
+        }
+        assert!(champion_of(&rounds).is_some());
     }
 
     #[test]
