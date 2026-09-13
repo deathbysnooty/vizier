@@ -2,11 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.97] - 2026-09-13
+
+### 💼 Other
+
+- Bracket module interface
+- Royale on a fixed bracket draw, posted before each round
+- Draw the royale bracket for 4 to 32 entrants
 ## [0.10.96] - 2026-09-13
 
 ### 💼 Other
 
 - One clash at the start of a 1v1 decides the fight
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.96
 ## [0.10.95] - 2026-09-13
 
 ### 💼 Other
