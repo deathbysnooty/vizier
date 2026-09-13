@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.95] - 2026-09-13
+
+### 💼 Other
+
+- Pay whoever the game bot names, not just the newest message
 ## [0.10.94] - 2026-09-13
 
 ### 💼 Other
@@ -9,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Counter-Strike 2 and Elden Ring fight types (placeholders)
 - English lines for the Counter-Strike 2 and Elden Ring fight types
 - Counter-Strike 2 and Elden Ring fight and champion cards
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.94
 ## [0.10.93] - 2026-09-13
 
 ### 💼 Other
