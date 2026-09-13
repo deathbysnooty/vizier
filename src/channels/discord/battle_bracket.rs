@@ -804,6 +804,10 @@ mod tests {
             _ => Play::Open,
         });
         out.push(("bracket_32_mid.png".into(), e, r, "29 warriors · Round of 16 · ● Yash vs Tara fighting now".into(), Theme::Classic));
+        let (e, r) = tournament(32, &[], |_, _| Play::Open);
+        out.push(("bracket_32_start.png".into(), e, r, "32 warriors · Round of 32".into(), Theme::Classic));
+        let (e, r) = tournament(32, &[], |r, _| if r == 0 { Play::Done } else { Play::Open });
+        out.push(("bracket_32_round2.png".into(), e, r, "32 warriors · Round of 16".into(), Theme::Classic));
         for theme in [Theme::Classic, Theme::Pokemon, Theme::Tarnished] {
             let (e, r) = tournament(16, &[5], |_, _| Play::Done);
             let name = format!("bracket_16_done_{}.png", theme.key());

@@ -63,7 +63,14 @@ const MAX_WAIT: i64 = 15;
 /// Fewer joiners than this and the battle is called off.
 const MIN_PLAYERS: usize = 4;
 /// Discord takes a while over each card, so keep a battle under a few minutes.
-const MAX_PLAYERS: usize = 32;
+/// Rounds with more matches than this are quick rounds: every match decided at
+/// once and posted as a list. From the quarter-finals on, fights play out.
+const FULL_FIGHTS_UP_TO: usize = 4;
+/// The bracket picture covers the draw from the round with this many matches
+/// (the round of 16); anything bigger would be unreadable.
+const CHART_FROM: usize = 8;
+/// Names shown in the lobby before it says how many more joined.
+const LOBBY_NAMES: usize = 40;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 /// Open lobbies, by the lobby message id.
@@ -101,6 +108,8 @@ struct Warrior {
     name: String,
     avatar: Option<Vec<u8>>,
     house: Option<&'static super::house::House>,
+    /// Where their picture is, for fetching it later.
+    face: String,
 }
 
 impl Warrior {
@@ -433,10 +442,30 @@ fn display(member: &Member) -> String {
     if name.chars().count() > 22 { name.chars().take(21).collect::<String>() + "…" } else { name }
 }
 
+/// A member ready to fight, picture included.
 async fn warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
-    let member = guild.member(&ctx.http, UserId::new(user)).await.ok()?;
+    let mut w = warrior_named(ctx, guild, user).await?;
+    w.avatar = picture(&w.face).await;
+    Some(w)
+}
+
+/// A member ready to fight, without their picture yet: a big royale only needs
+/// pictures for the last sixteen.
+async fn warrior_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
+    // The cache guard is let go before any await.
+    let cached = ctx.cache.guild(guild).and_then(|g| g.members.get(&UserId::new(user)).cloned());
+    let member = match cached {
+        Some(m) => m,
+        None => guild.member(&ctx.http, UserId::new(user)).await.ok()?,
+    };
     let face = member.face().replace("size=1024", "size=256");
-    let avatar = reqwest::Client::builder()
+    // Stepped-out members fight without a badge, as they asked to be left out.
+    let house = if super::house::opted_out(user) { None } else { super::house::house_of(user) };
+    Some(Warrior { id: user, name: display(&member), avatar: None, house, face })
+}
+
+async fn picture(face: &str) -> Option<Vec<u8>> {
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?
@@ -447,10 +476,7 @@ async fn warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
         .bytes()
         .await
         .ok()
-        .map(|b| b.to_vec());
-    // Stepped-out members fight without a badge, as they asked to be left out.
-    let house = if super::house::opted_out(user) { None } else { super::house::house_of(user) };
-    Some(Warrior { id: user, name: display(&member), avatar, house })
+        .map(|b| b.to_vec())
 }
 
 /// Drawing a card is CPU work, so it never runs on the gateway thread.
@@ -1166,7 +1192,11 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
     let list = if names.is_empty() {
         "Nobody yet. Who's first?".to_string()
     } else {
-        names.iter().map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n")
+        let mut list = names.iter().take(LOBBY_NAMES).map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n");
+        if names.len() > LOBBY_NAMES {
+            list.push_str(&format!("\n…and **{}** more", names.len() - LOBBY_NAMES));
+        }
+        list
     };
     CreateEmbed::new()
         .title(match theme {
@@ -1192,8 +1222,8 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
 async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>, theme: Theme) {
     let mut seed = Utc::now().timestamp_millis() as u64 | 1;
     let mut fighters: Vec<Warrior> = Vec::new();
-    for id in joined.into_iter().take(MAX_PLAYERS) {
-        if let Some(w) = warrior(ctx, guild, id).await {
+    for id in joined {
+        if let Some(w) = warrior_named(ctx, guild, id).await {
             fighters.push(w);
         }
     }
@@ -1203,46 +1233,78 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     }
     shuffle(&mut fighters, &mut seed);
     let started = fighters.len();
-    let entrants: Arc<Vec<Entrant>> = Arc::new(
-        fighters.iter().map(|w| Entrant { name: w.name.clone(), avatar: w.avatar.clone(), house: w.house }).collect(),
-    );
     let mut rounds = draw_bracket(started, &mut seed);
     let total = rounds.len();
+    // The chart starts at the first round small enough to draw.
+    let chart_start = rounds.iter().position(|round| round.len() <= CHART_FROM).unwrap_or(0);
+    let mut entrants: Option<Arc<Vec<Entrant>>> = None;
     // The final's loser is the runner-up.
     let mut runner_up: Option<u64> = None;
     for r in 0..total {
         let matches = rounds[r].len();
-        let title = round_title(matches);
-        let subtitle = format!("{} warriors · {}", started, title_case(&title));
-        post_bracket(ctx, arena, &entrants, &rounds, subtitle, theme, &format!("🗺️ **{}**: here's the bracket", title_case(&title)))
-            .await;
-        let passes: Vec<&str> =
-            rounds[r].iter().filter(|m| m.bye).filter_map(|m| m.a).map(|i| fighters[i].name.as_str()).collect();
-        if !passes.is_empty() {
-            let _ = arena
-                .send_message(
-                    &ctx.http,
-                    CreateMessage::new()
-                        .content(format!("☕ Free pass to the next round: {}", passes.join(", ")))
-                        .allowed_mentions(CreateAllowedMentions::new()),
-                )
-                .await;
+        let title = title_case(&round_title(matches));
+        if r >= chart_start {
+            if entrants.is_none() {
+                // Pictures for whoever is still in, fetched once.
+                let still_in: Vec<usize> = rounds[r].iter().flat_map(|m| [m.a, m.b]).flatten().collect();
+                for i in still_in {
+                    if fighters[i].avatar.is_none() {
+                        fighters[i].avatar = picture(&fighters[i].face).await;
+                    }
+                }
+                entrants = Some(Arc::new(
+                    fighters
+                        .iter()
+                        .map(|w| Entrant { name: w.name.clone(), avatar: w.avatar.clone(), house: w.house })
+                        .collect(),
+                ));
+            }
+            if let Some(entrants) = &entrants {
+                let subtitle = format!("{} warriors · {}", started, title);
+                let caption = format!("🗺️ **{}**: here's the bracket", title);
+                post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, theme, &caption).await;
+            }
+        }
+        if r == 0 {
+            let passes: Vec<String> = rounds[0].iter().filter(|m| m.bye).filter_map(|m| m.a).map(|i| tag(&fighters[i])).collect();
+            if !passes.is_empty() {
+                say_chunks(ctx, arena, &format!("☕ **Free pass to the next round** ({})", passes.len()), &passes, ", ").await;
+            }
         }
         tokio::time::sleep(FIGHT_GAP).await;
-        let stage = stage_title(matches);
-        for j in 0..matches {
-            let (Some(ai), Some(bi), false) = (rounds[r][j].a, rounds[r][j].b, rounds[r][j].bye) else {
-                continue;
-            };
-            let (a, b) = (&fighters[ai], &fighters[bi]);
-            let (winner, hp) = play(ctx, arena, &stage, a, b, &mut seed, theme, false).await;
-            let (side, loser) = if winner.id == a.id { (0, b.id) } else { (1, a.id) };
-            record("battle", winner.id, Some(loser));
-            runner_up = Some(loser);
-            rounds[r][j].winner = Some(side);
-            rounds[r][j].hp = Some(hp);
-            advance(&mut rounds, r, j);
-            tokio::time::sleep(FIGHT_GAP).await;
+
+        if matches > FULL_FIGHTS_UP_TO {
+            // A quick round: every match settled at once, posted as a list.
+            let mut results = Vec::new();
+            for j in 0..matches {
+                let (Some(ai), Some(bi), false) = (rounds[r][j].a, rounds[r][j].b, rounds[r][j].bye) else {
+                    continue;
+                };
+                let (side, hp) = quick_result(&mut seed);
+                let (winner, loser) = if side == 0 { (ai, bi) } else { (bi, ai) };
+                record("battle", fighters[winner].id, Some(fighters[loser].id));
+                rounds[r][j].winner = Some(side);
+                rounds[r][j].hp = Some(hp);
+                advance(&mut rounds, r, j);
+                results.push(format!("{} beat {} · {} HP", tag_bold(&fighters[winner]), tag(&fighters[loser]), hp));
+            }
+            let head = format!("⚡ **{}** · quick round · {} fights", title, results.len());
+            say_chunks(ctx, arena, &head, &results, "\n").await;
+        } else {
+            let stage = stage_title(matches);
+            for j in 0..matches {
+                let (Some(ai), Some(bi), false) = (rounds[r][j].a, rounds[r][j].b, rounds[r][j].bye) else {
+                    continue;
+                };
+                let (winner, hp) = play(ctx, arena, &stage, &fighters[ai], &fighters[bi], &mut seed, theme, false).await;
+                let (side, loser) = if winner.id == fighters[ai].id { (0, fighters[bi].id) } else { (1, fighters[ai].id) };
+                record("battle", winner.id, Some(loser));
+                runner_up = Some(loser);
+                rounds[r][j].winner = Some(side);
+                rounds[r][j].hp = Some(hp);
+                advance(&mut rounds, r, j);
+                tokio::time::sleep(FIGHT_GAP).await;
+            }
         }
         if r + 1 < total {
             tokio::time::sleep(ROUND_GAP).await;
@@ -1252,8 +1314,10 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     let Some(champion) = champion_of(&rounds).map(|i| fighters[i].clone()) else {
         return;
     };
-    let subtitle = format!("{} warriors · {} rounds · 👑 {}", started, total, champion.name);
-    post_bracket(ctx, arena, &entrants, &rounds, subtitle, theme, "🗺️ **The final bracket**").await;
+    if let Some(entrants) = &entrants {
+        let subtitle = format!("{} warriors · {} rounds · 👑 {}", started, total, champion.name);
+        post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, theme, "🗺️ **The final bracket**").await;
+    }
     record("champion", champion.id, None);
     award_royale(champion.id, runner_up);
     let won = crowns(champion.id);
@@ -1271,6 +1335,70 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         msg = msg.add_file(CreateAttachment::bytes(png, "champion.png"));
     }
     let _ = arena.send_message(&ctx.http, msg).await;
+}
+
+/// A quick-round match: a whole fight rolled out of sight. The side left
+/// healthier wins; a dead level fight is a coin toss. Returns the winning side
+/// and their health left.
+fn quick_result(seed: &mut u64) -> (usize, i32) {
+    let (_, hp) = roll_fight(seed);
+    let side = match hp[0].cmp(&hp[1]) {
+        std::cmp::Ordering::Greater => 0,
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Equal => roll(seed, 2) as usize,
+    };
+    (side, hp[side].max(1))
+}
+
+/// A name as it goes in a list: house crest first, markdown taken out.
+fn tag(w: &Warrior) -> String {
+    let crest = w.house.map(|h| format!("{} ", h.crest)).unwrap_or_default();
+    format!("{}{}", crest, plain(&w.name))
+}
+
+fn tag_bold(w: &Warrior) -> String {
+    let crest = w.house.map(|h| format!("{} ", h.crest)).unwrap_or_default();
+    format!("{}**{}**", crest, plain(&w.name))
+}
+
+/// A display name with the characters Discord would read as formatting removed.
+fn plain(name: &str) -> String {
+    name.chars().filter(|c| !matches!(c, '*' | '_' | '~' | '`' | '|' | '>')).collect()
+}
+
+/// Posts a heading and a list, split across messages so none passes Discord's
+/// 2000 characters.
+async fn say_chunks(ctx: &Context, arena: ChannelId, head: &str, items: &[String], sep: &str) {
+    for chunk in chunk_list(head, items, sep, 1900) {
+        let msg = CreateMessage::new().content(chunk).allowed_mentions(CreateAllowedMentions::new());
+        if let Err(err) = call(arena.send_message(&ctx.http, msg)).await {
+            tracing::warn!("battle: list not posted: {}", err);
+        }
+    }
+}
+
+/// The heading and items as messages of at most `limit` characters, the heading
+/// on the first.
+fn chunk_list(head: &str, items: &[String], sep: &str, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = head.to_string();
+    let mut first_item = true;
+    for item in items {
+        let item: String = item.chars().take(limit / 2).collect();
+        let joiner = if first_item { "\n" } else { sep };
+        if current.chars().count() + joiner.chars().count() + item.chars().count() > limit {
+            out.push(std::mem::take(&mut current));
+            current = item;
+        } else {
+            current.push_str(joiner);
+            current.push_str(&item);
+        }
+        first_item = false;
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 /// Draws the bracket off the gateway thread and posts it.
@@ -1587,7 +1715,6 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
             None => ("closed", Vec::new(), 0, 0, Theme::Classic),
             Some(lobby) if !lobby.open => ("closed", Vec::new(), lobby.ends, lobby.minutes, lobby.theme),
             Some(lobby) if lobby.joined.contains(&user) => ("already", roster(lobby), lobby.ends, lobby.minutes, lobby.theme),
-            Some(lobby) if lobby.joined.len() >= MAX_PLAYERS => ("full", Vec::new(), lobby.ends, lobby.minutes, lobby.theme),
             Some(lobby) => {
                 lobby.joined.push(user);
                 lobby.names.insert(user, name);
@@ -1604,9 +1731,6 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         }
         "already" => {
             let _ = component.create_response(&ctx.http, whisper("You are already in.")).await;
-        }
-        "full" => {
-            let _ = component.create_response(&ctx.http, whisper("The lobby is full.")).await;
         }
         _ => {
             let _ = component.create_response(&ctx.http, whisper("That battle is closed.")).await;
@@ -1658,7 +1782,7 @@ mod tests {
     #[test]
     fn the_draw_seats_everyone_once_and_byes_move_straight_on() {
         let mut seed = 77u64;
-        for n in MIN_PLAYERS..=MAX_PLAYERS {
+        for n in (MIN_PLAYERS..=40).chain([63, 64, 65, 200]) {
             let rounds = draw_bracket(n, &mut seed);
             let size = n.next_power_of_two();
             assert_eq!(rounds[0].len(), size / 2, "{} entrants", n);
@@ -1676,6 +1800,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn long_lists_split_under_the_limit_and_keep_every_item() {
+        let items: Vec<String> = (0..300).map(|i| format!("🦁 **Fighter{}** beat 🦅 Other{} · 42 HP", i, i)).collect();
+        let parts = chunk_list("⚡ **Round of 512** · quick round · 300 fights", &items, "\n", 1900);
+        assert!(parts.len() > 1);
+        assert!(parts.iter().all(|p| p.chars().count() <= 1900));
+        let joined = parts.join("\n");
+        for item in &items {
+            assert!(joined.contains(item.as_str()), "lost {}", item);
+        }
+        assert!(parts[0].starts_with("⚡"));
+    }
+
+    #[test]
+    fn a_quick_result_names_a_side_with_health_left() {
+        let mut seed = 9u64;
+        let mut left = 0;
+        for _ in 0..2000 {
+            let (side, hp) = quick_result(&mut seed);
+            assert!(side < 2 && (1..=START_HP).contains(&hp));
+            left += (side == 0) as usize;
+        }
+        assert!((850..1150).contains(&left), "left won {} of 2000", left);
     }
 
     #[test]
@@ -1842,7 +1991,7 @@ mod tests {
 
     #[test]
     fn fight_text_shows_both_bars_and_only_the_last_few_lines() {
-        let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None, house: None };
+        let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None, house: None, face: String::new() };
         let (a, b) = (warrior(1, "Ravi"), warrior(2, "Sneha"));
         let log: Vec<String> = (1..=6).map(|i| format!("line {}", i)).collect();
         let text = fight_text("head", &log, &a, &b, &[62, 0]);
@@ -1857,7 +2006,7 @@ mod tests {
     fn shuffle_keeps_everyone_and_pairs_leave_one_out_when_odd() {
         let warriors = |n: usize| {
             (0..n)
-                .map(|i| Warrior { id: i as u64, name: format!("w{}", i), avatar: None, house: None })
+                .map(|i| Warrior { id: i as u64, name: format!("w{}", i), avatar: None, house: None, face: String::new() })
                 .collect::<Vec<_>>()
         };
         let mut list = warriors(9);
