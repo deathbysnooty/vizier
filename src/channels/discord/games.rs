@@ -56,6 +56,30 @@ static PUZZLES: LazyLock<Mutex<HashMap<u64, String>>> = LazyLock::new(|| Mutex::
 /// skipped without a fetch or a trip to the ledger.
 static KOTO_DONE: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// Where Koto is played; only used to log edits whose author didn't come along.
+const KOTO_CHANNEL: u64 = 1_543_493_815_644_590_180;
+
+fn clip(text: &str) -> String {
+    text.chars().take(400).collect()
+}
+
+/// A Koto card's shape for the log, until its format is confirmed from a live game.
+fn describe_embeds(embeds: &[Embed]) -> String {
+    let parts: Vec<String> = embeds
+        .iter()
+        .map(|e| {
+            format!(
+                "[title={:?} desc={:?} fields={:?} footer={:?}]",
+                e.title.as_deref().map(clip),
+                e.description.as_deref().map(clip),
+                e.fields.iter().map(|f| format!("{}={}", clip(&f.name), clip(&f.value))).collect::<Vec<_>>(),
+                e.footer.as_ref().map(|f| clip(&f.text))
+            )
+        })
+        .collect();
+    format!("embeds={} {}", embeds.len(), parts.join(" "))
+}
+
 fn snowflake_ms(id: u64) -> u64 {
     (id >> 22) + DISCORD_EPOCH_MS
 }
@@ -73,6 +97,13 @@ pub fn on_message(_ctx: &Context, msg: &Message) {
     }
     match msg.author.id.get() {
         KOTO_BOT => {
+            tracing::info!(
+                "games: koto post {} content={:?} components={} {}",
+                msg.id,
+                clip(&msg.content),
+                msg.components.len(),
+                describe_embeds(&msg.embeds)
+            );
             // Normally Koto edits its card to the win, but a card could arrive
             // already finished.
             if let Ok(win) = parse_koto(&msg.embeds) {
@@ -100,6 +131,15 @@ pub fn on_message_update(ctx: &Context, event: &MessageUpdateEvent) {
     // An update can come without its embeds. Without them and without an
     // author there is nothing to go on; a card that is Koto's is fetched.
     let embeds = event.embeds.clone();
+    if author == Some(KOTO_BOT) || event.channel_id.get() == KOTO_CHANNEL {
+        tracing::info!(
+            "games: koto edit {} author={:?} content={:?} {}",
+            event.id,
+            author,
+            event.content.as_deref().map(clip),
+            embeds.as_deref().map_or_else(|| "embeds=absent".to_string(), describe_embeds)
+        );
+    }
     if embeds.is_none() && author.is_none() {
         return;
     }
