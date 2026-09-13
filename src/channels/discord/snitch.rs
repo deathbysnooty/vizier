@@ -728,6 +728,7 @@ pub fn spawn(ctx: Context) {
         return;
     }
     recover(&ctx);
+    drop_once(&ctx);
     match channels() {
         Some(channels) => {
             tracing::info!("snitch: dropping into {:?}", channels);
@@ -735,6 +736,32 @@ pub fn spawn(ctx: Context) {
         }
         None => tracing::info!("snitch: VIZIER_SNITCH_CHANNELS not set, no scheduled drops"),
     }
+}
+
+/// A one-off drop asked for from outside the bot: a channel id stored under the
+/// `drop_once` meta key is taken, cleared, and gets a Snitch shortly after start.
+/// Like `/snitchdrop`, it doesn't use up a scheduled drop.
+fn drop_once(ctx: &Context) {
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let channel = {
+        let conn = db.lock();
+        let value: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = 'drop_once'", [], |r| r.get(0)).optional().ok().flatten();
+        let _ = conn.execute("DELETE FROM meta WHERE key = 'drop_once'", []);
+        value.and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    let Some(channel) = channel else {
+        return;
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let kind = choose_kind(rand::random::<f64>());
+        tracing::info!("snitch: one-off {} drop asked for in {}", kind.key(), channel);
+        let _ = release(&ctx, ChannelId::new(channel), kind).await;
+    });
 }
 
 /// Cards left live by a restart. One past its two minutes flies away now; one

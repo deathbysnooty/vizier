@@ -63,7 +63,7 @@ fn clip(text: &str) -> String {
     text.chars().take(400).collect()
 }
 
-/// A Koto card's shape for the log, until its format is confirmed from a live game.
+/// A Koto card's shape, for debug logs should its format change again.
 fn describe_embeds(embeds: &[Embed]) -> String {
     let parts: Vec<String> = embeds
         .iter()
@@ -97,7 +97,7 @@ pub fn on_message(_ctx: &Context, msg: &Message) {
     }
     match msg.author.id.get() {
         KOTO_BOT => {
-            tracing::info!(
+            tracing::debug!(
                 "games: koto post {} content={:?} components={} {}",
                 msg.id,
                 clip(&msg.content),
@@ -132,7 +132,7 @@ pub fn on_message_update(ctx: &Context, event: &MessageUpdateEvent) {
     // author there is nothing to go on; a card that is Koto's is fetched.
     let embeds = event.embeds.clone();
     if author == Some(KOTO_BOT) || event.channel_id.get() == KOTO_CHANNEL {
-        tracing::info!(
+        tracing::debug!(
             "games: koto edit {} author={:?} content={:?} {}",
             event.id,
             author,
