@@ -87,7 +87,7 @@ fn snowflake_ms(id: u64) -> u64 {
 /// Every message the bot sees, in every channel. Notes humans, and spots the
 /// Koto, Anagram and Cat Bot lines that pay out. Never awaits and never
 /// consumes the message: anything slow is spawned.
-pub fn on_message(_ctx: &Context, msg: &Message) {
+pub fn on_message(ctx: &Context, msg: &Message) {
     if msg.guild_id.is_none() {
         return;
     }
@@ -110,8 +110,8 @@ pub fn on_message(_ctx: &Context, msg: &Message) {
                 pay_koto(msg.channel_id, win);
             }
         }
-        ANAGRAM_BOT => on_anagram(msg),
-        CAT_BOT => on_cat(msg),
+        ANAGRAM_BOT => on_anagram(ctx, msg),
+        CAT_BOT => on_cat(ctx, msg),
         _ => {}
     }
 }
@@ -187,6 +187,7 @@ fn note_human(msg: &Message) {
         user: msg.author.id.get(),
         names: std::iter::once(msg.author.name.to_lowercase())
             .chain(msg.author.global_name.as_deref().map(str::to_lowercase))
+            .chain(msg.member.as_ref().and_then(|m| m.nick.as_deref()).map(str::to_lowercase))
             .collect(),
         text: if text.chars().count() <= 40 { text.to_lowercase() } else { String::new() },
     };
@@ -253,17 +254,45 @@ fn unescape(name: &str) -> String {
     out
 }
 
-fn check_name(game: &str, printed: &str, solver: &Seen) {
+/// Who to pay for a bot's line. The name the bot printed wins over timing: the
+/// newest message before it is often somebody else chatting. In order: the
+/// timing pick if its names match, anyone in the channel's recent messages who
+/// matches, one server member who matches, and only when the bot printed no
+/// name at all, the timing pick. A name nobody matches pays no one, rather than
+/// the wrong person.
+fn resolve_solver(ctx: &Context, msg: &Message, game: &str, printed: &str, picked: Option<&Seen>, seen: &[Seen]) -> Option<u64> {
     let printed = unescape(printed).trim().to_lowercase();
-    if !printed.is_empty() && !solver.names.iter().any(|n| *n == printed) {
+    if printed.is_empty() {
+        return picked.map(|s| s.user);
+    }
+    if let Some(s) = picked.filter(|s| s.names.contains(&printed)) {
+        return Some(s.user);
+    }
+    let line = msg.id.get();
+    if let Some(s) = seen.iter().filter(|s| s.id < line && s.names.contains(&printed)).max_by_key(|s| s.id) {
+        return Some(s.user);
+    }
+    let member = msg.guild_id.and_then(|g| ctx.cache.guild(g)).and_then(|guild| {
+        let mut found = guild.members.values().filter(|m| {
+            !m.user.bot
+                && (m.user.name.to_lowercase() == printed
+                    || m.user.global_name.as_deref().is_some_and(|n| n.to_lowercase() == printed)
+                    || m.nick.as_deref().is_some_and(|n| n.to_lowercase() == printed))
+        });
+        match (found.next(), found.next()) {
+            (Some(one), None) => Some(one.user.id.get()),
+            _ => None,
+        }
+    });
+    if member.is_none() {
         tracing::warn!(
-            "games: {} line names {:?} but the message before it was {} ({:?}) - paying them anyway",
+            "games: {} line names {:?}, nobody matches (newest message was {:?}) - not paid",
             game,
             printed,
-            solver.user,
-            solver.names
+            picked.map(|s| (s.user, &s.names))
         );
     }
+    member
 }
 
 fn replied_to(msg: &Message) -> Option<u64> {
@@ -420,7 +449,7 @@ fn sorted_letters(word: &str) -> String {
     letters.into_iter().collect()
 }
 
-fn on_anagram(msg: &Message) {
+fn on_anagram(ctx: &Context, msg: &Message) {
     let channel = msg.channel_id.get();
     match parse_anagram(&all_text(msg)) {
         Some(AnagramLine::Puzzle(letters)) => {
@@ -435,13 +464,12 @@ fn on_anagram(msg: &Message) {
             // A guess that spells the puzzle's letters is the strongest sign of
             // who won; without a known puzzle, the newest human it is.
             let spells = |s: &Seen| letters.as_deref().is_some_and(|l| !l.is_empty() && sorted_letters(&s.text) == l);
-            let Some(solver) = pick_solver(&seen, msg.id.get(), replied_to(msg), spells) else {
-                tracing::warn!("games: anagram solved in {} but no fresh human message before it", msg.channel_id);
+            let picked = pick_solver(&seen, msg.id.get(), replied_to(msg), spells);
+            let Some(solver) = resolve_solver(ctx, msg, "anagram", &name, picked, &seen) else {
                 return;
             };
-            check_name("anagram", &name, solver);
             pay(
-                solver.user,
+                solver,
                 Source::Anagram,
                 ANAGRAM_WIN,
                 "solved an anagram".to_string(),
@@ -496,18 +524,17 @@ fn cat_points(kind: &str) -> i64 {
     }
 }
 
-fn on_cat(msg: &Message) {
+fn on_cat(ctx: &Context, msg: &Message) {
     let Some(catch) = parse_cat(&all_text(msg)) else { return };
     let seen = recent_humans(msg.channel_id);
     let typed_cat = |s: &Seen| s.text == "cat";
-    let Some(solver) = pick_solver(&seen, msg.id.get(), replied_to(msg), typed_cat) else {
-        tracing::warn!("games: cat caught in {} but no fresh human message before it", msg.channel_id);
+    let picked = pick_solver(&seen, msg.id.get(), replied_to(msg), typed_cat);
+    let Some(solver) = resolve_solver(ctx, msg, "cat", &catch.name, picked, &seen) else {
         return;
     };
-    check_name("cat", &catch.name, solver);
     let label = if catch.kind.is_empty() { "a cat".to_string() } else { format!("a {} cat", catch.kind) };
     let key = format!("cat:{}", msg.id.get());
-    pay(solver.user, Source::Cat, cat_points(&catch.kind), format!("caught {}", label), key);
+    pay(solver, Source::Cat, cat_points(&catch.kind), format!("caught {}", label), key);
 }
 
 #[cfg(test)]
