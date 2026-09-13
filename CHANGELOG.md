@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.96] - 2026-09-13
+
+### 💼 Other
+
+- One clash at the start of a 1v1 decides the fight
 ## [0.10.95] - 2026-09-13
 
 ### 💼 Other
 
 - Pay whoever the game bot names, not just the newest message
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.95
 ## [0.10.94] - 2026-09-13
 
 ### 💼 Other

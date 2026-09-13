@@ -1,6 +1,6 @@
 [package]
 name = "vizier-derive"
-version = "0.10.95"
+version = "0.10.96"
 edition = "2021"
 description = "Derive macros for vizier"
 license = "MIT"
