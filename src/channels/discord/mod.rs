@@ -30,6 +30,7 @@ use crate::utils::remove_think_tags;
 mod awards;
 mod battle;
 mod battle_bracket;
+pub(crate) mod control;
 mod battle_card;
 mod battle_theme;
 mod house;
@@ -79,6 +80,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = house::open(&self.deps.config.workspace) {
             tracing::warn!("house: store not opened: {}", err);
+        }
+        if let Err(err) = control::open(&self.deps.config.workspace) {
+            tracing::warn!("control: store not opened: {}", err);
         }
         if let Err(err) = snitch::open(&self.deps.config.workspace) {
             tracing::warn!("snitch: store not opened: {}", err);
