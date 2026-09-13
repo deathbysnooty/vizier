@@ -2,12 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.91] - 2026-09-13
+
+### 💼 Other
+
+- A Cat Bot line about anyone names no catcher
+- One-off drop on start; games: Koto card shapes back to debug
 ## [0.10.90] - 2026-09-13
 
 ### 💼 Other
 
 - Log Koto card shapes to confirm the live format
 - An uncaught Snitch gets a second chance 20-40 minutes later
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.90
 ## [0.10.89] - 2026-09-13
 
 ### 🚀 Features
