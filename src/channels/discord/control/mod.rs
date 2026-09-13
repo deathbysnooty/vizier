@@ -153,6 +153,17 @@ pub fn set(key: &str, value: Option<&str>, by: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Writes one change to the audit trail without saving a setting - for things
+/// kept elsewhere, like the bot's AI settings (`agent:<field>`).
+pub fn log_change(key: &str, old: Option<&str>, new: Option<&str>, by: u64) -> anyhow::Result<()> {
+    let db = DB.get().ok_or_else(|| anyhow::anyhow!("control store not open"))?;
+    db.lock().execute(
+        "INSERT INTO audit (ts, user_id, key, old, new) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![Utc::now().timestamp(), by as i64, key, old, new],
+    )?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct AuditEntry {
     pub ts: i64,

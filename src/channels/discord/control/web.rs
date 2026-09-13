@@ -110,7 +110,39 @@ pub trait PanelData: Send + Sync + 'static {
     fn admins(&self) -> Vec<u64>;
     /// Ends the process shortly after the response has gone; systemd starts it again.
     fn restart(&self);
+    /// The server's custom emoji.
+    fn emojis(&self) -> Vec<EmojiInfo> {
+        Vec::new()
+    }
+    /// A member from the cache only: for pages that name many people and must
+    /// not call Discord for each.
+    fn cached_member(&self, _id: u64) -> Option<MemberInfo> {
+        None
+    }
+    /// The house points standings for a period (`houses::Period`), at `now`.
+    fn house_cup(&self, _period: houses::Period, _now: i64) -> Option<houses::HouseCup> {
+        None
+    }
+    /// The AI agent's tone and limits, or none when the agent isn't reachable.
+    async fn agent_settings(&self) -> Option<agent::AgentSettings> {
+        None
+    }
+    async fn save_agent_settings(&self, _settings: &agent::AgentSettings) -> anyhow::Result<()> {
+        anyhow::bail!("the agent isn't reachable")
+    }
 }
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EmojiInfo {
+    pub id: String,
+    pub name: String,
+    pub animated: bool,
+    pub url: String,
+}
+
+mod agent;
+mod houses;
+mod rules;
 
 // --- the live implementation ------------------------------------------------------
 
@@ -236,11 +268,85 @@ impl PanelData for LiveData {
             std::process::exit(0);
         });
     }
+
+    fn emojis(&self) -> Vec<EmojiInfo> {
+        let Some(ctx) = CTX.get() else { return Vec::new() };
+        let Some(g) = guild_id(ctx).and_then(|id| ctx.cache.guild(id)) else { return Vec::new() };
+        let mut list: Vec<EmojiInfo> = g
+            .emojis
+            .values()
+            .filter(|e| e.available)
+            .map(|e| EmojiInfo { id: e.id.get().to_string(), name: e.name.clone(), animated: e.animated, url: e.url() })
+            .collect();
+        list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        list
+    }
+
+    fn cached_member(&self, id: u64) -> Option<MemberInfo> {
+        let ctx = CTX.get()?;
+        let g = ctx.cache.guild(guild_id(ctx)?)?;
+        g.members.get(&UserId::new(id)).map(member_info)
+    }
+
+    fn house_cup(&self, period: houses::Period, now: i64) -> Option<houses::HouseCup> {
+        houses::read_live(period, now)
+    }
+
+    async fn agent_settings(&self) -> Option<agent::AgentSettings> {
+        use crate::storage::agent::AgentStorage;
+        let (deps, agent_id) = AGENT.get()?;
+        let config = deps.storage.get_agent(agent_id).await.ok().flatten()?;
+        let core = deps
+            .storage
+            .get_agent_core(agent_id)
+            .await
+            .ok()
+            .flatten()
+            .or(config.core.clone())
+            .unwrap_or_else(|| crate::constant::CORE_MD.to_string());
+        Some(agent::AgentSettings {
+            name: config.name,
+            description: config.description.unwrap_or_default(),
+            system_prompt: config.system_prompt.unwrap_or_default(),
+            core,
+            model: config.model,
+            thinking_depth: config.thinking_depth,
+            silent_read_initiative_chance: config.silent_read_initiative_chance,
+            max_tokens: config.max_tokens,
+        })
+    }
+
+    async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
+        use crate::storage::agent::AgentStorage;
+        let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+        // Read fresh and change only these fields: everything else in the
+        // config (provider, tokens, tools, owner) stays exactly as stored.
+        let mut config =
+            deps.storage.get_agent(agent_id).await?.ok_or_else(|| anyhow::anyhow!("agent {} not found", agent_id))?;
+        let blank = |v: &str| (!v.trim().is_empty()).then(|| v.to_string());
+        config.name = s.name.clone();
+        config.description = blank(&s.description);
+        config.system_prompt = blank(&s.system_prompt);
+        config.model = s.model.clone();
+        config.thinking_depth = s.thinking_depth;
+        config.silent_read_initiative_chance = s.silent_read_initiative_chance;
+        config.max_tokens = s.max_tokens;
+        deps.storage.update_agent(agent_id, &config).await?;
+        let stored_core = deps.storage.get_agent_core(agent_id).await.ok().flatten();
+        if stored_core.as_deref() != Some(s.core.as_str()) {
+            deps.storage.set_agent_core(agent_id, &s.core).await?;
+        }
+        Ok(())
+    }
 }
+
+/// The agent's dependencies and id, for the Bot behaviour page.
+static AGENT: OnceLock<(crate::dependencies::VizierDependencies, String)> = OnceLock::new();
 
 /// Starts the panel once per process and (re)registers `/panel`. Called from
 /// `ready`, which fires again on every reconnect.
-pub fn start(ctx: &Context) {
+pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agent_id: &str) {
+    let _ = AGENT.set((deps.clone(), agent_id.to_string()));
     let http = ctx.http.clone();
     tokio::spawn(async move {
         let _ = serenity::all::Command::create_global_command(http, command()).await;
@@ -397,6 +503,13 @@ pub fn router(panel: Panel) -> Router {
         .route("/reminders/{id}/toggle", post(toggle_reminder))
         .route("/audit", get(audit))
         .route("/restart", post(restart))
+        .route("/discord/emojis", get(emojis))
+        .route("/autoreplies", get(rules::list).post(rules::create))
+        .route("/autoreplies/test", post(rules::test))
+        .route("/autoreplies/{id}", get(rules::get).put(rules::update).delete(rules::delete))
+        .route("/autoreplies/{id}/toggle", post(rules::toggle))
+        .route("/houses", get(houses::get))
+        .route("/agent", get(agent::get).put(agent::put))
         .route_layer(middleware::from_fn_with_state(panel.clone(), require_admin))
         .route("/login", post(login))
         .route("/logout", post(logout))
@@ -996,9 +1109,14 @@ struct AuditQuery {
     limit: Option<usize>,
 }
 
-fn reminder_name(body: Option<&str>) -> Option<(String, bool)> {
-    let r: Reminder = serde_json::from_str(body?).ok()?;
-    Some((r.name, r.enabled))
+/// The name and switch of a stored reminder or auto-response body.
+fn rule_name(body: Option<&str>) -> Option<(String, bool)> {
+    let v: Value = serde_json::from_str(body?).ok()?;
+    Some((v.get("name")?.as_str()?.to_string(), v.get("enabled").and_then(Value::as_bool).unwrap_or(true)))
+}
+
+async fn emojis(State(panel): State<Panel>) -> ApiResult {
+    ok(panel.data.emojis())
 }
 
 async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiResult {
@@ -1026,9 +1144,18 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 "key": e.key,
             });
             let mut obj = base.as_object().cloned().unwrap_or_default();
-            if let Some(rid) = e.key.strip_prefix("reminder:") {
-                let old = reminder_name(e.old.as_deref());
-                let new = reminder_name(e.new.as_deref());
+            let rule = e
+                .key
+                .strip_prefix("reminder:")
+                .map(|id| (id, "Reminder", json!({ "id": "reminders", "title": "Reminders", "icon": "⏰" })))
+                .or_else(|| {
+                    e.key.strip_prefix("autoreply:").map(|id| {
+                        (id, "Auto-response", json!({ "id": "autoreplies", "title": "Auto-responses", "icon": "💬" }))
+                    })
+                });
+            if let Some((rid, noun, section)) = rule {
+                let old = rule_name(e.old.as_deref());
+                let new = rule_name(e.new.as_deref());
                 let name = new.as_ref().or(old.as_ref()).map(|n| n.0.clone()).unwrap_or_else(|| format!("#{}", rid));
                 let change = match (&old, &new) {
                     (None, Some(_)) => "Created",
@@ -1036,11 +1163,39 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                     (Some(o), Some(n)) if o.1 != n.1 => if n.1 { "Switched on" } else { "Switched off" },
                     _ => "Edited",
                 };
-                obj.insert("label".into(), json!(format!("Reminder “{}”", name)));
-                obj.insert("section".into(), json!({ "id": "reminders", "title": "Reminders", "icon": "⏰" }));
+                obj.insert("label".into(), json!(format!("{} “{}”", noun, name)));
+                obj.insert("section".into(), section);
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);
+            } else if let Some(field) = e.key.strip_prefix("agent:") {
+                obj.insert("label".into(), json!(agent::label(field)));
+                obj.insert("section".into(), json!({ "id": "agent", "title": "Bot behaviour", "icon": "🤖" }));
+                if matches!(field, "system_prompt" | "core") {
+                    // Long texts: say by how much, not the whole thing.
+                    let len = |v: &Option<String>| v.as_deref().map(|t| t.chars().count()).unwrap_or(0);
+                    obj.insert(
+                        "change".into(),
+                        json!(format!("Edited · {} → {} characters", len(&e.old), len(&e.new))),
+                    );
+                    obj.insert("old".into(), Value::Null);
+                    obj.insert("new".into(), Value::Null);
+                } else {
+                    let shown = |v: &Option<String>| -> Value {
+                        match (field, v.as_deref()) {
+                            ("silent_read_initiative_chance", Some(t)) => {
+                                json!(t.parse::<f64>().map(|n| format!("{}%", (n * 1000.0).round() / 10.0)).unwrap_or(t.to_string()))
+                            }
+                            ("max_tokens", None) => json!("provider default"),
+                            (_, Some(t)) => json!(t),
+                            (_, None) => json!(""),
+                        }
+                    };
+                    obj.insert("kind".into(), json!({ "type": "text" }));
+                    obj.insert("old".into(), shown(&e.old));
+                    obj.insert("new".into(), shown(&e.new));
+                    obj.insert("change".into(), json!("Changed"));
+                }
             } else {
                 let found = sections.iter().find_map(|s| s.settings.iter().find(|x| x.key == e.key).map(|x| (s, x)));
                 match found {

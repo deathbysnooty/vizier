@@ -244,6 +244,29 @@ fn matcher(trigger: &str, mode: Match, case_sensitive: bool) -> Option<Regex> {
     Regex::new(&format!("{}{}", flags, body)).ok()
 }
 
+/// The trigger that would set a rule off for this message, leaving out the
+/// rule's switch, chance and cooldown. With a channel, the rule's channel list
+/// and exclusions apply too. For the panel's "try a message" box.
+pub fn matched_trigger(rule: &AutoReply, text: &str, channel: Option<u64>) -> Option<String> {
+    if text.trim().is_empty() || channel.is_some_and(|c| !in_scope(rule, c, None)) {
+        return None;
+    }
+    rule.triggers
+        .iter()
+        .find(|t| matcher(t, rule.match_mode, rule.case_sensitive).is_some_and(|m| m.is_match(text)))
+        .map(|t| t.trim().to_string())
+}
+
+/// Whether a message would set a rule off (see [`matched_trigger`]).
+pub fn would_match(rule: &AutoReply, text: &str, channel: Option<u64>) -> bool {
+    matched_trigger(rule, text, channel).is_some()
+}
+
+/// Whether a channel is inside a rule's channels and outside its exclusions.
+pub fn applies_in(rule: &AutoReply, channel: u64) -> bool {
+    in_scope(rule, channel, None)
+}
+
 fn compile(rule: AutoReply) -> Compiled {
     let matchers = rule.triggers.iter().filter_map(|t| matcher(t, rule.match_mode, rule.case_sensitive)).collect();
     Compiled { rule, matchers }
@@ -454,6 +477,17 @@ mod tests {
         let mut rule = sample();
         rule.reactions = vec!["fire".into()];
         assert!(validate(&rule).is_err());
+    }
+
+    #[test]
+    fn the_panel_tester_uses_the_same_matching() {
+        let mut rule = sample();
+        rule.channels = vec!["5".into()];
+        assert_eq!(matched_trigger(&rule, "GM everyone", None).as_deref(), Some("gm"));
+        assert!(would_match(&rule, "gm", Some(5)));
+        assert!(!would_match(&rule, "gm", Some(6)), "outside the rule's channels");
+        assert!(!would_match(&rule, "programming", None), "whole word only");
+        assert!(!would_match(&rule, "   ", None));
     }
 
     #[test]

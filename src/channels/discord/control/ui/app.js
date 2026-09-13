@@ -91,6 +91,16 @@
     power: '<path d="M12 3v8M6.4 6.4a8 8 0 1 0 11.2 0"/>',
     eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
     reset: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/>',
+    reply: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v5"/>',
+    zap: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>',
+    bot: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9 17h6"/>',
+    smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
+    target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    flask: '<path d="M9 3h6M10 3v6L4.5 18.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7 15h10"/>',
+    table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/>',
+    chart: '<path d="M4 20V4M4 20h16"/><rect x="7" y="12" width="3" height="5"/><rect x="12" y="8" width="3" height="9"/><rect x="17" y="5" width="3" height="12"/>',
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   };
 
   function icon(name, cls) {
@@ -209,7 +219,7 @@
       let layer;
       const done = (answer) => { wrap.remove(); popLayer(layer); if (before && before.focus) before.focus(); resolve(answer); };
       const yes = h('button', { class: 'btn ' + (opts.danger ? 'danger-solid' : 'primary'), type: 'button', onclick: () => done(true) }, opts.confirm || 'Confirm');
-      const modal = h('div', { class: 'modal', role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
+      const modal = h('div', { class: 'modal' + (opts.wide ? ' wide' : ''), role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
         h('div', { class: 'modal-body' },
           h('h2', { id: titleId }, opts.icon ? icon(opts.icon, opts.danger ? 'danger' : 'warn') : null, opts.title),
           typeof opts.body === 'string' ? h('p', null, opts.body) : h('div', { class: 'body' }, opts.body)),
@@ -346,6 +356,9 @@
     channels: [],
     roles: [],
     reminders: [],
+    rules: [],
+    emojis: null,
+    guard: null, // unsaved-change count for pages outside the settings form
     audit: [],
     members: new Map(),
     restartPending: false,
@@ -375,6 +388,7 @@
       api('GET', '/me'), api('GET', '/status'), api('GET', '/catalog'), api('GET', '/discord/channels'),
       api('GET', '/discord/roles'), api('GET', '/reminders'), api('GET', '/audit?limit=300'),
     ]);
+    S.rules = await api('GET', '/autoreplies').catch(() => []);
     S.me = me;
     S.status = status;
     S.statusAt = Date.now();
@@ -522,16 +536,21 @@
     }
     const nav = h('nav', { class: 'side-nav' });
     nav.appendChild(navItem('#/', icon('overview'), 'Overview'));
+    nav.appendChild(navItem('#/houses', icon('trophy'), 'House Cup', h('span', { class: 'nav-live', 'aria-label': 'live' })));
 
     const pinned = prefs.pins.map(sectionById).filter(Boolean);
     if (pinned.length) nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Pinned'), pinned.map(sectionItem)));
+    const active = S.reminders.filter((r) => r.enabled).length;
+    const activeRules = S.rules.filter((r) => r.enabled).length;
+    const count = (on, all) => (all ? h('span', { class: 'nav-count', 'aria-label': on + ' of ' + all + ' on' }, on + '/' + all) : null);
+    nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Manage'),
+      navItem('#/reminders', icon('bell'), 'Reminders', count(active, S.reminders.length)),
+      navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
+      navItem('#/agent', icon('bot'), 'Bot behaviour'),
+      navItem('#/activity', icon('activity'), 'Activity log'),
+      navItem('#/commands', icon('slash'), 'Commands')));
     const rest = S.sections.filter((s) => !prefs.pins.includes(s.id));
     if (rest.length) nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Features'), rest.map(sectionItem)));
-    const active = S.reminders.filter((r) => r.enabled).length;
-    nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Tools'),
-      navItem('#/reminders', icon('bell'), 'Reminders', S.reminders.length ? h('span', { class: 'nav-count', 'aria-label': active + ' active' }, active + '/' + S.reminders.length) : null),
-      navItem('#/commands', icon('slash'), 'Commands'),
-      navItem('#/activity', icon('activity'), 'Activity log')));
     side.appendChild(nav);
     side.appendChild(h('div', { class: 'side-foot' }, navItem('#/settings', icon('sliders'), 'Panel settings'),
       h('div', { class: 'side-version' }, h('span', null, 'v' + (S.status ? S.status.bot.version : '')), h('span', null, 'India time'))));
@@ -564,6 +583,9 @@
     const pages = [
       ['Overview', '#/', 'overview', 'Status, switches and recent changes'],
       ['Reminders', '#/reminders', 'bell', 'Scheduled messages'],
+      ['Auto-responses', '#/autoreplies', 'reply', 'Answer or react to set words'],
+      ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
+      ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
       ['Activity log', '#/activity', 'activity', 'Who changed what'],
       ['Panel settings', '#/settings', 'sliders', 'Theme, accent, density, pins'],
@@ -575,6 +597,7 @@
       sec.commands.forEach((c) => items.push({ kind: 'Commands', title: '/' + c.name, sub: c.what, href: '#/commands?q=' + encodeURIComponent(c.name), lead: icon('slash'), hint: c.who, hay: c.name + ' ' + c.what + ' ' + c.usage + ' ' + sec.title }));
     });
     S.reminders.forEach((r) => items.push({ kind: 'Reminders', title: r.name, sub: scheduleWords(r.schedule), href: '#/reminders/' + r.id, lead: icon('bell'), hay: r.name + ' ' + r.lines.join(' ') }));
+    S.rules.forEach((r) => items.push({ kind: 'Auto-responses', title: r.name, sub: r.triggers.join(', '), href: '#/autoreplies/' + r.id, lead: icon('reply'), hay: r.name + ' ' + r.triggers.join(' ') + ' ' + r.replies.join(' ') }));
     return items;
   }
 
@@ -604,7 +627,7 @@
     input.addEventListener('input', () => {
       const q = input.value.trim().toLowerCase();
       const words = q.split(/\s+/).filter(Boolean);
-      const order = ['Pages', 'Features', 'Settings', 'Commands', 'Reminders'];
+      const order = ['Pages', 'Features', 'Settings', 'Commands', 'Reminders', 'Auto-responses'];
       found = searchIndex().map((it) => {
         const hay = it.hay.toLowerCase(), title = it.title.toLowerCase();
         if (!words.every((w) => hay.includes(w))) return null;
@@ -652,16 +675,17 @@
 
   function navigate(href) { if (location.hash === href) rerender(); else location.hash = href; }
 
-  function dirtyCount() { return S.fields.filter((f) => f.dirty()).length; }
+  function dirtyCount() { return S.fields.filter((f) => f.dirty()).length + (S.guard ? S.guard() : 0); }
 
   async function onHashChange() {
     if (!S.booted) return;
     const target = location.hash;
-    const leavingSection = currentHash.startsWith('#/s/') && target.split('?')[0] !== currentHash.split('?')[0];
+    const leavingSection = target.split('?')[0] !== currentHash.split('?')[0];
     if (!skipGuard && leavingSection && dirtyCount()) {
       history.replaceState(null, '', currentHash);
       const ok = await confirmDialog({ title: 'Leave without saving?', icon: 'alert', body: plural(dirtyCount(), 'unsaved change') + ' on this page will be lost.', confirm: 'Discard changes', danger: true });
       if (!ok) return;
+      if (S.discard) S.discard();
       skipGuard = true;
       location.hash = target;
       return;
@@ -676,12 +700,18 @@
     const r = route();
     layers.filter((l) => l.popover || l.drawer).forEach((l) => l.close());
     S.fields = [];
+    S.guard = null;
+    S.discard = null;
+    if (agentBar) { agentBar.remove(); agentBar = null; }
     renderSidebar();
     const page = clear(shell.page);
     removeSavebar();
     switch (r.name) {
       case 'section': renderSection(page, r.parts[1], r.q.get('k')); break;
       case 'reminders': renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1]); break;
+      case 'autoreplies': renderRules(page); if (r.parts[1]) openRuleEditor(r.parts[1]); break;
+      case 'houses': renderHouses(page); break;
+      case 'agent': renderAgent(page); break;
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
       case 'settings': renderSettings(page); break;
@@ -923,14 +953,14 @@
   function changeItem(e) {
     const who = e.user_name || 'Someone (' + e.user_id + ')';
     const diff = h('div', { class: 'change-diff' });
-    if (e.key.startsWith('reminder:')) {
-      diff.appendChild(h('span', { class: 'badge' }, e.change));
+    if (!e.kind) {
+      diff.appendChild(h('span', { class: 'badge' }, e.change || 'Changed'));
     } else if (e.section) {
       if (e.change === 'Reset to .env') append(diff, [h('span', { class: 'badge src-env' }, icon('reset'), 'Back to .env')]);
       else append(diff, [oldValue(e), h('span', { class: 'arrow', 'aria-label': 'to' }, '→'), formatValue(e.new, e.kind)]);
     }
     return h('li', { class: 'change' }, avatar(e.user_avatar, who),
-      h('div', { style: 'min-width:0' }, h('div', { class: 'change-line' }, h('b', null, who), ' ', e.key.startsWith('reminder:') ? 'updated ' : 'changed ', h('b', null, e.label), e.section ? h('span', { style: 'color:var(--faint)' }, ' · ' + e.section.title) : null), diff),
+      h('div', { style: 'min-width:0' }, h('div', { class: 'change-line' }, h('b', null, who), ' ', e.kind ? 'changed ' : 'updated ', h('b', null, e.label), e.section ? h('span', { style: 'color:var(--faint)' }, ' · ' + e.section.title) : null), diff),
       h('span', { class: 'change-time', title: fmtFull.format(new Date(e.ts * 1000)) + ' IST' }, ago(e.ts)));
   }
 
@@ -962,6 +992,10 @@
       S.fields.push(f);
       rows.appendChild(f.el);
     });
+    if (sec.id === 'autoreplies') {
+      page.appendChild(h('a', { class: 'banner inline info link-banner', href: '#/autoreplies' }, icon('reply'),
+        h('p', null, h('b', null, 'The rules live on the Auto-responses page. '), h('span', null, plural(S.rules.length, 'rule') + ', ' + S.rules.filter((r) => r.enabled).length + ' switched on.')), icon('right')));
+    }
     page.appendChild(card('set-' + sec.id, 'Settings', sec.settings.length ? plural(sec.settings.length, 'setting') + ' · ' + (live === sec.settings.length ? 'all apply at once' : (sec.settings.length - live) + ' need a restart') : null, rows));
 
     const cmds = h('div', null);
@@ -1309,6 +1343,8 @@
       secSel.appendChild(h('option', { value: '' }, 'All features'));
       S.sections.forEach((s) => secSel.appendChild(h('option', { value: s.id, selected: s.id === section }, s.icon + '  ' + s.title)));
       secSel.appendChild(h('option', { value: 'reminders', selected: section === 'reminders' }, '⏰  Reminders'));
+      if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
+      secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
       clear(keySel);
       keySel.appendChild(h('option', { value: '' }, 'All settings'));
       const sec = sectionById(section);
@@ -1324,8 +1360,7 @@
       rows.forEach((e) => {
         const who = e.user_name || 'Unknown (' + e.user_id + ')';
         let diff;
-        if (e.key.startsWith('reminder:')) diff = h('span', { class: 'badge' }, e.change);
-        else if (!e.section) diff = h('span', { class: 'badge' }, 'Changed');
+        if (!e.kind) diff = h('span', { class: 'badge' }, e.change || 'Changed');
         else if (e.change === 'Reset to .env') diff = h('div', { class: 'diff' }, formatValue(e.old, e.kind), h('span', { class: 'arrow' }, '→'), h('span', { class: 'badge src-env' }, icon('reset'), 'Back to .env'));
         else diff = h('div', { class: 'diff' }, oldValue(e), h('span', { class: 'arrow', 'aria-label': 'to' }, '→'), formatValue(e.new, e.kind));
         tbody.appendChild(h('tr', null,
@@ -1751,6 +1786,879 @@
     };
     draw();
     requestAnimationFrame(() => { const n = body.querySelector('#r-name'); if (n) n.focus({ preventScroll: true }); });
+  }
+
+  // --- drawers ------------------------------------------------------------------------
+
+  /** A side panel editor. `isDirty()` guards closing; returns { body, finish, saveBtn }. */
+  function openDrawer(opts) {
+    const before = document.activeElement;
+    const body = h('div', { class: 'drawer-body' });
+    const saveBtn = h('button', { class: 'btn primary', type: 'button' }, opts.saveLabel || 'Save');
+    const titleId = 'drawer-title';
+    const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
+      h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', { id: titleId }, opts.title), opts.sub ? h('div', { class: 'sub' }, opts.sub) : null),
+        h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Close', onclick: () => attempt() }, icon('x'))),
+      body,
+      h('div', { class: 'drawer-foot' },
+        opts.onDelete ? h('button', { class: 'btn danger', type: 'button', onclick: opts.onDelete }, icon('trash'), 'Delete') : null,
+        h('span', { class: 'grow' }),
+        h('button', { class: 'btn ghost', type: 'button', onclick: () => attempt() }, 'Cancel'),
+        saveBtn));
+    const scrim = h('div', { class: 'scrim', onclick: () => attempt() });
+    const finish = (silent) => {
+      drawer.remove(); scrim.remove(); popLayer(layer);
+      if (!silent && opts.returnHash && location.hash !== opts.returnHash) { history.replaceState(null, '', opts.returnHash); currentHash = opts.returnHash; }
+      if (before && before.isConnected && before.focus) before.focus();
+    };
+    const attempt = async () => {
+      if (opts.isDirty && opts.isDirty()) {
+        const ok = await confirmDialog({ title: 'Discard your changes?', icon: 'alert', body: 'What you changed here has not been saved.', confirm: 'Discard', danger: true });
+        if (!ok) return;
+      }
+      finish();
+    };
+    const layer = pushLayer({ drawer: true, close: () => finish(true), attempt });
+    drawer.addEventListener('keydown', (e) => { if (e.key === 'Tab' && !layers.some((l) => l.popover)) trapFocus(drawer, e); });
+    saveBtn.addEventListener('click', () => opts.onSave(saveBtn));
+    $('#layers').appendChild(scrim);
+    $('#layers').appendChild(drawer);
+    return { body, finish, saveBtn };
+  }
+
+  function discordMsg(author, avatarEl, time, text, extra) {
+    return h('div', { class: 'msg' }, avatarEl,
+      h('div', { style: 'min-width:0' }, extra && extra.replyTo ? h('div', { class: 'msg-ref' }, icon('reply'), h('span', { class: 'mention' }, '@' + extra.replyTo), ' ', h('span', { class: 'msg-ref-text' }, extra.replyText || '')) : null,
+        h('div', { class: 'msg-head' }, h('b', null, author), extra && extra.bot ? h('span', { class: 'msg-bot' }, 'BOT') : null, h('span', { class: 'msg-time' }, time)),
+        h('div', { class: 'msg-text' }, text),
+        extra && extra.reactions && extra.reactions.length ? h('div', { class: 'msg-reactions' }, extra.reactions.map((r) => h('span', { class: 'msg-reaction' }, emojiEl(r), h('b', null, '1')))) : null));
+  }
+
+  // --- auto-responses ------------------------------------------------------------------
+
+  const MATCH_MODES = [
+    ['whole_word', 'Whole word or phrase', 'The trigger on its own, not inside a longer word.', '“hi” matches “hi there”, not “this”'],
+    ['contains', 'Anywhere', 'Anywhere in the message, even inside a longer word.', '“hi” matches “this”'],
+    ['exact', 'The whole message', 'The message is the trigger and nothing else.', '“gm” matches “gm”, not “gm all”'],
+    ['starts_with', 'Starts with', 'The message begins with the trigger.', '“bhai” matches “bhai sun”, not “sun bhai”'],
+    ['pattern', 'Pattern', 'A regular expression, for advanced rules.', '^when.*quiz matches “when is quiz?”'],
+  ];
+  const matchMode = (m) => MATCH_MODES.find((x) => x[0] === m) || MATCH_MODES[0];
+
+  function chanceWords(n) {
+    if (n >= 100) return 'Every time';
+    if (n >= 75) return 'Most of the time';
+    if (n >= 40) return 'About ' + n + '% of the time';
+    if (n >= 15) return 'Now and then (' + n + '%)';
+    return 'Rarely (' + n + '%)';
+  }
+  function cooldownWords(secs) {
+    if (!secs) return 'no cooldown';
+    if (secs % 3600 === 0) return plural(secs / 3600, 'hour') + ' cooldown';
+    if (secs % 60 === 0) return secs / 60 + ' min cooldown';
+    if (secs < 60) return secs + ' sec cooldown';
+    return Math.floor(secs / 60) + ' min ' + (secs % 60) + ' sec cooldown';
+  }
+
+  async function loadEmojis() {
+    if (S.emojis) return S.emojis;
+    try { S.emojis = await api('GET', '/discord/emojis'); } catch (_) { S.emojis = []; }
+    return S.emojis;
+  }
+
+  /** A reaction as written in a rule: unicode, or a custom `<:name:id>` / `name:id`. */
+  function emojiEl(text) {
+    const m = /^<?(a)?:?([A-Za-z0-9_~]+):(\d{5,20})>?$/.exec(String(text).trim());
+    if (!m) return h('span', { class: 'emoji-text' }, text);
+    const known = (S.emojis || []).find((e) => e.id === m[3]);
+    const url = known ? known.url : 'https://cdn.discordapp.com/emojis/' + m[3] + (m[1] ? '.gif' : '.png') + '?size=48';
+    const img = h('img', { class: 'emoji-img', src: url, alt: ':' + m[2] + ':', title: ':' + m[2] + ':', referrerpolicy: 'no-referrer' });
+    img.addEventListener('error', () => img.replaceWith(h('span', { class: 'emoji-text' }, ':' + m[2] + ':')), { once: true });
+    return img;
+  }
+
+  function channelList(ids) {
+    return ids.map((id, i) => [i ? ', ' : '', channelRef(id)]);
+  }
+
+  function masterSwitchBanner() {
+    const sec = sectionById('autoreplies');
+    const setting = sec && sec.settings.find((x) => x.key === 'VIZIER_AUTOREPLIES');
+    if (!setting) return null;
+    const on = isOn(baseline(setting));
+    const el = h('div', { class: 'master ' + (on ? 'is-on' : 'is-off') });
+    const sw = switchEl(on, 'All auto-responses', async (next, btn) => {
+      if (!next) {
+        const ok = await confirmDialog({ title: 'Pause every auto-response?', icon: 'alert', body: 'No rule fires until this is switched back on. Nothing is deleted.', confirm: 'Pause all', danger: true });
+        if (!ok) return;
+      }
+      btn.disabled = true;
+      try {
+        const updated = await api('PUT', '/settings/VIZIER_AUTOREPLIES', { value: next ? 'on' : 'off' });
+        replaceSetting(updated);
+        toast(next ? 'Auto-responses are on' : 'Auto-responses are paused');
+        refreshStatus(); refreshAudit();
+        rerender();
+      } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+    });
+    append(el, [
+      h('span', { class: 'master-icon', 'aria-hidden': 'true' }, on ? icon('zap') : icon('pause')),
+      h('div', { class: 'grow' }, h('b', null, on ? 'Auto-responses are on' : 'Auto-responses are paused'),
+        h('p', null, on ? 'Rules that are switched on answer and react as set below.' : 'The master switch is off, so no rule fires, whatever its own switch says.')),
+      sw,
+    ]);
+    return el;
+  }
+
+  function renderRules(page) {
+    document.title = 'Auto-responses · Loduchand';
+    page.appendChild(pageHead('Auto-responses', 'Let the bot answer or react when people say certain words. Each rule has its own switch.',
+      h('a', { class: 'btn primary', href: '#/autoreplies/new' }, icon('plus'), 'New rule')));
+    const master = masterSwitchBanner();
+    if (master) page.appendChild(master);
+    const masterOn = !master || master.classList.contains('is-on');
+    const input = h('input', { type: 'search', placeholder: 'Filter rules by name, trigger or reply', 'aria-label': 'Filter rules' });
+    const count = h('span', { class: 'count', 'aria-live': 'polite' });
+    const grid = h('div', { class: 'reminders rules' });
+    const draw = () => {
+      clear(grid);
+      const q = input.value.trim().toLowerCase();
+      const shown = S.rules.filter((r) => !q || (r.name + ' ' + r.triggers.join(' ') + ' ' + r.replies.join(' ')).toLowerCase().includes(q));
+      shown.forEach((r) => grid.appendChild(ruleCard(r, masterOn)));
+      count.textContent = shown.length === S.rules.length ? plural(S.rules.length, 'rule') : shown.length + ' of ' + S.rules.length;
+      if (!q) grid.appendChild(h('a', { class: 'new-card', href: '#/autoreplies/new' }, icon('plus'), S.rules.length ? 'New rule' : 'Make your first rule'));
+      else if (!shown.length) grid.appendChild(h('div', { class: 'card empty', style: 'grid-column:1/-1' }, h('p', null, 'No rule matches “' + q + '”.')));
+    };
+    input.addEventListener('input', draw);
+    if (S.rules.length > 3) page.appendChild(h('div', { class: 'toolbar' }, h('label', { class: 'search-box' }, icon('search'), input), count));
+    page.appendChild(grid);
+    draw();
+    if (!S.emojis) loadEmojis().then(() => { if (grid.isConnected) draw(); });
+  }
+
+  function ruleCard(r, masterOn) {
+    const el = h('article', { class: 'reminder rule' + (r.enabled ? '' : ' is-off') + (masterOn ? '' : ' master-off'), 'aria-label': r.name });
+    const sw = switchEl(r.enabled, (r.enabled ? 'Switch off ' : 'Switch on ') + r.name, async (on, btn) => {
+      btn.disabled = true;
+      try {
+        const updated = await api('POST', '/autoreplies/' + r.id + '/toggle');
+        Object.assign(r, updated);
+        el.replaceWith(ruleCard(r, masterOn));
+        renderSidebar();
+        toast(r.name + (updated.enabled ? ' is on' : ' is off'));
+        refreshAudit();
+      } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+    }, { noText: true });
+    const mode = matchMode(r.match_mode);
+    const triggers = r.triggers.slice(0, 6).map((t) => h('span', { class: 'trigger' + (r.match_mode === 'pattern' ? ' mono' : '') }, t));
+    if (r.triggers.length > 6) triggers.push(h('span', { class: 'trigger more' }, '+' + (r.triggers.length - 6)));
+    const replies = r.replies.length;
+    const facts = h('ul', { class: 'reminder-facts' },
+      h('li', null, icon('target'), h('span', null, mode[1], r.case_sensitive ? h('span', { style: 'color:var(--faint)' }, ' · case-sensitive') : null)),
+      h('li', null, icon('hash'), h('span', null, r.channels.length ? channelList(r.channels) : 'All channels', r.exclude_channels.length ? h('span', { style: 'color:var(--faint)' }, [' · not ', channelList(r.exclude_channels)]) : null)),
+      h('li', null, icon('message'), h('span', null, replies ? plural(replies, 'reply', 'replies') + (replies > 1 ? ', one at random' : '') + (r.as_reply ? ' · as a reply' : ' · in the channel') : 'No reply, reactions only')),
+      r.reactions.length ? h('li', null, icon('smile'), h('span', { class: 'reaction-row' }, r.reactions.map(emojiEl))) : null,
+      h('li', null, icon('clock'), h('span', null, chanceWords(r.chance) + ' · ' + cooldownWords(r.cooldown_secs))));
+    el.appendChild(h('div', { class: 'reminder-head' },
+      h('div', { class: 'grow' }, h('h3', null, r.name),
+        h('div', { class: 'sub' }, r.enabled ? (masterOn ? h('span', { class: 'badge on' }, h('span', { class: 'dot' }), 'On') : h('span', { class: 'badge paused', 'data-tip': 'The master switch is off' }, icon('pause'), 'Paused by master')) : h('span', { class: 'badge paused' }, 'Off'))),
+      sw));
+    el.appendChild(h('div', { class: 'triggers', 'aria-label': 'Triggers' }, triggers));
+    el.appendChild(facts);
+    el.appendChild(h('div', { class: 'reminder-foot' },
+      h('span', { class: 'grow' }, r.hits ? 'Fired ' + plural(r.hits, 'time') + (r.last_hit ? ' · last ' + ago(r.last_hit) : '') : 'Not fired yet'),
+      h('a', { class: 'btn sm', href: '#/autoreplies/' + r.id }, icon('edit'), 'Edit')));
+    return el;
+  }
+
+  function blankRule() {
+    return { id: 0, name: '', enabled: true, triggers: [], match_mode: 'whole_word', case_sensitive: false, channels: [], exclude_channels: [],
+      replies: [''], as_reply: true, reactions: [], chance: 100, cooldown_secs: 30, hits: 0, last_hit: 0 };
+  }
+
+  function openRuleEditor(which) {
+    const existing = which === 'new' ? null : S.rules.find((r) => String(r.id) === String(which));
+    if (which !== 'new' && !existing) { toast('That rule no longer exists', 'error'); history.replaceState(null, '', '#/autoreplies'); currentHash = '#/autoreplies'; return; }
+    const d = JSON.parse(JSON.stringify(existing || blankRule()));
+    if (!d.replies.length) d.replies = [''];
+    const original = JSON.stringify(d);
+    let previewIndex = 0;
+    let sample = '';
+    let sampleChannel = '';
+    let cooldownUnit = d.cooldown_secs && d.cooldown_secs % 3600 === 0 ? 'hours' : d.cooldown_secs && d.cooldown_secs % 60 === 0 ? 'minutes' : 'seconds';
+    loadEmojis().then(() => draw());
+
+    const payload = () => Object.assign({}, d, { replies: d.replies.filter((x) => x.trim()) });
+    const localCheck = () => {
+      if (!d.name.trim()) return 'Give the rule a name.';
+      if (!d.triggers.length) return 'Add at least one trigger.';
+      if (!d.replies.some((x) => x.trim()) && !d.reactions.length) return 'Add a reply or a reaction, or the rule does nothing.';
+      return null;
+    };
+    const ui = openDrawer({
+      title: existing ? 'Edit auto-response' : 'New auto-response',
+      sub: existing ? (existing.hits ? 'Fired ' + plural(existing.hits, 'time') + (existing.last_hit ? ', last ' + ago(existing.last_hit) : '') : 'Not fired yet') : 'Works as soon as it is saved and switched on',
+      saveLabel: existing ? 'Save changes' : 'Create rule',
+      returnHash: '#/autoreplies',
+      isDirty: () => JSON.stringify(d) !== original,
+      onDelete: existing ? async () => {
+        const ok = await confirmDialog({ title: 'Delete “' + existing.name + '”?', icon: 'trash', danger: true, body: 'The rule stops and is gone for good. To stop it for a while, switch it off instead.', confirm: 'Delete rule' });
+        if (!ok) return;
+        try {
+          await api('DELETE', '/autoreplies/' + existing.id);
+          S.rules = S.rules.filter((r) => r.id !== existing.id);
+          ui.finish(); rerender(); toast('Deleted ' + existing.name); refreshAudit();
+        } catch (e) { toast(e.message, 'error'); }
+      } : null,
+      onSave: async (btn) => {
+        const problem = localCheck();
+        if (problem) { toast(problem, 'error'); return; }
+        btn.disabled = true;
+        try {
+          const saved = existing ? await api('PUT', '/autoreplies/' + existing.id, payload()) : await api('POST', '/autoreplies', payload());
+          const i = S.rules.findIndex((r) => r.id === saved.id);
+          if (i >= 0) S.rules[i] = saved; else S.rules.push(saved);
+          ui.finish(); rerender();
+          toast(existing ? 'Saved ' + saved.name : 'Created ' + saved.name);
+          refreshAudit();
+        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      },
+    });
+    const body = ui.body;
+
+    const preview = h('div', null);
+    const result = h('div', { class: 'tester-result', 'aria-live': 'polite' });
+    let testTimer = null, testSeq = 0;
+    const runTest = () => {
+      clearTimeout(testTimer);
+      testTimer = setTimeout(async () => {
+        const mine = ++testSeq;
+        if (!sample.trim()) { clear(result).className = 'tester-result idle'; append(result, [icon('flask'), h('span', null, 'Type a message to see whether this rule would fire.')]); return; }
+        try {
+          const r = await api('POST', '/autoreplies/test', { rule: payload(), text: sample, channel_id: sampleChannel || null });
+          if (mine !== testSeq) return;
+          clear(result).className = 'tester-result ' + (r.fires ? 'yes' : r.matches ? 'maybe' : 'no');
+          append(result, [icon(r.fires ? 'check' : r.matches ? 'pause' : 'x'), h('span', null, h('b', null, r.fires ? 'Would fire. ' : 'Wouldn’t fire. '), r.why,
+            r.fires && (d.chance < 100 || d.cooldown_secs) ? h('small', null, ' Chance and cooldown still apply.') : null)]);
+        } catch (e) { if (mine === testSeq) { clear(result).className = 'tester-result no'; append(result, [icon('alert'), h('span', null, e.message)]); } }
+      }, 250);
+    };
+    const drawPreview = () => {
+      clear(preview);
+      const replies = d.replies.filter((x) => x.trim());
+      const idx = replies.length ? Math.min(previewIndex, replies.length - 1) : 0;
+      const userText = sample.trim() || d.triggers[0] || 'gm';
+      const ch = chan(sampleChannel) || chan(d.channels[0]) || S.channels.find((c) => c.kind === 'text');
+      const fill = (t) => t.split(/(\{user\}|\{name\})/g).map((part, i) => (i % 2 ? (part === '{user}' ? h('span', { class: 'mention' }, '@Rohan') : 'Rohan') : part));
+      append(preview, [
+        h('div', { class: 'preview-tools' }, h('span', null, ch ? '#' + ch.name : ''), h('span', { class: 'grow' }),
+          replies.length > 1 ? [h('span', null, 'Reply ' + (idx + 1) + ' of ' + replies.length + ' · picked at random'),
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Previous reply', onclick: () => { previewIndex = (idx - 1 + replies.length) % replies.length; drawPreview(); } }, icon('up')),
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Next reply', onclick: () => { previewIndex = (idx + 1) % replies.length; drawPreview(); } }, icon('down'))] : null),
+        h('div', { class: 'preview' },
+          discordMsg('Rohan', avatar(null, 'Rohan'), 'Today at 21:04', userText, { reactions: d.reactions }),
+          replies.length ? discordMsg('Loduchand', h('span', { class: 'brand-mark' }, h('span', null, 'L')), 'Today at 21:04', fill(replies[idx]),
+            { bot: true, replyTo: d.as_reply ? 'Rohan' : null, replyText: userText }) : null),
+      ]);
+    };
+
+    const field = (label, control, hint) => h('div', null, h('label', { class: 'label', for: control.id || null }, label), control, hint ? h('div', { class: 'hint' }, hint) : null);
+
+    const chipsInput = (list, opts) => {
+      const box = h('div', { class: 'chip-input' + (opts.mono ? ' mono' : '') });
+      const input = h('input', { type: 'text', id: opts.id, placeholder: list.length ? opts.more : opts.placeholder, 'aria-label': opts.label, autocomplete: 'off', spellcheck: 'false' });
+      const add = () => {
+        const parts = opts.split ? input.value.split(',') : [input.value];
+        let added = false;
+        parts.map((x) => x.trim()).filter(Boolean).forEach((x) => { if (!list.includes(x)) { list.push(x); added = true; } });
+        input.value = '';
+        if (added) { opts.onChange(); const again = body.querySelector('#' + opts.id); if (again) again.focus(); }
+      };
+      list.forEach((t, i) => box.appendChild(h('span', { class: 'chip' }, opts.render ? opts.render(t) : h('span', { class: 'chip-text' }, t),
+        h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + t, onclick: () => { list.splice(i, 1); opts.onChange(); } }, icon('x')))));
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || (opts.split && e.key === ',')) { e.preventDefault(); add(); }
+        else if (e.key === 'Backspace' && !input.value && list.length) { list.pop(); opts.onChange(); const again = body.querySelector('#' + opts.id); if (again) again.focus(); }
+      });
+      input.addEventListener('blur', () => { if (input.value.trim()) add(); });
+      box.appendChild(input);
+      box.addEventListener('click', (e) => { if (e.target === box) input.focus(); });
+      return box;
+    };
+
+    const channelChips = (list, label, empty) => {
+      const wrap = h('div', { class: 'chips' });
+      list.forEach((id, i) => {
+        const c = chan(id);
+        wrap.appendChild(h('span', { class: 'chip' + (c ? '' : ' missing') }, h('span', { class: 'glyph' }, '#'), h('span', { class: 'chip-text' }, c ? c.name : 'unknown ' + id),
+          h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + (c ? c.name : id), onclick: () => { list.splice(i, 1); draw(); } }, icon('x'))));
+      });
+      if (!list.length) wrap.appendChild(h('span', { class: 'chip ghost-chip' }, empty));
+      const add = h('button', { class: 'btn sm', type: 'button' }, icon('plus'), label);
+      add.addEventListener('click', () => openPicker(add, { title: label, placeholder: 'Search channels', load: channelItems('text', list), onPick: (it) => {
+        if (list.includes(it.id)) return;
+        const other = list === d.channels ? d.exclude_channels : d.channels;
+        const j = other.indexOf(it.id);
+        if (j >= 0) other.splice(j, 1);
+        list.push(it.id); draw();
+      } }));
+      wrap.appendChild(add);
+      return wrap;
+    };
+
+    function changed() { drawPreview(); runTest(); }
+
+    function draw() {
+      const scroll = body.scrollTop;
+      const focusId = document.activeElement && body.contains(document.activeElement) ? document.activeElement.id : null;
+      clear(body);
+
+      const name = h('input', { class: 'input', id: 'a-name', value: d.name, maxlength: '100', placeholder: 'e.g. Good morning', autocomplete: 'off' });
+      name.addEventListener('input', () => { d.name = name.value; });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('reply'), 'Basics', h('span', { class: 'right' }, switchEl(d.enabled, 'Rule on', (on, b) => { b.set(on); d.enabled = on; runTest(); }))),
+        field('Name', name, 'Only admins see this.')));
+
+      // triggers and matching
+      const mode = matchMode(d.match_mode);
+      const modes = h('div', { class: 'modes', role: 'radiogroup', 'aria-label': 'How to match' });
+      MATCH_MODES.forEach(([value, title, desc, example]) => {
+        modes.appendChild(h('button', { type: 'button', class: 'mode', role: 'radio', 'aria-checked': d.match_mode === value ? 'true' : 'false',
+          onclick: () => { d.match_mode = value; draw(); } },
+          h('span', { class: 'mode-dot', 'aria-hidden': 'true' }), h('span', null, h('b', null, title), h('small', null, desc), h('code', null, example))));
+      });
+      const caseBox = h('input', { type: 'checkbox', checked: d.case_sensitive });
+      caseBox.addEventListener('change', () => { d.case_sensitive = caseBox.checked; changed(); });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('target'), 'Triggers'),
+        h('div', null, h('label', { class: 'label', for: 'a-trigger' }, d.match_mode === 'pattern' ? 'Patterns' : 'Words or phrases'),
+          chipsInput(d.triggers, { id: 'a-trigger', label: 'Add a trigger', placeholder: d.match_mode === 'pattern' ? 'Type a pattern, then Enter' : 'Type a word or phrase, then Enter', more: 'Add another…', split: d.match_mode !== 'pattern', mono: d.match_mode === 'pattern', onChange: draw }),
+          h('div', { class: 'hint' }, d.match_mode === 'pattern' ? 'Press Enter after each pattern.' : 'Press Enter or a comma after each. Any one of them sets the rule off.')),
+        h('div', null, h('span', { class: 'label' }, 'How to match'), modes),
+        h('label', { class: 'check' }, caseBox, h('span', null, 'Case-sensitive', h('small', null, d.case_sensitive ? '“GM” and “gm” count as different.' : '“GM”, “Gm” and “gm” all match.')))));
+
+      // where
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('hash'), 'Where'),
+        h('div', null, h('span', { class: 'label' }, 'Only in these channels'), channelChips(d.channels, 'Add channel', 'All channels the bot can read'), h('div', { class: 'hint' }, 'Threads count as their parent channel.')),
+        h('div', null, h('span', { class: 'label' }, 'Never in'), channelChips(d.exclude_channels, 'Exclude channel', 'No exceptions'))));
+
+      // response
+      const replies = h('div', { class: 'lines' });
+      let lastFocused = null;
+      d.replies.forEach((line, i) => {
+        const ta = h('textarea', { class: 'textarea', rows: '1', id: 'a-reply-' + i, 'aria-label': 'Reply ' + (i + 1), placeholder: i === 0 ? 'e.g. gm {user} ☀️' : 'Another reply', maxlength: '1800' });
+        ta.value = line;
+        const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(200, ta.scrollHeight + 2) + 'px'; };
+        ta.addEventListener('input', () => { d.replies[i] = ta.value; grow(); previewIndex = i; drawPreview(); });
+        ta.addEventListener('focus', () => { lastFocused = ta; });
+        requestAnimationFrame(grow);
+        replies.appendChild(h('div', { class: 'line-row' }, h('span', { class: 'line-n', 'aria-hidden': 'true' }, i + 1), ta,
+          h('div', { class: 'line-tools' }, h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Remove reply ' + (i + 1), disabled: d.replies.length === 1 && !line, onclick: () => { d.replies.splice(i, 1); if (!d.replies.length) d.replies.push(''); draw(); } }, icon('trash')))));
+      });
+      const insert = (ph) => {
+        const ta = lastFocused && lastFocused.isConnected ? lastFocused : body.querySelector('.line-row textarea');
+        if (!ta) return;
+        const at = ta.selectionStart || ta.value.length;
+        ta.value = ta.value.slice(0, at) + ph + ta.value.slice(ta.selectionEnd || at);
+        ta.dispatchEvent(new Event('input')); ta.focus(); ta.selectionStart = ta.selectionEnd = at + ph.length;
+      };
+      const emojiInput = chipsInput(d.reactions, { id: 'a-reaction', label: 'Add a reaction', placeholder: 'Paste an emoji, then Enter', more: 'Add…', split: true, render: (t) => emojiEl(t), onChange: draw });
+      const serverEmoji = h('button', { class: 'btn sm', type: 'button' }, icon('smile'), 'Server emoji');
+      serverEmoji.addEventListener('click', async () => {
+        const list = await loadEmojis();
+        openPicker(serverEmoji, { title: 'Server emoji', placeholder: 'Search the server’s emoji', empty: 'This server has no custom emoji.',
+          load: (q) => list.filter((e) => !q || e.name.toLowerCase().includes(q.toLowerCase())).map((e) => ({ id: e.id, label: ':' + e.name + ':', sub: e.animated ? 'animated' : '', lead: h('img', { class: 'emoji-img', src: e.url, alt: '' }), emoji: e })),
+          onPick: (it) => { const code = '<' + (it.emoji.animated ? 'a' : '') + ':' + it.emoji.name + ':' + it.emoji.id + '>'; if (!d.reactions.includes(code)) d.reactions.push(code); draw(); } });
+      });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('message'), 'Response'),
+        h('div', null, h('div', { class: 'label-row' }, h('span', { class: 'label' }, 'Replies'), h('span', { class: 'hint', style: 'margin:0' }, 'One is picked at random. Leave empty to only react.')), replies,
+          h('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px' },
+            h('button', { class: 'btn sm', type: 'button', onclick: () => { d.replies.push(''); draw(); const all = body.querySelectorAll('.line-row textarea'); all[all.length - 1].focus(); } }, icon('plus'), 'Add reply'),
+            h('div', { class: 'placeholders' }, 'Insert:', [['{user}', 'Mentions the person'], ['{name}', 'Their display name']].map(([ph, tip]) => h('button', { class: 'ph', type: 'button', 'data-tip': tip, onmousedown: (e) => e.preventDefault(), onclick: () => insert(ph) }, ph))))),
+        h('div', null, h('span', { class: 'label' }, 'Send it as'), segmented([['reply', 'A reply to the message', 'reply'], ['post', 'A message in the channel', 'message']], d.as_reply ? 'reply' : 'post', 'Send as', (v) => { d.as_reply = v === 'reply'; drawPreview(); })),
+        h('div', null, h('label', { class: 'label', for: 'a-reaction' }, 'Reactions'), emojiInput, h('div', { class: 'hint-row' }, h('span', { class: 'hint', style: 'margin:0' }, 'Unicode emoji, or the server’s own.'), serverEmoji))));
+
+      // preview
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'Preview'), preview));
+
+      // timing
+      const range = h('input', { class: 'range', type: 'range', min: '1', max: '100', value: d.chance, id: 'a-chance', 'aria-describedby': 'a-chance-words' });
+      const words = h('b', { id: 'a-chance-words' }, chanceWords(d.chance));
+      range.addEventListener('input', () => { d.chance = +range.value; words.textContent = chanceWords(d.chance); runTest(); });
+      const factor = { seconds: 1, minutes: 60, hours: 3600 };
+      const cd = h('input', { class: 'input', type: 'number', min: '0', step: '1', id: 'a-cooldown', value: String(d.cooldown_secs / factor[cooldownUnit]), style: 'max-width:110px' });
+      const unit = h('select', { class: 'select', 'aria-label': 'Cooldown unit', style: 'max-width:130px' }, ['seconds', 'minutes', 'hours'].map((u) => h('option', { value: u, selected: u === cooldownUnit }, u)));
+      const cdHint = h('div', { class: 'hint' });
+      const syncCd = () => {
+        cooldownUnit = unit.value;
+        d.cooldown_secs = Math.max(0, Math.round((parseFloat(cd.value) || 0) * factor[cooldownUnit]));
+        const bad = d.cooldown_secs > 604800;
+        cd.classList.toggle('invalid', bad);
+        cdHint.className = bad ? 'error-text' : 'hint';
+        cdHint.textContent = bad ? 'At most 7 days.' : d.cooldown_secs ? 'After it fires in a channel, it stays quiet there for ' + cooldownWords(d.cooldown_secs).replace(' cooldown', '') + '.' : 'Fires on every matching message.';
+      };
+      cd.addEventListener('input', syncCd); unit.addEventListener('change', syncCd); syncCd();
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('clock'), 'Timing'),
+        h('div', null, h('div', { class: 'label-row' }, h('label', { class: 'label', for: 'a-chance' }, 'How often'), words), range,
+          h('div', { class: 'range-scale', 'aria-hidden': 'true' }, h('span', null, '1%'), h('span', null, '50%'), h('span', null, 'Every time'))),
+        h('div', null, h('label', { class: 'label', for: 'a-cooldown' }, 'Cooldown'), h('div', { style: 'display:flex;gap:8px' }, cd, unit), cdHint)));
+
+      // tester
+      const sampleInput = h('input', { class: 'input', id: 'a-sample', value: sample, placeholder: 'Type a message someone might send', autocomplete: 'off' });
+      sampleInput.addEventListener('input', () => { sample = sampleInput.value; changed(); });
+      const chSel = h('select', { class: 'select', 'aria-label': 'Channel for the test' }, h('option', { value: '' }, 'Any channel'),
+        S.channels.filter((c) => c.kind === 'text').map((c) => h('option', { value: c.id, selected: c.id === sampleChannel }, '#' + c.name)));
+      chSel.addEventListener('change', () => { sampleChannel = chSel.value; changed(); });
+      body.appendChild(h('section', { class: 'form-card tester' }, h('h3', null, icon('flask'), 'Try a message'),
+        h('div', { class: 'tester-row' }, sampleInput, chSel), result));
+
+      drawPreview();
+      runTest();
+      body.scrollTop = scroll;
+      if (focusId) { const again = body.querySelector('#' + CSS.escape(focusId)); if (again) again.focus(); }
+    }
+    draw();
+    requestAnimationFrame(() => { const n = body.querySelector('#a-name'); if (n && !existing) n.focus({ preventScroll: true }); });
+  }
+
+  // --- house cup ------------------------------------------------------------------------
+
+  // Colour follows the source group, always in this order (validated palette).
+  const SOURCE_GROUPS = [
+    { id: 'chat', label: 'Chat', icon: '💬', sources: ['chat'] },
+    { id: 'voice', label: 'Voice', icon: '🎙️', sources: ['voice'] },
+    { id: 'quiz', label: 'Quiz', icon: '🧠', sources: ['quiz'] },
+    { id: 'games', label: 'Koto, anagram, cats', icon: '🔤', sources: ['koto', 'anagram', 'cat'] },
+    { id: 'arena', label: 'Arena & royale', icon: '⚔️', sources: ['arena', 'royale'] },
+    { id: 'snitch', label: 'Snitch', icon: '🪽', sources: ['snitch', 'golden_snitch'] },
+    { id: 'weekly', label: 'Weekly posts', icon: '📝', sources: ['weekly'] },
+    { id: 'mod', label: 'Mods', icon: '🛡️', sources: ['mod'] },
+  ];
+  const groupOf = (source) => SOURCE_GROUPS.findIndex((g) => g.sources.includes(source));
+  const PERIODS = [['today', 'Today'], ['week', 'This week'], ['month', 'This month'], ['last_month', 'Last month'], ['all', 'All time']];
+  const cup = { period: 'month', data: null, timer: null, table: false, tab: 0, updated: 0, loading: false, error: null };
+
+  function ordinal(n) { return n + (n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'); }
+  function fmtPoints(n) { return numberFmt.format(n); }
+
+  function renderHouses(page) {
+    document.title = 'House Cup · Loduchand';
+    const live = h('span', { class: 'live-pill', 'aria-live': 'polite' });
+    page.appendChild(pageHead('House Cup', 'The house points race as it happens. Updates every 20 seconds while this tab is open.', null, h('span', { class: 'feature-icon', 'aria-hidden': 'true' }, '🏆')));
+    page.appendChild(h('div', { class: 'toolbar cup-toolbar' },
+      segmented(PERIODS, cup.period, 'Period', (v) => { cup.period = v; cup.data = null; drawBody(); refresh(); }), h('span', { class: 'grow' }), live));
+    const bodyEl = h('div', { class: 'cup-body' });
+    page.appendChild(bodyEl);
+
+    const setLive = () => {
+      clear(live);
+      if (cup.error) { live.className = 'live-pill err'; append(live, [icon('alert'), 'Can’t update: ' + cup.error]); return; }
+      if (document.hidden) { live.className = 'live-pill paused'; append(live, [icon('pause'), 'Paused while hidden']); return; }
+      live.className = 'live-pill';
+      append(live, [h('span', { class: 'live-dot', 'aria-hidden': 'true' }), 'Live', cup.updated ? h('span', { class: 'live-time' }, ' · updated ' + fmtTime.format(new Date(cup.updated)) + ' IST') : null]);
+    };
+    const refresh = async () => {
+      if (!page.isConnected) { clearInterval(cup.timer); return; }
+      // A hidden tab skips the timed updates, but still loads what it has never shown.
+      if (cup.loading || (document.hidden && cup.data)) { setLive(); return; }
+      cup.loading = true;
+      const period = cup.period;
+      try {
+        const data = await api('GET', '/houses?period=' + period);
+        if (period !== cup.period || !page.isConnected) return;
+        const before = cup.data;
+        cup.data = data; cup.updated = Date.now(); cup.error = null;
+        drawBody(before);
+      } catch (e) { cup.error = e.message; }
+      finally { cup.loading = false; setLive(); }
+    };
+    const drawBody = (before) => {
+      clear(bodyEl);
+      const data = cup.data;
+      if (!data) { bodyEl.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the standings…')); return; }
+      bodyEl.appendChild(cupCards(data, before));
+      bodyEl.appendChild(cupShare(data));
+      bodyEl.appendChild(h('div', { class: 'two-col cup-cols' }, cupSources(data), cupToday(data)));
+      bodyEl.appendChild(cupScorers(data));
+      bodyEl.appendChild(cupFeed(data));
+    };
+    drawBody();
+    clearInterval(cup.timer);
+    cup.timer = setInterval(refresh, 20000);
+    setLive();
+    refresh();
+    renderHouses.onVisible = () => { if (page.isConnected && !document.hidden) refresh(); else if (page.isConnected) setLive(); };
+  }
+  document.addEventListener('visibilitychange', () => { if (renderHouses.onVisible) renderHouses.onVisible(); });
+
+  function houseStyle(hs) { return '--house:' + (hs.colour || 'var(--accent)') + ';--house-2:' + (hs.secondary || 'var(--accent)'); }
+
+  function cupCards(data, before) {
+    const sorted = data.houses.slice().sort((a, b) => b.total - a.total);
+    const second = sorted[1] ? sorted[1].total : 0;
+    return h('div', { class: 'cup-cards' }, data.houses.map((hs) => {
+      const prev = before && before.houses.find((x) => x.key === hs.key);
+      const bumped = prev && prev.total !== hs.total;
+      const leader = hs.rank === 1;
+      const gap = leader ? (hs.total - second > 0 ? 'Leading by ' + fmtPoints(hs.total - second) : 'Level at the top') : fmtPoints(hs.gap) + ' behind the leader';
+      return h('article', { class: 'cup-card' + (leader ? ' leader' : ''), style: houseStyle(hs), 'aria-label': hs.name + ', ' + ordinal(hs.rank) + ', ' + hs.total + ' points' },
+        h('div', { class: 'cup-top' }, h('span', { class: 'crest', 'aria-hidden': 'true' }, hs.crest),
+          h('div', { class: 'grow' }, h('h3', null, hs.name), h('span', { class: 'cup-members' }, numberFmt.format(hs.members) + ' members')),
+          h('span', { class: 'rank' + (leader ? ' first' : '') }, leader ? [icon('trophy'), '1st'] : ordinal(hs.rank))),
+        h('div', { class: 'cup-total' + (bumped ? ' bump' : '') }, fmtPoints(hs.total), h('small', null, ' points')),
+        h('div', { class: 'cup-gap' }, gap),
+        h('div', { class: 'cup-captain' }, hs.captain ? [avatar(hs.captain.avatar, hs.captain.name || '?', 'xs'), h('span', null, hs.captain.name || 'Former member'), h('small', null, 'Captain')] : h('small', null, 'No captain named')));
+    }));
+  }
+
+  function cupShare(data) {
+    const positive = data.houses.map((hs) => Math.max(0, hs.total));
+    const sum = positive.reduce((a, b) => a + b, 0);
+    const bar = h('div', { class: 'share-bar', role: 'img', 'aria-label': 'Share of points: ' + data.houses.map((hs, i) => hs.name + ' ' + (sum ? Math.round((positive[i] / sum) * 100) : 0) + '%').join(', ') });
+    const labels = h('div', { class: 'share-labels' });
+    data.houses.forEach((hs, i) => {
+      const pct = sum ? (positive[i] / sum) * 100 : 25;
+      bar.appendChild(h('span', { style: houseStyle(hs) + ';flex-grow:' + (sum ? pct : 1) }));
+      labels.appendChild(h('span', { class: 'share-label', style: houseStyle(hs) }, h('i', { 'aria-hidden': 'true' }), hs.name, h('b', null, sum ? Math.round(pct) + '%' : '—')));
+    });
+    return h('div', { class: 'card share' }, h('div', { class: 'share-head' }, h('h2', null, 'Share of the cup'), h('span', { class: 'sub' }, fmtPoints(sum) + ' points so far ' + PERIODS.find((p) => p[0] === cup.period)[1].toLowerCase())), bar, labels);
+  }
+
+  let tip = null;
+  function showTip(e, lines) {
+    if (!tip) { tip = h('div', { class: 'viz-tip', role: 'tooltip' }); document.body.appendChild(tip); }
+    clear(tip);
+    lines.forEach((l, i) => tip.appendChild(i === 0 ? h('b', null, l) : h('div', null, l)));
+    tip.hidden = false;
+    const x = Math.min(window.innerWidth - tip.offsetWidth - 8, e.clientX + 14);
+    const y = e.clientY - tip.offsetHeight - 12 < 8 ? e.clientY + 16 : e.clientY - tip.offsetHeight - 12;
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  }
+  function hideTip() { if (tip) tip.hidden = true; }
+
+  function groupTotals(list) {
+    const totals = SOURCE_GROUPS.map(() => ({ points: 0, parts: [] }));
+    (list || []).forEach((s) => { const g = groupOf(s.source); if (g >= 0) { totals[g].points += s.points; totals[g].parts.push(s); } });
+    return totals;
+  }
+  function sourceName(key) { const s = (cup.data && cup.data.sources || []).find((x) => x.key === key); return s ? s.icon + ' ' + s.label : key; }
+
+  function cupSources(data) {
+    const rows = data.houses.map((hs) => ({ hs, groups: groupTotals(hs.by_source) }));
+    const max = Math.max(1, ...rows.map((r) => r.groups.reduce((a, g) => a + Math.max(0, g.points), 0)));
+    const present = SOURCE_GROUPS.map((g, i) => rows.some((r) => r.groups[i].points > 0));
+    const legend = h('div', { class: 'legend' }, SOURCE_GROUPS.map((g, i) => present[i] ? h('span', { class: 'legend-item' }, h('i', { style: 'background:var(--s' + (i + 1) + ')' }), g.label) : null));
+    const toggle = h('button', { class: 'btn sm ghost', type: 'button', 'aria-pressed': cup.table ? 'true' : 'false', onclick: () => { cup.table = !cup.table; const fresh = cupSources(data); el.replaceWith(fresh); } }, icon(cup.table ? 'chart' : 'table'), cup.table ? 'Chart' : 'Table');
+    let content;
+    if (cup.table) {
+      content = h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' },
+        h('thead', null, h('tr', null, h('th', null, 'Source'), data.houses.map((hs) => h('th', { class: 'num' }, hs.crest + ' ' + hs.name)))),
+        h('tbody', null, SOURCE_GROUPS.map((g, i) => present[i] ? h('tr', null, h('td', null, g.icon + ' ' + g.label), rows.map((r) => h('td', { class: 'num' }, r.groups[i].points ? fmtPoints(r.groups[i].points) : '—'))) : null),
+          h('tr', { class: 'total' }, h('td', null, 'Total'), data.houses.map((hs) => h('td', { class: 'num' }, fmtPoints(hs.total)))))));
+    } else {
+      content = h('div', { class: 'stack-chart' }, legend, rows.map(({ hs, groups }) => {
+        const net = groups.reduce((a, g) => a + Math.max(0, g.points), 0);
+        const track = h('div', { class: 'stack-track', style: 'width:' + Math.max(net ? 2 : 0, (net / max) * 100) + '%' });
+        groups.forEach((g, i) => {
+          if (g.points <= 0) return;
+          const seg = h('span', { class: 'stack-seg', style: 'flex-grow:' + g.points + ';background:var(--s' + (i + 1) + ')', tabindex: '0', 'aria-label': hs.name + ', ' + SOURCE_GROUPS[i].label + ': ' + g.points + ' points' });
+          const lines = () => [hs.name + ' · ' + SOURCE_GROUPS[i].label, fmtPoints(g.points) + ' points (' + Math.round((g.points / Math.max(1, net)) * 100) + '%)'].concat(g.parts.length > 1 ? g.parts.map((p) => sourceName(p.source) + ': ' + fmtPoints(p.points)) : []);
+          seg.addEventListener('mousemove', (e) => showTip(e, lines()));
+          seg.addEventListener('mouseleave', hideTip);
+          seg.addEventListener('focus', () => { const r = seg.getBoundingClientRect(); showTip({ clientX: r.left + r.width / 2, clientY: r.top }, lines()); });
+          seg.addEventListener('blur', hideTip);
+          track.appendChild(seg);
+        });
+        return h('div', { class: 'stack-row' }, h('span', { class: 'stack-label' }, h('span', { 'aria-hidden': 'true' }, hs.crest), hs.name),
+          h('div', { class: 'stack-bar' }, track, h('span', { class: 'stack-value' }, fmtPoints(hs.total))));
+      }));
+    }
+    const el = card('cup-sources', 'Where the points came from', PERIODS.find((p) => p[0] === cup.period)[1], h('div', { class: 'card-body pad-sm' }, content), { actions: toggle });
+    return el;
+  }
+
+  function cupToday(data) {
+    const rows = data.houses.map((hs) => groupTotals(hs.today_by_source));
+    const present = SOURCE_GROUPS.map((g, i) => rows.some((r) => r[i].points !== 0));
+    const max = Math.max(1, ...rows.flatMap((r) => r.map((g) => g.points)));
+    const totals = data.houses.map((hs) => (hs.today_by_source || []).reduce((a, s) => a + s.points, 0));
+    const body = present.some(Boolean)
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table heat' },
+        h('thead', null, h('tr', null, h('th', null, h('span', { class: 'sr' }, 'Source')), data.houses.map((hs) => h('th', { class: 'num', title: hs.name, style: houseStyle(hs) }, h('span', { class: 'th-crest' }, hs.crest), h('span', { class: 'sr' }, hs.name))))),
+        h('tbody', null, SOURCE_GROUPS.map((g, i) => present[i] ? h('tr', null, h('td', null, h('span', { 'aria-hidden': 'true' }, g.icon + ' '), g.label),
+          rows.map((r) => { const v = r[i].points; return h('td', { class: 'num', style: '--heat:' + Math.max(0, Math.round((v / max) * 100)) + '%' }, v ? fmtPoints(v) : h('span', { class: 'muted' }, '·')); })) : null),
+          h('tr', { class: 'total' }, h('td', null, 'Today'), totals.map((t) => h('td', { class: 'num' }, fmtPoints(t)))))))
+      : h('div', { class: 'empty' }, icon('clock'), h('p', null, 'No points yet today (India time).'));
+    return card('cup-today', 'Today so far', 'By source, India time', body);
+  }
+
+  function cupScorers(data) {
+    const narrow = window.innerWidth < 900;
+    const tabs = segmented(data.houses.map((hs, i) => [String(i), hs.crest + ' ' + hs.name]), String(cup.tab), 'House', (v) => { cup.tab = +v; cols.querySelectorAll('.scorer-col').forEach((c, i) => c.classList.toggle('shown', i === cup.tab)); });
+    const cols = h('div', { class: 'scorers' }, data.houses.map((hs, i) => h('section', { class: 'scorer-col' + (i === cup.tab ? ' shown' : ''), style: houseStyle(hs), 'aria-label': hs.name + ' top scorers' },
+      h('h3', null, h('span', { 'aria-hidden': 'true' }, hs.crest), hs.name),
+      hs.top.length ? h('ol', null, hs.top.map((t, n) => {
+        const g = groupOf(t.main_source);
+        return h('li', null, h('span', { class: 'pos' }, n + 1), avatar(t.avatar, t.name || '?', 'xs'),
+          h('span', { class: 'who' }, t.name || h('i', null, 'Former member')),
+          h('span', { class: 'src', title: 'Mostly ' + sourceName(t.main_source), 'aria-label': 'mostly ' + sourceName(t.main_source) }, g >= 0 ? SOURCE_GROUPS[g].icon : '•'),
+          h('b', null, fmtPoints(t.points)));
+      })) : h('p', { class: 'empty-small' }, 'Nobody has scored yet.'))));
+    return card('cup-scorers', 'Top scorers', 'Muggles are left out', [narrow ? h('div', { class: 'scorer-tabs' }, tabs) : null, cols]);
+  }
+
+  function cupFeed(data) {
+    const list = h('ul', { class: 'feed' });
+    if (!data.feed.length) list.appendChild(h('li', { class: 'empty' }, h('p', null, 'No points have been awarded yet.')));
+    data.feed.forEach((row) => {
+      const hs = data.houses.find((x) => x.key === row.house) || { name: row.house, crest: '', colour: null };
+      const g = groupOf(row.source);
+      const who = row.member ? (row.member.name || 'Former member') : hs.name + ' (house award)';
+      list.appendChild(h('li', { class: 'feed-row' },
+        h('span', { class: 'feed-icon', style: g >= 0 ? '--src:var(--s' + (g + 1) + ')' : '', 'aria-hidden': 'true' }, row.source_icon || '•'),
+        h('div', { class: 'feed-main' },
+          h('div', null, row.member ? avatar(row.member.avatar, who, 'xs') : null, h('b', null, who), h('span', { class: 'house-chip', style: houseStyle(hs) }, hs.crest + ' ' + hs.name), h('span', { class: 'feed-src' }, row.source_label)),
+          row.reason ? h('small', null, row.reason) : null),
+        h('div', { class: 'feed-side' }, h('b', { class: 'pts' + (row.points < 0 ? ' neg' : '') }, (row.points > 0 ? '+' : '') + row.points), h('small', { title: fmtFull.format(new Date(row.ts * 1000)) + ' IST' }, ago(row.ts)))));
+    });
+    return card('cup-feed', 'Latest points', 'The last 50 across all houses', list);
+  }
+
+  // --- bot behaviour ----------------------------------------------------------------------
+
+  const TONE_PRESETS = [
+    ['Friendly Hinglish banter', 'Tone: friendly Hinglish banter. Talk like a friend in the group chat, mixing Hindi and English the way members do ("haan bhai", "scene kya hai"). Light teasing is fine; keep it warm, never mean.'],
+    ['Calm and helpful', 'Tone: calm and helpful. Be patient and clear, explain step by step when someone asks, and keep a steady, kind voice even when a chat gets heated.'],
+    ['Short replies', 'Keep replies short: one to three sentences unless someone asks for detail. No long lists or essays in casual chat.'],
+    ['No roasting', "Don't roast, insult or make fun of members, even if they ask for it or others are doing it. Joke with people, not about them."],
+  ];
+  const CHANCE_STOPS = [0, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100];
+  function chattinessWords(pct) {
+    if (pct <= 0) return ['Only when talked to', 'It answers mentions and replies, and never joins in on its own.'];
+    const oneIn = Math.round(100 / pct);
+    const tail = pct >= 100 ? 'It considers answering every message it reads.' : 'About 1 in ' + oneIn + ' messages that weren’t meant for it get a reply.';
+    if (pct <= 2) return ['Rarely joins in', tail];
+    if (pct <= 5) return ['Joins in now and then', tail];
+    if (pct <= 15) return ['Chatty', tail];
+    if (pct <= 40) return ['Very chatty', tail];
+    return ['Talks over everyone', tail];
+  }
+
+  const agentState = { base: null, draft: null, notes: {}, loading: false, error: null, tab: 'system_prompt', undo: { system_prompt: [], core: [] } };
+  const AGENT_TEXT = ['name', 'description', 'system_prompt', 'core', 'model'];
+
+  function agentDirty() {
+    const a = agentState;
+    if (!a.base || !a.draft) return [];
+    return ['name', 'description', 'system_prompt', 'core', 'model', 'thinking_depth', 'silent_read_initiative_chance', 'max_tokens'].filter((f) => JSON.stringify(a.base[f]) !== JSON.stringify(a.draft[f]));
+  }
+
+  async function renderAgent(page) {
+    document.title = 'Bot behaviour · Loduchand';
+    page.appendChild(pageHead('Bot behaviour', 'How Loduchand talks when people chat with it: its instructions, notes, how often it joins in, and its model.',
+      h('button', { class: 'btn', type: 'button', onclick: restartFlow }, icon('restart'), 'Restart bot'), h('span', { class: 'feature-icon', 'aria-hidden': 'true' }, '🤖')));
+    page.appendChild(h('div', { class: 'banner inline info' }, icon('restart'),
+      h('p', null, h('b', null, 'Changes apply after a restart. '), h('span', null, 'Saving stores them straight away, but the chat side of the bot reads these settings when it starts. Quiz drafting and the weekly scan pick up a new model at once.'))));
+    const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the bot’s settings…'));
+    page.appendChild(holder);
+    S.guard = () => agentDirty().length;
+    S.discard = () => { agentState.base = null; agentState.draft = null; };
+    if (!agentState.base || agentDirty().length === 0) {
+      try {
+        const got = await api('GET', '/agent');
+        agentState.base = got.settings; agentState.notes = got.notes || {};
+        agentState.draft = JSON.parse(JSON.stringify(got.settings));
+        agentState.undo = { system_prompt: [], core: [] };
+      } catch (e) {
+        clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Can’t load the bot’s settings'), h('p', null, e.message)));
+        return;
+      }
+    }
+    if (!page.isConnected) return;
+    clear(holder);
+    drawAgent(holder);
+  }
+
+  function drawAgent(holder) {
+    const a = agentState, d = a.draft;
+    clear(holder);
+    const update = () => updateAgentBar();
+
+    // identity
+    const name = h('input', { class: 'input', id: 'g-name', value: d.name, maxlength: '64' });
+    const desc = h('input', { class: 'input', id: 'g-desc', value: d.description, maxlength: '300', placeholder: 'e.g. the resident bot of the MLCI server' });
+    const reads = h('p', { class: 'reads' });
+    const drawReads = () => { clear(reads); append(reads, ['The bot reads: ', h('q', null, 'You are ' + (d.name || '…') + ', ' + (d.description || 'a Digital Steward') + '.')]); };
+    name.addEventListener('input', () => { d.name = name.value; drawReads(); update(); });
+    desc.addEventListener('input', () => { d.description = desc.value; drawReads(); update(); });
+    drawReads();
+    holder.appendChild(card('agent-identity', 'Identity', 'Who the bot says it is', h('div', { class: 'card-body pad' },
+      h('div', { class: 'form-grid' }, h('div', null, h('label', { class: 'label', for: 'g-name' }, 'Name'), name), h('div', null, h('label', { class: 'label', for: 'g-desc' }, 'Description'), desc)), reads)));
+
+    // personality
+    const editorWrap = h('div', { class: 'prompt-wrap' });
+    const drawEditor = () => {
+      clear(editorWrap);
+      const field = a.tab;
+      const ta = h('textarea', { class: 'textarea prompt-editor', id: 'g-text', spellcheck: 'true', 'aria-label': field === 'core' ? 'Core notes' : 'System prompt', 'aria-describedby': 'g-text-help' });
+      ta.value = d[field];
+      const count = h('span', { class: 'text-count' });
+      const undoBtn = h('button', { class: 'btn sm ghost', type: 'button', hidden: !a.undo[field].length, onclick: () => {
+        const prev = a.undo[field].pop();
+        if (prev === undefined) return;
+        d[field] = prev; drawEditor(); update(); toast('Undid the last tone insert', 'info');
+      } }, icon('reset'), 'Undo insert');
+      const drawCount = () => {
+        const text = ta.value;
+        const words = (text.match(/\S+/g) || []).length;
+        count.textContent = numberFmt.format(text.length) + ' characters · ' + numberFmt.format(words) + ' words' + (text !== a.base[field] ? ' · edited' : '');
+        count.classList.toggle('edited', text !== a.base[field]);
+      };
+      ta.addEventListener('input', () => { d[field] = ta.value; drawCount(); update(); });
+      drawCount();
+      const presets = h('div', { class: 'presets' }, h('span', { class: 'hint', style: 'margin:0' }, 'Add a tone:'),
+        TONE_PRESETS.map(([label, text]) => h('button', { class: 'ph preset', type: 'button', 'data-tip': text, onmousedown: (e) => e.preventDefault(), onclick: () => {
+          a.undo[field].push(d[field]);
+          const at = document.activeElement === ta ? ta.selectionEnd : ta.value.length;
+          const beforeText = ta.value.slice(0, at);
+          const pad = (beforeText && !beforeText.endsWith('\n\n') ? (beforeText.endsWith('\n') ? '\n' : '\n\n') : '');
+          const insert = pad + text + (ta.value.slice(at).startsWith('\n') || at === ta.value.length ? '' : '\n\n');
+          ta.focus();
+          ta.setSelectionRange(at, at);
+          const done = document.execCommand && document.execCommand('insertText', false, insert);
+          if (!done) { ta.value = ta.value.slice(0, at) + insert + ta.value.slice(at); }
+          d[field] = ta.value;
+          ta.setSelectionRange(at + pad.length, at + insert.length);
+          drawCount(); update();
+          undoBtn.hidden = false;
+          toast('Added “' + label + '”. Edit it, or undo.', 'info');
+        } }, icon('plus'), label)));
+      append(editorWrap, [
+        h('p', { class: 'hint', id: 'g-text-help', style: 'margin:0 0 10px' }, field === 'core'
+          ? 'The bot’s own notes about people, running jokes and lessons. It rewrites these itself too: if it does while you edit, you’ll be asked to reload before saving.'
+          : 'The main instructions: who the bot is, how it should talk, and what to avoid.'),
+        presets, ta, h('div', { class: 'editor-foot' }, count, h('span', { class: 'grow' }), undoBtn),
+      ]);
+    };
+    const tabs = segmented([['system_prompt', 'System prompt', 'message'], ['core', 'Core notes', 'edit']], a.tab, 'Which text', (v) => { a.tab = v; drawEditor(); });
+    drawEditor();
+    holder.appendChild(card('agent-tone', 'Personality & tone', 'Tone presets add a paragraph you can edit; nothing is replaced', h('div', { class: 'card-body pad' }, h('div', { style: 'margin-bottom:12px' }, tabs), editorWrap)));
+
+    // chattiness
+    const pct = Math.round(d.silent_read_initiative_chance * 1000) / 10;
+    const nearest = CHANCE_STOPS.reduce((best, s, i) => (Math.abs(s - pct) < Math.abs(CHANCE_STOPS[best] - pct) ? i : best), 0);
+    const range = h('input', { class: 'range', type: 'range', min: '0', max: String(CHANCE_STOPS.length - 1), step: '1', value: nearest, id: 'g-chance', 'aria-describedby': 'g-chance-words' });
+    const exact = h('input', { class: 'input', type: 'number', min: '0', max: '100', step: '0.5', value: String(pct), 'aria-label': 'Exact percent' });
+    const title = h('b', { class: 'chatty-title' });
+    const sub = h('span', { class: 'hint', style: 'margin:0', id: 'g-chance-words' });
+    const drawWords = () => { const p = Math.round(d.silent_read_initiative_chance * 1000) / 10; const [t, s2] = chattinessWords(p); title.textContent = t; sub.textContent = s2; range.setAttribute('aria-valuetext', p + '%, ' + t); };
+    range.addEventListener('input', () => { const v = CHANCE_STOPS[+range.value]; d.silent_read_initiative_chance = v / 100; exact.value = String(v); drawWords(); update(); });
+    exact.addEventListener('input', () => { const v = Math.max(0, Math.min(100, parseFloat(exact.value) || 0)); d.silent_read_initiative_chance = Math.round(v * 10) / 1000; const i = CHANCE_STOPS.reduce((b, s, j) => (Math.abs(s - v) < Math.abs(CHANCE_STOPS[b] - v) ? j : b), 0); range.value = i; drawWords(); update(); });
+    drawWords();
+    holder.appendChild(card('agent-chatty', 'Chattiness', 'Joining conversations it wasn’t asked into', h('div', { class: 'card-body pad chatty' },
+      h('div', { class: 'label-row' }, title, h('div', { class: 'input-group', style: 'width:130px' }, exact, h('span', { class: 'addon' }, '%'))), sub,
+      range, h('div', { class: 'range-scale', 'aria-hidden': 'true' }, h('span', null, 'Never'), h('span', null, '5%'), h('span', null, '20%'), h('span', null, 'Always')))));
+
+    // model & limits
+    const model = h('input', { class: 'input mono', id: 'g-model', value: d.model, spellcheck: 'false', autocomplete: 'off' });
+    model.addEventListener('input', () => { d.model = model.value.trim(); update(); });
+    const tokens = h('input', { class: 'input', type: 'number', id: 'g-tokens', min: '1', max: '1000000', value: d.max_tokens == null ? '' : String(d.max_tokens), placeholder: 'Provider default' });
+    tokens.addEventListener('input', () => { const v = tokens.value.trim(); d.max_tokens = v === '' ? null : Math.round(+v); update(); });
+    const depth = h('input', { class: 'input', type: 'number', id: 'g-depth', min: '1', max: '64', value: String(d.thinking_depth) });
+    depth.addEventListener('input', () => { d.thinking_depth = Math.round(+depth.value || 0); update(); });
+    holder.appendChild(card('agent-model', 'Model & limits', null, h('div', { class: 'card-body pad' },
+      h('div', { class: 'form-grid' },
+        h('div', { class: 'full' }, h('label', { class: 'label', for: 'g-model' }, 'Model'), model, h('div', { class: 'hint' }, 'The name your AI provider uses, like provider/model-name. A name it doesn’t know stops chat replies, so copy it exactly.')),
+        h('div', null, h('label', { class: 'label', for: 'g-tokens' }, 'Max reply length'), h('div', { class: 'input-group' }, tokens, h('span', { class: 'addon' }, 'tokens')), h('div', { class: 'hint' }, 'Empty uses the provider’s default. About 750 words per 1,000 tokens.')),
+        h('div', null, h('label', { class: 'label', for: 'g-depth' }, 'Thinking depth'), h('div', { class: 'input-group' }, depth, h('span', { class: 'addon' }, 'steps')), h('div', { class: 'hint' }, 'How many tool steps one reply may take, 1 to 64. More can help hard questions and costs more.'))))));
+    updateAgentBar();
+  }
+
+  let agentBar = null;
+  function agentProblem() {
+    const d = agentState.draft;
+    if (!d.name.trim()) return 'The name can’t be empty.';
+    if (!d.core.trim()) return 'The core notes can’t be empty.';
+    if (!d.model || /\s/.test(d.model)) return 'The model is a name without spaces.';
+    if (!(d.thinking_depth >= 1 && d.thinking_depth <= 64)) return 'Thinking depth is 1 to 64.';
+    if (d.max_tokens !== null && !(d.max_tokens >= 1 && d.max_tokens <= 1000000)) return 'Max reply length is empty or 1 to 1,000,000.';
+    return null;
+  }
+  function updateAgentBar() {
+    const changed = agentDirty();
+    if (!changed.length || route().name !== 'agent') { if (agentBar) { agentBar.remove(); agentBar = null; } return; }
+    if (!agentBar) { agentBar = h('div', { class: 'savebar', role: 'region', 'aria-label': 'Unsaved changes' }); document.body.appendChild(agentBar); }
+    clear(agentBar);
+    const problem = agentProblem();
+    append(agentBar, [
+      h('p', null, h('span', { class: 'dot' }), plural(changed.length, 'unsaved change')),
+      problem ? h('span', { class: 'error-text', style: 'margin:0 8px 0 0' }, icon('alert'), problem) : null,
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { agentState.draft = JSON.parse(JSON.stringify(agentState.base)); agentState.undo = { system_prompt: [], core: [] }; rerender(); } }, 'Discard'),
+      h('button', { class: 'btn sm primary', type: 'button', disabled: !!problem, onclick: reviewAgent }, 'Review & save'),
+    ]);
+  }
+
+  const AGENT_LABELS = { name: 'Name', description: 'Description', system_prompt: 'System prompt', core: 'Core notes', model: 'Model', thinking_depth: 'Thinking depth', silent_read_initiative_chance: 'Chiming in', max_tokens: 'Max reply length' };
+
+  /** Line diff: [{type:'same'|'add'|'del', text}], with runs of unchanged lines folded. */
+  function lineDiff(a, b) {
+    const x = a.split('\n'), y = b.split('\n');
+    if (x.length * y.length > 4000000) return [{ type: 'del', text: a }, { type: 'add', text: b }];
+    const n = x.length, m = y.length;
+    const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) lcs[i][j] = x[i] === y[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    const out = [];
+    let i = 0, j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && x[i] === y[j]) { out.push({ type: 'same', text: x[i] }); i++; j++; }
+      else if (j < m && (i >= n || lcs[i][j + 1] >= lcs[i + 1][j])) { out.push({ type: 'add', text: y[j] }); j++; }
+      else { out.push({ type: 'del', text: x[i] }); i++; }
+    }
+    return out;
+  }
+
+  function diffView(a, b) {
+    const rows = lineDiff(a || '', b || '');
+    const el = h('div', { class: 'diff', role: 'table', 'aria-label': 'Changes' });
+    const near = rows.map((r, i) => r.type !== 'same' || rows.slice(Math.max(0, i - 2), i + 3).some((x) => x.type !== 'same'));
+    let skipped = 0;
+    rows.forEach((r, i) => {
+      if (!near[i]) { skipped++; return; }
+      if (skipped) { el.appendChild(h('div', { class: 'diff-skip' }, '⋯ ' + plural(skipped, 'unchanged line'))); skipped = 0; }
+      el.appendChild(h('div', { class: 'diff-line ' + r.type }, h('span', { class: 'diff-mark', 'aria-label': r.type === 'add' ? 'added' : r.type === 'del' ? 'removed' : '' }, r.type === 'add' ? '+' : r.type === 'del' ? '−' : ' '), h('span', null, r.text || ' ')));
+    });
+    if (skipped) el.appendChild(h('div', { class: 'diff-skip' }, '⋯ ' + plural(skipped, 'unchanged line')));
+    return el;
+  }
+
+  async function reviewAgent() {
+    const a = agentState, changed = agentDirty();
+    const show = (f, v) => (f === 'silent_read_initiative_chance' ? Math.round(v * 1000) / 10 + '%' : f === 'max_tokens' ? (v == null ? 'provider default' : numberFmt.format(v) + ' tokens') : String(v));
+    const body = h('div', { class: 'review' }, changed.map((f) => h('div', { class: 'review-item' },
+      h('h4', null, AGENT_LABELS[f]),
+      f === 'system_prompt' || f === 'core' || f === 'description'
+        ? diffView(a.base[f], a.draft[f])
+        : h('div', { class: 'change-diff' }, h('span', { class: 'val old' }, show(f, a.base[f])), h('span', { class: 'arrow' }, '→'), h('span', { class: 'val' }, show(f, a.draft[f]))))),
+      h('p', { class: 'hint' }, 'Saved now; the chat side uses it after the bot restarts.'));
+    const ok = await confirmDialog({ title: 'Save ' + plural(changed.length, 'change') + ' to the bot?', body, confirm: 'Save changes', wide: true });
+    if (!ok) return;
+    const patch = {};
+    changed.forEach((f) => { patch[f] = a.draft[f]; });
+    patch.base = {};
+    ['core', 'system_prompt', 'description', 'name'].forEach((f) => { if (f in patch) patch.base[f] = a.base[f]; });
+    try {
+      const res = await api('PUT', '/agent', patch);
+      a.base = res.settings;
+      a.draft = JSON.parse(JSON.stringify(res.settings));
+      a.undo = { system_prompt: [], core: [] };
+      if (res.restart_needed) { S.restartPending = true; renderBanner(); }
+      toast('Saved. Restart the bot to use it in chat.');
+      refreshAudit();
+      rerender();
+    } catch (e) {
+      if (e.status === 409) {
+        const reload = await confirmDialog({ title: 'The bot changed this meanwhile', icon: 'alert', body: e.message + ' Your edits stay on this page until you reload.', confirm: 'Reload latest', cancel: 'Keep editing' });
+        if (reload) { a.base = null; a.draft = null; rerender(); }
+      } else toast(e.message, 'error');
+    }
   }
 
   // --- restart --------------------------------------------------------------------

@@ -133,6 +133,129 @@ impl PanelData for FakeData {
     }
 
     fn restart(&self) {}
+
+    fn emojis(&self) -> Vec<EmojiInfo> {
+        ["pog", "kekw", "bhai_kya_kar_raha_hai", "doge_cool", "mlci_heart", "salute"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| EmojiInfo {
+                id: (912_345_678_901_234_000u64 + i as u64).to_string(),
+                name: name.to_string(),
+                animated: i == 1,
+                url: avatar(name, (i as u32) * 57),
+            })
+            .collect()
+    }
+
+    fn cached_member(&self, id: u64) -> Option<MemberInfo> {
+        if let Some(p) = PEOPLE.iter().find(|p| p.0 == id) {
+            return Some(person(p));
+        }
+        let i = id.checked_sub(2000)? as usize;
+        let name = ROSTER.get(i)?;
+        Some(MemberInfo { id: id.to_string(), name: name.to_string(), username: name.to_lowercase(), avatar: avatar(name, (i as u32) * 37 % 360), bot: false })
+    }
+
+    fn house_cup(&self, period: super::houses::Period, now: i64) -> Option<super::houses::HouseCup> {
+        let conn = fake_ledger(now).lock();
+        let optouts = [2043u64].into_iter().collect();
+        let captains = HOUSES_KEYS.iter().enumerate().map(|(i, k)| (*k, Some(2000 + i as u64))).collect();
+        let counts = HOUSES_KEYS.iter().zip([312, 298, 287, 301]).map(|(k, n)| (*k, n)).collect();
+        super::houses::read(&conn, period, now, &optouts, &captains, &counts).ok()
+    }
+
+    async fn agent_settings(&self) -> Option<super::agent::AgentSettings> {
+        Some(FAKE_AGENT.lock().clone())
+    }
+
+    async fn save_agent_settings(&self, settings: &super::agent::AgentSettings) -> anyhow::Result<()> {
+        *FAKE_AGENT.lock() = settings.clone();
+        Ok(())
+    }
+}
+
+const HOUSES_KEYS: [&str; 4] = ["gryffindor", "slytherin", "ravenclaw", "hufflepuff"];
+
+/// Members of the fake houses, ids 2000 and up; the member at `id % 4` picks the house.
+const ROSTER: &[&str] = &[
+    "Aarav", "Diya", "Kabir", "Meera", "Vihaan", "Anaya", "Rohan", "Zoya", "Arjun", "Ishita", "Dev", "Tanvi",
+    "Sameer", "Riya", "Yash", "Nisha", "Aditya", "Pooja", "Karan", "Sana", "Nikhil", "Aisha", "Rahul", "Kavya",
+    "Varun", "Myra", "Siddharth", "Neha", "Harsh", "Ira", "Kunal", "Mehak", "Parth", "Simran", "Aman", "Tara",
+    "Om", "Jiya", "Vivek", "Anika", "Rudra", "Pari", "Laksh", "Muggle Mike",
+];
+
+static FAKE_AGENT: std::sync::LazyLock<parking_lot::Mutex<super::agent::AgentSettings>> = std::sync::LazyLock::new(|| {
+    parking_lot::Mutex::new(super::agent::AgentSettings {
+        name: "Loduchand".into(),
+        description: "the resident bot of the MLCI Discord server".into(),
+        system_prompt: "You are Loduchand, the bot of the MLCI server: a community of friends who chat about films, \
+            games, cricket and life.\n\nSpeak like a friend in the group chat, not a customer-service agent. Keep \
+            replies short unless someone asks for detail. Mix English and Hindi the way the members do.\n\nNever \
+            share anyone's personal information, and stay out of arguments in #safe-corner."
+            .into(),
+        core: "# CORE\n\n## People\n- Kabir runs the quiz nights.\n- Meera prefers replies without emoji.\n\n\
+            ## Running jokes\n- The Snitch always lands in #memes when nobody is around.\n"
+            .into(),
+        model: "openrouter/google/gemini-2.5-flash".into(),
+        thinking_depth: 8,
+        silent_read_initiative_chance: 0.04,
+        max_tokens: Some(1200),
+    })
+});
+
+/// A house ledger with about six weeks of made-up points, the busiest in the last day.
+fn fake_ledger(now: i64) -> &'static parking_lot::Mutex<rusqlite::Connection> {
+    static LEDGER: OnceLock<parking_lot::Mutex<rusqlite::Connection>> = OnceLock::new();
+    LEDGER.get_or_init(|| {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(super::super::super::points::SCHEMA).unwrap();
+        let mut seed: u64 = 0x5eed_cafe;
+        let mut roll = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let sources: &[(&str, i64, &str, u64)] = &[
+            ("chat", 1, "Daily chat points", 30),
+            ("voice", 1, "Time in voice", 18),
+            ("quiz", 3, "Quiz round: 3 right", 14),
+            ("koto", 2, "Solved today's Koto", 6),
+            ("anagram", 2, "Anagram: PLANET", 6),
+            ("cat", 1, "Caught a cat", 5),
+            ("arena", 3, "Won a 1v1", 8),
+            ("royale", 10, "Battle royale champion", 1),
+            ("snitch", 5, "Caught the Snitch", 6),
+            ("golden_snitch", 25, "Caught the Golden Snitch", 1),
+            ("weekly", 3, "A post in #safe-corner about a rough week", 3),
+            ("mod", 15, "Meme contest winner", 2),
+        ];
+        let weights: u64 = sources.iter().map(|s| s.3).sum();
+        for i in 0..1400u64 {
+            // Most rows are old; the last 200 fall in the past day.
+            let age = if i >= 1200 { (1400 - i) * 420 + roll(300) } else { 86_400 + roll(40 * 86_400) };
+            let mut pick = roll(weights);
+            let source = sources.iter().find(|s| if pick < s.3 { true } else { pick -= s.3; false }).unwrap();
+            let user = 2000 + roll(ROSTER.len() as u64);
+            // Gryffindor and Ravenclaw are a little busier this month.
+            let house = if roll(10) < 2 { [0usize, 2][roll(2) as usize] } else { ((user - 2000) % 4) as usize };
+            let user = if house as u64 == (user - 2000) % 4 { user } else { 2000 + (house as u64) + (roll(10) * 4) % 40 };
+            let points = source.1 + roll(source.1 as u64 + 1) as i64;
+            let ts = now - age as i64;
+            conn.execute(
+                "INSERT INTO ledger (user_id, house, source, points, reason, day, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    if source.0 == "mod" { None } else { Some(user as i64) },
+                    HOUSES_KEYS[house],
+                    source.0,
+                    points,
+                    source.2,
+                    super::super::super::points::ist_day(ts),
+                    ts
+                ],
+            )
+            .unwrap();
+        }
+        parking_lot::Mutex::new(conn)
+    })
 }
 
 pub fn fake_catalog() -> Vec<Section> {
@@ -215,6 +338,14 @@ pub fn fake_catalog() -> Vec<Section> {
                 c("quiz_add", "Admins", "/quiz_add question: answer:", "Add a question to the bank."),
                 c("quiz_stop", "Admins", "/quiz_stop", "End the running round."),
             ],
+        },
+        Section {
+            id: "autoreplies",
+            title: "Auto-responses",
+            icon: "💬",
+            about: "Rules made on the Auto-responses page that react to or answer messages containing set words.",
+            settings: vec![s("VIZIER_AUTOREPLIES", "Auto-responses on", "Master switch for every auto-response rule.", Kind::Toggle, "on", true)],
+            commands: vec![],
         },
     ]
 }
@@ -484,7 +615,7 @@ async fn status_and_catalog_describe_the_sections() {
     assert_eq!(body["bot"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(body["guild"]["name"], "MLCI");
     let sections = body["sections"].as_array().unwrap();
-    assert_eq!(sections.len(), 4);
+    assert_eq!(sections.len(), 5);
     assert!(sections.iter().find(|s| s["id"] == "houses").unwrap()["enabled"].is_null());
     assert!(sections.iter().find(|s| s["id"] == "quiz").unwrap()["enabled"].is_boolean());
 
@@ -611,6 +742,216 @@ async fn reminders_are_validated() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// --- auto-responses ------------------------------------------------------------------
+
+fn sample_rule() -> Value {
+    json!({
+        "name": "Good morning",
+        "enabled": true,
+        "triggers": ["gm", " good morning ", "gm"],
+        "match_mode": "whole_word",
+        "case_sensitive": false,
+        "channels": ["21", "22"],
+        "exclude_channels": [],
+        "replies": ["gm {user} ☀️", "  "],
+        "as_reply": true,
+        "reactions": ["☀️", "<:pog:912345678901234000>"],
+        "chance": 100,
+        "cooldown_secs": 60,
+        "hits": 500
+    })
+}
+
+#[tokio::test]
+async fn autoreplies_round_trip() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, created, _) = call(&app, "POST", "/api/autoreplies", Some(&session), Some(sample_rule()), true).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!(created["triggers"], json!(["gm", "good morning"]));
+    assert_eq!(created["replies"], json!(["gm {user} ☀️"]));
+    assert_eq!(created["hits"], 0, "counts can't be set from the page");
+
+    let mut edited = created.clone();
+    edited["match_mode"] = json!("exact");
+    edited["hits"] = json!(99);
+    let (status, updated, _) = call(&app, "PUT", &format!("/api/autoreplies/{id}"), Some(&session), Some(edited), true).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["match_mode"], "exact");
+    assert_eq!(updated["hits"], 0);
+
+    let (status, toggled, _) = call(&app, "POST", &format!("/api/autoreplies/{id}/toggle"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(toggled["enabled"], false);
+
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == format!("autoreply:{id}")).collect();
+    assert_eq!(mine[0]["change"], "Switched off");
+    assert_eq!(mine[0]["label"], "Auto-response “Good morning”");
+    assert_eq!(mine[0]["section"]["id"], "autoreplies");
+    assert!(mine[0]["new"].is_null());
+
+    let (status, _, _) = call(&app, "DELETE", &format!("/api/autoreplies/{id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = call(&app, "GET", &format!("/api/autoreplies/{id}"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "POST", "/api/autoreplies", None, Some(sample_rule()), true).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "POST", "/api/autoreplies", Some(&session), Some(sample_rule()), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn autoreplies_are_validated() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let cases: Vec<(&str, Value, &str)> = vec![
+        ("name", json!(" "), "name"),
+        ("triggers", json!(["", "  "]), "trigger"),
+        ("replies", json!([]), ""),
+        ("channels", json!(["41"]), "text channel"),
+        ("channels", json!(["999"]), "no channel"),
+        ("exclude_channels", json!(["21"]), "both"),
+        ("match_mode", json!("pattern"), ""),
+        ("reactions", json!(["fire"]), "emoji"),
+        ("chance", json!(0), "Chance"),
+        ("cooldown_secs", json!(700000), "7 days"),
+        ("replies", json!(["x".repeat(1801)]), "1800"),
+    ];
+    for (field, value, needle) in cases {
+        let mut r = sample_rule();
+        r[field] = value.clone();
+        if field == "replies" && value == json!([]) {
+            r["reactions"] = json!([]);
+        }
+        if field == "match_mode" {
+            r["triggers"] = json!(["(unclosed"]);
+        }
+        let (status, body, _) = call(&app, "POST", "/api/autoreplies", Some(&session), Some(r), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value} gave {body}");
+        assert!(body["error"].as_str().unwrap().contains(needle), "{field}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn the_rule_tester_explains_itself() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let try_it = |text: &'static str, channel: Option<&'static str>, rule: Value| {
+        let app = app.clone();
+        let session = session.clone();
+        async move {
+            let body = json!({ "rule": rule, "text": text, "channel_id": channel });
+            call(&app, "POST", "/api/autoreplies/test", Some(&session), Some(body), true).await
+        }
+    };
+    let (status, r, _) = try_it("GM guys", None, sample_rule()).await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["fires"], true);
+    assert_eq!(r["trigger"], "gm");
+    let (_, r, _) = try_it("programming", None, sample_rule()).await;
+    assert_eq!(r["fires"], false);
+    let (_, r, _) = try_it("gm", Some("23"), sample_rule()).await;
+    assert_eq!(r["fires"], false);
+    assert!(r["why"].as_str().unwrap().contains("channel"));
+    let mut off = sample_rule();
+    off["enabled"] = json!(false);
+    let (_, r, _) = try_it("gm", Some("21"), off).await;
+    assert_eq!((r["fires"].clone(), r["matches"].clone()), (json!(false), json!(true)));
+    let mut bad = sample_rule();
+    bad["match_mode"] = json!("pattern");
+    bad["triggers"] = json!(["("]);
+    let (status, r, _) = try_it("gm", None, bad).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(r["why"].as_str().unwrap().contains("pattern"));
+    let (_, emojis, _) = call(&app, "GET", "/api/discord/emojis", Some(&session), None, false).await;
+    assert_eq!(emojis[0]["name"], "pog");
+}
+
+// --- house cup ----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn house_cup_names_people_and_hides_weekly_reasons() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, cup, _) = call(&app, "GET", "/api/houses?period=month", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{cup}");
+    let houses = cup["houses"].as_array().unwrap();
+    assert_eq!(houses.len(), 4);
+    let leader = houses.iter().find(|h| h["rank"] == 1).unwrap();
+    assert_eq!(leader["gap"], 0);
+    for h in houses {
+        assert!(h["top"].as_array().unwrap().len() <= 10);
+        assert!(h["top"].as_array().unwrap().iter().all(|t| t["id"] != "2043"), "Muggles aren't top scorers");
+        assert!(h["captain"]["name"].is_string());
+        assert!(h["colour"].as_str().unwrap().starts_with('#'));
+    }
+    let feed = cup["feed"].as_array().unwrap();
+    assert_eq!(feed.len(), 50);
+    for row in feed.iter().filter(|r| r["source"] == "weekly") {
+        assert_eq!(row["reason"], "weekly posts award");
+    }
+    assert!(!cup.to_string().contains("rough week"), "weekly reasons never leave the server");
+    for period in ["today", "week", "last_month", "all"] {
+        let (status, _, _) = call(&app, "GET", &format!("/api/houses?period={period}"), Some(&session), None, false).await;
+        assert_eq!(status, StatusCode::OK, "{period}");
+    }
+    let (status, _, _) = call(&app, "GET", "/api/houses?period=forever", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "GET", "/api/houses", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// --- bot behaviour -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_settings_are_limited_checked_and_audited() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    let (status, got, _) = call(&app, "GET", "/api/agent", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let keys: Vec<&String> = got["settings"].as_object().unwrap().keys().collect();
+    assert_eq!(keys.len(), 8, "only the safe fields: {keys:?}");
+    assert_eq!(got["live"]["system_prompt"], false);
+
+    for bad in [json!({ "provider": "openai" }), json!({ "tools": {} }), json!({ "silent_read_initiative_chance": 2 }), json!([1])] {
+        let (status, body, _) = call(&app, "PUT", "/api/agent", Some(&session), Some(bad.clone()), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} gave {body}");
+    }
+
+    let core = got["settings"]["core"].as_str().unwrap().to_string();
+    let (status, body, _) = call(
+        &app,
+        "PUT",
+        "/api/agent",
+        Some(&session),
+        Some(json!({ "core": "# CORE\nsomething else", "base": { "core": "an older version" } })),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    let patch = json!({ "silent_read_initiative_chance": 0.1, "core": format!("{core}\n- Likes cricket."), "base": { "core": core } });
+    let (status, body, _) = call(&app, "PUT", "/api/agent", Some(&session), Some(patch), true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["restart_needed"], true);
+    assert_eq!(body["changed"], json!(["core", "silent_read_initiative_chance"]));
+
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let chance = audit.as_array().unwrap().iter().find(|e| e["key"] == "agent:silent_read_initiative_chance").unwrap();
+    assert_eq!(chance["new"], "10%");
+    assert_eq!(chance["section"]["id"], "agent");
+    let core_entry = audit.as_array().unwrap().iter().find(|e| e["key"] == "agent:core").unwrap();
+    assert!(core_entry["change"].as_str().unwrap().contains("characters"));
+
+    // Saving the same values again changes nothing.
+    let (_, body, _) = call(&app, "PUT", "/api/agent", Some(&session), Some(json!({ "silent_read_initiative_chance": 0.1 })), true).await;
+    assert_eq!(body["restart_needed"], false);
+    let (status, _, _) = call(&app, "PUT", "/api/agent", Some(&session), Some(json!({ "name": "x" })), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -731,6 +1072,31 @@ async fn demo_server() {
         let r = super::super::reminders::list()[0].clone();
         super::super::reminders::save(&r, ADMIN).unwrap();
     }
+    if super::super::autoreplies::list().is_empty() {
+        let rule = |v: Value| serde_json::from_value::<super::super::autoreplies::AutoReply>(v).unwrap();
+        let gm = rule(json!({
+            "name": "Good morning", "enabled": true, "triggers": ["gm", "good morning", "suprabhat"],
+            "match_mode": "whole_word", "channels": ["21", "23"], "replies": ["gm {user} ☀️", "Good morning {name}! Chai ready hai?"],
+            "reactions": ["☀️"], "chance": 60, "cooldown_secs": 300, "hits": 412, "last_hit": now - 2400
+        }));
+        let bruh = rule(json!({
+            "name": "Bruh moment", "enabled": true, "triggers": ["bruh", "bhai kya"], "match_mode": "contains",
+            "replies": [], "reactions": ["💀", "<:kekw:912345678901234001>"], "chance": 35, "cooldown_secs": 90,
+            "exclude_channels": ["12", "13"], "hits": 1290, "last_hit": now - 300
+        }));
+        let quiz = rule(json!({
+            "name": "When is quiz night", "enabled": false, "triggers": ["^when.*quiz"], "match_mode": "pattern",
+            "channels": ["21"], "replies": ["Quiz night is every Friday at 9 PM in #quiz. Bring your A game, {name}."],
+            "as_reply": true, "chance": 100, "cooldown_secs": 3600, "hits": 37, "last_hit": now - 5 * 86400
+        }));
+        for r in [&gm, &bruh, &quiz] {
+            super::super::autoreplies::save(r, 0).unwrap();
+        }
+        let first = super::super::autoreplies::list()[1].clone();
+        super::super::autoreplies::save(&first, ADMIN_TWO).unwrap();
+        super::super::log_change("agent:silent_read_initiative_chance", Some("0.02"), Some("0.04"), ADMIN).unwrap();
+    }
+
     // Spread today's changes over the last few hours.
     DB.get()
         .unwrap()

@@ -1162,7 +1162,8 @@ impl EventHandler for Handler {
         quiz::resume(&ctx, &self.1.storage, &self.0);
 
         // Control panel: its web server (once per process) and the /panel sign-in command.
-        control::web::start(&ctx);
+        // The agent's storage and id let the panel's Bot behaviour page edit its AI settings.
+        control::web::start(&ctx, &self.1, &self.0);
 
         // History import, downtime catch-up and the voice log each start once
         // per process. Ready fires again on every reconnect, and two copies of
