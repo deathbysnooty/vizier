@@ -16,8 +16,8 @@ use cosmic_text::{
     Weight, Wrap,
 };
 use tiny_skia::{
-    Color as SkColor, FillRule, FilterQuality, GradientStop, LinearGradient, Mask, Paint, PathBuilder, Pixmap,
-    PixmapPaint, Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, Transform,
+    Color as SkColor, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint,
+    PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use super::awards_card::{avatar_pixmap, blend_rect, fill_circle, paint, rrect};
@@ -124,6 +124,91 @@ const CHAMP_CY: f32 = 232.0;
 const FIGHT_BADGE_R: f32 = 36.0;
 const CHAMP_BADGE_R: f32 = 50.0;
 
+/// What a theme changes in colour and words. The scenery each world adds on
+/// top is painted by `backdrop` and friends; Classic adds none, so its numbers
+/// here are the card as it has always been.
+struct Look {
+    /// The floor, top to bottom. One stop is a flat fill.
+    floor: &'static [(f32, [u8; 3])],
+    /// Each side's glow and ring colour.
+    left: [u8; 3],
+    right: [u8; 3],
+    /// The soft seam down the middle, and its bright core.
+    seam: ([u8; 3], [u8; 3]),
+    /// Words before the stage on the chip, and the champion's ribbon.
+    prefix: Option<&'static str>,
+    title: &'static str,
+    /// The champion card: the deep light behind them, the pool under their
+    /// name, the tints the rays cycle through and the confetti.
+    halo: [u8; 3],
+    pool: [u8; 3],
+    rays: &'static [[u8; 3]],
+    confetti: [[u8; 3]; 4],
+}
+
+fn look(theme: Theme) -> Look {
+    let classic = Look {
+        floor: &[(0.0, BG)],
+        left: WARM,
+        right: COOL,
+        seam: ([196, 138, 214], [246, 228, 255]),
+        prefix: None,
+        title: "BATTLE CHAMPION",
+        halo: [120, 86, 12],
+        pool: [186, 132, 22],
+        rays: &[GOLD],
+        confetti: [GOLD, lift(GOLD, 0.55), [255, 244, 214], [255, 186, 120]],
+    };
+    match theme {
+        Theme::Classic => classic,
+        Theme::Pokemon => Look {
+            floor: &[(0.0, [24, 50, 92]), (0.48, [15, 20, 32]), (1.0, [16, 42, 30])],
+            left: [239, 68, 68],
+            right: [59, 130, 246],
+            seam: ([210, 226, 255], [255, 255, 255]),
+            prefix: Some("POKÉMON BATTLE"),
+            title: "POKÉMON CHAMPION",
+            halo: [40, 70, 130],
+            rays: &[[239, 68, 68], [250, 204, 21], [59, 130, 246]],
+            confetti: [[239, 68, 68], [255, 255, 255], [59, 130, 246], [250, 204, 21]],
+            ..classic
+        },
+        Theme::Wizard => Look {
+            floor: &[(0.0, [12, 16, 42]), (0.58, [22, 14, 38]), (1.0, [50, 12, 28])],
+            left: [232, 44, 56],
+            right: [34, 197, 110],
+            seam: ([214, 180, 110], [255, 238, 196]),
+            prefix: Some("WIZARD DUEL"),
+            title: "DUELLING CHAMPION",
+            halo: [96, 70, 20],
+            ..classic
+        },
+        Theme::Saiyan => Look {
+            floor: &[(0.0, [84, 36, 6]), (0.55, [44, 18, 6]), (1.0, [20, 9, 5])],
+            left: [255, 150, 30],
+            right: [70, 150, 255],
+            seam: ([255, 196, 110], [255, 244, 210]),
+            prefix: Some("TOURNAMENT"),
+            title: "STRONGEST UNDER THE HEAVENS",
+            halo: [150, 76, 8],
+            rays: &[[255, 170, 40]],
+            confetti: [[255, 214, 90], [255, 150, 30], [255, 244, 200], [255, 120, 40]],
+            ..classic
+        },
+        Theme::Wrestling => Look {
+            floor: &[(0.0, [20, 18, 26]), (1.0, [8, 8, 11])],
+            left: [226, 44, 44],
+            right: [48, 100, 235],
+            seam: ([200, 204, 222], [240, 242, 255]),
+            prefix: Some("MAIN EVENT"),
+            title: "UNDISPUTED CHAMPION",
+            halo: [90, 84, 70],
+            confetti: [GOLD, [230, 232, 240], [255, 244, 214], [200, 204, 214]],
+            ..classic
+        },
+    }
+}
+
 /// PNG bytes of a fight card, or `None` if drawing failed.
 pub fn fight_png(fight: &Fight) -> Option<Vec<u8>> {
     let mut fs = super::awards::fonts().lock();
@@ -167,20 +252,23 @@ fn sides(outcome: &Outcome) -> (Side, Side) {
 
 fn draw_fight(pen: &mut Pen<'_>, f: &Fight) {
     let (left, right) = sides(&f.outcome);
-    pen.px.fill(sk(BG, 255));
-    glow(&mut pen.px, LEFT_CX + 30.0, FIGHT_CY + 20.0, 430.0, WARM, 74);
-    glow(&mut pen.px, RIGHT_CX - 30.0, FIGHT_CY + 20.0, 430.0, COOL, 74);
+    let look = look(f.theme);
+    floor(&mut pen.px, FIGHT_W, FIGHT_H, look.floor);
+    glow(&mut pen.px, LEFT_CX + 30.0, FIGHT_CY + 20.0, 430.0, look.left, 74);
+    glow(&mut pen.px, RIGHT_CX - 30.0, FIGHT_CY + 20.0, 430.0, look.right, 74);
     // Widest band first: stacking them leaves the seam soft down both sides
     // instead of ending on an edge.
     for (half, alpha) in [(124.0, 7), (88.0, 7), (54.0, 8), (26.0, 9)] {
-        seam(&mut pen.px, FIGHT_W, FIGHT_H, half, [196, 138, 214], alpha);
+        seam(&mut pen.px, FIGHT_W, FIGHT_H, half, look.seam.0, alpha);
     }
-    seam(&mut pen.px, FIGHT_W, FIGHT_H, 2.0, [246, 228, 255], 24);
+    seam(&mut pen.px, FIGHT_W, FIGHT_H, 2.0, look.seam.1, 24);
+    backdrop(&mut pen.px, f.theme, &look);
     vignette(&mut pen.px, FIGHT_W, FIGHT_H, 150);
+    frame(&mut pen.px, FIGHT_W, FIGHT_H, f.theme);
 
-    stage_chip(pen, f.stage.trim());
-    fighter(pen, f.left, LEFT_CX, WARM, left);
-    fighter(pen, f.right, RIGHT_CX, COOL, right);
+    stage_chip(pen, &stage_text(f.theme, f.stage.trim()));
+    fighter(pen, f.left, LEFT_CX, look.left, left, f.theme);
+    fighter(pen, f.right, RIGHT_CX, look.right, right, f.theme);
     versus(pen, FIGHT_W / 2.0, FIGHT_CY);
     // Last, so the damage lands on top of everything it belongs to.
     if let Some((who, delta)) = f.hit {
@@ -197,6 +285,16 @@ fn draw_fight(pen: &mut Pen<'_>, f: &Fight) {
         let buf = pen.paragraph(line, 19.0, 25.0, PANEL_W - 2.0 * PANEL_PAD, 2);
         let top = PANEL_Y + (PANEL_H - Pen::height(&buf)) / 2.0;
         pen.draw(&buf, PANEL_X + PANEL_PAD, top, [219, 224, 234]);
+    }
+}
+
+/// The chip's words: the theme's banner before the stage, or the banner alone
+/// for a one-off challenge, where "CHALLENGE" would only repeat it.
+fn stage_text(theme: Theme, stage: &str) -> String {
+    match look(theme).prefix {
+        None => stage.to_string(),
+        Some(prefix) if stage.is_empty() || stage.eq_ignore_ascii_case("challenge") => prefix.to_string(),
+        Some(prefix) => format!("{prefix} · {stage}"),
     }
 }
 
@@ -220,7 +318,7 @@ fn stage_chip(pen: &mut Pen<'_>, stage: &str) {
 
 /// One side: glow, shadow, ringed portrait, name plate and - once the fight is
 /// decided - a winner's pill or an OUT stamp.
-fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Side) {
+fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Side, theme: Theme) {
     let lost = matches!(side, Side::Loser);
     let outer = AV / 2.0 + GAP + RING;
     // The winner's ring turns to gold; the loser's goes to cold slate.
@@ -232,6 +330,11 @@ fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Sid
     if !lost {
         let halo = if matches!(side, Side::Winner) { 120 } else { 62 };
         glow(&mut pen.px, cx, FIGHT_CY, outer + 76.0, if lost { colour } else { band.0 }, halo);
+    }
+    // Saiyans flare up; whoever is beaten has nothing left to flare with.
+    if theme == Theme::Saiyan && !lost {
+        let ki = if matches!(side, Side::Winner) { GOLD } else { colour };
+        aura(&mut pen.px, cx, FIGHT_CY, outer, ki, 1.0);
     }
     shadow(&mut pen.px, cx, FIGHT_CY + 16.0, outer);
     ring(&mut pen.px, cx, FIGHT_CY, outer, band);
@@ -378,15 +481,19 @@ fn versus(pen: &mut Pen<'_>, cx: f32, cy: f32) {
 
 fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
     let outer = CHAMP_AV / 2.0 + GAP + RING;
-    pen.px.fill(sk(BG, 255));
-    glow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, 430.0, [120, 86, 12], 150);
-    rays(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer + 10.0, 760.0);
-    confetti(&mut pen.px, CHAMP_W, CHAMP_H, (CHAMP_W / 2.0, CHAMP_CY, outer + 26.0));
+    let look = look(c.theme);
+    floor(&mut pen.px, CHAMP_W, CHAMP_H, look.floor);
+    glow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, 430.0, look.halo, 150);
+    champion_backdrop(&mut pen.px, c.theme, outer, &look);
     vignette(&mut pen.px, CHAMP_W, CHAMP_H, 170);
+    frame(&mut pen.px, CHAMP_W, CHAMP_H, c.theme);
     // A warm pool of light under the name, so the type sits in the glow.
-    glow(&mut pen.px, CHAMP_W / 2.0, 462.0, 330.0, [186, 132, 22], 78);
+    glow(&mut pen.px, CHAMP_W / 2.0, 462.0, 330.0, look.pool, 78);
 
     glow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer + 90.0, lift(GOLD, 0.3), 110);
+    if c.theme == Theme::Saiyan {
+        aura(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer, GOLD, 1.5);
+    }
     shadow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY + 20.0, outer);
     ring(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer, (lift(GOLD, 0.6), dim(GOLD, 0.58)));
     fill_circle(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, CHAMP_AV / 2.0 + GAP, [12, 13, 17]);
@@ -400,7 +507,12 @@ fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
         let (bx, by) = (CHAMP_W / 2.0 + outer * angle.cos(), CHAMP_CY + outer * angle.sin());
         house_badge(pen, house, bx, by, CHAMP_BADGE_R, false);
     }
-    ribbon(pen, "BATTLE CHAMPION");
+    if c.theme == Theme::Wrestling {
+        belt(pen);
+        ribbon(pen, look.title, false);
+    } else {
+        ribbon(pen, look.title, true);
+    }
 
     let name = pen.fit(&c.who.name, 42.0, Weight::EXTRA_BOLD, 820.0);
     pen.centered(&name, CHAMP_W / 2.0, 468.0, 42.0, Weight::EXTRA_BOLD, INK);
@@ -438,10 +550,15 @@ fn house_badge(pen: &mut Pen<'_>, house: &super::house::House, cx: f32, cy: f32,
     }
 }
 
-/// A ribbon with two swallow-tailed ends, carrying the title.
-fn ribbon(pen: &mut Pen<'_>, label: &str) {
-    let (x, y, w, h) = (290.0, 370.0, 420.0, 54.0);
-    for side in [-1.0f32, 1.0] {
+/// A ribbon with two swallow-tailed ends, carrying the title. A long title
+/// widens the plate before it is cut short; `tails` off leaves just the plate,
+/// for a card that hangs it on something else.
+fn ribbon(pen: &mut Pen<'_>, label: &str, tails: bool) {
+    let label = spaced(label);
+    let w = (pen.measure(&label, 21.0, Weight::EXTRA_BOLD) + 52.0).clamp(420.0, 600.0);
+    let (x, y, h) = (CHAMP_W / 2.0 - w / 2.0, 370.0, 54.0);
+    let ends: &[f32] = if tails { &[-1.0, 1.0] } else { &[] };
+    for &side in ends {
         let start = if side < 0.0 { x + 24.0 } else { x + w - 24.0 };
         let (end, notch) = (start + side * 104.0, start + side * 74.0);
         let mut pb = PathBuilder::new();
@@ -471,7 +588,7 @@ fn ribbon(pen: &mut Pen<'_>, label: &str) {
     fill_shaded(&mut pen.px, &plate, shader, GOLD);
     let stroke = Stroke { width: 2.5, ..Stroke::default() };
     pen.px.stroke_path(&plate, &paint(dim(GOLD, 0.45), 255), &stroke, Transform::identity(), None);
-    let text = pen.fit(&spaced(label), 21.0, Weight::EXTRA_BOLD, w - 52.0);
+    let text = pen.fit(&label, 21.0, Weight::EXTRA_BOLD, w - 52.0);
     pen.centered(&text, x + w / 2.0, y + 35.0, 21.0, Weight::EXTRA_BOLD, ON_LIGHT);
 }
 
@@ -504,13 +621,15 @@ fn crown(px: &mut Pixmap, cx: f32, base: f32, w: f32, h: f32) {
     fill_circle(px, cx, base + h * 0.09, h * 0.08, [214, 62, 82]);
 }
 
-/// Spokes of light fanning out from behind the champion.
-fn rays(px: &mut Pixmap, cx: f32, cy: f32, r0: f32, r1: f32) {
+/// Spokes of light fanning out from behind the champion, each in the next of
+/// `tints`.
+fn rays(px: &mut Pixmap, cx: f32, cy: f32, r0: f32, r1: f32, tints: &[[u8; 3]]) {
     let n = 18;
     for i in 0..n {
         let a = i as f32 * std::f32::consts::TAU / n as f32 + 0.18;
         let half = std::f32::consts::TAU / n as f32 * 0.28;
         let alpha = if i % 2 == 0 { 54 } else { 26 };
+        let tint = tints.get(i % tints.len().max(1)).copied().unwrap_or(GOLD);
         let mut pb = PathBuilder::new();
         pb.move_to(cx + a.cos() * r0, cy + a.sin() * r0);
         pb.line_to(cx + (a - half).cos() * r1, cy + (a - half).sin() * r1);
@@ -518,8 +637,8 @@ fn rays(px: &mut Pixmap, cx: f32, cy: f32, r0: f32, r1: f32) {
         pb.close();
         let Some(path) = pb.finish() else { continue };
         let stops = vec![
-            GradientStop::new(0.0, sk(lift(GOLD, 0.3), alpha)),
-            GradientStop::new(1.0, sk(GOLD, 0)),
+            GradientStop::new(0.0, sk(lift(tint, 0.3), alpha)),
+            GradientStop::new(1.0, sk(tint, 0)),
         ];
         let shader = RadialGradient::new(
             Point::from_xy(cx, cy),
@@ -529,21 +648,25 @@ fn rays(px: &mut Pixmap, cx: f32, cy: f32, r0: f32, r1: f32) {
             SpreadMode::Pad,
             Transform::identity(),
         );
-        fill_shaded(px, &path, shader, GOLD);
+        fill_shaded(px, &path, shader, tint);
     }
 }
 
-/// Specks of gold thrown over the card. Fixed seed: the same card twice over
-/// should come out the same.
-fn confetti(px: &mut Pixmap, w: f32, h: f32, clear: (f32, f32, f32)) {
-    let mut s: u32 = 0x9E37_79B9;
-    let mut next = move || {
+/// A fixed-seed xorshift: scattered things land in the same places every time,
+/// so the same card twice over comes out the same.
+fn scatter(seed: u32) -> impl FnMut() -> u32 {
+    let mut s = seed;
+    move || {
         s ^= s << 13;
         s ^= s >> 17;
         s ^= s << 5;
         s
-    };
-    let palette = [GOLD, lift(GOLD, 0.55), [255, 244, 214], [255, 186, 120]];
+    }
+}
+
+/// Specks thrown over the card in the theme's colours.
+fn confetti(px: &mut Pixmap, w: f32, h: f32, clear: (f32, f32, f32), palette: [[u8; 3]; 4]) {
+    let mut next = scatter(0x9E37_79B9);
     for _ in 0..64 {
         let x = (next() % w as u32) as f32;
         let y = (next() % h as u32) as f32;
@@ -555,6 +678,393 @@ fn confetti(px: &mut Pixmap, w: f32, h: f32, clear: (f32, f32, f32)) {
         let r = 1.5 + (next() % 20) as f32 / 10.0;
         let c = palette[(next() % palette.len() as u32) as usize];
         wash(px, x, y, r, c, 40 + (next() % 120) as u8);
+    }
+}
+
+/// The floor: a flat fill, or a top-to-bottom wash through the theme's stops.
+fn floor(px: &mut Pixmap, w: f32, h: f32, stops: &[(f32, [u8; 3])]) {
+    let first = stops.first().map_or(BG, |s| s.1);
+    px.fill(sk(first, 255));
+    if stops.len() < 2 {
+        return;
+    }
+    if let (Some(shader), Some(area)) = (down(0.0, h, stops), Rect::from_xywh(0.0, 0.0, w, h)) {
+        let mut p = Paint::default();
+        p.shader = shader;
+        px.fill_rect(area, &p, Transform::identity(), None);
+    }
+}
+
+/// The world behind a fight, laid over the floor and the glows. Everything
+/// here sits behind the portraits and plates, and nothing busy reaches down to
+/// the line panel.
+fn backdrop(px: &mut Pixmap, theme: Theme, look: &Look) {
+    let mid = FIGHT_W / 2.0;
+    let edge = AV / 2.0 + GAP + RING;
+    match theme {
+        Theme::Classic => {}
+        Theme::Pokemon => {
+            poke_ball(px, mid, FIGHT_CY + 28.0, 140.0);
+            for cx in [LEFT_CX, RIGHT_CX] {
+                battle_field(px, cx, FIGHT_CY + 110.0);
+            }
+        }
+        Theme::Wizard => {
+            sparkles(px, FIGHT_W, 268.0, 90);
+            spell_beam(px, (LEFT_CX + edge, RIGHT_CX - edge), FIGHT_CY, (look.left, look.right));
+        }
+        Theme::Saiyan => speed_lines(px, mid, FIGHT_CY, 150.0, 760.0),
+        Theme::Wrestling => {
+            crowd(px, FIGHT_W);
+            ropes(px, FIGHT_W, [234.0, 292.0, 350.0]);
+            for cx in [LEFT_CX, RIGHT_CX] {
+                spotlight(px, cx + (mid - cx) * 0.4, (cx, FIGHT_CY + 140.0), 190.0, 1.0);
+            }
+        }
+    }
+}
+
+/// The world behind the champion: rays and confetti in the theme's colours,
+/// gold dust for the wizards, speed lines for the Saiyans, and a crowd under
+/// crossing spotlights for the ring.
+fn champion_backdrop(px: &mut Pixmap, theme: Theme, outer: f32, look: &Look) {
+    let (cx, cy) = (CHAMP_W / 2.0, CHAMP_CY);
+    match theme {
+        Theme::Saiyan => speed_lines(px, cx, cy, outer + 30.0, 820.0),
+        Theme::Wrestling => {
+            crowd(px, CHAMP_W);
+            // Two lamps from the rig, crossing on the champion.
+            for lamp in [150.0, CHAMP_W - 150.0] {
+                spotlight(px, lamp, (cx, CHAMP_H), 190.0, 2.0);
+            }
+        }
+        _ => rays(px, cx, cy, outer + 10.0, 760.0, look.rays),
+    }
+    match theme {
+        Theme::Wizard => sparkles(px, CHAMP_W, CHAMP_H - 150.0, 120),
+        _ => confetti(px, CHAMP_W, CHAMP_H, (cx, cy, outer + 26.0), look.confetti),
+    }
+}
+
+/// A theme's border. The wizards' cards get a double rule of gold, like the
+/// edge of an old certificate, with a diamond in each corner; it sits inside
+/// the stage chip and under the crown.
+fn frame(px: &mut Pixmap, w: f32, h: f32, theme: Theme) {
+    if theme != Theme::Wizard {
+        return;
+    }
+    let gold = [214, 176, 98];
+    for (inset, width, alpha, r) in [(6.0, 2.5, 220, 14.0), (12.0, 2.0, 130, 9.0)] {
+        if let Some(rule) = rrect(inset, inset, w - 2.0 * inset, h - 2.0 * inset, r) {
+            let stroke = Stroke { width, ..Stroke::default() };
+            px.stroke_path(&rule, &paint(gold, alpha), &stroke, Transform::identity(), None);
+        }
+    }
+    for (x, y) in [(20.0, 20.0), (w - 20.0, 20.0), (20.0, h - 20.0), (w - 20.0, h - 20.0)] {
+        diamond(px, x, y, 6.0, gold, 230);
+    }
+}
+
+fn diamond(px: &mut Pixmap, x: f32, y: f32, s: f32, c: [u8; 3], alpha: u8) {
+    let mut pb = PathBuilder::new();
+    pb.move_to(x, y - s);
+    pb.line_to(x + s, y);
+    pb.line_to(x, y + s);
+    pb.line_to(x - s, y);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        px.fill_path(&path, &paint(c, alpha), FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// A capture ball traced in faint light behind the VS: a red cap, a pale
+/// base, the dark band across the middle and the button ring at its heart.
+fn poke_ball(px: &mut Pixmap, cx: f32, cy: f32, r: f32) {
+    let (Some(disc), Some(mut mask)) = (PathBuilder::from_circle(cx, cy, r), Mask::new(px.width(), px.height()))
+    else {
+        return;
+    };
+    mask.fill_path(&disc, FillRule::Winding, true, Transform::identity());
+    let across = |y: f32, h: f32| Rect::from_xywh(cx - r, y, 2.0 * r, h);
+    for (area, c, alpha) in [
+        (across(cy - r, r), [232, 52, 60], 58),
+        (across(cy, r), [236, 240, 250], 22),
+        (across(cy - r * 0.075, r * 0.15), [4, 5, 8], 190),
+    ] {
+        if let Some(area) = area {
+            px.fill_rect(area, &paint(c, alpha), Transform::identity(), Some(&mask));
+        }
+    }
+    let stroke = Stroke { width: 4.0, ..Stroke::default() };
+    px.stroke_path(&disc, &paint([236, 240, 250], 40), &stroke, Transform::identity(), None);
+    wash(px, cx, cy, r * 0.31, [4, 5, 8], 200);
+    if let Some(button) = PathBuilder::from_circle(cx, cy, r * 0.19) {
+        let stroke = Stroke { width: 6.0, ..Stroke::default() };
+        px.stroke_path(&button, &paint([236, 240, 250], 80), &stroke, Transform::identity(), None);
+    }
+}
+
+/// The pale oval of field a trainer's fighter stands on.
+fn battle_field(px: &mut Pixmap, cx: f32, cy: f32) {
+    let Some(oval) = Rect::from_xywh(cx - 172.0, cy - 30.0, 344.0, 60.0).and_then(PathBuilder::from_oval) else {
+        return;
+    };
+    let shader = down(cy - 30.0, cy + 30.0, &[(0.0, [120, 196, 110]), (1.0, [52, 110, 60])]);
+    let mut p = paint([86, 150, 84], 80);
+    if let Some(shader) = shader {
+        p.shader = shader;
+        p.shader.apply_opacity(0.32);
+    }
+    px.fill_path(&oval, &p, FillRule::Winding, Transform::identity(), None);
+    let stroke = Stroke { width: 3.0, ..Stroke::default() };
+    px.stroke_path(&oval, &paint([190, 236, 176], 90), &stroke, Transform::identity(), None);
+}
+
+/// Gold dust with the odd four-pointed twinkle, kept above `bottom`.
+fn sparkles(px: &mut Pixmap, w: f32, bottom: f32, n: usize) {
+    let mut next = scatter(0x2545_F491);
+    for i in 0..n {
+        let x = (next() % w as u32) as f32;
+        let y = (next() % bottom as u32) as f32;
+        let alpha = 70 + (next() % 150) as u8;
+        let c = if next() % 3 == 0 { [255, 246, 214] } else { [240, 200, 110] };
+        // Inside the gold frame, and out of the chip's letters.
+        if under_chip(x, y) || x < 28.0 || x > w - 28.0 || y < 28.0 {
+            continue;
+        }
+        if i % 8 == 0 {
+            let s = 6.0 + (next() % 6) as f32;
+            glow(px, x, y, s * 1.8, c, 70);
+            twinkle(px, x, y, s, c, 230);
+        } else {
+            wash(px, x, y, 1.0 + (next() % 12) as f32 / 10.0, c, alpha);
+        }
+    }
+}
+
+/// Whether a point falls where the stage chip sits, top centre, so specks of
+/// scenery stay out of its letters.
+fn under_chip(x: f32, y: f32) -> bool {
+    y < 62.0 && (x - FIGHT_W / 2.0).abs() < 250.0
+}
+
+/// A four-pointed star with pinched sides.
+fn twinkle(px: &mut Pixmap, x: f32, y: f32, s: f32, c: [u8; 3], alpha: u8) {
+    let k = s * 0.16;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x, y - s);
+    pb.quad_to(x + k, y - k, x + s, y);
+    pb.quad_to(x + k, y + k, x, y + s);
+    pb.quad_to(x - k, y + k, x - s, y);
+    pb.quad_to(x - k, y - k, x, y - s);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        px.fill_path(&path, &paint(c, alpha), FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// Two spells meeting: a crackling bolt off each portrait in that side's
+/// colour, flaring white-gold where they collide behind the VS.
+fn spell_beam(px: &mut Pixmap, ends: (f32, f32), y: f32, colours: ([u8; 3], [u8; 3])) {
+    let mid = (ends.0 + ends.1) / 2.0;
+    let jag = [0.0, -9.0, 6.0, -4.0, 11.0, -7.0, 3.0, -10.0, 8.0, -3.0, 0.0];
+    for (from, colour, flip) in [(ends.0, colours.0, 1.0), (ends.1, colours.1, -1.0)] {
+        let mut pb = PathBuilder::new();
+        pb.move_to(from, y);
+        let n = (jag.len() - 1) as f32;
+        for (i, dy) in jag.iter().enumerate().skip(1) {
+            pb.line_to(from + (mid - from) * i as f32 / n, y + dy * flip);
+        }
+        let Some(bolt) = pb.finish() else { continue };
+        for (width, c, alpha) in [(18.0, colour, 36), (8.0, colour, 110), (3.0, lift(colour, 0.7), 240)] {
+            let stroke = Stroke { width, line_join: LineJoin::Round, line_cap: LineCap::Round, ..Stroke::default() };
+            px.stroke_path(&bolt, &paint(c, alpha), &stroke, Transform::identity(), None);
+        }
+    }
+    glow(px, mid, y, 80.0, [255, 240, 200], 170);
+}
+
+/// Speed lines bursting out of the clash, gone at the middle and strongest at
+/// the card's edge, like a panel in a fight manga.
+fn speed_lines(px: &mut Pixmap, cx: f32, cy: f32, r0: f32, r1: f32) {
+    let mut next = scatter(0x6C8E_9CF5);
+    let n = 60;
+    let tint = [255, 236, 190];
+    for i in 0..n {
+        let a = (i as f32 + (next() % 100) as f32 / 100.0) * std::f32::consts::TAU / n as f32;
+        let half = 0.004 + (next() % 10) as f32 * 0.0011;
+        let start = r0 + (next() % 90) as f32;
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx + a.cos() * start, cy + a.sin() * start);
+        pb.line_to(cx + (a - half).cos() * r1, cy + (a - half).sin() * r1);
+        pb.line_to(cx + (a + half).cos() * r1, cy + (a + half).sin() * r1);
+        pb.close();
+        let Some(path) = pb.finish() else { continue };
+        let stops = vec![GradientStop::new(r0 / r1, sk(tint, 0)), GradientStop::new(0.8, sk(tint, 70))];
+        let centre = Point::from_xy(cx, cy);
+        let shader = RadialGradient::new(centre, centre, r1, stops, SpreadMode::Pad, Transform::identity());
+        fill_shaded(px, &path, shader, tint);
+    }
+}
+
+/// A flaring ki aura: curved tongues of light round the ring that sweep
+/// upwards and burn tallest over the head, as a soft outer flame with a
+/// brighter core. `scale` grows it.
+fn aura(px: &mut Pixmap, cx: f32, cy: f32, r: f32, ki: [u8; 3], scale: f32) {
+    let lengths = [0.62, 1.0, 0.74, 0.9, 0.56, 0.96, 0.7, 0.84];
+    let far = r + 120.0 * scale;
+    for (reach, alpha, n, turn) in [(1.0, 165u8, 18usize, 0.0), (0.6, 235, 14, 0.11)] {
+        let step = std::f32::consts::TAU / n as f32;
+        let at = |angle: f32, dist: f32| (cx + angle.cos() * dist, cy + angle.sin() * dist);
+        let mut pb = PathBuilder::new();
+        for i in 0..n {
+            let (a0, a1) = (i as f32 * step + turn, (i + 1) as f32 * step + turn);
+            let m = (a0 + a1) / 2.0;
+            // 1 straight up, 0 straight down: flames rise.
+            let rise = (1.0 - m.sin()) / 2.0;
+            let len = (16.0 + 84.0 * rise * rise) * lengths[i % lengths.len()] * reach * scale;
+            // Each tip leans from the ring's outward line towards straight up.
+            let (nx, ny) = (m.cos(), m.sin() - 0.9);
+            let norm = (nx * nx + ny * ny).sqrt().max(0.001);
+            let root = at(m, r);
+            let tip = (root.0 + nx / norm * len, root.1 + ny / norm * len);
+            let (b0, b1) = (at(a0, r - 4.0), at(a1, r - 4.0));
+            if i == 0 {
+                pb.move_to(b0.0, b0.1);
+            }
+            // Bellied sides that pinch to a point, so each tongue reads as flame.
+            let c0 = at(a0 + step * 0.15, r + len * 0.32);
+            let c1 = at(a1 - step * 0.15, r + len * 0.2);
+            pb.quad_to(c0.0, c0.1 - len * 0.18, tip.0, tip.1);
+            pb.quad_to(c1.0, c1.1 - len * 0.08, b1.0, b1.1);
+        }
+        pb.close();
+        let Some(path) = pb.finish() else { continue };
+        let inner = r / far;
+        let stops = vec![
+            GradientStop::new(inner, sk(lift(ki, 0.65), alpha)),
+            GradientStop::new(inner + (1.0 - inner) * 0.45, sk(ki, alpha / 2)),
+            GradientStop::new(1.0, sk(ki, 0)),
+        ];
+        let centre = Point::from_xy(cx, cy);
+        let shader = RadialGradient::new(centre, centre, far, stops, SpreadMode::Pad, Transform::identity());
+        fill_shaded(px, &path, shader, ki);
+    }
+}
+
+/// A crowd in the dark along the top: rows of heads and shoulders against the
+/// arena haze, with the odd camera flash going off.
+fn crowd(px: &mut Pixmap, w: f32) {
+    glow(px, w * 0.25, 30.0, 250.0, [110, 96, 140], 26);
+    glow(px, w * 0.75, 30.0, 250.0, [110, 96, 140], 26);
+    let mut next = scatter(0x1B87_3593);
+    for row in 0..3 {
+        let y = 26.0 + row as f32 * 26.0;
+        let shade = [16 - row * 3, 15 - row * 3, 21 - row * 4];
+        let mut x = -12.0 + (next() % 20) as f32;
+        while x < w + 20.0 {
+            let r = 9.0 + (next() % 5) as f32;
+            let dy = (next() % 8) as f32;
+            wash(px, x, y + dy, r, shade, 215);
+            let shoulders = Rect::from_xywh(x - r * 1.7, y + dy + r * 0.9, r * 3.4, r * 3.0);
+            if let Some(body) = shoulders.and_then(PathBuilder::from_oval) {
+                px.fill_path(&body, &paint(shade, 215), FillRule::Winding, Transform::identity(), None);
+            }
+            x += r * 2.5 + (next() % 10) as f32;
+        }
+    }
+    for _ in 0..12 {
+        let (x, y) = ((next() % w as u32) as f32, 18.0 + (next() % 80) as f32);
+        if under_chip(x, y + 20.0) {
+            continue;
+        }
+        glow(px, x, y, 12.0, [255, 255, 255], 100);
+        wash(px, x, y, 1.8, [255, 255, 255], 210);
+    }
+}
+
+/// A spotlight cone from a lamp above the card down to `(cx, floor_y)`, bright
+/// at the lamp and gone by the floor. It is stacked from wide and faint to
+/// narrow, so the beam has soft edges; `power` scales how strong it is.
+fn spotlight(px: &mut Pixmap, lamp_x: f32, (cx, floor_y): (f32, f32), spread: f32, power: f32) {
+    let tint = [255, 246, 222];
+    for (widen, alpha) in [(1.25, 26.0), (1.0, 34.0), (0.72, 40.0)] {
+        let alpha = (alpha * power).min(255.0) as u8;
+        let mut pb = PathBuilder::new();
+        pb.move_to(lamp_x - 14.0 * widen, -10.0);
+        pb.line_to(lamp_x + 14.0 * widen, -10.0);
+        pb.line_to(cx + spread * widen, floor_y);
+        pb.line_to(cx - spread * widen, floor_y);
+        pb.close();
+        let Some(cone) = pb.finish() else { continue };
+        let stops = vec![GradientStop::new(0.0, sk(tint, alpha)), GradientStop::new(1.0, sk(tint, 0))];
+        let shader = LinearGradient::new(
+            Point::from_xy(lamp_x, 0.0),
+            Point::from_xy(cx, floor_y),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        );
+        fill_shaded(px, &cone, shader, tint);
+    }
+}
+
+/// Ring ropes in red, white and blue, sagging a little between two posts, with
+/// a padded turnbuckle where each meets a post.
+fn ropes(px: &mut Pixmap, w: f32, ys: [f32; 3]) {
+    let colours = [[214, 36, 44], [236, 236, 242], [36, 78, 204]];
+    let (x0, x1) = (22.0, w - 22.0);
+    for x in [x0, x1] {
+        if let Some(post) = rrect(x - 7.0, ys[0] - 30.0, 14.0, ys[2] - ys[0] + 60.0, 5.0) {
+            px.fill_path(&post, &paint([48, 50, 58], 255), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    for (y, c) in ys.into_iter().zip(colours) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y);
+        pb.quad_to(w / 2.0, y + 24.0, x1, y);
+        let Some(rope) = pb.finish() else { continue };
+        let line = |width: f32| Stroke { width, line_cap: LineCap::Round, ..Stroke::default() };
+        px.stroke_path(&rope, &paint([0, 0, 0], 120), &line(9.0), Transform::from_translate(0.0, 4.0), None);
+        px.stroke_path(&rope, &paint(dim(c, 0.9), 235), &line(6.0), Transform::identity(), None);
+        px.stroke_path(&rope, &paint(lift(c, 0.5), 120), &line(2.0), Transform::from_translate(0.0, -1.5), None);
+        for x in [x0, x1] {
+            if let Some(pad) = rrect(x - 12.0, y - 17.0, 24.0, 34.0, 8.0) {
+                let shader = down(y - 17.0, y + 17.0, &[(0.0, lift(c, 0.25)), (1.0, dim(c, 0.6))]);
+                fill_shaded(px, &pad, shader, c);
+            }
+        }
+    }
+}
+
+/// A title belt behind the champion's plate: a black leather strap with gold
+/// stitching and a jewelled side plate either way.
+fn belt(pen: &mut Pen<'_>) {
+    let (x0, x1, y, h) = (150.0, 850.0, 380.0, 34.0);
+    if let Some(strap) = rrect(x0, y, x1 - x0, h, 12.0) {
+        let shader = down(y, y + h, &[(0.0, [52, 46, 46]), (0.5, [24, 21, 21]), (1.0, [10, 9, 9])]);
+        fill_shaded(&mut pen.px, &strap, shader, [24, 21, 21]);
+        let stroke = Stroke { width: 2.0, ..Stroke::default() };
+        pen.px.stroke_path(&strap, &paint([0, 0, 0], 200), &stroke, Transform::identity(), None);
+    }
+    for sy in [y + 6.0, y + h - 6.0] {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0 + 16.0, sy);
+        pb.line_to(x1 - 16.0, sy);
+        let Some(stitch) = pb.finish() else { continue };
+        let stroke = Stroke { width: 2.0, dash: StrokeDash::new(vec![7.0, 6.0], 0.0), ..Stroke::default() };
+        pen.px.stroke_path(&stitch, &paint(GOLD, 170), &stroke, Transform::identity(), None);
+    }
+    for (sx, gem) in [(222.0, [214, 40, 48]), (778.0, [40, 90, 220])] {
+        let (pw, ph) = (62.0, h + 16.0);
+        let Some(plate) = rrect(sx - pw / 2.0, y - 8.0, pw, ph, 10.0) else { continue };
+        let shader = down(y - 8.0, y - 8.0 + ph, &METAL);
+        fill_shaded(&mut pen.px, &plate, shader, GOLD);
+        let stroke = Stroke { width: 2.0, ..Stroke::default() };
+        pen.px.stroke_path(&plate, &paint(dim(GOLD, 0.4), 255), &stroke, Transform::identity(), None);
+        fill_circle(&mut pen.px, sx, y + h / 2.0, 9.0, dim(GOLD, 0.4));
+        fill_circle(&mut pen.px, sx, y + h / 2.0, 7.0, gem);
+        wash(&mut pen.px, sx - 2.0, y + h / 2.0 - 2.5, 2.5, [255, 255, 255], 170);
     }
 }
 
@@ -1123,46 +1633,78 @@ mod tests {
         assert_eq!(&png[..4], &PNG_MAGIC);
     }
 
-    /// Writes both cards out to look at:
+    #[test]
+    fn themed_stage_reads_right() {
+        assert_eq!(stage_text(Theme::Classic, "Round 2"), "Round 2");
+        assert_eq!(stage_text(Theme::Pokemon, "Challenge"), "POKÉMON BATTLE");
+        assert_eq!(stage_text(Theme::Wrestling, "Final"), "MAIN EVENT · Final");
+    }
+
+    #[test]
+    fn every_theme_renders() {
+        let (a, b) = cast();
+        for theme in Theme::ALL {
+            let fight = Fight {
+                stage: "Final".to_string(),
+                left: &a,
+                right: &b,
+                line: "Line".to_string(),
+                outcome: Outcome::Won(0),
+                hit: None,
+                theme,
+            };
+            assert_eq!(&fight_png(&fight).expect("fight card")[..4], &PNG_MAGIC);
+            let champ = Champion { who: &b, subtitle: String::new(), line: String::new(), theme };
+            assert_eq!(&champion_png(&champ).expect("champion card")[..4], &PNG_MAGIC);
+        }
+    }
+
+    /// Writes every theme's cards out to look at, as `fight_<key>.png`,
+    /// `fight_result_<key>.png` and `champion_<key>.png`:
     /// `BATTLE_CARD_PREVIEW=/tmp cargo test battle_card -- --ignored`.
     #[test]
     #[ignore = "writes files; only useful when looking at the design"]
     fn preview() {
         let Ok(dir) = std::env::var("BATTLE_CARD_PREVIEW") else { return };
         let (a, b) = cast();
-        let mid = Fight {
-            stage: "Round 2 · quarter-final".to_string(),
-            left: &a,
-            right: &b,
-            line: "Rohit ne Meera ko block kar diya, aur bola: gaali nahi, bas ek chappal".to_string(),
-            outcome: Outcome::Open,
-            hit: Some((1, -27)),
-            theme: Theme::Classic,
-        };
         let done = Fighter { name: "Meera".to_string(), avatar: b.avatar.clone(), hp: 0, max_hp: 100, house: b.house };
-        let over = Fight {
-            stage: "Round 2 · quarter-final".to_string(),
-            left: &a,
-            right: &done,
-            line: "Meera gir gayi, Rohit ne chappal hawa mein ghuma di".to_string(),
-            outcome: Outcome::Won(0),
-            hit: None,
-            theme: Theme::Classic,
-        };
-        let champ = Champion {
-            who: &a,
-            subtitle: "12 warriors, 4 rounds, 1 champion".to_string(),
-            line: "Sab ro rahe hain, Rohit chappal ghuma raha hai".to_string(),
-            theme: Theme::Classic,
-        };
-        let cards = [
-            ("fight_preview.png", fight_png(&mid)),
-            ("fight_result_preview.png", fight_png(&over)),
-            ("champion_preview.png", champion_png(&champ)),
-        ];
-        for (name, png) in cards {
-            let bytes = png.expect("preview card");
-            std::fs::write(std::path::Path::new(&dir).join(name), bytes).expect("writing the preview");
+        for theme in Theme::ALL {
+            // Classic keeps its old long stage, so it can be compared with earlier renders.
+            let stage = if theme == Theme::Classic { "Round 2 · quarter-final" } else { "Quarter-final" };
+            let mid = Fight {
+                stage: stage.to_string(),
+                left: &a,
+                right: &b,
+                line: "Rohit ne Meera ko block kar diya, aur bola: gaali nahi, bas ek chappal".to_string(),
+                outcome: Outcome::Open,
+                hit: Some((1, -27)),
+                theme,
+            };
+            let over = Fight {
+                stage: stage.to_string(),
+                left: &a,
+                right: &done,
+                line: "Meera gir gayi, Rohit ne chappal hawa mein ghuma di".to_string(),
+                outcome: Outcome::Won(0),
+                hit: None,
+                theme,
+            };
+            let champ = Champion {
+                who: &a,
+                subtitle: "12 warriors, 4 rounds, 1 champion".to_string(),
+                line: "Sab ro rahe hain, Rohit chappal ghuma raha hai".to_string(),
+                theme,
+            };
+            let key = theme.key();
+            let cards = [
+                (format!("fight_{key}.png"), fight_png(&mid)),
+                (format!("fight_result_{key}.png"), fight_png(&over)),
+                (format!("champion_{key}.png"), champion_png(&champ)),
+            ];
+            for (name, png) in cards {
+                let bytes = png.expect("preview card");
+                std::fs::write(std::path::Path::new(&dir).join(name), bytes).expect("writing the preview");
+            }
         }
     }
 }
