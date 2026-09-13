@@ -138,6 +138,95 @@ async fn post_hour(ctx: &Context, start: i64, end: i64) {
     }
 }
 
+/// How many names `/housetop` lists.
+const TOP_LIST: usize = 10;
+
+pub fn housetop_builder() -> CreateCommand {
+    CreateCommand::new("housetop")
+        .description("a house's top 10 point scorers")
+        .add_option(house::house_option("house", "which house (yours if left out)"))
+        .add_option(
+            CreateCommandOption::new(serenity::all::CommandOptionType::String, "period", "which points to count")
+                .add_string_choice("This month", "month")
+                .add_string_choice("Last month", "last")
+                .add_string_choice("All time", "all"),
+        )
+}
+
+/// What `/housetop` says. `rows` is already ranked, trimmed and free of Muggles;
+/// each has the member, their points and where most of them came from.
+fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], captain: Option<u64>, total: i64) -> String {
+    let mut text = format!("{} **{}** · top scorers, {}", h.crest, h.name, period);
+    if rows.is_empty() {
+        text.push_str("\nNobody has scored yet.");
+        return text;
+    }
+    for (i, (user, points, mostly)) in rows.iter().enumerate() {
+        let rank = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            n => format!("`{:>2}.`", n + 1),
+        };
+        let crown = if Some(*user) == captain { " 👑" } else { "" };
+        let mostly = mostly.map(|s| format!(" · mostly {}", s.label())).unwrap_or_default();
+        text.push_str(&format!("\n{} <@{}>{} **{}**{}", rank, user, crown, points, mostly));
+    }
+    text.push_str(&format!("\n-# {} house total: {} points", h.name, total));
+    text
+}
+
+/// `/housetop [house] [period]` - private to whoever asks.
+pub async fn housetop_command(ctx: &Context, command: &CommandInteraction) {
+    let option = |name: &str| {
+        command.data.options.iter().find_map(|o| match (&o.value, o.name == name) {
+            (CommandDataOptionValue::String(v), true) => Some(v.clone()),
+            _ => None,
+        })
+    };
+    let asker = command.user.id.get();
+    let Some(h) = option("house").and_then(|k| house::house(&k)).or_else(|| house::house_of(asker)) else {
+        let _ = command.create_response(&ctx.http, whisper("You're not in a house, so pick one: `/housetop house:`")).await;
+        return;
+    };
+    let now = Utc::now().timestamp();
+    let this_month = ledger::month_start(now);
+    let (since, until, period) = match option("period").as_deref() {
+        Some("last") => {
+            let last = ledger::month_start(this_month - 1);
+            (last, this_month, month_label(&ledger::ist_day(last)))
+        }
+        Some("all") => (0, i64::MAX, "all time".to_string()),
+        _ => (this_month, i64::MAX, format!("{} so far", month_label(&ledger::ist_day(this_month)))),
+    };
+    // Both read the house database; asked before the ledger is locked below,
+    // since its lock can't be taken twice.
+    let stepped_out = house::optout_set();
+    let captain = house::captain_id(h.key);
+    let text = {
+        let Some(db) = house::db() else {
+            let _ = command.create_response(&ctx.http, whisper("The points aren't available right now.")).await;
+            return;
+        };
+        let conn = db.lock();
+        let ranked = ledger::top_members(&conn, h.key, since, until).unwrap_or_default();
+        let rows: Vec<(u64, i64, Option<Source>)> = ranked
+            .into_iter()
+            .filter(|(user, _)| !stepped_out.contains(user))
+            .take(TOP_LIST)
+            .map(|(user, points)| {
+                let mostly = ledger::breakdown_between(&conn, user, since, until)
+                    .ok()
+                    .and_then(|b| b.first().map(|(s, _)| *s));
+                (user, points, mostly)
+            })
+            .collect();
+        let total = ledger::house_total(&conn, h.key, since, until).unwrap_or(0);
+        housetop_text(h, &period, &rows, captain, total)
+    };
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
+}
+
 fn whisper(text: impl Into<String>) -> CreateInteractionResponse {
     CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
 }
@@ -287,6 +376,18 @@ fn month_label(day: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn housetop_lists_medals_the_captain_and_the_house_total() {
+        let h = &HOUSES[0];
+        let rows = vec![(11, 30, Some(Source::Quiz)), (12, 20, None), (13, 9, Some(Source::Chat)), (14, 4, Some(Source::Cat))];
+        let text = housetop_text(h, "September 2026 so far", &rows, Some(12), 80);
+        assert!(text.contains(&format!("🥇 <@11> **30** · mostly {}", Source::Quiz.label())), "{}", text);
+        assert!(text.contains("🥈 <@12> 👑 **20**"), "{}", text);
+        assert!(text.contains("` 4.` <@14> **4**"), "{}", text);
+        assert!(text.ends_with("house total: 80 points"), "{}", text);
+        assert!(housetop_text(h, "all time", &[], None, 0).contains("Nobody has scored yet."));
+    }
 
     #[test]
     fn india_hours_start_at_half_past_a_utc_hour() {

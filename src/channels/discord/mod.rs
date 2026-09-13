@@ -1361,6 +1361,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
 
         let house_opt = CreateCommand::new("houseopt")
@@ -1928,6 +1929,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
+            }
+            if command.data.name == "housetop" {
+                standings::housetop_command(&ctx, &command).await;
             }
             if command.data.name == "housedraw" {
                 standings::draw_command(&ctx, &command).await;

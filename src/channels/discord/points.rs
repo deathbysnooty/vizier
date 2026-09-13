@@ -291,14 +291,42 @@ pub fn by_source(conn: &Connection, since: i64, until: i64) -> rusqlite::Result<
 
 /// One person's points since `since`, split by source, biggest first.
 pub fn breakdown(conn: &Connection, user: u64, since: i64) -> rusqlite::Result<Vec<(Source, i64)>> {
+    breakdown_between(conn, user, since, i64::MAX)
+}
+
+/// One person's points between `since` and `until`, split by source, biggest first.
+pub fn breakdown_between(conn: &Connection, user: u64, since: i64, until: i64) -> rusqlite::Result<Vec<(Source, i64)>> {
     let mut stmt = conn.prepare(
-        "SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND ts >= ?2 GROUP BY source",
+        "SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND ts >= ?2 AND ts < ?3 GROUP BY source",
     )?;
-    let rows = stmt.query_map(params![user as i64, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt
+        .query_map(params![user as i64, since, until], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     let mut out: Vec<(Source, i64)> =
         rows.flatten().filter_map(|(key, sum)| Source::from_key(&key).map(|s| (s, sum))).filter(|(_, n)| *n != 0).collect();
     out.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(out)
+}
+
+/// One house's points between `since` and `until`, house-only awards included.
+pub fn house_total(conn: &Connection, house_key: &str, since: i64, until: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(points), 0) FROM ledger WHERE house = ?1 AND ts >= ?2 AND ts < ?3",
+        params![house_key, since, until],
+        |r| r.get(0),
+    )
+}
+
+/// Everyone who scored for a house between `since` and `until`, highest first,
+/// with their total. Ties go to whoever got there first. Anyone at zero or below
+/// (a deduction can do that) is left out.
+pub fn top_members(conn: &Connection, house_key: &str, since: i64, until: i64) -> rusqlite::Result<Vec<(u64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_id, SUM(points) AS total FROM ledger
+         WHERE house = ?1 AND user_id IS NOT NULL AND ts >= ?2 AND ts < ?3
+         GROUP BY user_id HAVING total > 0 ORDER BY total DESC, MAX(ts) ASC",
+    )?;
+    let rows = stmt.query_map(params![house_key, since, until], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))?;
+    rows.collect()
 }
 
 /// The monthly result.
@@ -386,6 +414,22 @@ mod tests {
 
     fn entry(user: u64, source: Source, points: i64) -> Entry<'static> {
         Entry { user: Some(user), house: &HOUSES[0], source, scope: None, points, reason: "", by: None, dedupe: None }
+    }
+
+    #[test]
+    fn top_members_ranks_one_house_in_its_window() {
+        let conn = db();
+        write(&conn, &entry(1, Source::Quiz, 5), MON).unwrap();
+        write(&conn, &entry(2, Source::Quiz, 6), MON).unwrap();
+        write(&conn, &entry(1, Source::Cat, 2), MON + 60).unwrap();
+        // Another house, outside the window, and someone taken back to zero.
+        let other = Entry { house: &HOUSES[1], ..entry(4, Source::Quiz, 6) };
+        write(&conn, &other, MON).unwrap();
+        write(&conn, &entry(5, Source::Quiz, 6), MON - 10 * DAY).unwrap();
+        write(&conn, &entry(3, Source::Quiz, 2), MON).unwrap();
+        write(&conn, &Entry { by: Some(9), ..entry(3, Source::Mod, -2) }, MON).unwrap();
+        let top = top_members(&conn, HOUSES[0].key, MON - DAY, MON + DAY).unwrap();
+        assert_eq!(top, vec![(1, 7), (2, 6)]);
     }
 
     #[test]
