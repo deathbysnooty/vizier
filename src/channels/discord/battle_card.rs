@@ -135,8 +135,10 @@ struct Look {
     right: [u8; 3],
     /// The soft seam down the middle, and its bright core.
     seam: ([u8; 3], [u8; 3]),
-    /// Words before the stage on the chip, and the champion's ribbon.
+    /// Words before the stage on the chip, the chip on its own for a one-off
+    /// challenge when that wants other words, and the champion's ribbon.
     prefix: Option<&'static str>,
+    challenge: Option<&'static str>,
     title: &'static str,
     /// The champion card: the deep light behind them, the pool under their
     /// name, the tints the rays cycle through and the confetti.
@@ -153,6 +155,7 @@ fn look(theme: Theme) -> Look {
         right: COOL,
         seam: ([196, 138, 214], [246, 228, 255]),
         prefix: None,
+        challenge: None,
         title: "BATTLE CHAMPION",
         halo: [120, 86, 12],
         pool: [186, 132, 22],
@@ -161,8 +164,30 @@ fn look(theme: Theme) -> Look {
     };
     match theme {
         Theme::Classic => classic,
-        // Placeholders until their looks are drawn.
-        Theme::Tactical | Theme::Tarnished => classic,
+        Theme::Tactical => Look {
+            floor: &[(0.0, [24, 33, 44]), (0.6, [14, 19, 26]), (1.0, [9, 11, 15])],
+            left: [236, 152, 40],
+            right: [92, 146, 208],
+            seam: ([176, 196, 220], [226, 236, 248]),
+            prefix: Some("COMPETITIVE"),
+            challenge: Some("1v1 AIM DUEL"),
+            title: "MATCH MVP",
+            halo: [44, 66, 96],
+            pool: [120, 100, 60],
+            confetti: [[236, 152, 40], [92, 146, 208], [255, 214, 150], [196, 222, 250]],
+            ..classic
+        },
+        Theme::Tarnished => Look {
+            floor: &[(0.0, [28, 26, 19]), (0.55, [17, 16, 13]), (1.0, [11, 11, 12])],
+            left: [222, 176, 84],
+            right: [192, 38, 48],
+            seam: ([204, 172, 110], [250, 232, 190]),
+            prefix: Some("COLOSSEUM"),
+            challenge: Some("INVADER DUEL"),
+            title: "ELDEN LORD",
+            halo: [110, 84, 30],
+            ..classic
+        },
         Theme::Pokemon => Look {
             floor: &[(0.0, [24, 50, 92]), (0.48, [15, 20, 32]), (1.0, [16, 42, 30])],
             left: [239, 68, 68],
@@ -293,9 +318,12 @@ fn draw_fight(pen: &mut Pen<'_>, f: &Fight) {
 /// The chip's words: the theme's banner before the stage, or the banner alone
 /// for a one-off challenge, where "CHALLENGE" would only repeat it.
 fn stage_text(theme: Theme, stage: &str) -> String {
-    match look(theme).prefix {
+    let look = look(theme);
+    match look.prefix {
         None => stage.to_string(),
-        Some(prefix) if stage.is_empty() || stage.eq_ignore_ascii_case("challenge") => prefix.to_string(),
+        Some(prefix) if stage.is_empty() || stage.eq_ignore_ascii_case("challenge") => {
+            look.challenge.unwrap_or(prefix).to_string()
+        }
         Some(prefix) => format!("{prefix} · {stage}"),
     }
 }
@@ -338,6 +366,11 @@ fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Sid
         let ki = if matches!(side, Side::Winner) { GOLD } else { colour };
         aura(&mut pen.px, cx, FIGHT_CY, outer, ki, 1.0);
     }
+    // A target frame, in the ring's own colour.
+    if theme == Theme::Tactical {
+        let alpha = if lost { 150 } else { 215 };
+        brackets(&mut pen.px, cx, FIGHT_CY, outer + 7.0, band.0, alpha);
+    }
     shadow(&mut pen.px, cx, FIGHT_CY + 16.0, outer);
     ring(&mut pen.px, cx, FIGHT_CY, outer, band);
     fill_circle(&mut pen.px, cx, FIGHT_CY, AV / 2.0 + GAP, [12, 13, 17]);
@@ -375,7 +408,12 @@ fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Sid
             };
             pen.chip(cx, PILL_Y, PILL_H, pill);
         }
-        Side::Loser => stamp(pen, cx, FIGHT_CY + 6.0),
+        Side::Loser => {
+            stamp(pen, cx, FIGHT_CY + 6.0);
+            if theme == Theme::Tarnished {
+                you_died(pen, cx);
+            }
+        }
         Side::Lit => {}
     }
 }
@@ -514,6 +552,9 @@ fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
         ribbon(pen, look.title, false);
     } else {
         ribbon(pen, look.title, true);
+    }
+    if c.theme == Theme::Tactical {
+        mvp_stars(pen, look.title);
     }
 
     let name = pen.fit(&c.who.name, 42.0, Weight::EXTRA_BOLD, 820.0);
@@ -704,7 +745,16 @@ fn backdrop(px: &mut Pixmap, theme: Theme, look: &Look) {
     let mid = FIGHT_W / 2.0;
     let edge = AV / 2.0 + GAP + RING;
     match theme {
-        Theme::Classic | Theme::Tactical | Theme::Tarnished => {}
+        Theme::Classic => {}
+        Theme::Tactical => {
+            hex_grid(px, FIGHT_W, FIGHT_H);
+            crosshair(px, mid, FIGHT_CY, 100.0);
+        }
+        Theme::Tarnished => {
+            great_tree(px, mid, (PANEL_Y + 10.0, FIGHT_CY - 20.0));
+            mist(px, FIGHT_W, FIGHT_H);
+            embers(px, FIGHT_W, PLATE_Y + 90.0, 60);
+        }
         Theme::Pokemon => {
             poke_ball(px, mid, FIGHT_CY + 28.0, 140.0);
             for cx in [LEFT_CX, RIGHT_CX] {
@@ -733,6 +783,13 @@ fn champion_backdrop(px: &mut Pixmap, theme: Theme, outer: f32, look: &Look) {
     let (cx, cy) = (CHAMP_W / 2.0, CHAMP_CY);
     match theme {
         Theme::Saiyan => speed_lines(px, cx, cy, outer + 30.0, 820.0),
+        Theme::Tactical => {
+            hex_grid(px, CHAMP_W, CHAMP_H);
+            tracers(px, CHAMP_W, CHAMP_H - 170.0, (look.left, look.right));
+        }
+        // The great tree would only poke out round the portrait like wings;
+        // on this card the light falls in shafts instead.
+        Theme::Tarnished => shafts(px, CHAMP_H),
         Theme::Wrestling => {
             crowd(px, CHAMP_W);
             // Two lamps from the rig, crossing on the champion.
@@ -744,6 +801,10 @@ fn champion_backdrop(px: &mut Pixmap, theme: Theme, outer: f32, look: &Look) {
     }
     match theme {
         Theme::Wizard => sparkles(px, CHAMP_W, CHAMP_H - 150.0, 120),
+        Theme::Tarnished => {
+            embers(px, CHAMP_W, CHAMP_H - 160.0, 50);
+            leaves(px, CHAMP_W, CHAMP_H - 160.0, (cx, cy, outer + 20.0));
+        }
         _ => confetti(px, CHAMP_W, CHAMP_H, (cx, cy, outer + 26.0), look.confetti),
     }
 }
@@ -1068,6 +1129,307 @@ fn belt(pen: &mut Pen<'_>) {
         fill_circle(&mut pen.px, sx, y + h / 2.0, 7.0, gem);
         wash(&mut pen.px, sx - 2.0, y + h / 2.0 - 2.5, 2.5, [255, 255, 255], 170);
     }
+}
+
+/// A faint honeycomb over the floor, like a tactical display, fading out
+/// before it reaches the line panel.
+fn hex_grid(px: &mut Pixmap, w: f32, h: f32) {
+    let r = 30.0;
+    let hw = r * 3f32.sqrt() / 2.0;
+    let mut pb = PathBuilder::new();
+    let (mut y, mut row) = (0.0, 0);
+    while y < h + r {
+        let mut x = if row % 2 == 1 { 0.0 } else { -hw };
+        while x < w + hw {
+            for k in 0..6 {
+                let a = (60.0 * k as f32 - 90.0).to_radians();
+                let (vx, vy) = (x + a.cos() * r, y + a.sin() * r);
+                if k == 0 {
+                    pb.move_to(vx, vy);
+                } else {
+                    pb.line_to(vx, vy);
+                }
+            }
+            pb.close();
+            x += 2.0 * hw;
+        }
+        y += 1.5 * r;
+        row += 1;
+    }
+    let Some(grid) = pb.finish() else { return };
+    let tint = [150, 190, 230];
+    let stops = vec![GradientStop::new(0.0, sk(tint, 30)), GradientStop::new(0.8, sk(tint, 0))];
+    let (top, bottom) = (Point::from_xy(0.0, 0.0), Point::from_xy(0.0, h));
+    let shader = LinearGradient::new(top, bottom, stops, SpreadMode::Pad, Transform::identity());
+    let mut p = paint(tint, 30);
+    if let Some(shader) = shader {
+        p.shader = shader;
+    }
+    let stroke = Stroke { width: 1.5, ..Stroke::default() };
+    px.stroke_path(&grid, &p, &stroke, Transform::identity(), None);
+}
+
+/// A scope's crosshair behind the VS: two range rings and four ticks that
+/// stop short of the middle.
+fn crosshair(px: &mut Pixmap, cx: f32, cy: f32, r: f32) {
+    let tint = [196, 226, 250];
+    for (ring, alpha) in [(r, 70), (r * 0.62, 44)] {
+        if let Some(circle) = PathBuilder::from_circle(cx, cy, ring) {
+            let stroke = Stroke { width: 2.0, ..Stroke::default() };
+            px.stroke_path(&circle, &paint(tint, alpha), &stroke, Transform::identity(), None);
+        }
+    }
+    let mut pb = PathBuilder::new();
+    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        pb.move_to(cx + dx * r * 0.3, cy + dy * r * 0.3);
+        pb.line_to(cx + dx * r * 1.4, cy + dy * r * 1.4);
+    }
+    if let Some(ticks) = pb.finish() {
+        let stroke = Stroke { width: 3.0, ..Stroke::default() };
+        px.stroke_path(&ticks, &paint(tint, 110), &stroke, Transform::identity(), None);
+    }
+}
+
+/// Target brackets at the corners of a square round a portrait, with a short
+/// tick in from each side, like a frame closing on a target.
+fn brackets(px: &mut Pixmap, cx: f32, cy: f32, half: f32, c: [u8; 3], alpha: u8) {
+    let arm = 28.0;
+    let mut pb = PathBuilder::new();
+    for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let (x, y) = (cx + sx * half, cy + sy * half);
+        pb.move_to(x - sx * arm, y);
+        pb.line_to(x, y);
+        pb.line_to(x, y - sy * arm);
+    }
+    for sx in [-1.0, 1.0] {
+        pb.move_to(cx + sx * half, cy);
+        pb.line_to(cx + sx * (half - 12.0), cy);
+    }
+    let Some(frame) = pb.finish() else { return };
+    let stroke = Stroke { width: 3.5, line_cap: LineCap::Square, ..Stroke::default() };
+    px.stroke_path(&frame, &paint(c, alpha), &stroke, Transform::identity(), None);
+}
+
+/// Tracer streaks whipping across the dark above `bottom`, each bright at its
+/// head and fading along its tail, in the two sides' colours.
+fn tracers(px: &mut Pixmap, w: f32, bottom: f32, tints: ([u8; 3], [u8; 3])) {
+    let mut next = scatter(0x51ED_270B);
+    for i in 0..16 {
+        let (hx, hy) = ((next() % w as u32) as f32, 24.0 + (next() % (bottom - 24.0) as u32) as f32);
+        let len = 160.0 + (next() % 200) as f32;
+        let tilt = ((next() % 40) as f32 - 20.0) / 100.0;
+        let (dir, tint) = if i % 2 == 0 { (1.0, tints.0) } else { (-1.0, tints.1) };
+        let (tx, ty) = (hx - dir * len * tilt.cos(), hy - len * tilt.sin());
+        let mut pb = PathBuilder::new();
+        pb.move_to(tx, ty);
+        pb.line_to(hx, hy);
+        let Some(streak) = pb.finish() else { continue };
+        for (width, alpha) in [(8.0, 50), (2.5, 220)] {
+            let stops = vec![GradientStop::new(0.0, sk(tint, 0)), GradientStop::new(1.0, sk(lift(tint, 0.4), alpha))];
+            let shader = LinearGradient::new(
+                Point::from_xy(tx, ty),
+                Point::from_xy(hx, hy),
+                stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            );
+            let mut p = paint(tint, alpha);
+            if let Some(shader) = shader {
+                p.shader = shader;
+            }
+            let stroke = Stroke { width, line_cap: LineCap::Round, ..Stroke::default() };
+            px.stroke_path(&streak, &p, &stroke, Transform::identity(), None);
+        }
+        wash(px, hx, hy, 2.5, lift(tint, 0.7), 230);
+    }
+}
+
+/// A dark five-pointed star either side of the MVP title on its plate.
+fn mvp_stars(pen: &mut Pen<'_>, title: &str) {
+    let w = pen.measure(&spaced(title), 21.0, Weight::EXTRA_BOLD);
+    for side in [-1.0, 1.0] {
+        star(&mut pen.px, CHAMP_W / 2.0 + side * (w / 2.0 + 26.0), 396.0, 12.0, ON_LIGHT);
+    }
+}
+
+fn star(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3]) {
+    let mut pb = PathBuilder::new();
+    for k in 0..10 {
+        let a = (36.0 * k as f32 - 90.0).to_radians();
+        let d = if k % 2 == 0 { r } else { r * 0.44 };
+        let (x, y) = (cx + a.cos() * d, cy + a.sin() * d);
+        if k == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    if let Some(path) = pb.finish() {
+        px.fill_path(&path, &paint(c, 255), FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// A great tree of light: a luminous trunk rising from `ends.0`, fading out
+/// towards its root, that splits at `ends.1` into boughs arching out to both
+/// sides like a wide canopy. Abstract on purpose - a glow and some lines.
+fn great_tree(px: &mut Pixmap, cx: f32, ends: (f32, f32)) {
+    let (root, fork) = ends;
+    let tint = [255, 208, 118];
+    let crown_glow = Transform::from_row(1.0, 0.0, 0.0, 0.5, cx, fork - 20.0);
+    let stops = vec![GradientStop::new(0.0, sk([196, 150, 60], 70)), GradientStop::new(1.0, sk([196, 150, 60], 0))];
+    let reach = 380.0;
+    let shader = RadialGradient::new(Point::zero(), Point::zero(), reach, stops, SpreadMode::Pad, crown_glow);
+    let area = Rect::from_xywh(cx - reach, fork - 20.0 - reach * 0.5, 2.0 * reach, reach);
+    if let (Some(shader), Some(area)) = (shader, area) {
+        let mut p = Paint::default();
+        p.shader = shader;
+        px.fill_rect(area, &p, Transform::identity(), None);
+    }
+    let mut pb = PathBuilder::new();
+    pb.move_to(cx, root);
+    pb.cubic_to(cx - 16.0, root - (root - fork) * 0.35, cx + 12.0, root - (root - fork) * 0.7, cx, fork);
+    // Boughs by their angle off straight up and their length: the long ones
+    // lean out wide and arch over, so the canopy spreads rather than climbs.
+    let boughs = [(84.0, 300.0), (62.0, 240.0), (38.0, 170.0), (18.0, 110.0)];
+    for (deg, len) in boughs {
+        for side in [-1.0f32, 1.0] {
+            let a = f32::to_radians(deg);
+            let end = (cx + side * a.sin() * len * 1.3, fork - a.cos() * len * 0.45 - 10.0);
+            let bend = (cx + side * a.sin() * len * 0.5, fork - len * 0.35);
+            pb.move_to(cx, fork);
+            pb.quad_to(bend.0, bend.1, end.0, end.1);
+            // A twig leaves each bough about halfway and droops outwards.
+            let mid = ((cx + 2.0 * bend.0 + end.0) / 4.0, (fork + 2.0 * bend.1 + end.1) / 4.0);
+            pb.move_to(mid.0, mid.1);
+            pb.quad_to(mid.0 + side * len * 0.2, mid.1 - len * 0.08, mid.0 + side * len * 0.34, mid.1 + len * 0.1);
+        }
+    }
+    let Some(tree) = pb.finish() else { return };
+    for (width, alpha) in [(18.0, 16), (7.0, 40), (2.5, 115)] {
+        let stops = vec![GradientStop::new(0.0, sk(tint, 0)), GradientStop::new(0.6, sk(tint, alpha))];
+        let shader = LinearGradient::new(
+            Point::from_xy(0.0, root),
+            Point::from_xy(0.0, fork),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        );
+        let mut p = paint(tint, alpha);
+        if let Some(shader) = shader {
+            p.shader = shader;
+        }
+        let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+        px.stroke_path(&tree, &p, &stroke, Transform::identity(), None);
+    }
+}
+
+/// Cold grey mist lying along the bottom of the card, as flattened pools.
+fn mist(px: &mut Pixmap, w: f32, h: f32) {
+    let tint = [150, 158, 170];
+    let pools = [(0.12, 0.78, 300.0, 62), (0.52, 0.88, 380.0, 50), (0.9, 0.76, 300.0, 62), (0.3, 0.98, 320.0, 48)];
+    for (fx, fy, r, alpha) in pools {
+        let (cx, cy) = (w * fx, h * fy);
+        let stops = vec![GradientStop::new(0.0, sk(tint, alpha)), GradientStop::new(1.0, sk(tint, 0))];
+        let squash = Transform::from_row(1.0, 0.0, 0.0, 0.28, cx, cy);
+        let shader = RadialGradient::new(Point::zero(), Point::zero(), r, stops, SpreadMode::Pad, squash);
+        if let (Some(shader), Some(area)) = (shader, Rect::from_xywh(cx - r, cy - r * 0.28, 2.0 * r, r * 0.56)) {
+            let mut p = Paint::default();
+            p.shader = shader;
+            px.fill_rect(area, &p, Transform::identity(), None);
+        }
+    }
+}
+
+/// Embers and ash drifting through the dark above `bottom`: warm specks with
+/// a faint glow, and a few grey flakes.
+fn embers(px: &mut Pixmap, w: f32, bottom: f32, n: usize) {
+    let mut next = scatter(0x7F4A_7C15);
+    for i in 0..n {
+        let (x, y) = ((next() % w as u32) as f32, (next() % bottom as u32) as f32);
+        let r = 1.0 + (next() % 16) as f32 / 10.0;
+        if under_chip(x, y) {
+            continue;
+        }
+        let c = match i % 5 {
+            0 | 1 => [255, 168, 64],
+            2 | 3 => [255, 214, 140],
+            _ => [168, 164, 152],
+        };
+        if i % 5 < 4 {
+            glow(px, x, y, r * 5.0, c, 60);
+        }
+        wash(px, x, y, r, c, 150 + (next() % 90) as u8);
+    }
+}
+
+/// Soft shafts of golden light slanting down from above the card.
+fn shafts(px: &mut Pixmap, h: f32) {
+    let tint = [255, 214, 140];
+    let beams = [(170.0, 80.0, 30), (390.0, 120.0, 26), (610.0, 70.0, 30), (830.0, 130.0, 24), (1010.0, 60.0, 26)];
+    for (top, width, alpha) in beams {
+        let lean = 200.0;
+        let mut pb = PathBuilder::new();
+        pb.move_to(top, -10.0);
+        pb.line_to(top + width, -10.0);
+        pb.line_to(top + width * 1.8 - lean, h);
+        pb.line_to(top - lean, h);
+        pb.close();
+        let Some(shaft) = pb.finish() else { continue };
+        let stops = vec![GradientStop::new(0.0, sk(tint, alpha)), GradientStop::new(0.85, sk(tint, 0))];
+        let (sky, ground) = (Point::from_xy(0.0, 0.0), Point::from_xy(0.0, h));
+        let shader = LinearGradient::new(sky, ground, stops, SpreadMode::Pad, Transform::identity());
+        fill_shaded(px, &shaft, shader, tint);
+    }
+}
+
+/// Gold leaves falling past the champion: small pointed ovals at every tilt,
+/// kept off the portrait (`clear`) and above `bottom`.
+fn leaves(px: &mut Pixmap, w: f32, bottom: f32, clear: (f32, f32, f32)) {
+    let mut next = scatter(0x3C6E_F372);
+    for i in 0..34 {
+        let (x, y) = ((next() % w as u32) as f32, (next() % bottom as u32) as f32);
+        let s = 5.0 + (next() % 5) as f32;
+        let turn = (next() % 360) as f32;
+        let (dx, dy) = (x - clear.0, y - clear.1);
+        if (dx * dx + dy * dy).sqrt() < clear.2 {
+            continue;
+        }
+        let mut pb = PathBuilder::new();
+        pb.move_to(0.0, -s);
+        pb.quad_to(s * 0.6, 0.0, 0.0, s);
+        pb.quad_to(-s * 0.6, 0.0, 0.0, -s);
+        pb.close();
+        let Some(leaf) = pb.finish() else { continue };
+        let c = if i % 3 == 0 { [255, 222, 140] } else { [214, 164, 60] };
+        let at = Transform::from_rotate(turn).post_translate(x, y);
+        px.fill_path(&leaf, &paint(c, 120 + (next() % 110) as u8), FillRule::Winding, at, None);
+    }
+}
+
+/// The old words for a fallen fighter, in dull red across a smoky band in the
+/// pill's place under their health bar.
+fn you_died(pen: &mut Pen<'_>, cx: f32) {
+    let (w, y, h) = (300.0, PILL_Y, PILL_H);
+    let band = [8, 6, 6];
+    let stops = vec![
+        GradientStop::new(0.0, sk(band, 0)),
+        GradientStop::new(0.5, sk(band, 190)),
+        GradientStop::new(1.0, sk(band, 0)),
+    ];
+    let shader = LinearGradient::new(
+        Point::from_xy(cx - w / 2.0, 0.0),
+        Point::from_xy(cx + w / 2.0, 0.0),
+        stops,
+        SpreadMode::Pad,
+        Transform::identity(),
+    );
+    if let (Some(shader), Some(area)) = (shader, Rect::from_xywh(cx - w / 2.0, y, w, h)) {
+        let mut p = Paint::default();
+        p.shader = shader;
+        pen.px.fill_rect(area, &p, Transform::identity(), None);
+    }
+    pen.centered(&spaced("YOU DIED"), cx, y + h / 2.0 + 7.0, 19.0, Weight::SEMIBOLD, [176, 36, 40]);
 }
 
 /// Where the two colours meet: a slanted seam, brightest across the middle.
@@ -1640,6 +2002,8 @@ mod tests {
         assert_eq!(stage_text(Theme::Classic, "Round 2"), "Round 2");
         assert_eq!(stage_text(Theme::Pokemon, "Challenge"), "POKÉMON BATTLE");
         assert_eq!(stage_text(Theme::Wrestling, "Final"), "MAIN EVENT · Final");
+        assert_eq!(stage_text(Theme::Tactical, "Challenge"), "1v1 AIM DUEL");
+        assert_eq!(stage_text(Theme::Tarnished, "Semi-final"), "COLOSSEUM · Semi-final");
     }
 
     #[test]
