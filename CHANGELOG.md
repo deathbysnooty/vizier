@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.94] - 2026-09-13
+
+### 💼 Other
+
+- Counter-Strike 2 and Elden Ring fight types (placeholders)
+- English lines for the Counter-Strike 2 and Elden Ring fight types
+- Counter-Strike 2 and Elden Ring fight and champion cards
 ## [0.10.93] - 2026-09-13
 
 ### 💼 Other
@@ -10,6 +17,10 @@ All notable changes to this project will be documented in this file.
 - English lines for the Pokemon, Harry Potter, DBZ and WWE fight types
 - /housetop lists a house's top 10 scorers for this month, last month or all time
 - Themed fight and champion cards for Pokemon, Harry Potter, DBZ and WWE
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.93
 ## [0.10.92] - 2026-09-13
 
 ### 💼 Other
