@@ -1333,7 +1333,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
         let house_opt = CreateCommand::new("houseopt")
-            .description("step out of the houses (no role, no pings) - or back in to the same house");
+            .description("step out of the houses and become a Muggle - or back in to your own house");
         let _ = Command::create_global_command(ctx.http.clone(), house_opt).await;
 
         let house_channels = CreateCommand::new("housechannels")
@@ -1378,6 +1378,8 @@ impl EventHandler for Handler {
         // A sorting interrupted by a restart carries on from where it stopped.
         if let Some(guild) = ctx.cache.guilds().first().copied() {
             house::resume_draft(&ctx, guild);
+            // Anyone who stepped out before the Muggles role existed gets it.
+            house::sync_muggles(&ctx, guild);
         }
 
         let toggle = CreateCommand::new("nochitthi")

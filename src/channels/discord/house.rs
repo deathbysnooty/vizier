@@ -594,6 +594,63 @@ pub async fn on_reply_points(ctx: &Context, msg: &serenity::all::Message) -> boo
 
 // --- stepping out -----------------------------------------------------------
 
+/// The Muggles role, worn by everyone who has stepped out of the houses. Off
+/// unless VIZIER_MUGGLE_ROLE is set.
+fn muggle_role() -> Option<RoleId> {
+    std::env::var("VIZIER_MUGGLE_ROLE").ok()?.trim().parse().ok().map(RoleId::new)
+}
+
+/// Puts the Muggles role on someone, or takes it off. Does nothing when they
+/// already are how they should be, so it is safe to call again and again.
+async fn set_muggle(ctx: &Context, guild: GuildId, user: u64, on: bool) {
+    let Some(role) = muggle_role() else {
+        return;
+    };
+    let Ok(member) = guild.member(&ctx.http, UserId::new(user)).await else {
+        return;
+    };
+    let result = match (on, member.roles.contains(&role)) {
+        (true, false) => member.add_role(&ctx.http, role).await,
+        (false, true) => member.remove_role(&ctx.http, role).await,
+        _ => return,
+    };
+    if let Err(err) = result {
+        // Usually the role sitting above the bot's own in the role list.
+        tracing::warn!("house: Muggles role not {} for {}: {}", if on { "given" } else { "removed" }, user, err);
+    }
+}
+
+/// Gives the Muggles role to everyone already recorded as stepped out, once
+/// per run: people who opted out before the role existed, or while the bot was
+/// down, would otherwise never get it.
+pub fn sync_muggles(ctx: &Context, guild: GuildId) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if muggle_role().is_none() || DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let users: Vec<u64> = {
+        let Some(db) = DB.get() else {
+            return;
+        };
+        let conn = db.lock();
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT user_id FROM optouts") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) {
+                out.extend(rows.flatten().map(|id| id as u64));
+            }
+        }
+        out
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let count = users.len();
+        for user in users {
+            set_muggle(&ctx, guild, user, true).await;
+        }
+        tracing::info!("house: Muggles role checked for {} stepped-out members", count);
+    });
+}
+
 /// Takes every house role off someone, whichever they happen to wear.
 async fn take_off_houses(ctx: &Context, guild: GuildId, user: u64) {
     let Ok(member) = guild.member(&ctx.http, UserId::new(user)).await else {
@@ -622,6 +679,7 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
 
     if opted_out(user) {
         set_opted_out(user, false);
+        set_muggle(ctx, guild, user, false).await;
         // Back to where they were. Someone who stepped out before ever being
         // sorted gets placed now, as an arrival would.
         let house = match house_of(user) {
@@ -633,7 +691,10 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
             }
         };
         wear_house(ctx, guild, user, house).await;
-        let text = format!("Welcome back to **{} {}**. Your role is back on.", house.crest, house.name);
+        let text = format!(
+            "Welcome back to **{} {}**. Your house role is back on, and you're no longer a Muggle.",
+            house.crest, house.name
+        );
         let _ = command.create_response(&ctx.http, whisper(text)).await;
         return;
     }
@@ -646,13 +707,15 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
         strip_captain_role(ctx, guild, user).await;
     }
     take_off_houses(ctx, guild, user).await;
+    set_muggle(ctx, guild, user, true).await;
     let text = match house_of(user) {
         Some(house) => format!(
-            "You're out of the houses. Your **{} {}** role is gone, so you won't be pinged for it and its room is \
-             hidden. The bot still remembers you as {} - run `/houseopt` again any time to step back in.",
+            "You're out of the houses and now a **Muggle**. Your **{} {}** role is gone, so you won't be pinged for \
+             it and its room is hidden. The bot still remembers you as {} - run `/houseopt` again any time to step \
+             back in.",
             house.crest, house.name, house.name
         ),
-        None => "You're out of the houses and won't be sorted. Run `/houseopt` again any time to join in.".into(),
+        None => "You're out of the houses and now a **Muggle**. Run `/houseopt` again any time to join in.".into(),
     };
     let _ = command.create_response(&ctx.http, whisper(text)).await;
 }
@@ -1569,8 +1632,11 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
     if member.user.bot {
         return;
     }
-    // Someone who stepped out stays out, however they come back.
+    // Someone who stepped out stays out, however they come back - and gets the
+    // Muggles role back, which Discord stripped along with everything else
+    // when they left.
     if opted_out(member.user.id.get()) {
+        set_muggle(ctx, member.guild_id, member.user.id.get(), true).await;
         return;
     }
     // Someone coming back. Discord strips every role on the way out and hands
