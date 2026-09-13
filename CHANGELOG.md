@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.90] - 2026-09-13
+
+### 💼 Other
+
+- Log Koto card shapes to confirm the live format
+- An uncaught Snitch gets a second chance 20-40 minutes later
 ## [0.10.89] - 2026-09-13
 
 ### 🚀 Features
@@ -9,6 +15,10 @@ All notable changes to this project will be documented in this file.
 - *(discord)* A points ledger that knows who earned what
 - *(discord)* Quiz and arena earn house points, and the houses can see the score
 - *(discord)* The Snitch - catch it with an accio reply for house points
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.89
 ## [0.10.88] - 2026-09-13
 
 ### 🚀 Features
