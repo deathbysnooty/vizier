@@ -531,13 +531,31 @@ async fn award_member(
         format!("📉 <@{}> cost {} **{}** **{}** points", user, house.crest, house.name, -points)
     };
     let mut message = CreateMessage::new()
-        .content(text)
+        .content(text.clone())
         .reference_message(earned)
         .allowed_mentions(CreateAllowedMentions::new().users(vec![target.id]));
-    if let Some(png) = png {
-        message = message.add_file(CreateAttachment::bytes(png, "points.png"));
+    if let Some(png) = &png {
+        message = message.add_file(CreateAttachment::bytes(png.clone(), "points.png"));
     }
     earned.channel_id.send_message(&ctx.http, message).await.map_err(|err| err.to_string())?;
+
+    // And a copy in the houses channel, so every award in the server lands in
+    // one place to scroll back through - unless it was earned right there,
+    // where a second card would just be a duplicate.
+    if let Some(board) = cards_channel().filter(|board| *board != earned.channel_id) {
+        let link = format!("https://discord.com/channels/{}/{}/{}", guild.get(), earned.channel_id.get(), earned.id.get());
+        // Already pinged under the message that earned it: the copy is a
+        // record, not a second notification.
+        let mut copy = CreateMessage::new()
+            .content(format!("{}\n-# earned in {}", text, link))
+            .allowed_mentions(CreateAllowedMentions::new());
+        if let Some(png) = png {
+            copy = copy.add_file(CreateAttachment::bytes(png, "points.png"));
+        }
+        if let Err(err) = board.send_message(&ctx.http, copy).await {
+            tracing::warn!("house: points card not copied to the houses channel: {}", err);
+        }
+    }
     tracing::info!("house: {} points to {} via {} (by {})", points, house.name, user, by);
     Ok(())
 }
