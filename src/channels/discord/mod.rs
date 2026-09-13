@@ -29,6 +29,7 @@ use crate::utils::remove_think_tags;
 
 mod awards;
 mod battle;
+mod battle_bracket;
 mod battle_card;
 mod battle_theme;
 mod house;
