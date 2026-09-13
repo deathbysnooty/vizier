@@ -30,6 +30,9 @@ pub struct Fighter {
     /// Health left, 0..=max_hp.
     pub hp: u32,
     pub max_hp: u32,
+    /// Their house, drawn as a crest badge on the portrait. `None` for anyone
+    /// unsorted or stepped out.
+    pub house: Option<&'static super::house::House>,
 }
 
 /// How far along a fight is when the card is drawn.
@@ -114,6 +117,9 @@ const CHAMP_W: f32 = 1000.0;
 const CHAMP_H: f32 = 580.0;
 const CHAMP_AV: f32 = 300.0;
 const CHAMP_CY: f32 = 232.0;
+/// House crest badges, on the portrait's shoulder.
+const FIGHT_BADGE_R: f32 = 36.0;
+const CHAMP_BADGE_R: f32 = 50.0;
 
 /// PNG bytes of a fight card, or `None` if drawing failed.
 pub fn fight_png(fight: &Fight) -> Option<Vec<u8>> {
@@ -233,6 +239,12 @@ fn fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], side: Sid
     }
     if matches!(side, Side::Winner) {
         crown(&mut pen.px, cx, FIGHT_CY - outer + 16.0, 82.0, 34.0);
+    }
+    if let Some(house) = who.house {
+        // On the outer shoulder, away from the VS between the two.
+        let d = outer * std::f32::consts::FRAC_1_SQRT_2;
+        let bx = if cx < FIGHT_W / 2.0 { cx - d } else { cx + d };
+        house_badge(pen, house, bx, FIGHT_CY + d, FIGHT_BADGE_R, lost);
     }
 
     let edge = match side {
@@ -379,6 +391,12 @@ fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
     pen.portrait(CHAMP_W / 2.0, CHAMP_CY, portrait);
     // After the ring, so the crown rests on it.
     crown(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY - outer + 8.0, 140.0, 60.0);
+    if let Some(house) = c.who.house {
+        // Low on the right of the ring, clear of the ribbon underneath.
+        let angle = 30f32.to_radians();
+        let (bx, by) = (CHAMP_W / 2.0 + outer * angle.cos(), CHAMP_CY + outer * angle.sin());
+        house_badge(pen, house, bx, by, CHAMP_BADGE_R, false);
+    }
     ribbon(pen, "BATTLE CHAMPION");
 
     let name = pen.fit(&c.who.name, 42.0, Weight::EXTRA_BOLD, 820.0);
@@ -392,6 +410,28 @@ fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
     if !line.is_empty() {
         let buf = pen.paragraph(line, 20.0, 25.0, 820.0, 2);
         pen.draw(&buf, (CHAMP_W - 820.0) / 2.0, 520.0, [186, 191, 202]);
+    }
+}
+
+/// A house crest in a dark disc with a keyline in the house's second colour, the
+/// same badge the sorting card wears. A beaten fighter's badge is dimmed with them.
+fn house_badge(pen: &mut Pen<'_>, house: &super::house::House, cx: f32, cy: f32, r: f32, dimmed: bool) {
+    wash(&mut pen.px, cx, cy + 4.0, r + 6.0, [0, 0, 0], 110);
+    fill_circle(&mut pen.px, cx, cy, r, [16, 16, 21]);
+    wash(&mut pen.px, cx, cy, r, [255, 255, 255], 14);
+    if let Some(edge) = PathBuilder::from_circle(cx, cy, r - 1.25) {
+        let keyline = if dimmed { [86, 91, 104] } else { lift(house.colours.1, 0.55) };
+        let stroke = Stroke { width: 2.5, ..Stroke::default() };
+        pen.px.stroke_path(&edge, &paint(keyline, 235), &stroke, Transform::identity(), None);
+    }
+    let side = (r * 1.5).round();
+    if let Some(art) = super::house_card::crest_art(house.key, side as u32) {
+        let corner = |centre: f32| (centre - side / 2.0).round() as i32;
+        let paint = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
+        pen.px.draw_pixmap(corner(cx), corner(cy), art.as_ref(), &paint, Transform::identity(), None);
+    }
+    if dimmed {
+        wash(&mut pen.px, cx, cy, r, [8, 9, 12], 120);
     }
 }
 
@@ -1010,8 +1050,8 @@ mod tests {
 
     fn cast() -> (Fighter, Fighter) {
         (
-            Fighter { name: "Rohit 🔥".to_string(), avatar: Some(fake_avatar([214, 96, 92])), hp: 68, max_hp: 100 },
-            Fighter { name: "Meera".to_string(), avatar: Some(fake_avatar([112, 104, 220])), hp: 41, max_hp: 100 },
+            Fighter { name: "Rohit 🔥".to_string(), avatar: Some(fake_avatar([214, 96, 92])), hp: 68, max_hp: 100, house: super::super::house::house("gryffindor") },
+            Fighter { name: "Meera".to_string(), avatar: Some(fake_avatar([112, 104, 220])), hp: 41, max_hp: 100, house: super::super::house::house("ravenclaw") },
         )
     }
 
@@ -1036,9 +1076,9 @@ mod tests {
     /// miss, and a `hit` naming a side that does not exist.
     #[test]
     fn cards_survive_the_awkward_cases() {
-        let a = Fighter { name: "Koi nahi".to_string(), avatar: None, hp: 0, max_hp: 0 };
+        let a = Fighter { name: "Koi nahi".to_string(), avatar: None, hp: 0, max_hp: 0, house: None };
         let picture = Some(fake_avatar([90, 190, 160]));
-        let b = Fighter { name: "ज़ैद".to_string(), avatar: picture, hp: 3, max_hp: 100 };
+        let b = Fighter { name: "ज़ैद".to_string(), avatar: picture, hp: 3, max_hp: 100, house: super::super::house::house("hufflepuff") };
         for hit in [None, Some((0, 9)), Some((1, 0)), Some((7, -5))] {
             let fight = Fight {
                 stage: "Challenge".to_string(),
@@ -1091,7 +1131,7 @@ mod tests {
             outcome: Outcome::Open,
             hit: Some((1, -27)),
         };
-        let done = Fighter { name: "Meera".to_string(), avatar: b.avatar.clone(), hp: 0, max_hp: 100 };
+        let done = Fighter { name: "Meera".to_string(), avatar: b.avatar.clone(), hp: 0, max_hp: 100, house: b.house };
         let over = Fight {
             stage: "Round 2 · quarter-final".to_string(),
             left: &a,

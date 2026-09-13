@@ -97,6 +97,7 @@ struct Warrior {
     id: u64,
     name: String,
     avatar: Option<Vec<u8>>,
+    house: Option<&'static super::house::House>,
 }
 
 impl Warrior {
@@ -106,6 +107,7 @@ impl Warrior {
             avatar: self.avatar.clone(),
             hp: hp.max(0) as u32,
             max_hp: START_HP as u32,
+            house: self.house,
         }
     }
 }
@@ -580,7 +582,9 @@ async fn warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
         .await
         .ok()
         .map(|b| b.to_vec());
-    Some(Warrior { id: user, name: display(&member), avatar })
+    // Stepped-out members fight without a badge, as they asked to be left out.
+    let house = if super::house::opted_out(user) { None } else { super::house::house_of(user) };
+    Some(Warrior { id: user, name: display(&member), avatar, house })
 }
 
 /// Drawing a card is CPU work, so it never runs on the gateway thread.
@@ -1523,7 +1527,7 @@ mod tests {
 
     #[test]
     fn fight_text_shows_both_bars_and_only_the_last_few_lines() {
-        let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None };
+        let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None, house: None };
         let (a, b) = (warrior(1, "Ravi"), warrior(2, "Sneha"));
         let log: Vec<String> = (1..=6).map(|i| format!("line {}", i)).collect();
         let text = fight_text("head", &log, &a, &b, &[62, 0]);
@@ -1538,7 +1542,7 @@ mod tests {
     fn shuffle_keeps_everyone_and_pairs_leave_one_out_when_odd() {
         let warriors = |n: usize| {
             (0..n)
-                .map(|i| Warrior { id: i as u64, name: format!("w{}", i), avatar: None })
+                .map(|i| Warrior { id: i as u64, name: format!("w{}", i), avatar: None, house: None })
                 .collect::<Vec<_>>()
         };
         let mut list = warriors(9);

@@ -72,7 +72,7 @@ const CREST_ART: f32 = 112.0;
 
 /// A house's artwork, square at `side` pixels, or `None` for an unknown house
 /// or bytes that don't decode.
-fn crest_art(house: &str, side: u32) -> Option<Pixmap> {
+pub(super) fn crest_art(house: &str, side: u32) -> Option<Pixmap> {
     let wanted = house.trim().to_ascii_lowercase();
     let (_, bytes) = CRESTS.iter().find(|(key, _)| *key == wanted)?;
     let decoded = image::load_from_memory(bytes).ok()?;
