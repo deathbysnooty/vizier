@@ -14,6 +14,7 @@ pub mod autoreplies;
 pub mod catalog;
 pub mod reminders;
 pub mod scheduler;
+pub mod web;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
@@ -248,6 +249,16 @@ pub fn session_user(session: &str) -> Option<u64> {
         .ok()
         .flatten()
         .map(|u| u as u64)
+}
+
+/// When a session runs out, as a Unix timestamp.
+pub fn session_expires(session: &str) -> Option<i64> {
+    let db = DB.get()?;
+    db.lock()
+        .query_row("SELECT expires FROM sessions WHERE token_hash = ?1", params![hash(session)], |r| r.get(0))
+        .optional()
+        .ok()
+        .flatten()
 }
 
 pub fn end_session(session: &str) {

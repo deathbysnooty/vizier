@@ -1161,6 +1161,9 @@ impl EventHandler for Handler {
         // takes the better part of a minute, and players notice the silence.
         quiz::resume(&ctx, &self.1.storage, &self.0);
 
+        // Control panel: its web server (once per process) and the /panel sign-in command.
+        control::web::start(&ctx);
+
         // History import, downtime catch-up and the voice log each start once
         // per process. Ready fires again on every reconnect, and two copies of
         // one import would count every message twice.
@@ -1721,6 +1724,12 @@ impl EventHandler for Handler {
 
         if let Interaction::Command(command) = interaction {
             let agent_id = self.0.clone();
+
+            // Control panel: /panel sends an admin a one-use sign-in link.
+            if command.data.name == "panel" {
+                control::web::on_command(&ctx, &command).await;
+                return;
+            }
 
             if command.data.name == "ping" {
                 let _ = command

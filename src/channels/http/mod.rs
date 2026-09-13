@@ -66,11 +66,17 @@ impl VizierChannel for HTTPChannel {
 
         app = app.merge(SwaggerUi::new("/swagger").url("/openapi.json", ApiDoc::openapi()));
 
+        // VIZIER_HTTP_HOST=127.0.0.1 keeps vizier's own web UI off the public internet.
+        let host = std::env::var("VIZIER_HTTP_HOST")
+            .ok()
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
         let listener =
-            tokio::net::TcpListener::bind(format!("0.0.0.0:{}", self.config.port)).await?;
+            tokio::net::TcpListener::bind(format!("{}:{}", host, self.config.port)).await?;
 
         let server = axum::serve(listener, app);
-        tracing::info!("http listening on port {}", self.config.port);
+        tracing::info!("http listening on {}:{}", host, self.config.port);
 
         server.await?;
 

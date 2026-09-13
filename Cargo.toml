@@ -108,6 +108,9 @@ symphonia = { version = "0.5.5", features = ["mp3", "ogg", "vorbis", "wav", "fla
 sherpa-onnx = "1.13"
 vizier-derive = { path = "vizier-derive", version = "0.10.0" }
 
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
 [features]
 default = []
 
