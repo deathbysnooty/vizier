@@ -66,13 +66,13 @@ pub struct Champion<'a> {
     pub theme: Theme,
 }
 
-const BG: [u8; 3] = [15, 16, 20];
+pub(super) const BG: [u8; 3] = [15, 16, 20];
 const PANEL: [u8; 3] = [30, 32, 38];
-const INK: [u8; 3] = [244, 245, 247];
-const MUTED: [u8; 3] = [148, 154, 166];
+pub(super) const INK: [u8; 3] = [244, 245, 247];
+pub(super) const MUTED: [u8; 3] = [148, 154, 166];
 const WARM: [u8; 3] = [251, 113, 133];
 const COOL: [u8; 3] = [167, 139, 250];
-const GOLD: [u8; 3] = [241, 196, 15];
+pub(super) const GOLD: [u8; 3] = [241, 196, 15];
 const STAMP: [u8; 3] = [229, 72, 77];
 /// Type that sits on gold or on any other lit fill.
 const ON_LIGHT: [u8; 3] = [18, 19, 24];
@@ -127,28 +127,28 @@ const CHAMP_BADGE_R: f32 = 50.0;
 /// What a theme changes in colour and words. The scenery each world adds on
 /// top is painted by `backdrop` and friends; Classic adds none, so its numbers
 /// here are the card as it has always been.
-struct Look {
+pub(super) struct Look {
     /// The floor, top to bottom. One stop is a flat fill.
-    floor: &'static [(f32, [u8; 3])],
+    pub(super) floor: &'static [(f32, [u8; 3])],
     /// Each side's glow and ring colour.
-    left: [u8; 3],
-    right: [u8; 3],
+    pub(super) left: [u8; 3],
+    pub(super) right: [u8; 3],
     /// The soft seam down the middle, and its bright core.
-    seam: ([u8; 3], [u8; 3]),
+    pub(super) seam: ([u8; 3], [u8; 3]),
     /// Words before the stage on the chip, the chip on its own for a one-off
     /// challenge when that wants other words, and the champion's ribbon.
-    prefix: Option<&'static str>,
-    challenge: Option<&'static str>,
-    title: &'static str,
+    pub(super) prefix: Option<&'static str>,
+    pub(super) challenge: Option<&'static str>,
+    pub(super) title: &'static str,
     /// The champion card: the deep light behind them, the pool under their
     /// name, the tints the rays cycle through and the confetti.
-    halo: [u8; 3],
-    pool: [u8; 3],
-    rays: &'static [[u8; 3]],
-    confetti: [[u8; 3]; 4],
+    pub(super) halo: [u8; 3],
+    pub(super) pool: [u8; 3],
+    pub(super) rays: &'static [[u8; 3]],
+    pub(super) confetti: [[u8; 3]; 4],
 }
 
-fn look(theme: Theme) -> Look {
+pub(super) fn look(theme: Theme) -> Look {
     let classic = Look {
         floor: &[(0.0, BG)],
         left: WARM,
@@ -636,7 +636,7 @@ fn ribbon(pen: &mut Pen<'_>, label: &str, tails: bool) {
 }
 
 /// A five-point crown on a jewelled band.
-fn crown(px: &mut Pixmap, cx: f32, base: f32, w: f32, h: f32) {
+pub(super) fn crown(px: &mut Pixmap, cx: f32, base: f32, w: f32, h: f32) {
     let hw = w / 2.0;
     let peaks = [(-1.0, 0.60), (-0.5, 0.84), (0.0, 1.0), (0.5, 0.84), (1.0, 0.60)];
     let mut pb = PathBuilder::new();
@@ -725,7 +725,7 @@ fn confetti(px: &mut Pixmap, w: f32, h: f32, clear: (f32, f32, f32), palette: [[
 }
 
 /// The floor: a flat fill, or a top-to-bottom wash through the theme's stops.
-fn floor(px: &mut Pixmap, w: f32, h: f32, stops: &[(f32, [u8; 3])]) {
+pub(super) fn floor(px: &mut Pixmap, w: f32, h: f32, stops: &[(f32, [u8; 3])]) {
     let first = stops.first().map_or(BG, |s| s.1);
     px.fill(sk(first, 255));
     if stops.len() < 2 {
@@ -1510,7 +1510,7 @@ fn shadow(px: &mut Pixmap, cx: f32, cy: f32, r: f32) {
 }
 
 /// Edges pulled into darkness, so the middle of the card carries the eye.
-fn vignette(px: &mut Pixmap, w: f32, h: f32, strength: u8) {
+pub(super) fn vignette(px: &mut Pixmap, w: f32, h: f32, strength: u8) {
     let stops = vec![
         GradientStop::new(0.42, sk([0, 0, 0], 0)),
         GradientStop::new(1.0, sk([0, 0, 0], strength)),
@@ -1548,12 +1548,12 @@ fn silhouette(px: &mut Pixmap, cx: f32, cy: f32, r: f32) {
     }
 }
 
-fn sk(c: [u8; 3], a: u8) -> SkColor {
+pub(super) fn sk(c: [u8; 3], a: u8) -> SkColor {
     SkColor::from_rgba8(c[0], c[1], c[2], a)
 }
 
 /// A top-to-bottom gradient between `y0` and `y1`.
-fn down(y0: f32, y1: f32, stops: &[(f32, [u8; 3])]) -> Option<Shader<'static>> {
+pub(super) fn down(y0: f32, y1: f32, stops: &[(f32, [u8; 3])]) -> Option<Shader<'static>> {
     let stops = stops.iter().map(|(at, c)| GradientStop::new(*at, sk(*c, 255))).collect();
     LinearGradient::new(
         Point::from_xy(0.0, y0),
@@ -1566,7 +1566,7 @@ fn down(y0: f32, y1: f32, stops: &[(f32, [u8; 3])]) -> Option<Shader<'static>> {
 
 /// Fill `path` with `shader`, falling back to flat `c` if it could not be
 /// built (two identical stops, a zero-length axis).
-fn fill_shaded(px: &mut Pixmap, path: &tiny_skia::Path, shader: Option<Shader<'_>>, c: [u8; 3]) {
+pub(super) fn fill_shaded(px: &mut Pixmap, path: &tiny_skia::Path, shader: Option<Shader<'_>>, c: [u8; 3]) {
     let mut p = paint(c, 255);
     if let Some(shader) = shader {
         p.shader = shader;
@@ -1575,7 +1575,7 @@ fn fill_shaded(px: &mut Pixmap, path: &tiny_skia::Path, shader: Option<Shader<'_
 }
 
 /// A soft pool of colour, fading out to nothing at radius `r`.
-fn glow(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3], alpha: u8) {
+pub(super) fn glow(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3], alpha: u8) {
     let shader = RadialGradient::new(
         Point::from_xy(cx, cy),
         Point::from_xy(cx, cy),
@@ -1593,24 +1593,24 @@ fn glow(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3], alpha: u8) {
 }
 
 /// A translucent disc: confetti specks, and the wash over whoever lost.
-fn wash(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3], alpha: u8) {
+pub(super) fn wash(px: &mut Pixmap, cx: f32, cy: f32, r: f32, c: [u8; 3], alpha: u8) {
     if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
         px.fill_path(&path, &paint(c, alpha), FillRule::Winding, Transform::identity(), None);
     }
 }
 
 /// The same hue pulled `t` of the way towards white.
-fn lift(c: [u8; 3], t: f32) -> [u8; 3] {
+pub(super) fn lift(c: [u8; 3], t: f32) -> [u8; 3] {
     [0, 1, 2].map(|i| (c[i] as f32 + (255.0 - c[i] as f32) * t) as u8)
 }
 
 /// The same hue at `t` of its brightness.
-fn dim(c: [u8; 3], t: f32) -> [u8; 3] {
+pub(super) fn dim(c: [u8; 3], t: f32) -> [u8; 3] {
     [0, 1, 2].map(|i| (c[i] as f32 * t) as u8)
 }
 
 /// Letters opened up, the way a small caps chip wants them.
-fn spaced(s: &str) -> String {
+pub(super) fn spaced(s: &str) -> String {
     s.chars().map(String::from).collect::<Vec<_>>().join("\u{2009}")
 }
 
@@ -1638,8 +1638,8 @@ struct Portrait<'t> {
     grey: bool,
 }
 
-struct Pen<'a> {
-    px: Pixmap,
+pub(super) struct Pen<'a> {
+    pub(super) px: Pixmap,
     fs: &'a mut FontSystem,
     cache: SwashCache,
     family: String,
@@ -1648,7 +1648,7 @@ struct Pen<'a> {
 }
 
 impl<'a> Pen<'a> {
-    fn new(w: f32, h: f32, fs: &'a mut FontSystem) -> Option<Pen<'a>> {
+    pub(super) fn new(w: f32, h: f32, fs: &'a mut FontSystem) -> Option<Pen<'a>> {
         let family = pick_family(fs);
         let faces = fs
             .db()
@@ -1672,7 +1672,7 @@ impl<'a> Pen<'a> {
             .unwrap_or((FontStyle::Normal, Stretch::Normal, weight))
     }
 
-    fn layout(&mut self, text: &str, size: f32, line_h: f32, weight: Weight, width: Option<f32>) -> Buffer {
+    pub(super) fn layout(&mut self, text: &str, size: f32, line_h: f32, weight: Weight, width: Option<f32>) -> Buffer {
         let (style, stretch, weight) = self.snap(weight);
         let family = self.family.clone();
         let fs = &mut *self.fs;
@@ -1694,7 +1694,7 @@ impl<'a> Pen<'a> {
         buf.layout_runs().last().map(|r| r.line_top + buf.metrics().line_height).unwrap_or(0.0)
     }
 
-    fn draw(&mut self, buf: &Buffer, x: f32, top: f32, color: [u8; 3]) {
+    pub(super) fn draw(&mut self, buf: &Buffer, x: f32, top: f32, color: [u8; 3]) {
         let (fs, cache, px) = (&mut *self.fs, &mut self.cache, &mut self.px);
         let (ox, oy) = (x.round() as i32, top.round() as i32);
         buf.draw(fs, cache, Color::rgb(color[0], color[1], color[2]), |gx, gy, w, h, c| {
@@ -1702,13 +1702,13 @@ impl<'a> Pen<'a> {
         });
     }
 
-    fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {
+    pub(super) fn measure(&mut self, text: &str, size: f32, weight: Weight) -> f32 {
         let buf = self.layout(text, size, size * 1.3, weight, None);
         buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
     /// One line centred on `cx`, with its baseline at `baseline`.
-    fn centered(&mut self, text: &str, cx: f32, baseline: f32, size: f32, weight: Weight, color: [u8; 3]) {
+    pub(super) fn centered(&mut self, text: &str, cx: f32, baseline: f32, size: f32, weight: Weight, color: [u8; 3]) {
         let buf = self.layout(text, size, size * 1.3, weight, None);
         let (line_y, w) = buf.layout_runs().next().map(|r| (r.line_y, r.line_w)).unwrap_or((size, 0.0));
         self.draw(&buf, cx - w / 2.0, baseline - line_y, color);
@@ -1735,7 +1735,7 @@ impl<'a> Pen<'a> {
         });
     }
 
-    fn fit(&mut self, text: &str, size: f32, weight: Weight, max_w: f32) -> String {
+    pub(super) fn fit(&mut self, text: &str, size: f32, weight: Weight, max_w: f32) -> String {
         if self.measure(text, size, weight) <= max_w {
             return text.to_string();
         }
