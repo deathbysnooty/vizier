@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-09-13
+
+### 💼 Other
+
+- Settings store over the environment, audit trail, sign-in links, reminder store
+- Every feature reads live settings; full catalog; reminders scheduler replaces the nudge
+- Auto-responses - react to or answer messages with set words, per channel
+- The web panel - sign-in via /panel, settings, reminders, commands, activity log
+- House Cup live page, auto-responses page, bot behaviour page
 ## [0.10.98] - 2026-09-13
 
 ### 💼 Other
 
 - Unlimited royale, quick rounds until the quarter-finals
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.10.98
 ## [0.10.97] - 2026-09-13
 
 ### 💼 Other
