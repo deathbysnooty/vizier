@@ -216,6 +216,10 @@ pub trait PanelData: Send + Sync + 'static {
     async fn drop_frog(&self, _channel: u64, _by: u64) -> Result<super::super::frog_store::Drop, String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// Withdraws an open card trade offer and updates its message.
+    async fn cancel_trade(&self, _id: i64, _by: u64) -> Result<super::super::frog_trade::Trade, String> {
+        Err("Discord isn't connected right now.".into())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -551,6 +555,11 @@ impl PanelData for LiveData {
         super::super::frog::drop_now(ctx, channel, by).await
     }
 
+    async fn cancel_trade(&self, id: i64, by: u64) -> Result<super::super::frog_trade::Trade, String> {
+        let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
+        super::super::frog_trade::admin_cancel(ctx, id, by).await
+    }
+
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -768,6 +777,10 @@ pub fn router(panel: Panel) -> Router {
         .route("/frogs/owners", get(frogs::owners))
         .route("/frogs/riddles/{id}/retire", post(frogs::retire_riddle))
         .route("/frogs/drop", post(frogs::drop_now))
+        .route("/frogs/rewards", get(frogs::rewards))
+        .route("/frogs/sales", get(frogs::sales))
+        .route("/frogs/trades", get(frogs::trades))
+        .route("/frogs/trades/{id}/cancel", post(frogs::cancel_trade))
         .route("/memos", get(memos::list).post(memos::create))
         .route("/memos/when", get(memos::when))
         .route("/memos/{id}/cancel", post(memos::cancel))

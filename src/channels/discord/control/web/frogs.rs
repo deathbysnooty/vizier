@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::super::super::frog_store::{self as store, Rarity, Status, Wizard};
+use super::super::super::frog_trade::{self as trade, Trade};
 use super::super::super::points::Source;
 use super::{ApiError, ApiResult, Caller, Panel, ok};
 
@@ -124,7 +125,7 @@ pub async fn overview(State(panel): State<Panel>) -> ApiResult {
         "channels": channels,
         "channels_from": from,
         "open_minutes": super::super::number("VIZIER_FROG_OPEN_MINUTES", 5).clamp(1, 60),
-        "set_bonus": super::super::number("VIZIER_FROG_SET_BONUS", 15),
+        "set_bonus": super::super::number("VIZIER_FROG_SET_BONUS", 35),
         "modal_mode": super::super::super::frog::modal_mode(),
         "totals": totals,
         "rarities": rarities,
@@ -240,9 +241,11 @@ fn frog_points(user: u64) -> i64 {
 pub async fn owners(State(panel): State<Panel>, Query(q): Query<OwnersQuery>) -> ApiResult {
     if !q.member.trim().is_empty() {
         let user = super::parse_id(&q.member).ok_or_else(|| ApiError::bad("That isn't a member id."))?;
-        let (cards, wizards) = {
+        let (cards, wizards, history) = {
             let conn = frogs()?.lock();
-            (store::cards_of(&conn, user), store::wizards(&conn))
+            let cards = store::cards_of(&conn, user);
+            let history: Vec<Vec<(u64, u64, Option<i64>, i64)>> = cards.iter().map(|c| store::transfers_of(&conn, c.serial)).collect();
+            (cards, store::wizards(&conn), history)
         };
         let enabled: Vec<&Wizard> = wizards.iter().filter(|w| w.enabled).collect();
         let collected = enabled.iter().filter(|w| cards.iter().any(|c| c.wizard_id == w.id)).count();
@@ -257,8 +260,12 @@ pub async fn owners(State(panel): State<Panel>, Query(q): Query<OwnersQuery>) ->
             "points": frog_points(user),
             "collected": collected,
             "of": enabled.len(),
-            "cards": cards.iter().map(|c| json!({
+            "cards": cards.iter().zip(history.iter()).map(|(c, moves)| json!({
                 "serial": c.serial, "edition": c.edition, "wizard_id": c.wizard_id, "wizard": c.wizard_name, "rarity": c.rarity, "ts": c.ts, "drop_id": c.drop_id,
+                "origin": c.origin, "original_owner": person(&panel, c.original_owner), "traded_in": c.traded_in(),
+                "transfers": moves.iter().map(|(from, to, trade, ts)| json!({
+                    "from": person(&panel, *from), "to": person(&panel, *to), "trade_id": trade, "ts": ts,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         }));
     }
@@ -331,6 +338,128 @@ pub async fn drop_now(State(panel): State<Panel>, axum::Extension(Caller(admin))
     ok(json!({ "id": dropped.id, "wizard": dropped.wizard_name, "rarity": dropped.rarity, "channel": channel_json(&panel, channel), "status": dropped.status, "open": dropped.status == Status::Open }))
 }
 
+/// Earned cards: the morning's top-of-the-day cards and battle royale cards.
+pub async fn rewards(State(panel): State<Panel>) -> ApiResult {
+    let (daily, royale) = {
+        let conn = frogs()?.lock();
+        (store::awards(&conn, "daily_top", 200), store::awards(&conn, "royale", 60))
+    };
+    let row = |a: &store::AwardRow| {
+        json!({
+            "key": a.key, "day": a.day, "activity": a.activity,
+            "activity_label": super::super::super::frog_rewards::activity_label(&a.activity),
+            "battle_id": a.battle_id, "role": a.role, "total": a.total, "ts": a.ts,
+            "member": person(&panel, a.user_id.parse().unwrap_or(0)),
+            "card": { "serial": a.serial, "edition": a.edition, "name": a.card, "rarity": a.rarity },
+        })
+    };
+    ok(json!({
+        "daily_enabled": super::super::on("VIZIER_FROGS", false) && super::super::on("VIZIER_FROG_DAILY_TOP", true),
+        "royale_enabled": super::super::on("VIZIER_FROGS", false) && super::super::on("VIZIER_FROG_ROYALE_CARDS", true),
+        "daily": daily.iter().map(row).collect::<Vec<_>>(),
+        "royale": royale.iter().map(row).collect::<Vec<_>>(),
+    }))
+}
+
+/// Full sets handed in with /sellset, newest first.
+pub async fn sales(State(panel): State<Panel>) -> ApiResult {
+    let (list, cards) = {
+        let conn = frogs()?.lock();
+        let list = store::sales(&conn, 100);
+        let serials: Vec<i64> = list.iter().flat_map(|s| s.serials.iter().copied()).collect();
+        (list.clone(), store::cards_by_serial(&conn, &serials))
+    };
+    ok(json!({
+        "price": super::super::number("VIZIER_FROG_SET_BONUS", 35),
+        "items": list.iter().map(|s| json!({
+            "id": s.id, "ts": s.ts, "points": s.points,
+            "member": person(&panel, s.user_id.parse().unwrap_or(0)),
+            "cards": s.serials.iter().map(|serial| match cards.iter().find(|c| c.serial == *serial) {
+                Some(c) => json!({ "serial": c.serial, "edition": c.edition, "name": c.wizard_name, "rarity": c.rarity }),
+                None => json!({ "serial": serial, "edition": Value::Null, "name": Value::Null, "rarity": Value::Null }),
+            }).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct TradesQuery {
+    #[serde(default)]
+    member: String,
+    #[serde(default)]
+    status: String,
+}
+
+fn trade_json(panel: &Panel, t: &Trade, cards: &[store::Card]) -> Value {
+    let card = |serial: &i64| match cards.iter().find(|c| c.serial == *serial) {
+        Some(c) => json!({ "serial": c.serial, "edition": c.edition, "name": c.wizard_name, "rarity": c.rarity, "owner": c.user_id.to_string() }),
+        None => json!({ "serial": serial, "edition": Value::Null, "name": Value::Null, "rarity": Value::Null, "owner": Value::Null }),
+    };
+    let mut from = person(panel, t.from_user);
+    if from["name"].is_null() && !t.from_name.is_empty() {
+        from["name"] = json!(t.from_name);
+    }
+    let mut to = person(panel, t.to_user);
+    if to["name"].is_null() && !t.to_name.is_empty() {
+        to["name"] = json!(t.to_name);
+    }
+    json!({
+        "id": t.id, "status": t.status, "from": from, "to": to,
+        "channel": channel_json(panel, t.channel_id), "guild_id": t.guild_id.map(|g| g.to_string()),
+        "message_id": t.message_id.map(|m| m.to_string()),
+        "created_ts": t.created_ts, "expires_ts": t.expires_ts, "closed_ts": t.closed_ts,
+        "closed_by": t.closed_by.map(|b| person(panel, b)),
+        "give": t.give.iter().map(card).collect::<Vec<_>>(),
+        "ask": t.ask.iter().map(card).collect::<Vec<_>>(),
+    })
+}
+
+/// Trades, newest first, optionally one member's or one status.
+pub async fn trades(State(panel): State<Panel>, Query(q): Query<TradesQuery>) -> ApiResult {
+    let member = match q.member.trim() {
+        "" => None,
+        raw => Some(super::parse_id(raw).ok_or_else(|| ApiError::bad("That isn't a member id."))?),
+    };
+    let status = match q.status.trim() {
+        "" | "all" => None,
+        s @ ("open" | "done" | "declined" | "cancelled" | "expired" | "failed") => Some(s),
+        _ => return Err(ApiError::bad("Pick open, done, declined, cancelled, expired or failed.")),
+    };
+    let (list, cards, counts) = {
+        let conn = frogs()?.lock();
+        let list = trade::list(&conn, member, status, 100);
+        let serials: Vec<i64> = list.iter().flat_map(|t| t.give.iter().chain(t.ask.iter()).copied()).collect();
+        let counts: Vec<(String, i64)> = ["open", "done", "declined", "cancelled", "expired", "failed"]
+            .iter()
+            .map(|s| (s.to_string(), conn.query_row("SELECT COUNT(*) FROM trades WHERE status = ?1", rusqlite::params![s], |r| r.get(0)).unwrap_or(0)))
+            .collect();
+        (list, store::cards_by_serial(&conn, &serials), counts)
+    };
+    ok(json!({
+        "enabled": super::super::on("VIZIER_FROGS", false) && super::super::on("VIZIER_TRADES", true),
+        "counts": counts.into_iter().map(|(k, v)| (k, json!(v))).collect::<serde_json::Map<String, Value>>(),
+        "items": list.iter().map(|t| trade_json(&panel, t, &cards)).collect::<Vec<_>>(),
+    }))
+}
+
+/// An admin withdraws an open offer.
+pub async fn cancel_trade(State(panel): State<Panel>, Path(id): Path<String>, axum::Extension(Caller(admin)): axum::Extension<Caller>) -> ApiResult {
+    let id = id.parse::<i64>().ok().filter(|i| *i > 0).ok_or_else(|| ApiError::not_found("No such trade."))?;
+    let existing = trade::get(&frogs()?.lock(), id).ok_or_else(|| ApiError::not_found("No such trade."))?;
+    if existing.status != "open" {
+        return Err(ApiError(StatusCode::CONFLICT, format!("That offer is already {}.", existing.status)));
+    }
+    let closed = panel.data.cancel_trade(id, admin).await.map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
+    let facts = json!({ "from": closed.from_user.to_string(), "to": closed.to_user.to_string(), "from_name": closed.from_name, "to_name": closed.to_name, "status": closed.status }).to_string();
+    super::super::log_change(&format!("frog:trade:{}", id), None, Some(&facts), admin).map_err(ApiError::internal)?;
+    tracing::info!("panel: {} cancelled trade {}", admin, id);
+    let cards = {
+        let conn = frogs()?.lock();
+        store::cards_by_serial(&conn, &closed.give.iter().chain(closed.ask.iter()).copied().collect::<Vec<_>>())
+    };
+    ok(trade_json(&panel, &closed, &cards))
+}
+
 /// How a frog change reads in the activity log.
 pub fn audit_entry(panel: &Panel, e: &super::super::AuditEntry) -> Map<String, Value> {
     let body = |b: &Option<String>| b.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()).unwrap_or(Value::Null);
@@ -368,6 +497,12 @@ pub fn audit_entry(panel: &Panel, e: &super::super::AuditEntry) -> Map<String, V
             }
         };
         obj.insert("change".into(), json!(change));
+    } else if let Some(id) = rest.strip_prefix("trade:") {
+        let name = |k: &str, n: &str| {
+            text(facts, k).parse::<u64>().ok().and_then(|u| panel.data.cached_member(u)).map(|m| m.name).unwrap_or_else(|| text(facts, n))
+        };
+        obj.insert("label".into(), json!(format!("Card trade {}", id)));
+        obj.insert("change".into(), json!(format!("Cancelled the offer from {} to {}", name("from", "from_name"), name("to", "to_name"))));
     } else if let Some(id) = rest.strip_prefix("riddle:") {
         obj.insert("label".into(), json!(format!("Riddle {}", id)));
         let retired = new.get("retired").and_then(Value::as_bool) == Some(true);

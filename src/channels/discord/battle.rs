@@ -366,7 +366,8 @@ fn record(kind: &str, winner: u64, loser: Option<u64>) {
 }
 
 /// House points for a battle royale: 8 to the champion, 3 to the runner-up.
-fn award_royale(champion: u64, runner_up: Option<u64>) {
+/// Returns the battle's id, the moment it was paid.
+fn award_royale(champion: u64, runner_up: Option<u64>) -> i64 {
     let battle = Utc::now().timestamp();
     let give = |user: u64, amount: i64, reason: &str| {
         if amount <= 0 {
@@ -379,6 +380,7 @@ fn award_royale(champion: u64, runner_up: Option<u64>) {
     if let Some(user) = runner_up {
         give(user, super::control::number("VIZIER_POINTS_ROYALE_RUNNER_UP", 3) as i64, "runner-up in the battle royale");
     }
+    battle
 }
 
 /// Fights fought and fights won, counting every 1v1 - the ones inside a battle too.
@@ -1575,17 +1577,21 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, theme, "🗺️ **The final bracket**").await;
     }
     record("champion", champion.id, None);
-    award_royale(champion.id, runner_up);
+    let battle_id = award_royale(champion.id, runner_up);
+    // A Chocolate Frog card each for the champion and runner-up of a big enough royale.
+    let card_lines = super::frog_rewards::royale_cards(battle_id, champion.id, runner_up, started);
     let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
     let subtitle = format!("{} warriors · {} rounds · 1 champion", started, total);
     let line = pick(theme.lines().champion, &mut seed).to_string();
     let card = champion_card(champion.card(START_HP), subtitle, line, theme).await;
     let mut msg = CreateMessage::new()
-        .content(format!(
-            "👑 <@{}> is the **{}**! Battles won: **{}**",
-            champion.id, CHAMPION_ROLE, won
-        ))
+        .content(
+            std::iter::once(format!("👑 <@{}> is the **{}**! Battles won: **{}**", champion.id, CHAMPION_ROLE, won))
+                .chain(card_lines)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
         .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(champion.id)]));
     if let Some(png) = card {
         msg = msg.add_file(CreateAttachment::bytes(png, "champion.png"));

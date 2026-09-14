@@ -83,10 +83,6 @@ fn snitch_gap() -> i64 {
     control::number("VIZIER_FROG_SNITCH_GAP_MINUTES", 20) as i64 * 60
 }
 
-fn set_bonus() -> i64 {
-    control::number("VIZIER_FROG_SET_BONUS", 15).min(1000) as i64
-}
-
 /// Where frogs drop: their own channels, or the Snitch's when none are set -
 /// never #safe-corner. `None` means nowhere.
 fn channels() -> Option<Vec<(u64, u32)>> {
@@ -397,6 +393,7 @@ struct CollectionPage {
 
 /// The collection: the checklist of every card in play, then the copies owned,
 /// newest first, [`CARD_LINES`] to a page.
+#[allow(clippy::too_many_arguments)]
 fn frogs_text(name: &str, cards: &[Card], wizards: &[Wizard], frog_points: i64, house: Option<&House>, dropped: i64, page: usize) -> CollectionPage {
     let title = format!("{}'s Chocolate Frog cards", name).chars().take(250).collect();
     let shown: Vec<&Wizard> = wizards.iter().filter(|w| w.enabled || cards.iter().any(|c| c.wizard_id == w.id)).collect();
@@ -404,10 +401,13 @@ fn frogs_text(name: &str, cards: &[Card], wizards: &[Wizard], frog_points: i64, 
     let collected = shown.iter().filter(|w| w.enabled && owned(w) > 0).count();
     let enabled = shown.iter().filter(|w| w.enabled).count();
     let house = house.map(|h| format!(" · {} {}", h.crest, h.name)).unwrap_or_default();
+    let full = enabled > 0 && collected == enabled;
+    let badge = if full { " · Full set ready to sell — /sellset" } else { "" };
     let mut text = format!(
-        "**{} of {} collected** · **{}** frog point{}{}\n",
+        "**{} of {} collected**{} · **{}** frog point{}{}\n",
         collected,
         enabled,
+        badge,
         frog_points,
         if frog_points == 1 { "" } else { "s" },
         house
@@ -436,7 +436,11 @@ fn frogs_text(name: &str, cards: &[Card], wizards: &[Wizard], frog_points: i64, 
         text.push_str("No cards yet. Press 🐸 **Catch it** when a frog hops in.\n");
     }
     for card in cards.iter().skip(page * CARD_LINES).take(CARD_LINES) {
-        text.push_str(&format!("{} {} · {}\n", card.rarity.emoji(), store::card_label(&card.wizard_name, card.edition, card.serial), day_month(card.ts)));
+        let mark = if card.traded_in() { " 🔁" } else if card.earned() { " 🏅" } else { "" };
+        text.push_str(&format!("{} {} · {}{}\n", card.rarity.emoji(), store::card_label(&card.wizard_name, card.edition, card.serial), day_month(card.ts), mark));
+    }
+    if cards.iter().any(|c| c.traded_in() || c.earned()) {
+        text.push_str("-# 🏅 earned by playing · 🔁 came by trade\n");
     }
     let footer = format!("{} frog{} dropped so far", dropped, if dropped == 1 { "" } else { "s" });
     CollectionPage { title, text: text.trim_end().to_string(), footer, page, pages }
@@ -574,20 +578,41 @@ pub async fn frogs_command(ctx: &Context, command: &CommandInteraction) {
 }
 
 /// The text of one card: (title, description).
-fn card_text(card: &Card, drop: &Drop, canonical: &str) -> (String, String) {
+/// How a card came to exist, for /frogcard.
+fn origin_words(card: &Card, drop: Option<&Drop>) -> String {
+    let when = day_month(card.ts);
+    let who = format!("<@{}>", card.original_owner);
+    match card.origin.as_str() {
+        "caught" => match drop {
+            Some(d) => format!("Caught by {} on {} in <#{}>", who, when, d.channel),
+            None => format!("Caught by {} on {}", who, when),
+        },
+        "royale_champion" => format!("Earned by {} on {} for winning a battle royale", who, when),
+        "royale_runner_up" => format!("Earned by {} on {} as a battle royale runner-up", who, when),
+        other => match other.strip_prefix("daily_top:") {
+            Some(activity) => format!("Earned by {} on {} as the day's top in {}", who, when, super::frog_rewards::activity_label(activity)),
+            None => format!("Earned by {} on {}", who, when),
+        },
+    }
+}
+
+/// The text of one card: (title, description).
+fn card_text(card: &Card, drop: Option<&Drop>, canonical: &str, transfers: usize) -> (String, String) {
     let title = format!("{} {}", card.rarity.emoji(), store::card_label(&card.wizard_name, card.edition, card.serial));
-    let mut text = format!(
-        "{} **{}** · **{}**\nOwned by <@{}>\nCaught {} in <#{}>",
-        card.rarity.emoji(),
-        card.rarity.name(),
-        points_words(drop.points),
-        card.user_id,
-        day_month(card.ts),
-        drop.channel
-    );
-    if !canonical.is_empty() {
+    // Only a catch paid points; an earned card shows none.
+    let points = drop.map(|d| format!(" · **{}**", points_words(d.points))).unwrap_or_default();
+    let holder = if card.status == "spent" {
+        format!("Sold in a full set by <@{}> on {}", card.user_id, day_month(card.spent_ts.unwrap_or(card.ts)))
+    } else {
+        format!("Owned by <@{}>", card.user_id)
+    };
+    let mut text = format!("{} **{}**{}\n{}\n{}", card.rarity.emoji(), card.rarity.name(), points, holder, origin_words(card, drop));
+    if transfers > 0 {
+        text.push_str(&format!(" · traded {}×", transfers));
+    }
+    if let (Some(d), false) = (drop, canonical.is_empty()) {
         text.push_str(&format!("\nWon with the answer **{}**", plain(canonical)));
-        if let Some(secs) = drop.solved_secs {
+        if let Some(secs) = d.solved_secs {
             text.push_str(&format!(" · solved in {} s", secs));
         }
     }
@@ -603,14 +628,15 @@ pub async fn frogcard_command(ctx: &Context, command: &CommandInteraction) {
         let db = store::db()?;
         let conn = db.lock();
         let (card, drop) = store::card_by_serial(&conn, n)?;
-        let canonical = store::riddle(&conn, &drop.riddle_id).map(|r| r.canonical().to_string()).unwrap_or_default();
+        let canonical = drop.as_ref().and_then(|d| store::riddle(&conn, &d.riddle_id)).map(|r| r.canonical().to_string()).unwrap_or_default();
         let wizard = store::wizard(&conn, card.wizard_id);
-        Some((card, drop, canonical, wizard))
+        let moves = store::transfers_of(&conn, card.serial).len();
+        Some((card, drop, canonical, wizard, moves))
     });
     let message = match found {
         None => CreateInteractionResponseMessage::new().content(format!("No card {} yet", store::serial_label(number.unwrap_or(0).max(0)))),
-        Some((card, drop, canonical, wizard)) => {
-            let (title, text) = card_text(&card, &drop, &canonical);
+        Some((card, drop, canonical, wizard, moves)) => {
+            let (title, text) = card_text(&card, drop.as_ref(), &canonical, moves);
             let mut embed = CreateEmbed::new().title(title).description(text).colour(card.rarity.colour());
             let mut message = CreateInteractionResponseMessage::new();
             if let Some(w) = wizard {
@@ -926,17 +952,7 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
         Outcome::Granted(n) => *n,
         _ => 0,
     });
-    let mut text = won_text(&win.canonical, d, win.serial, win.edition, granted);
-    let mut bonus_line = None;
-    if win.set_complete && set_bonus() > 0 {
-        let bonus = super::house::award_person(user, Source::Frog, set_bonus(), "Chocolate Frog: every card collected", None, Some(format!("frogset:{}", user)), None);
-        if let Some((house, Outcome::Granted(n))) = bonus {
-            if n > 0 {
-                text.push_str(&format!("\n🎉 You've collected every card! **+{}** bonus", points_words(n)));
-                bonus_line = Some(format!("🐸 <@{}> has collected every Chocolate Frog card! **+{}** for {} {}", user, points_words(n), house.crest, house.name));
-            }
-        }
-    }
+    let text = won_text(&win.canonical, d, win.serial, win.edition, granted);
     tracing::info!(
         "frog: {} caught {} (drop {}, card {}) in {}s, paid {:?}",
         user,
@@ -948,12 +964,6 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
     );
     reply_modal(ctx, modal, text, Some(my_cards_button())).await;
     finish(ctx, d, false).await;
-    if let Some(line) = bonus_line {
-        let message = CreateMessage::new().content(line).allowed_mentions(CreateAllowedMentions::new());
-        if let Err(err) = call(ChannelId::new(d.channel).send_message(&ctx.http, message)).await {
-            tracing::warn!("frog: collection line for {} not posted: {}", user, err);
-        }
-    }
 }
 
 /// Closes frogs a restart left open and finishes cards it left unedited, then
@@ -980,6 +990,9 @@ pub fn spawn(ctx: Context) {
         (true, None) => tracing::info!("frog: switched on but no channels to drop into"),
         (false, _) => tracing::info!("frog: VIZIER_FROGS is off, no scheduled drops until it is switched on"),
     }
+    // Earned cards each morning, and offers that run out of time.
+    super::frog_rewards::spawn_daily(ctx.clone());
+    super::frog_trade::spawn(ctx.clone());
     tokio::spawn(schedule(ctx));
 }
 
@@ -1248,7 +1261,7 @@ mod tests {
         let wizards = store::wizards(&conn);
         let card = |serial: i64, wizard_id: i64, edition: i64| {
             let w = wizards.iter().find(|w| w.id == wizard_id).unwrap();
-            Card { serial, edition, user_id: 1, wizard_id, wizard_name: w.name.clone(), rarity: w.rarity, drop_id: serial, ts: MIDNIGHT + 12 * HOUR }
+            Card { serial, edition, user_id: 1, wizard_id, wizard_name: w.name.clone(), rarity: w.rarity, drop_id: Some(serial), ts: MIDNIGHT + 12 * HOUR, origin: "caught".into(), original_owner: 1, status: "owned".into(), spent_reason: String::new(), spent_ts: None }
         };
         let mut cards: Vec<Card> = (1..=20).map(|s| card(s, if s % 2 == 0 { 3 } else { 1 }, (s + 1) / 2)).collect();
         cards.push(card(187, 10, 3));
@@ -1296,11 +1309,18 @@ mod tests {
     #[test]
     fn one_card_reads_with_its_owner_and_answer() {
         let d = sample_drop(Status::Caught);
-        let card = Card { serial: 187, edition: 3, user_id: 1234, wizard_id: 10, wizard_name: "The Eternal Phoenix".into(), rarity: Rarity::Legendary, drop_id: 42, ts: MIDNIGHT + 12 * HOUR };
+        let card = Card { serial: 187, edition: 3, user_id: 1234, wizard_id: 10, wizard_name: "The Eternal Phoenix".into(), rarity: Rarity::Legendary, drop_id: Some(42), ts: MIDNIGHT + 12 * HOUR, origin: "caught".into(), original_owner: 99, status: "owned".into(), spent_reason: String::new(), spent_ts: None };
         let drop = Drop { points: 10, rarity: Rarity::Legendary, ..d };
-        let (title, text) = card_text(&card, &drop, "phoenix");
+        let (title, text) = card_text(&card, Some(&drop), "phoenix", 2);
         assert_eq!(title, "🔥 The Eternal Phoenix #3 · No. 0187");
-        assert_eq!(text, "🔥 **Legendary** · **10 points**\nOwned by <@1234>\nCaught 14 Sep in <#7>\nWon with the answer **phoenix** · solved in 48 s");
+        assert_eq!(text, "🔥 **Legendary** · **10 points**\nOwned by <@1234>\nCaught by <@99> on 14 Sep in <#7> · traded 2×\nWon with the answer **phoenix** · solved in 48 s");
+        let earned = Card { rarity: Rarity::Uncommon, wizard_name: "Merlin".into(), drop_id: None, origin: "daily_top:snitch".into(), original_owner: 1234, ..card.clone() };
+        let (_, text) = card_text(&earned, None, "", 0);
+        assert_eq!(text, "🍫 **Uncommon**\nOwned by <@1234>\nEarned by <@1234> on 14 Sep as the day's top in 🪽 Snitch");
+        let royale = Card { origin: "royale_runner_up".into(), ..earned };
+        assert!(card_text(&royale, None, "", 1).1.ends_with("as a battle royale runner-up · traded 1×"));
+        let sold = Card { status: "spent".into(), spent_reason: "sold full set #3".into(), spent_ts: Some(MIDNIGHT + 30 * HOUR), ..royale };
+        assert!(card_text(&sold, None, "", 1).1.contains("\nSold in a full set by <@1234> on 15 Sep\n"), "{}", card_text(&sold, None, "", 1).1);
     }
 
     #[test]
@@ -1310,9 +1330,14 @@ mod tests {
         let wizards = store::wizards(&conn);
         let none = frogs_text("A", &[], &wizards, 0, None, 0, 0).text;
         assert!(!none.contains("Luna") && none.contains("0 of 9 collected"), "{none}");
-        let owned = Card { serial: 1, edition: 1, user_id: 1, wizard_id: 2, wizard_name: "Luna Lovegood".into(), rarity: Rarity::Common, drop_id: 1, ts: MIDNIGHT };
-        let some = frogs_text("A", &[owned], &wizards, 1, None, 1, 0).text;
+        let owned = Card { serial: 1, edition: 1, user_id: 1, wizard_id: 2, wizard_name: "Luna Lovegood".into(), rarity: Rarity::Common, drop_id: None, ts: MIDNIGHT, origin: "royale_champion".into(), original_owner: 5, status: "owned".into(), spent_reason: String::new(), spent_ts: None };
+        let some = frogs_text("A", &[owned.clone()], &wizards, 1, None, 1, 0).text;
         assert!(some.contains("✅ Luna Lovegood ×1") && some.contains("0 of 9 collected"), "{some}");
+        assert!(some.contains("🥛 Luna Lovegood #1 · No. 0001 · 14 Sep 🔁") && some.ends_with("-# 🏅 earned by playing · 🔁 came by trade"), "{some}");
+        // A full set of any origin is ready to sell.
+        let all: Vec<Card> = wizards.iter().filter(|w| w.enabled).enumerate().map(|(i, w)| Card { serial: i as i64 + 1, wizard_id: w.id, wizard_name: w.name.clone(), rarity: w.rarity, ..owned.clone() }).collect();
+        assert!(frogs_text("A", &all, &wizards, 1, None, 1, 0).text.starts_with("**9 of 9 collected** · Full set ready to sell — /sellset · **1** frog point"));
+        assert!(frogs_text("A", &[], &wizards, 1, None, 1, 0).text.starts_with("**0 of 9 collected** · **1** frog point"));
     }
 
     #[test]

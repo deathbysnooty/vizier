@@ -2827,7 +2827,7 @@
 
   // --- chocolate frogs -------------------------------------------------------------------
 
-  const FROG = { data: null, allDrops: false, ownerMode: 'member', member: null, wizard: '', owners: null, ownersBusy: false };
+  const FROG = { data: null, rewards: null, sales: null, trades: null, tradeFilter: 'all', tradeMember: null, allDrops: false, ownerMode: 'member', member: null, wizard: '', owners: null, ownersBusy: false };
 
   async function loadFrogs() {
     FROG.data = await api('GET', '/frogs');
@@ -2849,6 +2849,93 @@
   const pointsWords = (n) => n + (n === 1 ? ' point' : ' points');
   function secsWords(n) { if (n < 60) return n + ' s'; const m = Math.floor(n / 60), s = n % 60; return m + ' min' + (s ? ' ' + s + ' s' : ''); }
 
+  const TRADE_STATUS = { open: ['Open', 'live'], done: ['Done', 'on'], declined: ['Declined', 'paused'], cancelled: ['Cancelled', 'paused'], expired: ['Expired', 'paused'], failed: ['Failed', 'failed'] };
+  const personName = (p) => (p && p.name) || (p && p.id ? 'Member ' + p.id : 'Someone');
+  /** "Sun 13 Sep", built by hand: browsers disagree on "Sep" and "Sept". */
+  const fullDay = (ymd) => { const [y, m, d] = String(ymd).split('-').map(Number); if (!y) return ymd; const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m - 1, d)).getUTCDay()]; return wd + ' ' + d + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1]; };
+  function cardChip(c) {
+    const r = rarityOf(c.rarity);
+    return h('span', { class: 'frog-card-chip', style: '--rarity:' + r.colour, title: c.name ? c.name + ' #' + c.edition + ' · ' + serialLabel(c.serial) : serialLabel(c.serial) },
+      h('span', null, (c.rarity ? r.emoji + ' ' : '') + (c.name ? c.name + ' #' + c.edition : 'Card')), h('small', { class: 'mono' }, serialLabel(c.serial)));
+  }
+  function originWords(c) {
+    if (c.origin === 'caught') return 'Caught by ' + personName(c.original_owner);
+    if (c.origin === 'royale_champion') return 'Won by ' + personName(c.original_owner) + ' as royale champion';
+    if (c.origin === 'royale_runner_up') return 'Won by ' + personName(c.original_owner) + ' as royale runner-up';
+    if (String(c.origin).startsWith('daily_top:')) return 'Earned by ' + personName(c.original_owner) + ' as top of the day';
+    return 'Earned by ' + personName(c.original_owner);
+  }
+
+  function frogEarnedCard(r) {
+    const body = h('div', { class: 'frog-earned' });
+    if (!r) { body.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); return card('frog-earned', 'Earned cards', null, body, { pad: true }); }
+    const days = [];
+    r.daily.forEach((a) => { let g = days.find((x) => x.day === a.day); if (!g) { g = { day: a.day, rows: [] }; days.push(g); } g.rows.push(a); });
+    const daily = h('section', { class: 'frog-earned-col' }, h('h3', null, '☀️ Top of the day', r.daily_enabled ? null : h('span', { class: 'badge paused' }, 'Off')));
+    if (!days.length) daily.appendChild(h('p', { class: 'hint' }, 'Each morning the day before’s top scorer in every game wins a card. None yet.'));
+    days.slice(0, 7).forEach((g) => {
+      daily.appendChild(h('div', { class: 'frog-day' }, h('b', null, fullDay(g.day)), h('small', null, plural(g.rows.length, 'card'))));
+      daily.appendChild(h('ul', { class: 'frog-award-list' }, g.rows.map((a) => h('li', null,
+        h('span', { class: 'frog-award-what' }, a.activity_label), avatar(a.member.avatar, personName(a.member), 'xs'),
+        h('span', { class: 'frog-award-who' }, h('b', null, personName(a.member)), h('small', null, pointsWords(a.total) + ' that day')), cardChip(a.card)))));
+    });
+    const royale = h('section', { class: 'frog-earned-col' }, h('h3', null, '⚔️ Battle royales', r.royale_enabled ? null : h('span', { class: 'badge paused' }, 'Off')));
+    if (!r.royale.length) royale.appendChild(h('p', { class: 'hint' }, 'The champion and runner-up of a big enough royale win a card each. None yet.'));
+    else royale.appendChild(h('ul', { class: 'frog-award-list' }, r.royale.slice(0, 20).map((a) => h('li', null,
+      h('span', { class: 'frog-award-what' }, a.role === 'champion' ? '👑 Champion' : '🥈 Runner-up'), avatar(a.member.avatar, personName(a.member), 'xs'),
+      h('span', { class: 'frog-award-who' }, h('b', null, personName(a.member)), h('small', null, dayMonth(a.ts))), cardChip(a.card)))));
+    const sold = h('section', { class: 'frog-earned-col' }, h('h3', null, '🏆 Full sets sold'));
+    const sales = FROG.sales ? FROG.sales.items : [];
+    if (!sales.length) sold.appendChild(h('p', { class: 'hint' }, 'Members hand in one copy of every card with /sellset for ' + pointsWords(FROG.sales ? FROG.sales.price : 35) + '. None sold yet.'));
+    else sold.appendChild(h('ul', { class: 'frog-sale-list' }, sales.slice(0, 20).map((x) => h('li', null,
+      h('div', { class: 'frog-sale-head' }, avatar(x.member.avatar, personName(x.member), 'xs'), h('b', null, personName(x.member)), h('span', { class: 'badge on' }, '+' + x.points),
+        h('span', { class: 'grow' }), h('small', { title: fmtFull.format(new Date(x.ts * 1000)) + ' IST' }, dayMonth(x.ts))),
+      h('div', { class: 'frog-chips' }, x.cards.map(cardChip))))));
+    append(body, [daily, royale, sold]);
+    return card('frog-earned', 'Earned cards & sales', 'Cards won by playing (no points) · full sets handed in for points', body, { pad: true });
+  }
+
+  function frogTradesCard(redraw) {
+    const t = FROG.trades;
+    const body = h('div', { class: 'frog-trades' });
+    const controls = h('div', { class: 'frog-owner-controls' });
+    controls.appendChild(segmented([['all', 'All'], ['open', 'Open'], ['done', 'Done'], ['closed', 'Closed']], FROG.tradeFilter, 'Trade status', (v) => { FROG.tradeFilter = v; redraw(); }));
+    const who = FROG.tradeMember;
+    const btn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox' }, icon('search'), h('span', { class: 'value' + (who ? '' : ' placeholder') }, who ? who.name : 'Any member'), icon('chevron'));
+    btn.addEventListener('click', () => openPicker(btn, { title: 'Member', placeholder: 'Search members by name', debounce: 180,
+      load: async (q) => [{ id: '', label: 'Any member', lead: icon('users') }].filter(() => !q).concat(await memberItems(q)),
+      onPick: async (it) => { FROG.tradeMember = it.id ? it.member : null; await loadTrades(); redraw(); } }));
+    controls.appendChild(btn);
+    body.appendChild(controls);
+    if (!t) { body.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading trades…')); }
+    else {
+      const shown = t.items.filter((x) => FROG.tradeFilter === 'all' || (FROG.tradeFilter === 'closed' ? !['open', 'done'].includes(x.status) : x.status === FROG.tradeFilter));
+      if (!shown.length) body.appendChild(h('p', { class: 'hint' }, t.items.length ? 'No trades match.' : 'No trades yet. Members start one with /trade.'));
+      else body.appendChild(h('ul', { class: 'frog-trade-list' }, shown.map((x) => {
+        const [label, cls] = TRADE_STATUS[x.status] || [x.status, ''];
+        const link = x.guild_id && x.message_id ? h('a', { href: 'https://discord.com/channels/' + x.guild_id + '/' + x.channel.id + '/' + x.message_id, target: '_blank', rel: 'noopener' }, icon('external'), 'Open in Discord') : null;
+        const cancel = x.status === 'open' ? h('button', { class: 'btn sm danger', type: 'button', onclick: async () => {
+          const ok = await confirmDialog({ title: 'Cancel this offer?', icon: 'alert', danger: true, confirm: 'Cancel offer', body: personName(x.from) + '’s offer to ' + personName(x.to) + ' closes and its message in Discord says it was cancelled. No cards move.' });
+          if (!ok) return;
+          try { await api('POST', '/frogs/trades/' + x.id + '/cancel'); toast('Offer cancelled'); refreshAudit(); await loadTrades(); redraw(); } catch (e) { toast(e.message, 'error'); }
+        } }, icon('x'), 'Cancel offer') : null;
+        const side = (title, list) => h('div', { class: 'frog-trade-side' }, h('small', null, title), list.length ? h('div', { class: 'frog-chips' }, list.map(cardChip)) : h('span', { class: 'hint' }, 'nothing'));
+        return h('li', { class: 'frog-trade is-' + x.status },
+          h('div', { class: 'frog-trade-head' }, h('span', { class: 'badge ' + cls }, x.status === 'open' ? h('span', { class: 'dot' }) : null, label),
+            avatar(x.from.avatar, personName(x.from), 'xs'), h('b', null, personName(x.from)), h('span', { class: 'frog-arrow' }, x.status === 'done' ? '⇄' : '→'), avatar(x.to.avatar, personName(x.to), 'xs'), h('b', null, personName(x.to)),
+            h('span', { class: 'grow' }), h('small', { title: fmtFull.format(new Date(x.created_ts * 1000)) + ' IST' }, x.status === 'open' ? 'expires ' + fromNow(x.expires_ts) : ago(x.closed_ts || x.created_ts))),
+          h('div', { class: 'frog-trade-sides' }, side(personName(x.from) + ' gives', x.give), side(personName(x.from) + ' asks for', x.ask)),
+          (link || cancel) ? h('div', { class: 'frog-trade-foot' }, x.channel && x.channel.name ? h('small', null, '#' + x.channel.name) : null, link, h('span', { class: 'grow' }), cancel) : null);
+      })));
+    }
+    const c = t && t.counts;
+    return card('frog-trades', 'Trades', c ? c.open + ' open · ' + c.done + ' done · ' + (c.declined + c.cancelled + c.expired + c.failed) + ' closed' : null, body, { pad: true });
+  }
+
+  async function loadTrades() {
+    try { FROG.trades = await api('GET', '/frogs/trades' + (FROG.tradeMember ? '?member=' + encodeURIComponent(FROG.tradeMember.id) : '')); } catch (_) { FROG.trades = FROG.trades || { items: [], counts: null }; }
+  }
+
   /** The extra parts of the Chocolate Frogs page, above its settings. */
   function renderFrogs(page) {
     const holder = h('div', { class: 'frog-page' });
@@ -2861,9 +2948,12 @@
       holder.appendChild(frogWizardsCard(d, draw));
       holder.appendChild(frogDropsCard(d, draw));
       holder.appendChild(frogOwnersCard(d));
+      holder.appendChild(frogEarnedCard(FROG.rewards));
+      holder.appendChild(frogTradesCard(draw));
       holder.appendChild(frogBankCard(d));
     };
     draw();
+    Promise.all([api('GET', '/frogs/rewards').then((r) => { FROG.rewards = r; }).catch(() => null), api('GET', '/frogs/sales').then((r) => { FROG.sales = r; }).catch(() => null), loadTrades()]).then(() => { if (holder.isConnected && FROG.data) draw(); });
     loadFrogs().then(() => { if (holder.isConnected) draw(); }).catch((e) => { if (holder.isConnected) { clear(holder); holder.appendChild(h('div', { class: 'banner inline', role: 'alert' }, icon('alert'), h('p', null, e.message))); } });
   }
 
@@ -3006,8 +3096,13 @@
         results.appendChild(h('div', { class: 'person-row' }, avatar(m.avatar, m.name || '?', 'lg'),
           h('div', { class: 'grow' }, h('b', null, m.name || 'Member ' + m.id), h('small', null, plural(o.cards.length, 'card') + ' · ' + o.collected + ' of ' + o.of + ' collected · ' + pointsWords(o.points) + ' from frogs'))));
         if (!o.cards.length) results.appendChild(h('p', { class: 'hint' }, 'No cards yet.'));
-        else results.appendChild(h('ul', { class: 'frog-cards' }, o.cards.map((c) => h('li', { style: '--rarity:' + rarityOf(c.rarity).colour },
-          h('span', null, rarityOf(c.rarity).emoji + ' ' + c.wizard + ' #' + c.edition), h('span', { class: 'mono' }, serialLabel(c.serial)), h('small', null, dayMonth(c.ts))))));
+        else results.appendChild(h('ul', { class: 'frog-cards' }, o.cards.map((c) => {
+          const moves = (c.transfers || []).map((t) => personName(t.from) + ' → ' + personName(t.to) + ' · ' + dayMonth(t.ts));
+          const mark = c.traded_in ? '🔁' : c.origin !== 'caught' ? '🏅' : '';
+          return h('li', { style: '--rarity:' + rarityOf(c.rarity).colour, title: [originWords(c)].concat(moves).join('\n') },
+            h('span', null, rarityOf(c.rarity).emoji + ' ' + c.wizard + ' #' + c.edition), h('span', { class: 'mono' }, serialLabel(c.serial)), h('small', null, (mark ? mark + ' ' : '') + dayMonth(c.ts)),
+            moves.length ? h('small', { class: 'frog-history' }, originWords(c) + ' · traded ' + moves.length + '×: ' + moves.join(', ')) : null);
+        })));
       } else if (o.wizard && FROG.ownerMode === 'wizard') {
         const w = o.wizard;
         results.appendChild(h('div', { class: 'person-row' }, frogArt(w.image_url, 'sm'),

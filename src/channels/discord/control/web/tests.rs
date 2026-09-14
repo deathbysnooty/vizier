@@ -465,6 +465,12 @@ impl PanelData for FakeData {
         Ok(())
     }
 
+    async fn cancel_trade(&self, id: i64, by: u64) -> Result<super::super::super::frog_trade::Trade, String> {
+        let db = super::super::super::frog_store::db().ok_or("The frog store isn't open.")?;
+        let closed = super::super::super::frog_trade::close(&db.lock(), id, "cancelled", Some(by), chrono::Utc::now().timestamp()).map_err(|e| e.to_string())?;
+        closed.ok_or_else(|| "That offer isn't open any more.".to_string())
+    }
+
     /// A frog opened straight in the store, as if Discord took the post.
     async fn drop_frog(&self, channel: u64, by: u64) -> Result<super::super::super::frog_store::Drop, String> {
         use super::super::super::frog_store as store;
@@ -2504,6 +2510,77 @@ async fn chocolate_frogs_round_trip() {
     assert_eq!(said[3], ("Frog card “Dobby the Free Elf”".to_string(), "Renamed from Dobby, now legendary, picture changed, switched off".to_string()));
     assert_eq!(said[4], ("Frog card “Dobby”".to_string(), "Added".to_string()));
     assert!(frog_rows.iter().all(|e| e["section"]["id"] == "frogs"));
+
+    // Earned cards and trades.
+    let (royale_card, gift) = {
+        use super::super::super::frog_store::AwardFor;
+        use super::super::super::frog_trade as trade;
+        let db = store::db().unwrap();
+        let mut conn = db.lock();
+        let now = chrono::Utc::now().timestamp();
+        let daily = AwardFor { kind: "daily_top", day: "2026-09-14".into(), activity: "quiz".into(), total: 12, ..Default::default() };
+        store::award_card(&mut conn, "frogtop:2026-09-14:quiz", 1005, "daily_top:quiz", &daily, (0.2, 0.2), now).unwrap().unwrap();
+        let royale = AwardFor { kind: "royale", battle_id: Some(77), role: "champion".into(), ..Default::default() };
+        let card = store::award_card(&mut conn, "frogroyale:77:champion", 1004, "royale_champion", &royale, (0.9, 0.9), now).unwrap().unwrap().card;
+        let gift = trade::create(&mut conn, (1004, "Zoya"), (1005, "Arjun"), Some(900), 21, &[card.serial], &[], now, 3600).unwrap();
+        (card, gift)
+    };
+    let (status, rewards, _) = call(&app, "GET", "/api/frogs/rewards", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{rewards}");
+    assert_eq!((rewards["daily"][0]["activity_label"].as_str(), rewards["daily"][0]["member"]["name"].as_str(), rewards["daily"][0]["total"].as_i64()), (Some("🧠 Quiz"), Some("Arjun"), Some(12)));
+    assert_eq!((rewards["royale"][0]["role"].as_str(), rewards["royale"][0]["card"]["serial"].as_i64()), (Some("champion"), Some(royale_card.serial)));
+    let (status, trades, _) = call(&app, "GET", "/api/frogs/trades?member=1005", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{trades}");
+    assert_eq!((trades["items"][0]["status"].as_str(), trades["items"][0]["from"]["name"].as_str(), trades["items"][0]["give"][0]["serial"].as_i64()), (Some("open"), Some("Zoya"), Some(royale_card.serial)));
+    assert_eq!(trades["counts"]["open"], 1);
+    let (status, _, _) = call(&app, "GET", "/api/frogs/trades?status=weird", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, none, _) = call(&app, "GET", "/api/frogs/trades?member=1003", Some(&session), None, false).await;
+    assert_eq!((status, none["items"].as_array().unwrap().len()), (StatusCode::OK, 0));
+    let (_, mine, _) = call(&app, "GET", "/api/frogs/owners?member=1004", Some(&session), None, false).await;
+    let earned = mine["cards"].as_array().unwrap().iter().find(|c| c["serial"] == royale_card.serial).cloned().unwrap();
+    assert_eq!((earned["origin"].as_str(), earned["traded_in"].as_bool(), earned["transfers"].as_array().unwrap().len()), (Some("royale_champion"), Some(false), 0));
+    for (method, path) in [("GET", "/api/frogs/rewards"), ("GET", "/api/frogs/trades"), ("POST", &format!("/api/frogs/trades/{}/cancel", gift.id)[..])] {
+        let (status, _, _) = call(&app, method, path, None, None, true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+    }
+    let (status, _, _) = call(&app, "POST", &format!("/api/frogs/trades/{}/cancel", gift.id), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "cancelling needs the panel header");
+    let (status, cancelled, _) = call(&app, "POST", &format!("/api/frogs/trades/{}/cancel", gift.id), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!((cancelled["status"].as_str(), cancelled["closed_by"]["name"].as_str()), (Some("cancelled"), Some("Kabir")));
+    let (status, _, _) = call(&app, "POST", &format!("/api/frogs/trades/{}/cancel", gift.id), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = call(&app, "POST", "/api/frogs/trades/99999/cancel", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // A full set sold: Arjun holds one of each card in play.
+    {
+        use super::super::super::frog_store::AwardFor;
+        let db = store::db().unwrap();
+        let mut conn = db.lock();
+        let now = chrono::Utc::now().timestamp();
+        let in_play: Vec<i64> = store::wizards(&conn).into_iter().filter(|w| w.enabled).map(|w| w.id).collect();
+        let owned: Vec<i64> = store::cards_of(&conn, 1005).iter().map(|c| c.wizard_id).collect();
+        for (i, w) in in_play.iter().enumerate() {
+            if owned.contains(w) {
+                continue;
+            }
+            store::award_card(&mut conn, &format!("test-set-{i}"), 1005, "royale_champion", &AwardFor { kind: "royale", ..Default::default() }, (0.0, 0.0), now).unwrap();
+            conn.execute("UPDATE cards SET wizard_id = ?1 WHERE serial = (SELECT MAX(serial) FROM cards)", rusqlite::params![w]).unwrap();
+        }
+        let plan: Vec<i64> = store::sale_plan(&conn, 1005).unwrap().iter().map(|c| c.serial).collect();
+        store::sell_set(&mut conn, 1005, &plan, 15, now).unwrap().unwrap();
+    }
+    let (status, sold, _) = call(&app, "GET", "/api/frogs/sales", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{sold}");
+    assert_eq!((sold["items"][0]["member"]["name"].as_str(), sold["items"][0]["points"].as_i64(), sold["price"].as_i64()), (Some("Arjun"), Some(15), Some(35)));
+    assert_eq!(sold["items"][0]["cards"].as_array().unwrap().len(), 10);
+    let (status, _, _) = call(&app, "GET", "/api/frogs/sales", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=5", Some(&session), None, false).await;
+    let last = audit.as_array().unwrap().iter().find(|e| e["key"] == format!("frog:trade:{}", gift.id)).cloned().expect("logged");
+    assert_eq!(last["change"], "Cancelled the offer from Zoya to Arjun");
 }
 
 // --- the demo ----------------------------------------------------------------------------
@@ -3018,6 +3095,66 @@ async fn demo_server() {
             let d = store::start_drop(&conn, 23, &wizard, &riddle, now - 70, None).unwrap();
             store::mark_open(&conn, d.id, 1_290_000_000_000_009_999, now - 70, 300).unwrap();
             store::set_retired(&conn, "wordplay-017", true).unwrap();
+            // Earned cards: three mornings of tops and two royales.
+            use super::super::super::frog_store::AwardFor;
+            let acts = ["chat", "voice", "quiz", "koto", "wordle", "arena", "snitch", "frog"];
+            for back in 1..=3i64 {
+                let day = super::super::super::points::ist_day(now - back * 86_400);
+                for (i, act) in acts.iter().enumerate() {
+                    if (back as usize + i) % 5 == 4 {
+                        continue;
+                    }
+                    let who = 2000 + ((back as u64 * 7 + i as u64 * 5) % 30);
+                    let what = AwardFor { kind: "daily_top", day: day.clone(), activity: act.to_string(), total: 3 + ((i as i64 * 7 + back) % 11), ..Default::default() };
+                    store::award_card(&mut conn, &format!("frogtop:{}:{}", day, act), who, &format!("daily_top:{}", act), &what, (roll(), roll()), now - back * 86_400 + 10 * 3600 + 86_400).unwrap();
+                }
+            }
+            for (battle, champ, runner) in [(now - 30 * 3600, 2012u64, 2004u64), (now - 3 * 3600, 2007, 2012)] {
+                for (role, user) in [("champion", champ), ("runner_up", runner)] {
+                    let what = AwardFor { kind: "royale", battle_id: Some(battle), role: role.into(), ..Default::default() };
+                    store::award_card(&mut conn, &format!("frogroyale:{}:{}", battle, role), user, &format!("royale_{}", role), &what, (roll(), roll()), battle).unwrap();
+                }
+            }
+            // Trades in every state.
+            use super::super::super::frog_trade as trade;
+            let first = |user: u64, conn: &rusqlite::Connection| store::cards_of(conn, user).into_iter().map(|c| c.serial).collect::<Vec<_>>();
+            let sameer = first(2012, &conn);
+            let aarav = first(2000, &conn);
+            let zoya = first(2007, &conn);
+            let name = |u: u64| ROSTER[(u - 2000) as usize];
+            if sameer.len() >= 3 && !zoya.is_empty() {
+                let done = trade::create(&mut conn, (2012, name(2012)), (2007, name(2007)), Some(900), 21, &sameer[..2], &zoya[..1], now - 20 * 3600, 86_400).unwrap();
+                trade::set_message(&conn, done.id, 1_290_000_000_000_100_001).unwrap();
+                trade::accept(&mut conn, done.id, now - 19 * 3600).unwrap();
+                let (z, s1) = (first(2007, &conn), first(2012, &conn));
+                let open = trade::create(&mut conn, (2007, name(2007)), (2012, name(2012)), Some(900), 23, &z[..1], &s1[..1], now - 2 * 3600, 86_400).unwrap();
+                trade::set_message(&conn, open.id, 1_290_000_000_000_100_002).unwrap();
+            }
+            let sameer_now = first(2012, &conn);
+            if let (Some(a), Some(s2)) = (aarav.first(), sameer_now.last()) {
+                let declined = trade::create(&mut conn, (2000, name(2000)), (2012, name(2012)), Some(900), 21, &[*a], &[*s2], now - 9 * 3600, 86_400).unwrap();
+                trade::close(&conn, declined.id, "declined", Some(2012), now - 8 * 3600).unwrap();
+                let gift = trade::create(&mut conn, (2000, name(2000)), (2004, name(2004)), Some(900), 22, &[*a], &[], now - 50 * 3600, 86_400).unwrap();
+                trade::close(&conn, gift.id, "expired", None, now - 26 * 3600).unwrap();
+            }
+            // One full set sold by Siddharth.
+            let seller = 2026u64;
+            let in_play: Vec<i64> = store::wizards(&conn).into_iter().filter(|w| w.enabled).map(|w| w.id).collect();
+            for w in in_play {
+                if store::cards_of(&conn, seller).iter().any(|c| c.wizard_id == w) {
+                    continue;
+                }
+                let what = AwardFor { kind: "royale", battle_id: Some(1), role: format!("demo-{w}"), ..Default::default() };
+                store::award_card(&mut conn, &format!("demo-sale-{w}"), seller, "royale_champion", &what, (0.0, 0.0), now - 7 * 3600).unwrap();
+                conn.execute(
+                    "UPDATE cards SET edition = (SELECT COALESCE(MAX(edition), 0) + 1 FROM cards WHERE wizard_id = ?1), wizard_id = ?1 WHERE serial = (SELECT MAX(serial) FROM cards)",
+                    rusqlite::params![w],
+                )
+                .unwrap();
+                conn.execute("DELETE FROM awards WHERE key = ?1", rusqlite::params![format!("demo-sale-{w}")]).unwrap();
+            }
+            let plan: Vec<i64> = store::sale_plan(&conn, seller).unwrap().iter().map(|c| c.serial).collect();
+            store::sell_set(&mut conn, seller, &plan, 35, now - 6 * 3600).unwrap().unwrap();
             store::meta_set(&conn, "demo_seeded", "1").unwrap();
         }
     }

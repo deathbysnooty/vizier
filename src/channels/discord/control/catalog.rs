@@ -343,7 +343,7 @@ pub fn sections() -> Vec<Section> {
                     gets three tries, and close spellings count. The first right answer keeps the card, a numbered \
                     collectable, and scores the frog's points for their house. Nobody right in time and the frog hops \
                     away, showing the answer but never the riddle. Uncommon cards ask harder riddles and pay more, the \
-                    Legendary Eternal Phoenix hardest and most, and collecting every card pays a one-off bonus. Drops only land where someone spoke recently and keep \
+                    Legendary Eternal Phoenix hardest and most, and a full set of cards can be sold for points with /sellset. Drops only land where someone spoke recently and keep \
                     clear of Snitch drops. The cards, recent drops, card owners and the riddle bank are managed on \
                     this page. A day's plan is made once, so changes to drops, hours and gap apply from the next day's \
                     plan.",
@@ -370,7 +370,14 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_POINTS_FROG_COMMON", "Common points", "Points for catching a Common frog.", number(0, 100, "points"), "2"),
                 setting("VIZIER_POINTS_FROG_UNCOMMON", "Uncommon points", "Points for catching an Uncommon frog.", number(0, 100, "points"), "4"),
                 setting("VIZIER_POINTS_FROG_LEGENDARY", "Legendary points", "Points for catching a Legendary frog.", number(0, 100, "points"), "10"),
-                setting("VIZIER_FROG_SET_BONUS", "Collection bonus", "One-off points for a member the first time they own at least one of every switched-on card. 0 means no bonus.", number(0, 1000, "points"), "15"),
+                toggle("VIZIER_FROG_DAILY_TOP", "Top of the day cards", "Each morning, give the day before's top scorer in every game (chat, voice, quiz, Koto, anagram, cats, Wordle, arena, Snitch, frogs) a random Common or Uncommon card (no house points: only catching frogs pays those). Only while scheduled frog drops are on."),
+                setting("VIZIER_FROG_DAILY_TOP_TIME", "Top of the day time", "India time the top of the day cards go out, for the day before. After Wordle's morning results is best. Missed while the bot was down, they go out when it's back.", Kind::Time, "10:00"),
+                setting("VIZIER_FROG_DAILY_TOP_CHANNEL", "Top of the day channel", "Where the morning summary of who won which card is posted. Empty uses the houses channel.", Kind::Channel, ""),
+                toggle("VIZIER_FROG_ROYALE_CARDS", "Battle royale cards", "Give a battle royale's champion and runner-up a random Common or Uncommon card each (no house points). Only while scheduled frog drops are on."),
+                setting("VIZIER_FROG_ROYALE_MIN_PLAYERS", "Royale cards from", "A royale needs at least this many fighters for its cards, so tiny royales can't be farmed.", number(2, 64, "fighters"), "6"),
+                toggle("VIZIER_TRADES", "Card trading", "Let house members trade cards with /trade. Trades move cards only, never points. Only while scheduled frog drops are on."),
+                setting("VIZIER_TRADE_EXPIRY_HOURS", "Trade offers last", "How long a trade offer waits for an answer before it expires.", number(1, 168, "hours"), "24"),
+                setting("VIZIER_FROG_SET_BONUS", "Full set price", "House points a member gets for handing in one copy of every card in play with /sellset. The copies are spent; each sale needs a whole new set.", number(0, 1000, "points"), "35"),
             ],
             commands: vec![
                 command(
@@ -378,6 +385,19 @@ pub fn sections() -> Vec<Section> {
                     EVERYONE,
                     "/frogs member:",
                     "Your Chocolate Frog cards, or anyone's: which cards are collected, frog points, and every copy owned, like The Eternal Phoenix #3 · No. 0187. Only you see it.",
+                ),
+                command(
+                    "trade",
+                    EVERYONE,
+                    "/trade member:",
+                    "Offer cards to another house member and ask for some of theirs. They accept or decline in the channel; cards only move if everyone still has them.",
+                ),
+                command("trades", EVERYONE, "/trades", "Your open trade offers, both ways, and your latest trades. Only you see it."),
+                command(
+                    "sellset",
+                    EVERYONE,
+                    "/sellset",
+                    "Hand in one copy of every card in play for house points. Your highest-numbered copies go unless you pick others; the copies are spent.",
                 ),
                 command(
                     "frogcard",

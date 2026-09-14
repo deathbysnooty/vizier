@@ -228,14 +228,36 @@ pub struct Drop {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Card {
     pub serial: i64,
-    /// Copies of this card caught up to and including this one.
+    /// Copies of this card handed out up to and including this one.
     pub edition: i64,
+    /// Who owns it now.
     pub user_id: u64,
     pub wizard_id: i64,
     pub wizard_name: String,
     pub rarity: Rarity,
-    pub drop_id: i64,
+    /// The frog it was caught from; none for an earned card.
+    pub drop_id: Option<i64>,
     pub ts: i64,
+    /// `caught`, `daily_top:<activity>`, `royale_champion` or `royale_runner_up`.
+    pub origin: String,
+    /// Who got it first, however it moved since.
+    pub original_owner: u64,
+    /// `owned`, or `spent` once handed in.
+    pub status: String,
+    pub spent_reason: String,
+    pub spent_ts: Option<i64>,
+}
+
+impl Card {
+    /// Earned by playing rather than caught from a frog.
+    pub fn earned(&self) -> bool {
+        self.origin != "caught"
+    }
+
+    /// Came to its owner by trade.
+    pub fn traded_in(&self) -> bool {
+        self.user_id != self.original_owner
+    }
 }
 
 // --- store ----------------------------------------------------------------------
@@ -267,11 +289,33 @@ pub const SCHEMA: &str = "
         PRIMARY KEY (drop_id, user_id));
     CREATE TABLE IF NOT EXISTS cards (
         serial INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, wizard_id INTEGER NOT NULL,
-        edition INTEGER NOT NULL, drop_id INTEGER NOT NULL UNIQUE, ts INTEGER NOT NULL,
+        edition INTEGER NOT NULL, drop_id INTEGER UNIQUE, ts INTEGER NOT NULL,
+        origin TEXT NOT NULL DEFAULT 'caught', original_owner INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'owned', spent_reason TEXT NOT NULL DEFAULT '', spent_ts INTEGER,
         UNIQUE (wizard_id, edition));
-    CREATE INDEX IF NOT EXISTS cards_user ON cards (user_id);
+    CREATE INDEX IF NOT EXISTS cards_user ON cards (user_id, status);
+    CREATE TABLE IF NOT EXISTS transfers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, serial INTEGER NOT NULL, from_user INTEGER NOT NULL,
+        to_user INTEGER NOT NULL, trade_id INTEGER, ts INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS transfers_serial ON transfers (serial);
+    CREATE TABLE IF NOT EXISTS awards (
+        key TEXT PRIMARY KEY, kind TEXT NOT NULL, day TEXT NOT NULL DEFAULT '', activity TEXT NOT NULL DEFAULT '',
+        battle_id INTEGER, role TEXT NOT NULL DEFAULT '', user_id INTEGER NOT NULL, serial INTEGER NOT NULL,
+        points INTEGER NOT NULL, total INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS awards_kind ON awards (kind, ts);
+    CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, from_user INTEGER NOT NULL, to_user INTEGER NOT NULL,
+        guild_id INTEGER, channel_id INTEGER NOT NULL, message_id INTEGER, status TEXT NOT NULL DEFAULT 'open',
+        created_ts INTEGER NOT NULL, expires_ts INTEGER NOT NULL, closed_ts INTEGER, closed_by INTEGER,
+        finished INTEGER NOT NULL DEFAULT 0);
+    CREATE INDEX IF NOT EXISTS trades_status ON trades (status, expires_ts);
+    CREATE TABLE IF NOT EXISTS trade_names (trade_id INTEGER PRIMARY KEY, from_name TEXT NOT NULL, to_name TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS trade_items (
+        trade_id INTEGER NOT NULL, serial INTEGER NOT NULL, side TEXT NOT NULL, PRIMARY KEY (trade_id, serial));
     CREATE INDEX IF NOT EXISTS cards_wizard ON cards (wizard_id);
-    CREATE TABLE IF NOT EXISTS set_bonus (user_id INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS set_sales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, points INTEGER NOT NULL, ts INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS set_sale_items (sale_id INTEGER NOT NULL, serial INTEGER NOT NULL, PRIMARY KEY (sale_id, serial));
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
 /// The owner's ten cards, seeded once. The slugs are the picture file names in
@@ -570,7 +614,7 @@ pub fn thumbnail(image: &str, slug: &str) -> Option<(Vec<u8>, &'static str)> {
 
 /// Copies owned per wizard.
 pub fn copies(conn: &Connection) -> HashMap<i64, i64> {
-    conn.prepare("SELECT wizard_id, COUNT(*) FROM cards GROUP BY wizard_id")
+    conn.prepare("SELECT wizard_id, COUNT(*) FROM cards WHERE status = 'owned' GROUP BY wizard_id")
         .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
         .unwrap_or_default()
 }
@@ -898,8 +942,6 @@ pub struct Win {
     pub serial: i64,
     pub edition: i64,
     pub canonical: String,
-    /// This catch completed their collection for the first time.
-    pub set_complete: bool,
 }
 
 /// Checks an answer to an open frog and, if it is right, hands over the card -
@@ -933,9 +975,7 @@ pub fn submit(conn: &mut Connection, drop_id: i64, user: u64, user_name: &str, g
         tx.commit()?;
         return Ok(Submit::Wrong { left: MAX_TRIES - used - 1 });
     }
-    let serial: i64 = tx.query_row("SELECT COALESCE(MAX(serial), 0) + 1 FROM cards", [], |r| r.get(0))?;
-    let edition: i64 =
-        tx.query_row("SELECT COALESCE(MAX(edition), 0) + 1 FROM cards WHERE wizard_id = ?1", params![drop.wizard_id], |r| r.get(0))?;
+    let (serial, edition) = next_numbers(&tx, drop.wizard_id)?;
     let typed: String = guess.trim().chars().take(60).collect();
     let name: String = user_name.chars().take(80).collect();
     let won = tx.execute(
@@ -947,23 +987,237 @@ pub fn submit(conn: &mut Connection, drop_id: i64, user: u64, user_name: &str, g
     if won != 1 {
         return Ok(Submit::TooLate { winner_name: String::new() });
     }
-    tx.execute(
-        "INSERT INTO cards (serial, user_id, wizard_id, edition, drop_id, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![serial, user as i64, drop.wizard_id, edition, drop_id, now],
-    )?;
-    let enabled: i64 = tx.query_row("SELECT COUNT(*) FROM wizards WHERE enabled = 1", [], |r| r.get(0))?;
-    let missing: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM wizards w WHERE w.enabled = 1
-         AND NOT EXISTS (SELECT 1 FROM cards c WHERE c.user_id = ?1 AND c.wizard_id = w.id)",
-        params![user as i64],
-        |r| r.get(0),
-    )?;
-    let set_complete = enabled > 0
-        && missing == 0
-        && tx.execute("INSERT OR IGNORE INTO set_bonus (user_id, ts) VALUES (?1, ?2)", params![user as i64, now])? == 1;
+    insert_card(&tx, serial, edition, user, drop.wizard_id, Some(drop_id), "caught", now)?;
     let drop = get_drop(&tx, drop_id).unwrap_or(drop);
     tx.commit()?;
-    Ok(Submit::Won(Win { drop, serial, edition, canonical: riddle.canonical().to_string(), set_complete }))
+    Ok(Submit::Won(Win { drop, serial, edition, canonical: riddle.canonical().to_string() }))
+}
+
+/// The next global serial and the next edition of one card. Call inside the
+/// transaction that inserts the card.
+fn next_numbers(conn: &Connection, wizard_id: i64) -> rusqlite::Result<(i64, i64)> {
+    let serial: i64 = conn.query_row("SELECT COALESCE(MAX(serial), 0) + 1 FROM cards", [], |r| r.get(0))?;
+    let edition: i64 =
+        conn.query_row("SELECT COALESCE(MAX(edition), 0) + 1 FROM cards WHERE wizard_id = ?1", params![wizard_id], |r| r.get(0))?;
+    Ok((serial, edition))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_card(conn: &Connection, serial: i64, edition: i64, user: u64, wizard_id: i64, drop_id: Option<i64>, origin: &str, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO cards (serial, user_id, wizard_id, edition, drop_id, ts, origin, original_owner, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?2, 'owned')",
+        params![serial, user as i64, wizard_id, edition, drop_id, now, origin],
+    )
+    .map(|_| ())
+}
+
+/// A card given for playing well: which card, and whether this call gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Award {
+    pub card: Card,
+    pub points: i64,
+    /// False when the key had already been paid: the same card comes back.
+    pub fresh: bool,
+}
+
+/// What an award is for, as the panel lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AwardFor {
+    /// `daily_top` or `royale`.
+    pub kind: &'static str,
+    pub day: String,
+    pub activity: String,
+    pub battle_id: Option<i64>,
+    pub role: String,
+    /// The day's winning total, for a daily top.
+    pub total: i64,
+}
+
+/// A random Common or Uncommon card in play, by the rarities' weights - never
+/// Legendary, which only a riddle can win.
+pub fn pick_earned_card(conn: &Connection, rarity_roll: f64, card_roll: f64) -> Option<Wizard> {
+    let all: Vec<Wizard> = wizards(conn).into_iter().filter(|w| w.enabled && w.rarity != Rarity::Legendary).collect();
+    let weights: Vec<(Rarity, u64)> = [Rarity::Common, Rarity::Uncommon]
+        .into_iter()
+        .map(|r| (r, if all.iter().any(|w| w.rarity == r) { r.weight() } else { 0 }))
+        .collect();
+    let rarity = choose_rarity(rarity_roll, &weights)?;
+    let pool: Vec<&Wizard> = all.iter().filter(|w| w.rarity == rarity).collect();
+    let index = ((card_roll.clamp(0.0, 1.0) * pool.len() as f64) as usize).min(pool.len().checked_sub(1)?);
+    pool.get(index).map(|w| (*w).clone())
+}
+
+/// Gives a member one earned card under a key that can only ever pay once. A
+/// key already paid hands back the card it paid; `None` when there's no card
+/// to give.
+pub fn award_card(conn: &mut Connection, key: &str, user: u64, origin: &str, what: &AwardFor, rolls: (f64, f64), now: i64) -> rusqlite::Result<Option<Award>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let paid: Option<(i64, i64)> =
+        tx.query_row("SELECT serial, points FROM awards WHERE key = ?1", params![key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    if let Some((serial, points)) = paid {
+        let card = tx.query_row(&format!("{} WHERE c.serial = ?1", CARD_SELECT), params![serial], card_row).optional()?;
+        return Ok(card.map(|card| Award { card, points, fresh: false }));
+    }
+    let Some(wizard) = pick_earned_card(&tx, rolls.0, rolls.1) else {
+        return Ok(None);
+    };
+    let (serial, edition) = next_numbers(&tx, wizard.id)?;
+    insert_card(&tx, serial, edition, user, wizard.id, None, origin, now)?;
+    // Earned cards pay no house points; the column stays for the record.
+    let points = 0;
+    tx.execute(
+        "INSERT INTO awards (key, kind, day, activity, battle_id, role, user_id, serial, points, total, ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![key, what.kind, what.day, what.activity, what.battle_id, what.role, user as i64, serial, points, what.total, now],
+    )?;
+    let card = tx.query_row(&format!("{} WHERE c.serial = ?1", CARD_SELECT), params![serial], card_row)?;
+    tx.commit()?;
+    Ok(Some(Award { card, points, fresh: true }))
+}
+
+/// One earned card as the panel lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AwardRow {
+    pub key: String,
+    pub kind: String,
+    pub day: String,
+    pub activity: String,
+    pub battle_id: Option<i64>,
+    pub role: String,
+    pub user_id: String,
+    pub serial: i64,
+    pub edition: i64,
+    pub card: String,
+    pub rarity: Rarity,
+    pub points: i64,
+    pub total: i64,
+    pub ts: i64,
+}
+
+/// The newest earned cards of a kind.
+pub fn awards(conn: &Connection, kind: &str, limit: i64) -> Vec<AwardRow> {
+    conn.prepare(
+        "SELECT a.key, a.kind, a.day, a.activity, a.battle_id, a.role, a.user_id, a.serial, c.edition,
+                COALESCE(w.name, '?'), COALESCE(w.rarity, 'common'), a.points, a.total, a.ts
+         FROM awards a JOIN cards c ON c.serial = a.serial LEFT JOIN wizards w ON w.id = c.wizard_id
+         WHERE a.kind = ?1 ORDER BY a.ts DESC, a.key LIMIT ?2",
+    )
+    .and_then(|mut s| {
+        s.query_map(params![kind, limit], |r| {
+            Ok(AwardRow {
+                key: r.get(0)?,
+                kind: r.get(1)?,
+                day: r.get(2)?,
+                activity: r.get(3)?,
+                battle_id: r.get(4)?,
+                role: r.get(5)?,
+                user_id: r.get::<_, i64>(6)?.to_string(),
+                serial: r.get(7)?,
+                edition: r.get(8)?,
+                card: r.get(9)?,
+                rarity: Rarity::from_key(&r.get::<_, String>(10)?).unwrap_or(Rarity::Common),
+                points: r.get(11)?,
+                total: r.get(12)?,
+                ts: r.get(13)?,
+            })
+        })?
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A card's moves: (from, to, trade id, when), oldest first.
+pub fn transfers_of(conn: &Connection, serial: i64) -> Vec<(u64, u64, Option<i64>, i64)> {
+    conn.prepare("SELECT from_user, to_user, trade_id, ts FROM transfers WHERE serial = ?1 ORDER BY id")
+        .and_then(|mut s| s.query_map(params![serial], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?)))?.collect())
+        .unwrap_or_default()
+}
+
+// --- selling a full set -------------------------------------------------------------------
+
+/// What a member would hand in to sell a set: one copy of every card in play -
+/// by default their highest-numbered copy, so they keep their low numbers.
+/// `Err` lists the cards in play they don't have.
+pub fn sale_plan(conn: &Connection, user: u64) -> Result<Vec<Card>, Vec<Wizard>> {
+    let owned = cards_of(conn, user);
+    let in_play: Vec<Wizard> = wizards(conn).into_iter().filter(|w| w.enabled).collect();
+    let missing: Vec<Wizard> = in_play.iter().filter(|w| !owned.iter().any(|c| c.wizard_id == w.id)).cloned().collect();
+    if !missing.is_empty() || in_play.is_empty() {
+        return Err(missing);
+    }
+    Ok(in_play.iter().filter_map(|w| owned.iter().filter(|c| c.wizard_id == w.id).max_by_key(|c| c.serial).cloned()).collect())
+}
+
+/// Why a sale didn't go through; nothing was spent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SaleError {
+    /// These copies aren't the member's any more.
+    NotOwned(Vec<i64>),
+    /// The copies don't make exactly one of every card in play (the cards in play changed).
+    NotASet,
+}
+
+/// Sells a full set: in one transaction, checks those exact copies are still the
+/// member's and make one of every card in play, spends them, and records the
+/// sale. Returns the sale's id; the caller pays the points under `frogsell:<id>`.
+pub fn sell_set(conn: &mut Connection, user: u64, serials: &[i64], points: i64, now: i64) -> rusqlite::Result<Result<i64, SaleError>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let cards = cards_by_serial(&tx, serials);
+    let not_owned: Vec<i64> =
+        serials.iter().filter(|s| !cards.iter().any(|c| c.serial == **s && c.user_id == user && c.status == "owned")).copied().collect();
+    if !not_owned.is_empty() {
+        return Ok(Err(SaleError::NotOwned(not_owned)));
+    }
+    let in_play: Vec<i64> = wizards(&tx).into_iter().filter(|w| w.enabled).map(|w| w.id).collect();
+    let mut covered: Vec<i64> = cards.iter().map(|c| c.wizard_id).collect();
+    covered.sort_unstable();
+    let mut wanted = in_play.clone();
+    wanted.sort_unstable();
+    if in_play.is_empty() || covered != wanted {
+        return Ok(Err(SaleError::NotASet));
+    }
+    tx.execute("INSERT INTO set_sales (user_id, points, ts) VALUES (?1, ?2, ?3)", params![user as i64, points, now])?;
+    let sale = tx.last_insert_rowid();
+    let reason = format!("sold full set #{}", sale);
+    for serial in serials {
+        tx.execute(
+            "UPDATE cards SET status = 'spent', spent_reason = ?2, spent_ts = ?3 WHERE serial = ?1 AND user_id = ?4 AND status = 'owned'",
+            params![serial, reason, now, user as i64],
+        )?;
+        tx.execute("INSERT INTO set_sale_items (sale_id, serial) VALUES (?1, ?2)", params![sale, serial])?;
+    }
+    tx.commit()?;
+    Ok(Ok(sale))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Sale {
+    pub id: i64,
+    pub user_id: String,
+    pub points: i64,
+    pub ts: i64,
+    pub serials: Vec<i64>,
+}
+
+/// The newest set sales.
+pub fn sales(conn: &Connection, limit: i64) -> Vec<Sale> {
+    let rows: Vec<(i64, i64, i64, i64)> = conn
+        .prepare("SELECT id, user_id, points, ts FROM set_sales ORDER BY id DESC LIMIT ?1")
+        .and_then(|mut s| s.query_map(params![limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect())
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|(id, user, points, ts)| Sale {
+            id,
+            user_id: user.to_string(),
+            points,
+            ts,
+            serials: conn
+                .prepare("SELECT serial FROM set_sale_items WHERE sale_id = ?1 ORDER BY serial")
+                .and_then(|mut s| s.query_map(params![id], |r| r.get(0))?.collect())
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 // --- cards ---------------------------------------------------------------------------
@@ -978,24 +1232,37 @@ fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
         drop_id: r.get(5)?,
         ts: r.get(6)?,
         edition: r.get(7)?,
+        origin: r.get(8)?,
+        original_owner: r.get::<_, i64>(9)? as u64,
+        status: r.get(10)?,
+        spent_reason: r.get(11)?,
+        spent_ts: r.get(12)?,
     })
 }
 
 const CARD_SELECT: &str = "SELECT c.serial, c.user_id, c.wizard_id, COALESCE(w.name, d.wizard_name, '?'), COALESCE(w.rarity, d.rarity, 'common'),
-         c.drop_id, c.ts, c.edition
+         c.drop_id, c.ts, c.edition, c.origin, c.original_owner, c.status, c.spent_reason, c.spent_ts
      FROM cards c LEFT JOIN wizards w ON w.id = c.wizard_id LEFT JOIN drops d ON d.id = c.drop_id";
 
-/// A member's cards, newest first.
+/// A member's cards, newest first. Spent cards are never theirs to show.
 pub fn cards_of(conn: &Connection, user: u64) -> Vec<Card> {
-    conn.prepare(&format!("{} WHERE c.user_id = ?1 ORDER BY c.serial DESC", CARD_SELECT))
+    conn.prepare(&format!("{} WHERE c.user_id = ?1 AND c.status = 'owned' ORDER BY c.serial DESC", CARD_SELECT))
         .and_then(|mut s| s.query_map(params![user as i64], card_row)?.collect())
         .unwrap_or_default()
 }
 
-/// One copy by its number, with the drop it was won from.
-pub fn card_by_serial(conn: &Connection, serial: i64) -> Option<(Card, Drop)> {
+/// Cards by number, as they are now.
+pub fn cards_by_serial(conn: &Connection, serials: &[i64]) -> Vec<Card> {
+    serials
+        .iter()
+        .filter_map(|s| conn.query_row(&format!("{} WHERE c.serial = ?1", CARD_SELECT), params![s], card_row).optional().ok().flatten())
+        .collect()
+}
+
+/// One copy by its number - spent or not - with the drop it was caught from if it was.
+pub fn card_by_serial(conn: &Connection, serial: i64) -> Option<(Card, Option<Drop>)> {
     let card = conn.query_row(&format!("{} WHERE c.serial = ?1", CARD_SELECT), params![serial], card_row).optional().ok()??;
-    let drop = get_drop(conn, card.drop_id)?;
+    let drop = card.drop_id.and_then(|id| get_drop(conn, id));
     Some((card, drop))
 }
 
@@ -1003,7 +1270,7 @@ pub fn card_by_serial(conn: &Connection, serial: i64) -> Option<(Card, Drop)> {
 /// most copies first.
 pub fn owners_of(conn: &Connection, wizard_id: i64) -> Vec<(u64, Vec<(i64, i64)>)> {
     let rows: Vec<(i64, i64, i64)> = conn
-        .prepare("SELECT user_id, serial, edition FROM cards WHERE wizard_id = ?1 ORDER BY serial")
+        .prepare("SELECT user_id, serial, edition FROM cards WHERE wizard_id = ?1 AND status = 'owned' ORDER BY serial")
         .and_then(|mut s| s.query_map(params![wizard_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect())
         .unwrap_or_default();
     let mut owners: Vec<(u64, Vec<(i64, i64)>)> = Vec::new();
@@ -1035,9 +1302,9 @@ pub fn totals(conn: &Connection) -> Totals {
         caught: count("SELECT COUNT(*) FROM drops WHERE status = 'caught'"),
         escaped: count("SELECT COUNT(*) FROM drops WHERE status = 'escaped'"),
         open: count("SELECT COUNT(*) FROM drops WHERE status = 'open'"),
-        cards: count("SELECT COUNT(*) FROM cards"),
-        collectors: count("SELECT COUNT(DISTINCT user_id) FROM cards"),
-        full_sets: count("SELECT COUNT(*) FROM set_bonus"),
+        cards: count("SELECT COUNT(*) FROM cards WHERE status = 'owned'"),
+        collectors: count("SELECT COUNT(DISTINCT user_id) FROM cards WHERE status = 'owned'"),
+        full_sets: count("SELECT COUNT(*) FROM set_sales"),
     }
 }
 
@@ -1326,7 +1593,7 @@ pub(crate) mod tests {
         let d = open_frog(&mut conn, &["keyboard", "computer keyboard"], 3, NOW);
         assert_eq!(submit(&mut conn, d.id, 5, "Rohan", "piano", NOW + 10).unwrap(), Submit::Wrong { left: 2 });
         let Submit::Won(win) = submit(&mut conn, d.id, 6, "Aarav", "The Keybord", NOW + 48).unwrap() else { panic!("should win") };
-        assert_eq!((win.serial, win.edition, win.canonical.as_str(), win.set_complete), (1, 1, "keyboard", false));
+        assert_eq!((win.serial, win.edition, win.canonical.as_str()), (1, 1, "keyboard"));
         assert_eq!(win.drop.edition, Some(1));
         assert_eq!(win.drop.status, Status::Caught);
         assert_eq!((win.drop.winner, win.drop.winner_name.as_str(), win.drop.solved_secs), (Some(6), "Aarav", Some(48)));
@@ -1354,7 +1621,9 @@ pub(crate) mod tests {
         assert_eq!(cards_of(&conn, 40).iter().map(|c| (c.serial, c.edition)).collect::<Vec<_>>(), vec![(5, 3), (3, 2), (1, 1)], "newest first");
         assert_eq!(owners_of(&conn, 1), vec![(40, vec![(1, 1), (3, 2), (5, 3)])]);
         let (card, drop) = card_by_serial(&conn, 3).unwrap();
+        let drop = drop.unwrap();
         assert_eq!((card.wizard_name.as_str(), card.edition, drop.edition, drop.serial), ("Rubeus Hagrid", 2, Some(2), Some(3)));
+        assert_eq!((card.origin.as_str(), card.original_owner, card.earned(), card.traded_in()), ("caught", 40, false, false));
         assert!(card_by_serial(&conn, 999).is_none());
         assert_eq!(card_label("The Eternal Phoenix", 3, 187), "The Eternal Phoenix #3 · No. 0187");
         assert_eq!(copies(&conn)[&1], 3);
@@ -1430,23 +1699,64 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_collection_bonus_comes_once_when_the_set_is_first_complete() {
+    fn a_full_set_sells_once_and_needs_every_card() {
         let mut conn = memory();
-        // Only three wizards in play, to keep it short.
         conn.execute("UPDATE wizards SET enabled = 0 WHERE id > 3", []).unwrap();
-        let mut completes = Vec::new();
-        for (i, wizard) in [1, 2, 2, 3, 1, 3].into_iter().enumerate() {
-            let at = NOW + i as i64 * 1000;
-            let d = open_frog(&mut conn, &["candle"], wizard, at);
-            let Submit::Won(win) = submit(&mut conn, d.id, 7, "Kabir", "candle", at + 1).unwrap() else { panic!() };
-            completes.push(win.set_complete);
-        }
-        assert_eq!(completes, vec![false, false, false, true, false, false]);
-        // A new wizard: completing again later pays nothing more.
-        conn.execute("UPDATE wizards SET enabled = 1 WHERE id = 4", []).unwrap();
-        let d = open_frog(&mut conn, &["candle"], 4, NOW + 90_000);
-        let Submit::Won(win) = submit(&mut conn, d.id, 7, "Kabir", "candle", NOW + 90_001).unwrap() else { panic!() };
-        assert!(!win.set_complete);
+        let catch = |conn: &mut Connection, wizard: i64, at: i64| {
+            let d = open_frog(conn, &["candle"], wizard, at);
+            let Submit::Won(win) = submit(conn, d.id, 7, "Kabir", "candle", at + 1).unwrap() else { panic!() };
+            win.serial
+        };
+        let h1 = catch(&mut conn, 1, NOW);
+        let l1 = catch(&mut conn, 2, NOW + 1000);
+        // Two cards of three: not a set.
+        let missing = sale_plan(&conn, 7).unwrap_err();
+        assert_eq!(missing.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), vec!["Hermione Granger"]);
+        assert_eq!(sell_set(&mut conn, 7, &[h1, l1], 15, NOW).unwrap(), Err(SaleError::NotASet));
+        let e1 = catch(&mut conn, 3, NOW + 2000);
+        let h2 = catch(&mut conn, 1, NOW + 3000);
+        // The default hands in the highest-numbered copy of each.
+        let plan = sale_plan(&conn, 7).unwrap();
+        let mut picked: Vec<i64> = plan.iter().map(|c| c.serial).collect();
+        picked.sort_unstable();
+        assert_eq!(picked, vec![l1, e1, h2]);
+        // Choosing the other Hagrid, or two Hagrids, isn't a set; someone else's card isn't theirs.
+        assert_eq!(sell_set(&mut conn, 7, &[h1, h2, l1], 15, NOW).unwrap(), Err(SaleError::NotASet));
+        assert_eq!(sell_set(&mut conn, 8, &picked, 15, NOW).unwrap(), Err(SaleError::NotOwned(picked.clone())));
+        let sale = sell_set(&mut conn, 7, &[h1, l1, e1], 15, NOW + 4000).unwrap().unwrap();
+        let spent = card_by_serial(&conn, h1).unwrap().0;
+        assert_eq!((spent.status.as_str(), spent.spent_reason.clone(), spent.spent_ts), ("spent", format!("sold full set #{}", sale), Some(NOW + 4000)));
+        assert_eq!(cards_of(&conn, 7).iter().map(|c| c.serial).collect::<Vec<_>>(), vec![h2], "spent cards are gone from the collection");
+        assert_eq!(copies(&conn).get(&1), Some(&1));
+        // Selling again needs a second full set; the spent copies can't be reused.
+        assert_eq!(sell_set(&mut conn, 7, &[h1, l1, e1], 15, NOW + 5000).unwrap(), Err(SaleError::NotOwned(vec![h1, l1, e1])));
+        assert!(sale_plan(&conn, 7).is_err());
+        let s = sales(&conn, 10);
+        assert_eq!((s.len(), s[0].user_id.as_str(), s[0].points), (1, "7", 15));
+        let mut sold = s[0].serials.clone();
+        sold.sort_unstable();
+        let mut want = vec![h1, l1, e1];
+        want.sort_unstable();
+        assert_eq!(sold, want);
         assert_eq!(totals(&conn).full_sets, 1);
     }
+
+    #[test]
+    fn a_card_traded_away_before_the_sale_spends_nothing() {
+        let mut conn = memory();
+        conn.execute("UPDATE wizards SET enabled = 0 WHERE id > 2", []).unwrap();
+        let mut serials = Vec::new();
+        for (i, wizard) in [1, 2].into_iter().enumerate() {
+            let d = open_frog(&mut conn, &["candle"], wizard, NOW + i as i64 * 1000);
+            let Submit::Won(win) = submit(&mut conn, d.id, 7, "x", "candle", NOW + i as i64 * 1000 + 1).unwrap() else { panic!() };
+            serials.push(win.serial);
+        }
+        let plan: Vec<i64> = sale_plan(&conn, 7).unwrap().iter().map(|c| c.serial).collect();
+        // Between opening /sellset and confirming, one copy leaves.
+        conn.execute("UPDATE cards SET user_id = 9 WHERE serial = ?1", params![serials[1]]).unwrap();
+        assert_eq!(sell_set(&mut conn, 7, &plan, 15, NOW).unwrap(), Err(SaleError::NotOwned(vec![serials[1]])));
+        assert_eq!(cards_of(&conn, 7).len(), 1, "nothing was spent");
+        assert!(sales(&conn, 10).is_empty());
+    }
+
 }

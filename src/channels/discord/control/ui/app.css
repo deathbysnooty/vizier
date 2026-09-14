@@ -1952,7 +1952,7 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .frog-owner-controls .picker-btn, .frog-owner-controls .select { flex: 1; min-width: 200px; max-width: 360px; }
 .frog-owner-results { display: grid; gap: 10px; }
 .frog-owner-results .cup-loading { padding: 12px 0; justify-content: flex-start; }
-.frog-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; }
+.frog-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px; }
 .frog-cards li { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-left: 3px solid var(--rarity); border-radius: var(--r-sm); background: var(--surface); min-width: 0; font-size: 13px; }
 .frog-cards li .mono { color: var(--text-2); white-space: nowrap; }
 .frog-cards li span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1963,6 +1963,48 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .frog-holders b { font-weight: 600; }
 .frog-serials { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
 .frog-serials .chip { height: 22px; font-size: 11.5px; padding: 0 7px; }
+
+.frog-cards li { flex-wrap: wrap; }
+.frog-cards .frog-history { flex-basis: 100%; white-space: normal !important; color: var(--muted) !important; }
+.frog-earned { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
+.frog-earned-col + .frog-earned-col { border-top: 1px solid var(--line); padding-top: 18px; }
+.frog-earned-col h3 { font-size: 13px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.frog-day { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 6px; }
+.frog-day:first-of-type { margin-top: 0; }
+.frog-day small { color: var(--faint); }
+.frog-award-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.frog-award-list li { display: grid; grid-template-columns: 120px 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.frog-award-list li:first-child { border-top: 0; }
+.frog-award-what { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.frog-award-who { min-width: 0; }
+.frog-award-who b { font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frog-award-who small { color: var(--faint); font-size: 12px; }
+.frog-card-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 8px; border: 1px solid var(--line); border-left: 3px solid var(--rarity, var(--line-2)); border-radius: var(--r-sm); background: var(--surface); font-size: 12.5px; white-space: nowrap; max-width: 100%; overflow: hidden; }
+.frog-card-chip span { overflow: hidden; text-overflow: ellipsis; }
+.frog-card-chip small { color: var(--faint); font-size: 11px; }
+.frog-sale-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.frog-sale-list li { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.frog-sale-list li:first-child { border-top: 0; padding-top: 0; }
+.frog-sale-head { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.frog-sale-head .grow { flex: 1; }
+.frog-sale-head small { color: var(--faint); }
+.frog-trades { display: grid; gap: 14px; }
+.frog-trade-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.frog-trade { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface-2); padding: 10px 12px; display: grid; gap: 8px; }
+.frog-trade.is-open { border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
+.frog-trade-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 13.5px; }
+.frog-trade-head b { font-weight: 600; }
+.frog-trade-head .grow { flex: 1; }
+.frog-trade-head small { color: var(--faint); }
+.frog-arrow { color: var(--muted); }
+.frog-trade-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.frog-trade-side > small { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.frog-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.frog-trade-foot { display: flex; align-items: center; gap: 6px 10px; font-size: 12.5px; flex-wrap: wrap; }
+.frog-trade-foot a { white-space: nowrap; }
+.frog-trade-foot a { display: inline-flex; align-items: center; gap: 4px; }
+.frog-trade-foot .grow { flex: 1; }
+.frog-trade-foot small { color: var(--faint); }
 
 .frog-bank { display: grid; gap: 12px; margin-bottom: 14px; }
 .frog-bank-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 170px; gap: 14px; align-items: center; }
@@ -2006,4 +2048,11 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .frog-owner-controls .segmented button { flex: 1; justify-content: center; }
   .frog-owner-controls .picker-btn, .frog-owner-controls .select { max-width: none; }
   .frog-editor .segmented button { flex: 1 1 45%; justify-content: center; }
+  .frog-earned { grid-template-columns: minmax(0, 1fr); }
+  .frog-award-list li { grid-template-columns: 18px minmax(0, 1fr); row-gap: 4px; }
+  .frog-award-what { grid-column: 1 / -1; font-size: 12px; }
+  .frog-award-list .frog-card-chip { grid-column: 2; justify-self: start; }
+  .frog-trade-sides { grid-template-columns: minmax(0, 1fr); }
+  .frog-trade-foot small { display: none; }
+  .frog-cards { grid-template-columns: minmax(0, 1fr); }
 }

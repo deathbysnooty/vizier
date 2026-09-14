@@ -35,7 +35,10 @@ mod battle_card;
 mod battle_theme;
 mod frog;
 mod frog_answer;
+mod frog_rewards;
+mod frog_sell;
 mod frog_store;
+mod frog_trade;
 mod house;
 mod house_card;
 mod house_draft;
@@ -1405,6 +1408,9 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::card_command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
@@ -1501,6 +1507,14 @@ impl EventHandler for Handler {
             let id = component.data.custom_id.clone();
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("sellpick:") || id.starts_with("sellgo:") || id.starts_with("sellno:") {
+                frog_sell::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("trade") {
+                frog_trade::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -2007,6 +2021,18 @@ impl EventHandler for Handler {
             }
             if command.data.name == "frogcard" {
                 frog::frogcard_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "sellset" {
+                frog_sell::sellset_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "trade" {
+                frog_trade::trade_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "trades" {
+                frog_trade::trades_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "mypoints" {
