@@ -196,6 +196,12 @@ pub fn sections() -> Vec<Section> {
                     "/housetop house: period:",
                     "A house's top 10 scorers this month, last month or all time (your own house if none is picked). Only the asker sees it.",
                 ),
+                command(
+                    "today",
+                    EVERYONE,
+                    "/today member:",
+                    "Your points today, with chat and voice progress and which daily game limits are maxed out; add a member of your own house to see theirs (admins can check anyone). Private.",
+                ),
                 command("mypoints", EVERYONE, "/mypoints", "Your points this month, where they came from, and how far you are from the Nitro draw. Private."),
                 command(
                     "houseopt",

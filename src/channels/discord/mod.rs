@@ -1376,6 +1376,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
 
@@ -1953,6 +1954,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
+            }
+            if command.data.name == "today" {
+                standings::today_command(&ctx, &command).await;
             }
             if command.data.name == "housetop" {
                 standings::housetop_command(&ctx, &command).await;

@@ -258,6 +258,128 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)]) -> String {
     text
 }
 
+pub fn today_builder() -> CreateCommand {
+    CreateCommand::new("today")
+        .description("your points today and which daily limits are maxed - or a housemate's")
+        .add_option(CreateCommandOption::new(
+            serenity::all::CommandOptionType::User,
+            "member",
+            "someone in your house (leave empty for yourself)",
+        ))
+}
+
+/// One line per activity for a member's day: chat and voice progress towards
+/// their point, each capped game against its daily limit, and anything extra.
+fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64) -> String {
+    let pts = |s: Source| sources.get(s.key()).copied().unwrap_or(0);
+    let total: i64 = sources.values().sum();
+    let subject = who.map(|name| format!("**{}** has", name)).unwrap_or_else(|| "you've".to_string());
+    let mut lines =
+        vec![format!("{} **{}** · today {} earned **{}** point{}", h.crest, h.name, subject, total, if total == 1 { "" } else { "s" })];
+    let (chat_bar, voice_bar) = (super::activity::chat_bar(), super::activity::voice_bar_secs() / 60);
+    let voice_min = voice_secs / 60;
+    lines.push(if pts(Source::Chat) > 0 {
+        format!("{} ✅ point earned ({} msgs)", Source::Chat.label(), messages)
+    } else {
+        format!("{} {}/{} msgs", Source::Chat.label(), messages.min(chat_bar), chat_bar)
+    });
+    lines.push(if pts(Source::Voice) > 0 {
+        format!("{} ✅ point earned ({} min)", Source::Voice.label(), voice_min)
+    } else {
+        format!("{} {}/{} min", Source::Voice.label(), voice_min.min(voice_bar), voice_bar)
+    });
+    let mut left = 0;
+    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch] {
+        match s.cap() {
+            ledger::Cap::PerDay(cap) if pts(s) >= cap => lines.push(format!("{} ✅ maxed {}/{}", s.label(), pts(s), cap)),
+            ledger::Cap::PerDay(cap) => {
+                left += cap - pts(s);
+                lines.push(format!("{} {}/{}", s.label(), pts(s), cap));
+            }
+            _ => lines.push(format!("{} {}", s.label(), pts(s))),
+        }
+    }
+    for s in [Source::GoldenSnitch, Source::Royale, Source::Weekly, Source::Mod] {
+        if pts(s) != 0 {
+            lines.push(format!("{} {}{}", s.label(), if pts(s) > 0 { "+" } else { "" }, pts(s)));
+        }
+    }
+    lines.push(if left > 0 {
+        format!("-# {} more game point{} still up for grabs today · limits reset at midnight India time", left, if left == 1 { "" } else { "s" })
+    } else {
+        "-# Every game limit maxed today 🔥 · limits reset at midnight India time".to_string()
+    });
+    lines.join("\n")
+}
+
+/// `/today [member]` - private to whoever asks. Members can look at themselves
+/// or someone in their own house; bot admins can look at anyone.
+pub async fn today_command(ctx: &Context, command: &CommandInteraction) {
+    let asker = command.user.id.get();
+    let picked = command.data.options.iter().find_map(|o| match o.value {
+        CommandDataOptionValue::User(id) => Some(id.get()),
+        _ => None,
+    });
+    let user = picked.unwrap_or(asker);
+    let someone_else = user != asker;
+    let name = if someone_else {
+        let resolved = command.data.resolved.members.get(&serenity::all::UserId::new(user)).and_then(|m| m.nick.clone());
+        let fallback = command.data.resolved.users.get(&serenity::all::UserId::new(user)).map(|u| u.display_name().to_string());
+        Some(resolved.or(fallback).unwrap_or_else(|| "That member".to_string()))
+    } else {
+        None
+    };
+    // All of these read the house database, before it is locked below.
+    let stepped_out = house::opted_out(user);
+    let home = house::house_of(user);
+    let asker_home = house::house_of(asker);
+    let is_admin = super::admin_ids().contains(&asker);
+    let text = if someone_else && !is_admin && (asker_home.is_none() || asker_home.map(|h| h.key) != home.map(|h| h.key)) {
+        "You can only check members of your own house.".to_string()
+    } else if stepped_out {
+        if someone_else {
+            format!("{} has stepped out of the houses, so they're not earning points.", name.as_deref().unwrap_or("They"))
+        } else {
+            "You've stepped out of the houses, so you're not earning points. Run `/houseopt` to step back in.".to_string()
+        }
+    } else if let Some(h) = home {
+        let now = Utc::now().timestamp();
+        let day = ledger::ist_day(now);
+        let start = ist_hour_floor(now) - ist_hour(now) * 3600;
+        let sources: HashMap<String, i64> = house::db()
+            .and_then(|db| {
+                let conn = db.lock();
+                let mut stmt =
+                    conn.prepare("SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND day = ?2 GROUP BY source").ok()?;
+                let rows = stmt
+                    .query_map(rusqlite::params![user as i64, day], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                    .ok()?;
+                Some(rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        let (messages, voice_secs) = super::stats::db()
+            .map(|db| {
+                let conn = db.lock();
+                let messages = super::activity::messages_on(&conn, &day, Some(user))
+                    .ok()
+                    .and_then(|m| m.get(&user).copied())
+                    .unwrap_or(0);
+                let voice = super::activity::voice_between(&conn, Some(user), start, start + 86_400, now)
+                    .ok()
+                    .and_then(|v| v.get(&user).copied())
+                    .unwrap_or(0);
+                (messages, voice)
+            })
+            .unwrap_or((0, 0));
+        today_text(h, name.as_deref(), &sources, messages, voice_secs)
+    } else if someone_else {
+        format!("{} isn't in a house, so there are no points to show.", name.as_deref().unwrap_or("They"))
+    } else {
+        "You're not in a house yet, so there are no points to show.".to_string()
+    };
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
+}
+
 /// `/mypoints` - private to whoever asks.
 pub async fn mypoints_command(ctx: &Context, command: &CommandInteraction) {
     let user = command.user.id.get();
@@ -382,6 +504,25 @@ fn month_label(day: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn today_marks_maxed_limits_and_counts_whats_left() {
+        let h = &HOUSES[0];
+        let mut sources = HashMap::new();
+        sources.insert("chat".to_string(), 1);
+        sources.insert("quiz".to_string(), 6);
+        sources.insert("koto".to_string(), 2);
+        sources.insert("golden_snitch".to_string(), 6);
+        let text = today_text(h, None, &sources, 34, 25 * 60);
+        assert!(today_text(h, Some("Riya"), &sources, 34, 0).contains("today **Riya** has earned"));
+        assert!(text.contains("today you've earned **15** points"), "{}", text);
+        assert!(text.contains("✅ point earned (34 msgs)"), "{}", text);
+        assert!(text.contains("25/60 min"), "{}", text);
+        assert!(text.contains("🧠 Quiz ✅ maxed 6/6"), "{}", text);
+        assert!(text.contains("🔤 Koto 2/4"), "{}", text);
+        assert!(text.contains("🥇 Golden Snitch +6"), "{}", text);
+        assert!(text.contains("still up for grabs"), "{}", text);
+    }
 
     #[test]
     fn housetop_lists_medals_the_captain_and_the_house_total() {
