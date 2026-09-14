@@ -246,8 +246,8 @@ pub fn sections() -> Vec<Section> {
                     the Golden Snitch and points given by mods have no limit. What each game pays is set in its own \
                     section.",
             settings: vec![
-                setting("VIZIER_CAP_CHAT", "Chat points a day", "Most points one person can earn from chat days in a day.", number(0, 100, "points"), "1"),
-                setting("VIZIER_CAP_VOICE", "Voice points a day", "Most points one person can earn from voice days in a day.", number(0, 100, "points"), "1"),
+                setting("VIZIER_CAP_CHAT", "Chat points a day", "Most chat points one person can earn in a day (one per message tier reached).", number(0, 3, "points"), "3"),
+                setting("VIZIER_CAP_VOICE", "Voice points a day", "Most voice points one person can earn in a day (one per full hour, or whatever the voice block is set to).", number(0, 24, "points"), "4"),
                 setting("VIZIER_CAP_QUIZ", "Quiz points a day", "Most points one person can earn from quiz rounds in a day.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_KOTO", "Koto points a day", "Most points one person can earn from Koto in a day.", number(0, 100, "points"), "4"),
                 setting("VIZIER_CAP_ANAGRAM", "Anagram points a day", "Most points one person can earn from Anagram Bot in a day.", number(0, 100, "points"), "6"),
@@ -431,8 +431,15 @@ pub fn sections() -> Vec<Section> {
                     rooms count too; time in the AFK room or an excluded channel never does.",
             settings: vec![
                 toggle("VIZIER_ACTIVITY_POINTS", "Chat and voice points", "Give the daily chat and voice points. Off pays nothing; a day earned meanwhile is paid if it's switched back on before the next day ends."),
-                setting("VIZIER_CHAT_DAY_MESSAGES", "Messages for a chat day", "Messages in one India day that earn the chat point.", number(1, 1000, "messages"), "20"),
-                setting("VIZIER_VOICE_DAY_MINUTES", "Minutes for a voice day", "Minutes in voice in one India day that earn the voice point.", number(1, 1440, "minutes"), "60"),
+                setting("VIZIER_CHAT_DAY_MESSAGES", "1st chat point at", "Messages in one India day that earn the first chat point.", number(1, 5000, "messages"), "20"),
+                setting("VIZIER_CHAT_TIER2_MESSAGES", "2nd chat point at", "Messages in the day for the second chat point. Set it at or below the first to switch this tier off.", number(1, 5000, "messages"), "60"),
+                setting("VIZIER_CHAT_TIER3_MESSAGES", "3rd chat point at", "Messages in the day for the third chat point. Set it at or below the second to switch this tier off.", number(1, 5000, "messages"), "150"),
+                setting("VIZIER_VOICE_DAY_MINUTES", "Minutes per voice point", "Each full block of this many minutes in voice in a day earns a voice point, up to the daily limit.", number(10, 1440, "minutes"), "60"),
+                toggle(
+                    "VIZIER_VOICE_NEEDS_COMPANY",
+                    "Voice needs company",
+                    "Only count voice time spent with at least one other person in the room (bots don't count). Off counts time alone too.",
+                ),
                 at_start(
                     "VIZIER_VOICE_LOG_CHANNEL",
                     "Voice log channel",

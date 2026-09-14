@@ -1,7 +1,8 @@
-//! Chat days and voice days: a house point for turning up.
+//! Chat and voice points: house points for turning up and sticking around.
 //!
-//! Someone who sends 20 messages in an India day, or spends an hour in voice,
-//! earns their house one point for it, once per day each. Nothing new is
+//! Chat pays in tiers across an India day (20, 60 and 150 messages by default),
+//! voice pays a point for every full hour spent in a room with at least one
+//! other person (bots aren't company), up to the daily limits. Nothing new is
 //! recorded for this: the counts already kept for /awards are read back on a
 //! timer, so the numbers here can never disagree with the awards card.
 //!
@@ -22,8 +23,11 @@ use serenity::all::{Context, UserId};
 use super::points::Source;
 use super::stats;
 
-/// Messages in one India day that make it a chat day, `VIZIER_CHAT_DAY_MESSAGES`.
+/// Messages in one India day for the first chat point, `VIZIER_CHAT_DAY_MESSAGES`.
 pub const CHAT_DAY_MESSAGES: i64 = 20;
+/// The second and third chat points, `VIZIER_CHAT_TIER2_MESSAGES` and `VIZIER_CHAT_TIER3_MESSAGES`.
+pub const CHAT_TIER2_MESSAGES: i64 = 60;
+pub const CHAT_TIER3_MESSAGES: i64 = 150;
 /// Seconds of real voice time in one India day that make it a voice day,
 /// `VIZIER_VOICE_DAY_MINUTES` in minutes.
 pub const VOICE_DAY_SECS: i64 = 60 * 60;
@@ -31,6 +35,32 @@ pub const VOICE_DAY_SECS: i64 = 60 * 60;
 fn chat_day_messages() -> i64 {
     super::control::number("VIZIER_CHAT_DAY_MESSAGES", CHAT_DAY_MESSAGES as u64).max(1) as i64
 }
+
+/// The message counts that each earn a chat point, lowest first; a tier set
+/// below the one before it is ignored.
+fn chat_tiers() -> Vec<i64> {
+    let raw = [
+        chat_day_messages(),
+        super::control::number("VIZIER_CHAT_TIER2_MESSAGES", CHAT_TIER2_MESSAGES as u64) as i64,
+        super::control::number("VIZIER_CHAT_TIER3_MESSAGES", CHAT_TIER3_MESSAGES as u64) as i64,
+    ];
+    let mut out: Vec<i64> = Vec::new();
+    for t in raw {
+        if t > 0 && out.last().is_none_or(|last| t > *last) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Whether voice time only counts with someone else in the room.
+fn voice_needs_company() -> bool {
+    super::control::on("VIZIER_VOICE_NEEDS_COMPANY", true)
+}
+
+/// Bots seen in the server, kept fresh by each pass, so music bots never count
+/// as company - also for the panel and /today, which have no cache to hand.
+static BOTS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn voice_day_secs() -> i64 {
     super::control::number("VIZIER_VOICE_DAY_MINUTES", (VOICE_DAY_SECS / 60) as u64).max(1) as i64 * 60
@@ -137,13 +167,25 @@ async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
     // Until Dyno's log has been read to the end, today's voice is the part
     // still missing. It is picked up on a later pass; nothing is lost.
     let voice = stats::voice_caught_up();
+    let bots: HashSet<u64> = ctx
+        .cache
+        .guilds()
+        .into_iter()
+        .filter_map(|g| ctx.cache.guild(g).map(|g| g.members.values().filter(|m| m.user.bot).map(|m| m.user.id.get()).collect::<Vec<_>>()))
+        .flatten()
+        .collect();
+    let bots = {
+        let mut known = BOTS.lock();
+        known.extend(bots);
+        known.clone()
+    };
 
     let db = db.clone();
     let loaded = tokio::task::spawn_blocking(move || {
         let conn = db.lock();
         let mut out = Vec::new();
         for day in days {
-            out.extend(load_day(&conn, day, now, &exclude, afk, voice)?);
+            out.extend(load_day(&conn, day, now, &exclude, afk, voice, &bots)?);
         }
         Ok::<_, rusqlite::Error>(out)
     })
@@ -232,6 +274,7 @@ fn load_day(
     exclude: &HashSet<u64>,
     afk: Option<u64>,
     voice: bool,
+    bots: &HashSet<u64>,
 ) -> rusqlite::Result<Vec<Award>> {
     let label = day.to_string();
     let mut stmt = conn
@@ -261,21 +304,72 @@ fn load_day(
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        seconds = voice_seconds(&events, bounds, exclude, afk, Some(now));
+        seconds = if voice_needs_company() {
+            shared_seconds(&sittings(&events, bounds, exclude, afk, Some(now)), bots)
+        } else {
+            voice_seconds(&events, bounds, exclude, afk, Some(now))
+        };
     }
     Ok(plan(day, &chat, &seconds))
 }
 
 // --- read by the control panel -----------------------------------------------
 
-/// Messages in an India day that earn the chat point, as set now.
+/// Messages in an India day that earn the first chat point, as set now.
 pub(crate) fn chat_bar() -> i64 {
     chat_day_messages()
 }
 
-/// Seconds in voice in an India day that earn the voice point, as set now.
+/// Every chat tier, lowest first, as set now.
+pub(crate) fn chat_tier_bars() -> Vec<i64> {
+    chat_tiers()
+}
+
+/// Seconds in voice that earn each voice point, as set now.
 pub(crate) fn voice_bar_secs() -> i64 {
     voice_day_secs()
+}
+
+/// Whether voice points only count time with someone else in the room.
+pub(crate) fn voice_company_rule() -> bool {
+    voice_needs_company()
+}
+
+/// Voice seconds that count towards voice points inside `[start, end)`: time
+/// with company when that rule is on, otherwise all real voice time. For one
+/// person or everyone.
+pub(crate) fn voice_points_between(
+    conn: &Connection,
+    user: Option<u64>,
+    start: i64,
+    end: i64,
+    now: i64,
+) -> rusqlite::Result<HashMap<u64, i64>> {
+    if !voice_needs_company() {
+        return voice_between(conn, user, start, end, now);
+    }
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
+    // Company needs everyone's events, not just this person's.
+    let mut stmt = conn.prepare(
+        "SELECT user_id, action, channel_id, ts FROM voice_events WHERE ts >= ?1 AND ts < ?2 ORDER BY user_id, ts, msg_id",
+    )?;
+    let events: Vec<VoiceEvent> = stmt
+        .query_map(params![start - MAX_SITTING, end + MAX_SITTING], |r| {
+            Ok(VoiceEvent {
+                user: r.get::<_, i64>(0)? as u64,
+                left: r.get::<_, String>(1)? == "left",
+                room: r.get::<_, i64>(2)? as u64,
+                ts: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let bots = BOTS.lock().clone();
+    let mut shared = shared_seconds(&sittings(&events, (start, end), &exclude, afk, Some(now)), &bots);
+    if let Some(u) = user {
+        shared.retain(|k, _| *k == u);
+    }
+    Ok(shared)
 }
 
 /// Messages per person on one India day ("YYYY-MM-DD"), leaving out the
@@ -331,18 +425,18 @@ pub(crate) fn voice_between(
     Ok(voice_seconds(&events, (start, end), &exclude, afk, Some(now)))
 }
 
-/// Who reached the message bar, from (user, channel, messages) rows for one day.
-fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> Vec<u64> {
+/// Messages per person who reached the first chat tier, from (user, channel,
+/// messages) rows for one day.
+fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> HashMap<u64, i64> {
     let mut per_user: HashMap<u64, i64> = HashMap::new();
     for &(user, channel, count) in rows {
         if !exclude.contains(&channel) {
             *per_user.entry(user).or_insert(0) += count;
         }
     }
-    let bar = chat_day_messages();
-    let mut out: Vec<u64> = per_user.into_iter().filter(|&(_, n)| n >= bar).map(|(u, _)| u).collect();
-    out.sort_unstable();
-    out
+    let bar = chat_tiers().first().copied().unwrap_or(CHAT_DAY_MESSAGES);
+    per_user.retain(|_, n| *n >= bar);
+    per_user
 }
 
 /// Real voice seconds per person inside `day` (start, end).
@@ -362,20 +456,45 @@ fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> Vec<u64> {
 ///   midnight, when the ledger would book it against the next day.
 fn voice_seconds(
     events: &[VoiceEvent],
-    (day_start, day_end): (i64, i64),
+    day: (i64, i64),
     exclude: &HashSet<u64>,
     afk: Option<u64>,
     now: Option<i64>,
 ) -> HashMap<u64, i64> {
     let mut out: HashMap<u64, i64> = HashMap::new();
+    for s in sittings(events, day, exclude, afk, now) {
+        *out.entry(s.user).or_insert(0) += s.end - s.start;
+    }
+    out
+}
+
+/// One stretch in one room, clipped to the day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sitting {
+    user: u64,
+    room: u64,
+    start: i64,
+    end: i64,
+}
+
+/// Every real stretch in voice inside `day`, paired as `voice_seconds`
+/// describes: AFK and excluded rooms and stretches over `MAX_SITTING` dropped,
+/// split at the day's edges, an open room counted up to `now`.
+fn sittings(
+    events: &[VoiceEvent],
+    (day_start, day_end): (i64, i64),
+    exclude: &HashSet<u64>,
+    afk: Option<u64>,
+    now: Option<i64>,
+) -> Vec<Sitting> {
+    let mut out = Vec::new();
     let mut add = |user: u64, start: i64, end: i64, room: u64| {
-        let d = end - start;
-        if d > MAX_SITTING || Some(room) == afk || exclude.contains(&room) {
+        if end - start > MAX_SITTING || Some(room) == afk || exclude.contains(&room) {
             return;
         }
-        let inside = end.min(day_end) - start.max(day_start);
-        if inside > 0 {
-            *out.entry(user).or_insert(0) += inside;
+        let (s, e) = (start.max(day_start), end.min(day_end));
+        if e > s {
+            out.push(Sitting { user, room, start: s, end: e });
         }
     };
     let mut current: Option<u64> = None;
@@ -403,31 +522,86 @@ fn voice_seconds(
     out
 }
 
-/// The awards owed for one day. The same rows always give the same list, and
-/// the keys name only the person and the day, so a rerun asks for nothing new.
-fn plan(day: NaiveDate, chat: &[u64], voice: &HashMap<u64, i64>) -> Vec<Award> {
+/// Seconds each person spent in voice with at least one other person (not a
+/// bot) in the same room. Bots get nothing themselves.
+fn shared_seconds(sittings: &[Sitting], bots: &HashSet<u64>) -> HashMap<u64, i64> {
+    let people: Vec<&Sitting> = sittings.iter().filter(|s| !bots.contains(&s.user)).collect();
+    let mut out: HashMap<u64, i64> = HashMap::new();
+    for me in &people {
+        // Everyone else's overlap with this stretch, merged so two companions
+        // at once aren't counted twice.
+        let mut overlaps: Vec<(i64, i64)> = people
+            .iter()
+            .filter(|o| o.user != me.user && o.room == me.room)
+            .map(|o| (o.start.max(me.start), o.end.min(me.end)))
+            .filter(|(s, e)| e > s)
+            .collect();
+        overlaps.sort_unstable();
+        let mut total = 0;
+        let mut reach = i64::MIN;
+        for (s, e) in overlaps {
+            let s = s.max(reach);
+            if e > s {
+                total += e - s;
+                reach = e;
+            }
+        }
+        if total > 0 {
+            *out.entry(me.user).or_insert(0) += total;
+        }
+    }
+    out
+}
+
+/// The awards owed for one day: a chat point per tier reached and a voice point
+/// per full hour (with company, when that rule is on). The same rows always give
+/// the same list, and each key names the person, the day and the tier, so a
+/// rerun asks for nothing new. The first tier keeps the key it had when there
+/// was only one, so a day already paid isn't paid again.
+fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> Vec<Award> {
     let at = day_bounds(day).map(|(_, end)| end - 1).unwrap_or(0);
-    let mut out: Vec<Award> = chat
-        .iter()
-        .filter(|&&u| u != 0)
-        .map(|&user| Award {
-            user,
-            source: Source::Chat,
-            reason: format!("{}+ messages on {}", chat_day_messages(), day),
-            dedupe: format!("chat:{}:{}", day, user),
-            at,
-        })
-        .collect();
+    let key = |kind: &str, user: u64, tier: usize| {
+        if tier == 1 { format!("{}:{}:{}", kind, day, user) } else { format!("{}:{}:{}:{}", kind, day, user, tier) }
+    };
+    let tiers = chat_tiers();
+    let mut chatters: Vec<(&u64, &i64)> = chat.iter().filter(|(u, _)| **u != 0).collect();
+    chatters.sort_unstable();
+    let mut out: Vec<Award> = Vec::new();
+    for (&user, &messages) in chatters {
+        for (i, bar) in tiers.iter().enumerate().filter(|(_, bar)| messages >= **bar) {
+            out.push(Award {
+                user,
+                source: Source::Chat,
+                reason: format!("{}+ messages on {}", bar, day),
+                dedupe: key("chat", user, i + 1),
+                at,
+            });
+        }
+    }
     let bar = voice_day_secs();
-    let mut voiced: Vec<u64> = voice.iter().filter(|&(&u, &s)| u != 0 && s >= bar).map(|(&u, _)| u).collect();
+    let company = voice_needs_company();
+    let mut voiced: Vec<(&u64, &i64)> = voice.iter().filter(|(u, s)| **u != 0 && **s >= bar).collect();
     voiced.sort_unstable();
-    out.extend(voiced.into_iter().map(|user| Award {
-        user,
-        source: Source::Voice,
-        reason: format!("{}+ minutes in voice on {}", bar / 60, day),
-        dedupe: format!("voice:{}:{}", day, user),
-        at,
-    }));
+    for (&user, &secs) in voiced {
+        // The ledger's daily limit decides how many are kept; a few spare
+        // hours on a marathon day are asked for and refused as capped.
+        let hours = (secs / bar).min(24) as usize;
+        for hour in 1..=hours {
+            out.push(Award {
+                user,
+                source: Source::Voice,
+                reason: format!(
+                    "{} {} in voice{} on {}",
+                    hour * (bar / 60) as usize,
+                    "minutes",
+                    if company { " with others" } else { "" },
+                    day
+                ),
+                dedupe: key("voice", user, hour),
+                at,
+            });
+        }
+    }
     out
 }
 
@@ -484,7 +658,48 @@ mod tests {
             (YOU, 7, 30), // mostly in an excluded room
             (33, 1, 19),
         ];
-        assert_eq!(chat_days(&rows, &exclude), vec![ME]);
+        assert_eq!(chat_days(&rows, &exclude), [(ME, 20)].into_iter().collect());
+    }
+
+    #[test]
+    fn chat_pays_a_point_per_tier_reached() {
+        let chat: HashMap<u64, i64> = [(ME, 150), (YOU, 59), (33, 19)].into_iter().collect();
+        let awards = plan(day(), &chat, &HashMap::new());
+        let keys: Vec<&str> = awards.iter().map(|a| a.dedupe.as_str()).collect();
+        assert_eq!(keys, vec!["chat:2026-09-14:11", "chat:2026-09-14:11:2", "chat:2026-09-14:11:3", "chat:2026-09-14:22"]);
+    }
+
+    #[test]
+    fn voice_counts_only_time_with_someone_else_and_bots_are_not_company() {
+        let (s, _) = bounds();
+        const BOT: u64 = 99;
+        const THIRD: u64 = 33;
+        let e = [
+            // ME in ROOM 10:00-13:00; YOU there 11:00-12:30; THIRD 12:00-13:30.
+            ev(ME, "joined", ROOM, s + 10 * H),
+            ev(ME, "left", ROOM, s + 13 * H),
+            ev(YOU, "joined", ROOM, s + 11 * H),
+            ev(YOU, "left", ROOM, s + 12 * H + 1800),
+            ev(THIRD, "joined", ROOM, s + 12 * H),
+            ev(THIRD, "left", ROOM, s + 13 * H + 1800),
+            // A music bot keeps someone company in another room: that's alone.
+            ev(BOT, "joined", OTHER_ROOM, s + 14 * H),
+            ev(BOT, "left", OTHER_ROOM, s + 16 * H),
+            ev(44, "joined", OTHER_ROOM, s + 14 * H),
+            ev(44, "left", OTHER_ROOM, s + 16 * H),
+        ];
+        let mut sorted = e.to_vec();
+        sorted.sort_by_key(|v| (v.user, v.ts));
+        let bots: HashSet<u64> = [BOT].into_iter().collect();
+        let shared = shared_seconds(&sittings(&sorted, bounds(), &excluded(), Some(AFK), None), &bots);
+        // ME had company 11:00-13:00 (YOU then THIRD overlapping, not counted twice).
+        assert_eq!(shared.get(&ME), Some(&(2 * H)));
+        assert_eq!(shared.get(&YOU), Some(&(90 * 60)));
+        assert_eq!(shared.get(&THIRD), Some(&H));
+        assert_eq!(shared.get(&44), None, "a bot is not company");
+        assert_eq!(shared.get(&BOT), None);
+        let hours: Vec<String> = plan(day(), &HashMap::new(), &shared).into_iter().map(|a| a.dedupe).collect();
+        assert_eq!(hours, vec!["voice:2026-09-14:11", "voice:2026-09-14:11:2", "voice:2026-09-14:22", "voice:2026-09-14:33"]);
     }
 
     #[test]
@@ -508,7 +723,7 @@ mod tests {
         ];
         let got = secs(&e, None);
         assert_eq!(got[&ME], 3600);
-        assert_eq!(plan(day(), &[], &got).len(), 1, "exactly an hour is enough");
+        assert_eq!(plan(day(), &HashMap::new(), &got).len(), 1, "exactly an hour is enough");
     }
 
     #[test]
@@ -534,7 +749,7 @@ mod tests {
         assert_eq!(secs(&e, None)[&ME], 45 * 60, "only the minutes after midnight belong to this day");
         let e = [ev(YOU, "joined", ROOM, e_ - 50 * 60), ev(YOU, "left", ROOM, e_ + 3 * H)];
         assert_eq!(secs(&e, None)[&YOU], 50 * 60);
-        assert!(plan(day(), &[], &secs(&e, None)).is_empty(), "50 minutes before midnight is not a voice day");
+        assert!(plan(day(), &HashMap::new(), &secs(&e, None)).is_empty(), "50 minutes before midnight is not a voice day");
     }
 
     #[test]
@@ -595,6 +810,9 @@ mod tests {
         let voice = [
             (1, YOU, "joined", s + 8 * H),
             (2, YOU, "left", s + 9 * H + 5),
+            // Company for the hour, so it counts under the with-others rule.
+            (5, 44, "joined", s + 8 * H),
+            (6, 44, "left", s + 9 * H + 5),
             // Joined 13h before midnight, left an hour after: over the 12h bar, so
             // nothing - and the join falling outside the query window changes nothing.
             (3, 33, "joined", s - 13 * H),
@@ -605,11 +823,11 @@ mod tests {
             conn.execute("INSERT INTO voice_events VALUES (?1, ?2, ?3, ?4, ?5)", row).unwrap();
         }
         let now = s + 23 * H;
-        let first = load_day(&conn, day(), now, &HashSet::new(), None, true).unwrap();
+        let first = load_day(&conn, day(), now, &HashSet::new(), None, true, &HashSet::new()).unwrap();
         let keys: Vec<&str> = first.iter().map(|a| a.dedupe.as_str()).collect();
-        assert_eq!(keys, vec!["chat:2026-09-14:11", "voice:2026-09-14:22"]);
+        assert_eq!(keys, vec!["chat:2026-09-14:11", "voice:2026-09-14:22", "voice:2026-09-14:44"]);
         // Voice log still importing: no voice days yet.
-        let early = load_day(&conn, day(), now, &HashSet::new(), None, false).unwrap();
+        let early = load_day(&conn, day(), now, &HashSet::new(), None, false, &HashSet::new()).unwrap();
         assert!(early.iter().all(|a| a.source == Source::Chat));
 
         // Through the ledger: the first pass pays, the rerun is refused outright.
@@ -629,7 +847,7 @@ mod tests {
             points::write(&ledger, &entry, now).unwrap()
         };
         assert!(first.iter().map(write).all(|o| o == Outcome::Granted(1)));
-        let again = load_day(&conn, day(), now + 900, &HashSet::new(), None, true).unwrap();
+        let again = load_day(&conn, day(), now + 900, &HashSet::new(), None, true, &HashSet::new()).unwrap();
         assert_eq!(again, first);
         assert!(again.iter().map(write).all(|o| o == Outcome::Duplicate));
     }

@@ -276,17 +276,30 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
     let subject = who.map(|name| format!("**{}** has", name)).unwrap_or_else(|| "you've".to_string());
     let mut lines =
         vec![format!("{} **{}** · today {} earned **{}** point{}", h.crest, h.name, subject, total, if total == 1 { "" } else { "s" })];
-    let (chat_bar, voice_bar) = (super::activity::chat_bar(), super::activity::voice_bar_secs() / 60);
-    let voice_min = voice_secs / 60;
-    lines.push(if pts(Source::Chat) > 0 {
-        format!("{} ✅ point earned ({} msgs)", Source::Chat.label(), messages)
-    } else {
-        format!("{} {}/{} msgs", Source::Chat.label(), messages.min(chat_bar), chat_bar)
+    let tiers = super::activity::chat_tier_bars();
+    let chat_cap = match Source::Chat.cap() {
+        ledger::Cap::PerDay(n) => n.min(tiers.len() as i64),
+        _ => tiers.len() as i64,
+    };
+    lines.push(match tiers.iter().find(|t| messages < **t) {
+        _ if chat_cap > 0 && pts(Source::Chat) >= chat_cap => {
+            format!("{} ✅ maxed {}/{} ({} msgs)", Source::Chat.label(), pts(Source::Chat), chat_cap, messages)
+        }
+        Some(next) => format!("{} {}/{} · {} msgs, next point at {}", Source::Chat.label(), pts(Source::Chat), chat_cap, messages, next),
+        None => format!("{} {}/{} · {} msgs", Source::Chat.label(), pts(Source::Chat), chat_cap, messages),
     });
-    lines.push(if pts(Source::Voice) > 0 {
-        format!("{} ✅ point earned ({} min)", Source::Voice.label(), voice_min)
+    let per_point = (super::activity::voice_bar_secs() / 60).max(1);
+    let voice_cap = match Source::Voice.cap() {
+        ledger::Cap::PerDay(n) => n,
+        _ => 0,
+    };
+    let voice_min = voice_secs / 60;
+    let company = if super::activity::voice_company_rule() { " with others" } else { "" };
+    lines.push(if voice_cap > 0 && pts(Source::Voice) >= voice_cap {
+        format!("{} ✅ maxed {}/{} ({} min{})", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company)
     } else {
-        format!("{} {}/{} min", Source::Voice.label(), voice_min.min(voice_bar), voice_bar)
+        let next = (voice_min / per_point + 1) * per_point;
+        format!("{} {}/{} · {} min{}, next point at {}", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company, next)
     });
     let mut left = 0;
     for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch] {
@@ -364,7 +377,7 @@ pub async fn today_command(ctx: &Context, command: &CommandInteraction) {
                     .ok()
                     .and_then(|m| m.get(&user).copied())
                     .unwrap_or(0);
-                let voice = super::activity::voice_between(&conn, Some(user), start, start + 86_400, now)
+                let voice = super::activity::voice_points_between(&conn, Some(user), start, start + 86_400, now)
                     .ok()
                     .and_then(|v| v.get(&user).copied())
                     .unwrap_or(0);
@@ -516,8 +529,8 @@ mod tests {
         let text = today_text(h, None, &sources, 34, 25 * 60);
         assert!(today_text(h, Some("Riya"), &sources, 34, 0).contains("today **Riya** has earned"));
         assert!(text.contains("today you've earned **15** points"), "{}", text);
-        assert!(text.contains("✅ point earned (34 msgs)"), "{}", text);
-        assert!(text.contains("25/60 min"), "{}", text);
+        assert!(text.contains("💬 Chat 1/3 · 34 msgs, next point at 60"), "{}", text);
+        assert!(text.contains("🎙️ Voice 0/4 · 25 min"), "{}", text);
         assert!(text.contains("🧠 Quiz ✅ maxed 6/6"), "{}", text);
         assert!(text.contains("🔤 Koto 2/4"), "{}", text);
         assert!(text.contains("🥇 Golden Snitch +6"), "{}", text);

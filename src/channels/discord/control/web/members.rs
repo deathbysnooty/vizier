@@ -61,6 +61,9 @@ pub struct MemberStats {
     /// Messages per India hour over 30 days, 24 entries.
     pub hours: Vec<i64>,
     pub voice_today_secs: i64,
+    /// Voice today that counts towards voice points (with company, when that rule is on).
+    #[serde(default)]
+    pub voice_points_today_secs: i64,
     pub voice_7d_secs: i64,
     pub quiz_all: i64,
     pub quiz_month: i64,
@@ -222,6 +225,10 @@ fn activity_for(conn: &Connection, user: u64, now: i64, out: &mut MemberStats) -
             .map(|m| m.get(&user).copied().unwrap_or(0))
     };
     out.voice_today_secs = voice(start)?;
+    out.voice_points_today_secs = super::super::super::activity::voice_points_between(conn, Some(user), start, start + 86_400, now)?
+        .get(&user)
+        .copied()
+        .unwrap_or(0);
     out.voice_7d_secs = voice(start - 6 * 86_400)?;
     Ok(())
 }
@@ -482,7 +489,7 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
     let today = super::scorers::activity_chips(
         &stats.today.iter().cloned().collect(),
         stats.chat_counted_today,
-        stats.voice_today_secs,
+        stats.voice_points_today_secs,
         stats.weekly_this_week,
     );
     let sources = |list: &[(String, i64)]| list.iter().map(|(k, n)| json!({ "source": k, "points": n })).collect::<Vec<_>>();

@@ -102,8 +102,8 @@ impl Source {
     pub fn cap(self) -> Cap {
         let day = |limit: u64| Cap::PerDay(limit as i64);
         match self {
-            Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 1)),
-            Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 1)),
+            Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 3)),
+            Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 4)),
             Source::Quiz => day(super::control::number("VIZIER_CAP_QUIZ", 6)),
             Source::Anagram => day(super::control::number("VIZIER_CAP_ANAGRAM", 6)),
             Source::Snitch => day(super::control::number("VIZIER_CAP_SNITCH", 6)),

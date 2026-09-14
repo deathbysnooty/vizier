@@ -53,7 +53,7 @@ pub fn read_live(days_back: i64, now: i64) -> Option<Vec<ScorerData>> {
             let day = points::ist_day(start);
             (
                 activity::messages_on(&conn, &day, None).unwrap_or_default(),
-                activity::voice_between(&conn, None, start, end, now.min(end)).unwrap_or_default(),
+                activity::voice_points_between(&conn, None, start, end, now.min(end)).unwrap_or_default(),
             )
         }
         None => (HashMap::new(), HashMap::new()),
@@ -170,18 +170,34 @@ pub fn activity_chips(sources: &HashMap<String, i64>, messages: i64, voice_secs:
         l.split_once(' ').map(|(i, n)| (i.to_string(), n.to_string())).unwrap_or_default()
     };
     let mut out = Vec::new();
-    let (chat_bar, voice_bar) = (activity::chat_bar(), activity::voice_bar_secs());
+    let cap_of = |s: Source| match s.cap() {
+        Cap::PerDay(n) => Some(n),
+        _ => None,
+    };
+    // Chat pays a point per tier; the target is the next tier still to reach.
+    let tiers = activity::chat_tier_bars();
+    let chat_pts = pts(Source::Chat);
+    let chat_cap = cap_of(Source::Chat).unwrap_or(tiers.len() as i64).min(tiers.len() as i64);
+    let next_tier = tiers.iter().copied().find(|t| messages < *t);
     let (icon, name) = label(Source::Chat);
     out.push(json!({
         "key": "chat", "icon": icon, "label": name, "kind": "progress",
-        "count": messages, "target": chat_bar, "unit": "msgs",
-        "points": pts(Source::Chat), "reached": pts(Source::Chat) > 0 || messages >= chat_bar,
+        "count": messages, "target": next_tier.unwrap_or(*tiers.last().unwrap_or(&0)), "unit": "msgs",
+        "points": chat_pts, "cap": chat_cap, "tiers": tiers,
+        "reached": chat_cap > 0 && chat_pts >= chat_cap,
     }));
+    // Voice pays a point per full block (an hour by default) of time that counts.
+    let voice_bar = activity::voice_bar_secs().max(60);
+    let voice_pts = pts(Source::Voice);
+    let voice_cap = cap_of(Source::Voice).unwrap_or(0);
+    let next_block = ((voice_secs / voice_bar) + 1) * voice_bar;
     let (icon, name) = label(Source::Voice);
     out.push(json!({
         "key": "voice", "icon": icon, "label": name, "kind": "progress",
-        "count": voice_secs / 60, "target": voice_bar / 60, "unit": "min",
-        "points": pts(Source::Voice), "reached": pts(Source::Voice) > 0 || voice_secs >= voice_bar,
+        "count": voice_secs / 60, "target": next_block / 60, "unit": "min",
+        "points": voice_pts, "cap": voice_cap, "per_point_min": voice_bar / 60,
+        "with_company": activity::voice_company_rule(),
+        "reached": voice_cap > 0 && voice_pts >= voice_cap,
     }));
     for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch] {
         let (icon, name) = label(s);

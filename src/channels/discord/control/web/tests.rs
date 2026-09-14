@@ -229,6 +229,7 @@ impl PanelData for FakeData {
             top_channels: vec![(21, 318), (23, 201), (22, 96), (32, 61), (24, 36)],
             hours,
             voice_today_secs: 42 * 60,
+            voice_points_today_secs: 42 * 60,
             voice_7d_secs: 385 * 60,
             quiz_all: 214,
             quiz_month: 37,

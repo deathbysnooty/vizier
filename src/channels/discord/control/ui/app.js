@@ -2713,10 +2713,12 @@
     let cls = 'act', text, pct = 0, title;
     if (c.kind === 'progress') {
       pct = c.target ? Math.min(1, c.count / c.target) : 0;
-      if (c.reached) { cls += ' reached'; text = [icon('check'), (c.key === 'chat' ? 'chat point' : 'voice point')]; }
-      else text = c.count + '/' + c.target + ' ' + c.unit;
+      const unitWord = c.unit === 'msgs' ? 'messages' : 'minutes';
+      const capTxt = c.cap ? pts + '/' + c.cap : String(pts);
+      if (c.reached) { cls += ' reached'; pct = 1; text = [icon('check'), 'max ' + c.cap]; }
+      else text = (pts ? capTxt + ' · ' : '') + c.count + '/' + c.target + ' ' + c.unit;
       if (!c.count && !pts) cls += ' zero';
-      title = c.label + ': ' + c.count + ' of ' + c.target + ' ' + (c.unit === 'msgs' ? 'messages' : 'minutes') + (c.reached ? ', point earned' : '');
+      title = c.label + ': ' + capTxt + ' points today, ' + c.count + ' ' + unitWord + (c.reached ? ' (daily limit reached)' : ', next point at ' + c.target) + (c.with_company ? ' · voice counts only with someone else in the room' : '');
     } else if (c.kind === 'capped') {
       pct = c.cap ? Math.min(1, pts / c.cap) : 0;
       if (c.reached) { cls += ' reached'; text = [icon('check'), 'max ' + c.cap]; }
@@ -2742,7 +2744,7 @@
     return h('details', { class: 'act-legend-wrap', open: window.innerWidth > 640 }, h('summary', null, 'What the chips mean'), h('div', { class: 'act-legend' },
       h('span', null, h('span', { class: 'act' }, h('span', { class: 'act-icon' }, '🧠'), h('span', { class: 'act-text' }, '4/6'), h('span', { class: 'act-bar' }, h('i', { style: 'width:66%' }))), ' points today of the daily limit'),
       h('span', null, h('span', { class: 'act reached' }, h('span', { class: 'act-icon' }, '🧠'), h('span', { class: 'act-text' }, icon('check'), 'max 6')), ' limit reached'),
-      h('span', null, h('span', { class: 'act' }, h('span', { class: 'act-icon' }, '💬'), h('span', { class: 'act-text' }, '14/20 msgs'), h('span', { class: 'act-bar' }, h('i', { style: 'width:70%' }))), ' on the way to the chat or voice point'),
+      h('span', null, h('span', { class: 'act' }, h('span', { class: 'act-icon' }, '💬'), h('span', { class: 'act-text' }, '14/20 msgs'), h('span', { class: 'act-bar' }, h('i', { style: 'width:70%' }))), ' on the way to the next chat or voice point'),
       h('span', null, h('span', { class: 'act zero' }, h('span', { class: 'act-icon' }, '⚔️'), h('span', { class: 'act-text' }, '0/3')), ' nothing yet')));
   }
 
@@ -2792,7 +2794,7 @@
       const rows = st.data.rows.filter((r) => (st.house === 'all' || r.house === st.house) && (!q || (r.name || '').toLowerCase().includes(q)));
       const head = h('div', { class: 'scorers-head' },
         h('b', null, plural(rows.length, 'member')),
-        h('span', null, (st.day === 'today' ? 'Today, ' : 'Yesterday, ') + fmtDay(st.data.day) + ' · chat point at ' + st.data.chat_bar + ' messages, voice point at ' + st.data.voice_bar_min + ' minutes'),
+        h('span', null, (st.day === 'today' ? 'Today, ' : 'Yesterday, ') + fmtDay(st.data.day) + ' · chat points at 20/60/150 messages (as set), a voice point per ' + st.data.voice_bar_min + ' minutes with company'),
         h('a', { class: 'open-link', href: '#/s/points' }, 'Limits', icon('right')));
       body.appendChild(head);
       if (!rows.length) { body.appendChild(h('div', { class: 'empty' }, icon('zap'), h('h3', null, q ? 'Nobody matches' : 'No scorers yet'), h('p', null, q ? 'Try another name.' : 'Points earned today show up here as they happen.'))); return; }
