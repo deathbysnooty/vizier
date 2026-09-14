@@ -8,6 +8,7 @@
 //! <activity>`, `frogroyale:<battle>:<role>`), so a restart or a second run
 //! hands back the same card instead of a new one.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -103,37 +104,114 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
     ACTIVITIES.iter().find(|(_, sources)| sources.contains(&row.source.as_str())).map(|(key, _)| *key)
 }
 
-/// The top scorer of each activity from a day's rows (in ledger order): the
-/// most points, more than zero; a tie goes to whoever reached that total first.
+/// Activities whose top is the most wins or catches rather than the most
+/// points: their daily limits leave many people level on points, and a capped
+/// win is still in the ledger as a zero.
+const COUNTED: &[&str] = &["quiz", "koto", "anagram", "cat", "arena", "snitch"];
+
+/// The top of each activity from a day's rows (in ledger order). Wordle and
+/// frogs: the most points. Quiz, Koto, Anagram, Cat Bot, fights and the Snitch:
+/// the most wins or catches, capped ones included, then the most points. Chat
+/// and voice here are by points; `run_daily_top` swaps in messages and voice
+/// time. Ties go to whoever got there first.
 pub fn daily_tops(rows: &[LedgerRow]) -> Vec<(&'static str, u64, i64)> {
     let mut out = Vec::new();
     for (activity, _) in ACTIVITIES {
+        let counted = COUNTED.contains(activity);
         let mine: Vec<&LedgerRow> = rows.iter().filter(|r| activity_of(r) == Some(activity)).collect();
-        let mut totals: Vec<(u64, i64)> = Vec::new();
+        // (user, wins, points)
+        let mut totals: Vec<(u64, i64, i64)> = Vec::new();
         for row in &mine {
-            match totals.iter_mut().find(|(u, _)| *u == row.user) {
-                Some((_, total)) => *total += row.points,
-                None => totals.push((row.user, row.points)),
+            let win = if row.points < 0 { -1 } else { 1 };
+            match totals.iter_mut().find(|(u, _, _)| *u == row.user) {
+                Some((_, wins, points)) => {
+                    *wins += win;
+                    *points += row.points;
+                }
+                None => totals.push((row.user, win, row.points)),
             }
         }
-        let best = totals.iter().filter(|(_, t)| *t > 0).map(|(u, t)| {
-            // When their running total first reached what they ended on.
-            let mut running = 0;
-            let reached = mine
-                .iter()
-                .filter(|r| r.user == *u)
-                .find_map(|r| {
-                    running += r.points;
-                    (running >= *t).then_some(r.ts)
-                })
-                .unwrap_or(i64::MAX);
-            (*u, *t, reached)
-        });
-        if let Some((user, total, _)) = best.min_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0))) {
+        let best = totals
+            .iter()
+            .filter(|(_, wins, points)| if counted { *wins > 0 } else { *points > 0 })
+            .map(|(u, wins, points)| {
+                let target = if counted { *wins } else { *points };
+                // When their running total first reached what they ended on.
+                let mut running = 0;
+                let reached = mine
+                    .iter()
+                    .filter(|r| r.user == *u)
+                    .find_map(|r| {
+                        running += if counted { if r.points < 0 { -1 } else { 1 } } else { r.points };
+                        (running >= target).then_some(r.ts)
+                    })
+                    .unwrap_or(i64::MAX);
+                (*u, target, *points, reached)
+            });
+        if let Some((user, total, _, _)) =
+            best.min_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0)))
+        {
             out.push((*activity, user, total));
         }
     }
     out
+}
+
+/// Chat's and voice's tops are who sent the most messages / spent the most
+/// voice time that day, not the most points: the daily limit leaves many people
+/// level. Only people the ledger paid for that activity that day can win (so
+/// opt-outs, mods and the unsorted can't); a tie goes to whoever was paid first.
+pub fn measured_top(rows: &[LedgerRow], source: &str, measure: &HashMap<u64, i64>) -> Option<(u64, i64)> {
+    let mut eligible: Vec<(u64, i64)> = Vec::new();
+    for row in rows.iter().filter(|r| r.source == source && r.points > 0) {
+        if !eligible.iter().any(|(u, _)| *u == row.user) {
+            eligible.push((row.user, row.ts));
+        }
+    }
+    eligible
+        .iter()
+        .filter_map(|(u, first)| measure.get(u).copied().filter(|n| *n > 0).map(|n| (*u, n, *first)))
+        .min_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)))
+        .map(|(u, n, _)| (u, n))
+}
+
+/// India midnight at the start of `day` (YYYY-MM-DD).
+fn day_start(day: &str) -> Option<i64> {
+    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp() - IST_OFFSET)
+}
+
+/// Swaps chat's and voice's points-based tops for messages and voice time.
+fn with_chat_and_voice_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let Some(db) = super::stats::db() else {
+        return tops;
+    };
+    let (messages, voice) = {
+        let conn = db.lock();
+        let messages = super::activity::messages_on(&conn, day, None).unwrap_or_default();
+        let voice = match day_start(day) {
+            Some(start) => {
+                super::activity::voice_points_between(&conn, None, start, start + DAY, Utc::now().timestamp().min(start + DAY)).unwrap_or_default()
+            }
+            None => HashMap::new(),
+        };
+        (messages, voice)
+    };
+    for (activity, measure) in [("chat", &messages), ("voice", &voice)] {
+        if let Some((user, amount)) = measured_top(rows, activity, measure) {
+            match tops.iter_mut().find(|(a, _, _)| *a == activity) {
+                Some(top) => *top = (activity, user, amount),
+                None => tops.push((activity, user, amount)),
+            }
+        }
+    }
+    tops
+}
+
+/// Puts tops back in the activities' order, so card numbers follow the list.
+fn order_like_activities(mut tops: Vec<(&'static str, u64, i64)>) -> Vec<(&'static str, u64, i64)> {
+    tops.sort_by_key(|(a, _, _)| ACTIVITIES.iter().position(|(k, _)| k == a).unwrap_or(usize::MAX));
+    tops
 }
 
 /// The India day whose tops should go out at `now`, if they haven't: yesterday,
@@ -190,7 +268,8 @@ fn give(key: &str, user: u64, origin: &str, what: &AwardFor) -> Option<Award> {
 
 /// Hands out a day's top cards and posts the summary.
 pub async fn run_daily_top(ctx: &Context, day: &str) {
-    let tops = daily_tops(&day_rows(day));
+    let rows = day_rows(day);
+    let tops = order_like_activities(with_chat_and_voice_measured(daily_tops(&rows), &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -211,7 +290,7 @@ pub async fn run_daily_top(ctx: &Context, day: &str) {
             .title("🐸 Yesterday's top frogs")
             .description(lines.join("\n"))
             .colour(0xC68E54)
-            .footer(CreateEmbedFooter::new("The day's top scorer in each game wins a card"));
+            .footer(CreateEmbedFooter::new("Most messages, most VC time, most wins in each game, most Wordle and frog points: each wins a card"));
         let message = CreateMessage::new().embed(embed).allowed_mentions(CreateAllowedMentions::new());
         match tokio::time::timeout(Duration::from_secs(20), channel.send_message(&ctx.http, message)).await {
             Ok(Ok(_)) => {
@@ -286,12 +365,13 @@ mod tests {
     }
 
     #[test]
-    fn the_top_of_each_activity_is_the_most_points_and_ties_go_to_the_first_there() {
+    fn games_go_to_the_most_wins_capped_ones_included_and_ties_to_the_first_there() {
         let rows = vec![
             row(1, "quiz", 3, 100),
             row(2, "quiz", 2, 110),
             row(2, "quiz", 1, 120),
-            row(3, "quiz", 1, 130),
+            row(3, "quiz", 0, 130),
+            row(3, "quiz", 0, 131),
             row(1, "chat", 1, 140),
             row(9, "voice", 0, 150),
             row(4, "snitch", 2, 160),
@@ -300,14 +380,32 @@ mod tests {
             row(6, "mod", 50, 190),
             row(6, "weekly", 3, 191),
             row(6, "royale", 8, 192),
+            row(7, "wordle", 4, 193),
+            row(8, "wordle", 5, 194),
         ];
         let tops = daily_tops(&rows);
-        // Quiz: 1 and 2 both have 3; 1 got there first.
-        // Snitch counts both kinds: 4 and 5 both reach 6, and 5 was there first.
-        assert_eq!(tops, vec![("chat", 1, 1), ("quiz", 1, 3), ("snitch", 5, 6)]);
-        // A tie reached later by the earlier starter goes the other way.
-        let later = vec![row(1, "koto", 1, 100), row(2, "koto", 2, 110), row(1, "koto", 1, 120)];
+        // Quiz: 2 and 3 both have two wins (3's were capped at zero); 2 has more points.
+        // Snitch counts both kinds: 4 caught twice, 5 once.
+        // Wordle is by points.
+        assert_eq!(tops, vec![("chat", 1, 1), ("quiz", 2, 2), ("wordle", 8, 5), ("snitch", 4, 2)]);
+        // Equal wins and points go to whoever got there first.
+        let later = vec![row(1, "koto", 1, 100), row(2, "koto", 1, 110), row(2, "koto", 1, 115), row(1, "koto", 1, 120)];
         assert_eq!(daily_tops(&later), vec![("koto", 2, 2)]);
+    }
+
+    #[test]
+    fn chat_and_voice_go_to_the_most_messages_or_time_among_people_paid_for_them() {
+        let rows = vec![row(1, "chat", 1, 100), row(2, "chat", 1, 100), row(3, "chat", 1, 90), row(4, "quiz", 3, 50), row(6, "voice", 1, 10)];
+        let messages: HashMap<u64, i64> = [(1, 40), (2, 760), (3, 760), (4, 9000), (5, 5000)].into_iter().collect();
+        // 4 wasn't paid for chat and 5 isn't in the ledger at all; 2 and 3 tie and 3 was paid first.
+        assert_eq!(measured_top(&rows, "chat", &messages), Some((3, 760)));
+        assert_eq!(measured_top(&rows, "chat", &HashMap::new()), None);
+        assert_eq!(measured_top(&[row(1, "chat", 0, 1)], "chat", &messages), None, "a capped zero row isn't a payout");
+        let voice: HashMap<u64, i64> = [(6, 7200), (1, 90_000)].into_iter().collect();
+        assert_eq!(measured_top(&rows, "voice", &voice), Some((6, 7200)));
+        assert_eq!(day_start("2026-09-14"), Some(MIDNIGHT));
+        let shuffled = vec![("snitch", 1, 1), ("chat", 2, 5), ("voice", 3, 9)];
+        assert_eq!(order_like_activities(shuffled), vec![("chat", 2, 5), ("voice", 3, 9), ("snitch", 1, 1)]);
     }
 
     #[test]
