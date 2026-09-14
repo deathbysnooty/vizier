@@ -44,6 +44,8 @@ const MAX_EXCHANGES: usize = 20;
 const BEAT: Duration = Duration::from_secs(2);
 /// Messages under the fight before it is moved back to the bottom of the channel.
 const STICKY_AFTER: u32 = 4;
+/// How often an open lobby checks whether chat has buried it.
+const LOBBY_TICK: Duration = Duration::from_secs(3);
 /// Blocks in a health bar.
 const BAR_BLOCKS: usize = 14;
 /// How long any one Discord call may take before the fight gives up on it and
@@ -1210,7 +1212,38 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
             .await;
     }
 
-    tokio::time::sleep(Duration::from_secs((minutes * 60) as u64)).await;
+    // Keep the lobby at the bottom while it is open, like a live fight: once
+    // enough chat piles on top of it (an @everyone brings a rush), it is posted
+    // again below and the old copy removed. The repost doesn't ping again.
+    BELOW.lock().insert(arena.get(), 0);
+    while Utc::now().timestamp() < ends {
+        tokio::time::sleep(LOBBY_TICK).await;
+        let buried = BELOW.lock().get(&arena.get()).copied().unwrap_or(0) >= STICKY_AFTER;
+        if !buried {
+            continue;
+        }
+        let names = LOBBIES.lock().get(&lobby_id).map(|l| l.joined.iter().filter_map(|u| l.names.get(u).cloned()).collect::<Vec<_>>());
+        let Some(names) = names else {
+            break;
+        };
+        let fresh = CreateMessage::new()
+            .content("⚔️ A battle royale is starting! Join below 👇")
+            .allowed_mentions(CreateAllowedMentions::new())
+            .embed(lobby_embed(&names, ends, minutes, theme))
+            .components(lobby_buttons(lobby_id, true));
+        match call(arena.send_message(&ctx.http, fresh)).await {
+            Ok(moved) => {
+                BELOW.lock().insert(arena.get(), 0);
+                let old = std::mem::replace(&mut posted, moved);
+                let http = ctx.http.clone();
+                tokio::spawn(async move {
+                    let _ = arena.delete_message(&http, old.id).await;
+                });
+            }
+            Err(err) => tracing::warn!("battle: lobby not moved down: {}", err),
+        }
+    }
+    BELOW.lock().remove(&arena.get());
     let joined = {
         let mut lobbies = LOBBIES.lock();
         let lobby = lobbies.get_mut(&lobby_id);
