@@ -226,6 +226,19 @@ pub fn channel() -> Option<ChannelId> {
     super::control::id("VIZIER_QUIZ_CHANNEL").map(ChannelId::new)
 }
 
+/// Quiz points a person has won: all time, and since `since`. For the control panel.
+pub(crate) fn points_of(user: u64, since: i64) -> (i64, i64) {
+    let Some(db) = DB.get() else {
+        return (0, 0);
+    };
+    let conn = db.lock();
+    let count = |from: i64| {
+        conn.query_row("SELECT COUNT(*) FROM points WHERE user_id = ?1 AND ts >= ?2", params![user as i64, from], |r| r.get(0))
+            .unwrap_or(0)
+    };
+    (count(0), count(since))
+}
+
 pub fn open(workspace: &str) -> anyhow::Result<()> {
     let conn = open_conn(workspace)?;
     *KNOWN.write() = known_names(&conn);

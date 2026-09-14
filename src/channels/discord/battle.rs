@@ -414,6 +414,12 @@ pub fn wins_per_user(since: Option<i64>) -> std::collections::HashMap<u64, u64> 
     out
 }
 
+/// Fights fought, fights won and battles won outright, for the control panel.
+pub(crate) fn record_of(user: u64) -> (i64, i64, i64) {
+    let (fights, wins) = tally(user);
+    (fights, wins, crowns(user))
+}
+
 fn crowns(user: u64) -> i64 {
     let Some(db) = DB.get() else {
         return 0;

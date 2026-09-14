@@ -60,6 +60,7 @@
     pin: '<path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v6"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     right: '<path d="m9 6 6 6-6 6"/>',
+    left: '<path d="m15 6-6 6 6 6"/>',
     x: '<path d="M6 6l12 12M18 6 6 18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
@@ -546,6 +547,7 @@
     nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Manage'),
       navItem('#/reminders', icon('bell'), 'Reminders', count(active, S.reminders.length)),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
+      navItem('#/members', icon('users'), 'Members'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
       navItem('#/commands', icon('slash'), 'Commands')));
@@ -586,6 +588,8 @@
       ['Auto-responses', '#/autoreplies', 'reply', 'Answer or react to set words'],
       ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
+      ['Members', '#/members', 'users', 'Profiles, what the bot sees, mods’ notes'],
+      ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
       ['Activity log', '#/activity', 'activity', 'Who changed what'],
       ['Panel settings', '#/settings', 'sliders', 'Theme, accent, density, pins'],
@@ -710,7 +714,8 @@
       case 'section': renderSection(page, r.parts[1], r.q.get('k')); break;
       case 'reminders': renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1]); break;
       case 'autoreplies': renderRules(page); if (r.parts[1]) openRuleEditor(r.parts[1]); break;
-      case 'houses': renderHouses(page); break;
+      case 'houses': if (r.parts[1] === 'scorers') renderScorers(page); else renderHouses(page); break;
+      case 'members': if (r.parts[1]) renderProfile(page, r.parts[1], r.parts[2]); else renderMembers(page); break;
       case 'agent': renderAgent(page); break;
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
@@ -838,7 +843,8 @@
     const greeting = hour < 5 ? 'Up late' : hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
 
     page.appendChild(pageHead(greeting + ', ' + S.me.name, 'Everything Loduchand does on ' + (guild ? guild.name : 'the server') + ', in one place.',
-      h('button', { class: 'btn', type: 'button', onclick: restartFlow }, icon('restart'), 'Restart bot')));
+      [h('a', { class: 'btn', href: '#/houses/scorers' }, icon('zap'), 'Scorers today'),
+        h('button', { class: 'btn', type: 'button', onclick: restartFlow }, icon('restart'), 'Restart bot')]));
 
     const upTile = tile('Uptime', 'clock', duration(uptime), 'since ' + when(st.bot.started));
     page.appendChild(h('div', { class: 'tiles' },
@@ -1345,6 +1351,7 @@
       secSel.appendChild(h('option', { value: 'reminders', selected: section === 'reminders' }, '⏰  Reminders'));
       if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
       secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
+      if (!sectionById('members')) secSel.appendChild(h('option', { value: 'members', selected: section === 'members' }, '👤  Members'));
       clear(keySel);
       keySel.appendChild(h('option', { value: '' }, 'All settings'));
       const sec = sectionById(section);
@@ -2243,6 +2250,7 @@
     document.title = 'House Cup · Loduchand';
     const live = h('span', { class: 'live-pill', 'aria-live': 'polite' });
     page.appendChild(pageHead('House Cup', 'The house points race as it happens. Updates every 20 seconds while this tab is open.', null, h('span', { class: 'feature-icon', 'aria-hidden': 'true' }, '🏆')));
+    page.appendChild(cupTabs('standings'));
     page.appendChild(h('div', { class: 'toolbar cup-toolbar' },
       segmented(PERIODS, cup.period, 'Period', (v) => { cup.period = v; cup.data = null; drawBody(); refresh(); }), h('span', { class: 'grow' }), live));
     const bodyEl = h('div', { class: 'cup-body' });
@@ -2659,6 +2667,444 @@
         if (reload) { a.base = null; a.draft = null; rerender(); }
       } else toast(e.message, 'error');
     }
+  }
+
+  // --- scorers today ------------------------------------------------------------------------
+
+  const scorersState = { day: 'today', house: 'all', q: '', data: null, timer: null, updated: 0, loading: false, error: null };
+
+  function cupTabs(active) {
+    return h('nav', { class: 'page-tabs', 'aria-label': 'House Cup views' },
+      h('a', { href: '#/houses', 'aria-current': active === 'standings' ? 'page' : null }, icon('trophy'), 'Standings'),
+      h('a', { href: '#/houses/scorers', 'aria-current': active === 'scorers' ? 'page' : null }, icon('zap'), 'Scorers today'));
+  }
+
+  /** One activity chip: progress towards the chat/voice point, a capped source, or an extra. */
+  function actChip(c) {
+    const pts = c.points || 0;
+    let cls = 'act', text, pct = 0, title;
+    if (c.kind === 'progress') {
+      pct = c.target ? Math.min(1, c.count / c.target) : 0;
+      if (c.reached) { cls += ' reached'; text = [icon('check'), (c.key === 'chat' ? 'chat point' : 'voice point')]; }
+      else text = c.count + '/' + c.target + ' ' + c.unit;
+      if (!c.count && !pts) cls += ' zero';
+      title = c.label + ': ' + c.count + ' of ' + c.target + ' ' + (c.unit === 'msgs' ? 'messages' : 'minutes') + (c.reached ? ', point earned' : '');
+    } else if (c.kind === 'capped') {
+      pct = c.cap ? Math.min(1, pts / c.cap) : 0;
+      if (c.reached) { cls += ' reached'; text = [icon('check'), 'max ' + c.cap]; }
+      else text = pts + (c.cap ? '/' + c.cap : '');
+      if (!pts) cls += ' zero';
+      title = c.label + ': ' + pts + (c.cap ? ' of ' + c.cap + ' today' : ' today') + (c.reached ? ', daily limit reached' : '');
+    } else if (c.kind === 'weekly') {
+      cls += ' extra';
+      text = (pts ? '+' + pts + ' · ' : '') + c.week + ' this week';
+      title = 'Weekly posts: ' + pts + ' today, ' + c.week + ' this week (limit ' + c.cap_per_channel + ' per channel per week)';
+    } else {
+      cls += ' extra';
+      text = (pts > 0 ? '+' : '') + pts;
+      title = c.label + ': ' + pts + ' today (no daily limit)';
+    }
+    const el = h('span', { class: cls, 'data-tip': title, 'aria-label': title, tabindex: '0' },
+      h('span', { class: 'act-icon', 'aria-hidden': 'true' }, c.icon), h('span', { class: 'act-text' }, text));
+    if (c.kind === 'progress' || c.kind === 'capped') el.appendChild(h('span', { class: 'act-bar', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.round(pct * 100) + '%' })));
+    return el;
+  }
+
+  function scorersLegend() {
+    return h('details', { class: 'act-legend-wrap', open: window.innerWidth > 640 }, h('summary', null, 'What the chips mean'), h('div', { class: 'act-legend' },
+      h('span', null, h('span', { class: 'act' }, h('span', { class: 'act-icon' }, '🧠'), h('span', { class: 'act-text' }, '4/6'), h('span', { class: 'act-bar' }, h('i', { style: 'width:66%' }))), ' points today of the daily limit'),
+      h('span', null, h('span', { class: 'act reached' }, h('span', { class: 'act-icon' }, '🧠'), h('span', { class: 'act-text' }, icon('check'), 'max 6')), ' limit reached'),
+      h('span', null, h('span', { class: 'act' }, h('span', { class: 'act-icon' }, '💬'), h('span', { class: 'act-text' }, '14/20 msgs'), h('span', { class: 'act-bar' }, h('i', { style: 'width:70%' }))), ' on the way to the chat or voice point'),
+      h('span', null, h('span', { class: 'act zero' }, h('span', { class: 'act-icon' }, '⚔️'), h('span', { class: 'act-text' }, '0/3')), ' nothing yet')));
+  }
+
+  function renderScorers(page) {
+    document.title = 'Scorers today · Loduchand';
+    const st = scorersState;
+    page.appendChild(pageHead('House Cup', 'Who has scored today, and who has hit the daily limit for each game. Updates every 20 seconds.', null, h('span', { class: 'feature-icon', 'aria-hidden': 'true' }, '🏆')));
+    page.appendChild(cupTabs('scorers'));
+    const live = h('span', { class: 'live-pill', 'aria-live': 'polite' });
+    const search = h('input', { type: 'search', placeholder: 'Find a member', 'aria-label': 'Find a member', value: st.q });
+    const houseOpts = [['all', 'All houses']].concat(((cup.data && cup.data.houses) || [
+      { key: 'gryffindor', crest: '🦁', name: 'Gryffindor' }, { key: 'slytherin', crest: '🐍', name: 'Slytherin' },
+      { key: 'ravenclaw', crest: '🦅', name: 'Ravenclaw' }, { key: 'hufflepuff', crest: '🦡', name: 'Hufflepuff' }]).map((x) => [x.key, x.crest + ' ' + x.name]));
+    const houseSel = h('select', { class: 'select', 'aria-label': 'House' }, houseOpts.map(([v, t]) => h('option', { value: v, selected: v === st.house }, t)));
+    const body = h('div', { class: 'card scorers-card' });
+    page.appendChild(h('div', { class: 'toolbar scorers-toolbar' },
+      segmented([['today', 'Today'], ['yesterday', 'Yesterday']], st.day, 'Day', (v) => { st.day = v; st.data = null; draw(); refresh(); }),
+      houseSel, h('label', { class: 'search-box' }, icon('search'), search), h('span', { class: 'grow' }), live));
+    page.appendChild(scorersLegend());
+    page.appendChild(body);
+
+    const setLive = () => {
+      clear(live);
+      if (st.error) { live.className = 'live-pill err'; append(live, [icon('alert'), 'Can’t update: ' + st.error]); return; }
+      if (st.day === 'yesterday') { live.className = 'live-pill paused'; append(live, [icon('clock'), 'Yesterday, final']); return; }
+      if (document.hidden) { live.className = 'live-pill paused'; append(live, [icon('pause'), 'Paused while hidden']); return; }
+      live.className = 'live-pill';
+      append(live, [h('span', { class: 'live-dot', 'aria-hidden': 'true' }), 'Live', st.updated ? h('span', { class: 'live-time' }, ' · updated ' + fmtTime.format(new Date(st.updated)) + ' IST') : null]);
+    };
+    const refresh = async () => {
+      if (!page.isConnected) { clearInterval(st.timer); return; }
+      if (st.loading || (document.hidden && st.data)) { setLive(); return; }
+      st.loading = true;
+      const day = st.day;
+      try {
+        const data = await api('GET', '/houses/scorers?day=' + day);
+        if (day !== st.day || !page.isConnected) return;
+        st.data = data; st.updated = Date.now(); st.error = null;
+        draw();
+      } catch (e) { st.error = e.message; }
+      finally { st.loading = false; setLive(); }
+    };
+    const draw = () => {
+      clear(body);
+      if (!st.data) { body.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading today’s scorers…')); return; }
+      const q = st.q.trim().toLowerCase();
+      const rows = st.data.rows.filter((r) => (st.house === 'all' || r.house === st.house) && (!q || (r.name || '').toLowerCase().includes(q)));
+      const head = h('div', { class: 'scorers-head' },
+        h('b', null, plural(rows.length, 'member')),
+        h('span', null, (st.day === 'today' ? 'Today, ' : 'Yesterday, ') + fmtDay(st.data.day) + ' · chat point at ' + st.data.chat_bar + ' messages, voice point at ' + st.data.voice_bar_min + ' minutes'),
+        h('a', { class: 'open-link', href: '#/s/points' }, 'Limits', icon('right')));
+      body.appendChild(head);
+      if (!rows.length) { body.appendChild(h('div', { class: 'empty' }, icon('zap'), h('h3', null, q ? 'Nobody matches' : 'No scorers yet'), h('p', null, q ? 'Try another name.' : 'Points earned today show up here as they happen.'))); return; }
+      const list = h('ol', { class: 'scorer-list' });
+      rows.forEach((r) => {
+        list.appendChild(h('li', { class: 'scorer-row', style: r.colour ? '--house:' + r.colour : '' },
+          h('span', { class: 'sr-rank' }, r.rank),
+          h('div', { class: 'sr-who' }, avatar(r.avatar, r.name || '?', 'lg'),
+            h('div', { style: 'min-width:0' }, h('a', { class: 'sr-name', href: '#/members/' + r.id }, r.name || 'Former member'),
+              h('span', { class: 'house-chip', style: '--house:' + (r.colour || 'var(--accent)') }, (r.crest || '') + ' ' + (r.house_name || r.house)))),
+          h('div', { class: 'sr-total' }, h('b', null, fmtPoints(r.total)), h('small', null, r.total === 1 ? 'point' : 'points')),
+          h('div', { class: 'sr-acts' }, r.activities.map(actChip))));
+      });
+      body.appendChild(list);
+    };
+    search.addEventListener('input', () => { st.q = search.value; draw(); });
+    houseSel.addEventListener('change', () => { st.house = houseSel.value; draw(); });
+    draw();
+    clearInterval(st.timer);
+    st.timer = setInterval(() => { if (st.day === 'today') refresh(); }, 20000);
+    setLive();
+    refresh();
+    renderHouses.onVisible = () => { if (page.isConnected && !document.hidden && st.day === 'today') refresh(); else if (page.isConnected) setLive(); };
+  }
+
+  function fmtDay(ymd) {
+    const d = new Date(ymd + 'T12:00:00+05:30');
+    return isNaN(d) ? ymd : new Intl.DateTimeFormat('en-GB', { timeZone: IST, weekday: 'short', day: 'numeric', month: 'short' }).format(d);
+  }
+
+  // --- members ------------------------------------------------------------------------
+
+  const TONE_ICONS = { normal: '🙂', gentle: '🤍', light_roast: '😏', roast: '🔥', respectful: '🎩', brief: '✂️' };
+
+  function renderMembers(page) {
+    document.title = 'Members · Loduchand';
+    page.appendChild(pageHead('Members', 'Look anyone up: their points, activity, what the bot has seen from them, and the mods’ private notes it uses when it replies.'));
+    const input = h('input', { type: 'search', placeholder: 'Search members by name', 'aria-label': 'Search members', autocomplete: 'off', spellcheck: 'false' });
+    const results = h('ul', { class: 'member-results', 'aria-live': 'polite' });
+    let timer = null, seq = 0;
+    const run = async () => {
+      const mine = ++seq;
+      const q = input.value.trim();
+      if (!q) { clear(results); results.hidden = true; return; }
+      let list = [];
+      try { list = await api('GET', '/members?q=' + encodeURIComponent(q)); } catch (e) { toast(e.message, 'error'); }
+      if (mine !== seq) return;
+      clear(results); results.hidden = false;
+      if (!list.length) { results.appendChild(h('li', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nobody called “' + q + '”.')); return; }
+      list.forEach((m) => results.appendChild(h('li', null, h('a', { class: 'member-hit', href: '#/members/' + m.id },
+        avatar(m.avatar, m.name, 'lg'), h('span', { class: 'grow' }, h('b', null, m.name), h('small', null, '@' + m.username)),
+        m.has_note ? h('span', { class: 'badge src-panel' }, icon('edit'), 'Has notes') : null, m.bot ? h('span', { class: 'badge' }, 'Bot') : null, icon('right')))));
+    };
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 200); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const first = results.querySelector('a'); if (first) { e.preventDefault(); navigate(first.getAttribute('href')); } } });
+    results.hidden = true;
+    page.appendChild(h('div', { class: 'member-search' }, h('label', { class: 'search-box big' }, icon('search'), input), results));
+
+    const notesCard = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading notes…'));
+    page.appendChild(h('div', { class: 'section-title' }, h('h2', null, 'Members with notes'), h('span', null, 'Private to mods. Members never see these.')));
+    page.appendChild(notesCard);
+    api('GET', '/members/notes').then((list) => {
+      clear(notesCard);
+      if (!list.length) { notesCard.appendChild(h('div', { class: 'card empty' }, icon('edit'), h('h3', null, 'No notes yet'), h('p', null, 'Open a member and add a note to shape how the bot talks to them.'))); return; }
+      const grid = h('div', { class: 'note-grid' });
+      list.forEach((n) => grid.appendChild(h('a', { class: 'note-card' + (n.use_in_replies ? '' : ' is-off'), href: '#/members/' + n.user_id },
+        h('div', { class: 'note-card-top' }, avatar(n.avatar, n.name, 'lg'), h('div', { class: 'grow' }, h('b', null, n.name), h('small', null, 'Edited ' + ago(n.updated_ts))),
+          h('span', { class: 'badge tone-' + n.tone }, (TONE_ICONS[n.tone] || '') + ' ' + toneLabel(n.tone))),
+        n.notes ? h('p', null, n.notes) : h('p', { class: 'muted' }, 'Tone only, no notes.'),
+        n.use_in_replies ? null : h('span', { class: 'badge paused' }, 'Not used in replies'))));
+      notesCard.appendChild(grid);
+    }).catch((e) => { clear(notesCard).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); });
+    requestAnimationFrame(() => input.focus({ preventScroll: true }));
+  }
+
+  function toneLabel(t) { return ({ normal: 'Normal', gentle: 'Gentle', light_roast: 'Light roast', roast: 'Roast', respectful: 'Respectful', brief: 'Brief' })[t] || t; }
+
+  const profileState = { id: null, tab: 'overview', data: null };
+
+  async function renderProfile(page, id, tab) {
+    document.title = 'Member · Loduchand';
+    profileState.tab = ['overview', 'seen', 'memories'].includes(tab) ? tab : 'overview';
+    page.appendChild(h('a', { class: 'back-link', href: '#/members' }, icon('left'), 'Members'));
+    const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the profile…'));
+    page.appendChild(holder);
+    let p;
+    try { p = await api('GET', '/members/' + encodeURIComponent(id)); }
+    catch (e) { clear(holder).appendChild(h('div', { class: 'card empty' }, icon('user'), h('h3', null, e.status === 404 ? 'No such member' : 'Can’t load this member'), h('p', null, e.message))); return; }
+    if (!page.isConnected) return;
+    profileState.id = id; profileState.data = p;
+    document.title = p.name + ' · Members · Loduchand';
+    clear(holder);
+
+    // header
+    const flags = [
+      p.admin ? h('span', { class: 'badge who-admins' }, icon('shield'), 'Admin') : null,
+      p.bot ? h('span', { class: 'badge' }, 'Bot') : null,
+      p.captain ? h('span', { class: 'badge rank first' }, icon('trophy'), 'House captain') : null,
+      p.muggle ? h('span', { class: 'badge paused' }, 'Muggle · out of the houses') : null,
+      p.in_server ? null : h('span', { class: 'badge paused' }, 'Not in the server'),
+    ];
+    const hs = p.house;
+    holder.appendChild(h('section', { class: 'profile-head card', style: hs ? '--house:' + hs.colour : '' },
+      avatar(p.avatar, p.name, 'xl'),
+      h('div', { class: 'grow' },
+        h('div', { class: 'title-row' }, h('h1', null, p.name), hs ? h('span', { class: 'house-chip big' }, hs.crest + ' ' + hs.name) : null, flags),
+        h('p', { class: 'profile-sub' }, p.username ? '@' + p.username : '', h('span', { class: 'field-key' }, p.id)),
+        h('div', { class: 'profile-dates' },
+          p.joined_at ? h('span', null, icon('calendar'), 'Joined ' + fmtDate(p.joined_at * 1000)) : null,
+          p.created_at ? h('span', null, icon('user'), 'Account from ' + fmtDate(p.created_at * 1000)) : null,
+          p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null),
+        p.roles.length ? h('div', { class: 'chips role-chips' }, p.roles.map((r) => h('span', { class: 'chip role-chip' }, h('span', { class: 'role-dot', style: r.color ? 'background:' + r.color : '' }), h('span', { class: 'chip-text' }, r.name)))) : null)));
+
+    const grid = h('div', { class: 'profile-grid' });
+    const main = h('div', { class: 'profile-main' });
+    const side = h('aside', { class: 'profile-side' });
+    grid.appendChild(main); grid.appendChild(side);
+    holder.appendChild(grid);
+    side.appendChild(notesEditor(p));
+
+    const panel = h('div', null);
+    // Tabs swap the panel in place, so an unsaved note beside them survives.
+    const show = (key) => {
+      profileState.tab = key;
+      tabs.querySelectorAll('a').forEach((a) => a.setAttribute('aria-current', a.dataset.tab === key ? 'page' : 'false'));
+      const hash = '#/members/' + p.id + (key === 'overview' ? '' : '/' + key);
+      if (location.hash !== hash) { history.replaceState(null, '', hash); currentHash = hash; }
+      clear(panel);
+      if (key === 'seen') profileSeen(panel, p);
+      else if (key === 'memories') profileMemories(panel, p);
+      else profileOverview(panel, p);
+    };
+    const tabs = h('nav', { class: 'page-tabs', 'aria-label': 'Profile sections' },
+      [['overview', 'Overview', 'overview'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
+        h('a', { href: '#/members/' + p.id + (key === 'overview' ? '' : '/' + key), dataset: { tab: key }, onclick: (e) => { e.preventDefault(); show(key); } }, icon(ic), label)));
+    main.appendChild(tabs);
+    main.appendChild(panel);
+    show(profileState.tab);
+  }
+
+  function fmtDate(ms) { return new Intl.DateTimeFormat('en-GB', { timeZone: IST, day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(ms)); }
+
+  function profileOverview(panel, p) {
+    const pts = p.points;
+    const today = card('pf-today', 'Today', pts.today_total ? fmtPoints(pts.today_total) + ' points so far, India time' : 'No points yet today, India time',
+      h('div', { class: 'card-body pad' }, h('div', { class: 'sr-acts wide' }, pts.activities.map(actChip))));
+    panel.appendChild(today);
+
+    const month = pts.month.slice().sort((a, b) => b.points - a.points);
+    const max = Math.max(1, ...month.map((m) => m.points));
+    const bars = h('ul', { class: 'hbars' }, month.length ? month.map((m) => {
+      const g = groupOf(m.source);
+      return h('li', null, h('span', { class: 'hb-label' }, sourceLabel(m.source)),
+        h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.max(2, (Math.max(0, m.points) / max) * 100) + '%' })),
+        h('b', null, fmtPoints(m.points)));
+    }) : h('li', { class: 'empty-small' }, 'No points this month yet.'));
+    panel.appendChild(card('pf-month', 'This month', null, h('div', { class: 'card-body pad' },
+      h('div', { class: 'stat-row' },
+        stat('Month', fmtPoints(pts.month_total), 'points'),
+        stat('House rank', pts.house_rank ? '#' + pts.house_rank.rank : '—', pts.house_rank ? 'of ' + pts.house_rank.of + (p.house ? ' in ' + p.house.name : '') : 'not ranked'),
+        stat('All time', fmtPoints(pts.all_time), 'points')),
+      bars)));
+
+    const a = p.activity;
+    const hours = a.hours;
+    const hmax = Math.max(1, ...hours);
+    const peak = hours.indexOf(Math.max(...hours));
+    const spark = h('div', { class: 'hours', role: 'img', 'aria-label': 'Messages by hour over 30 days; busiest around ' + String(peak).padStart(2, '0') + ':00 India time' },
+      hours.map((n, i) => {
+        const bar = h('span', { class: 'hour' + (i === peak && n ? ' peak' : ''), style: '--v:' + Math.max(n ? 6 : 2, Math.round((n / hmax) * 100)) + '%' });
+        bar.addEventListener('mousemove', (e) => showTip(e, [String(i).padStart(2, '0') + ':00–' + String((i + 1) % 24).padStart(2, '0') + ':00 IST', plural(n, 'message') + ' in 30 days']));
+        bar.addEventListener('mouseleave', hideTip);
+        return bar;
+      }));
+    const chMax = Math.max(1, ...a.top_channels.map((c) => c.messages));
+    panel.appendChild(card('pf-activity', 'Activity', 'Messages and voice, India time', h('div', { class: 'card-body pad' },
+      h('div', { class: 'stat-row five' },
+        stat('Today', numberFmt.format(a.messages_today), 'messages'),
+        stat('7 days', numberFmt.format(a.messages_7d), 'messages'),
+        stat('30 days', numberFmt.format(a.messages_30d), 'messages'),
+        stat('🎙️ Voice', a.voice_today_min + ' min', 'today'),
+        stat('🎙️ Voice', duration(a.voice_7d_min * 60), '7 days')),
+      h('div', { class: 'two-mini' },
+        h('div', null, h('h4', { class: 'mini-title' }, 'Busiest hours', h('span', null, hours.some(Boolean) ? 'peak ' + String(peak).padStart(2, '0') + ':00' : '')), spark,
+          h('div', { class: 'range-scale' }, h('span', null, '00'), h('span', null, '06'), h('span', null, '12'), h('span', null, '18'), h('span', null, '23'))),
+        h('div', null, h('h4', { class: 'mini-title' }, 'Top channels', h('span', null, '30 days')),
+          a.top_channels.length ? h('ul', { class: 'hbars compact' }, a.top_channels.map((c) => h('li', null, h('span', { class: 'hb-label' }, '#' + (c.name || 'unknown')),
+            h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.max(2, (c.messages / chMax) * 100) + '%' })), h('b', null, numberFmt.format(c.messages))))) : h('p', { class: 'empty-small' }, 'No messages counted.'))))));
+
+    const g = p.games;
+    const rate = g.fights ? Math.round((g.wins / g.fights) * 100) + '% won' : 'no fights';
+    panel.appendChild(card('pf-games', 'Games', null, h('div', { class: 'card-body pad' }, h('div', { class: 'stat-row four' },
+      stat('🧠 Quiz', numberFmt.format(g.quiz_all), g.quiz_month + ' this month'),
+      stat('⚔️ Fights', numberFmt.format(g.fights), g.wins + ' won (' + (g.fights ? Math.round((g.wins / g.fights) * 100) : 0) + '%)'),
+      stat('👑 Crowns', numberFmt.format(g.crowns), 'royales won'),
+      stat('🪽 Snitches', numberFmt.format(g.snitch_month), 'this month')))));
+
+    if (p.joins) {
+      const j = p.joins;
+      const d = (s) => (s ? fmtDate(Date.parse(s)) : '—');
+      panel.appendChild(card('pf-joins', 'Join history', 'From the member log', h('dl', { class: 'kv' },
+        h('dt', null, 'Joins and leaves'), h('dd', null, plural(j.joins, 'join') + ', ' + plural(j.leaves, 'leave')),
+        h('dt', null, 'First joined'), h('dd', null, d(j.first_join)),
+        h('dt', null, 'Last joined'), h('dd', null, d(j.last_join)),
+        h('dt', null, 'Last left'), h('dd', null, d(j.last_leave)))));
+    }
+  }
+
+  function stat(label, value, sub) {
+    return h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), h('b', null, value), sub ? h('small', null, sub) : null);
+  }
+  function sourceLabel(key) {
+    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', cat: '🐱 Cat Bot', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
+    return labels[key] || key;
+  }
+
+  async function profileSeen(panel, p) {
+    panel.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the bot’s history…'));
+    let data;
+    try { data = await api('GET', '/members/' + p.id + '/seen'); } catch (e) { clear(panel).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+    clear(panel);
+    const list = h('ul', { class: 'seen' });
+    data.messages.forEach((m) => list.appendChild(h('li', null,
+      h('div', { class: 'seen-meta' }, m.kind === 'chat' ? h('span', { class: 'badge src-panel' }, icon('message'), 'Talked to the bot') : h('span', { class: 'badge' }, icon('eye'), 'Read along'),
+        m.channel ? h('span', { class: 'inline-ref' }, h('span', { class: 'glyph' }, '#'), m.channel) : null,
+        h('span', { class: 'grow' }), h('small', { title: fmtFull.format(new Date(m.ts * 1000)) + ' IST' }, when(m.ts) + ' · ' + ago(m.ts))),
+      h('p', { class: 'seen-text' }, m.text))));
+    if (!data.messages.length) list.appendChild(h('li', { class: 'empty' }, icon('eye'), h('h3', null, 'Nothing stored'), h('p', null, 'The bot hasn’t kept any of their messages in the last ' + data.days + ' days.')));
+    panel.appendChild(card('pf-seen', 'What the bot sees', 'Their latest messages in the bot’s conversation history · last ' + data.days + ' days, up to ' + data.limit, list));
+  }
+
+  async function profileMemories(panel, p) {
+    panel.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Searching the bot’s memories…'));
+    let data;
+    try { data = await api('GET', '/members/' + p.id + '/memories'); } catch (e) { clear(panel).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+    clear(panel);
+    const list = h('ul', { class: 'memories' });
+    data.memories.forEach((m) => {
+      const full = h('div', { class: 'memory-full', hidden: true }, markTerms(m.content + (m.truncated ? '\n…' : ''), m.matched));
+      const toggle = h('button', { class: 'btn sm ghost', type: 'button', 'aria-expanded': 'false', onclick: () => { full.hidden = !full.hidden; toggle.setAttribute('aria-expanded', String(!full.hidden)); toggle.lastChild.textContent = full.hidden ? 'Read all' : 'Show less'; } }, icon('eye'), 'Read all');
+      list.appendChild(h('li', null,
+        h('div', { class: 'seen-meta' }, h('b', { class: 'memory-title' }, m.title), m.tags.map((t) => h('span', { class: 'badge' }, t)), h('span', { class: 'grow' }), h('small', null, fmtDate(m.ts * 1000))),
+        h('p', { class: 'seen-text' }, markTerms(m.snippet, m.matched)),
+        h('div', { class: 'memory-foot' }, h('small', null, 'Matched on ' + m.matched.join(', ')),
+          m.truncated || m.snippet.startsWith('…') || m.snippet.endsWith('…') ? toggle : null), full));
+    });
+    if (!data.memories.length) list.appendChild(h('li', { class: 'empty' }, icon('bot'), h('h3', null, 'No memories mention them'), h('p', null, 'Searched ' + plural(data.searched, 'memory', 'memories') + ' for ' + data.terms.join(', ') + '.')));
+    panel.appendChild(card('pf-memories', 'What the bot remembers', plural(data.memories.length, 'memory', 'memories') + ' naming them, out of ' + numberFmt.format(data.searched) + ' · read-only', list));
+  }
+
+  function markTerms(text, terms) {
+    const words = (terms || []).filter(Boolean).map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!words.length) return text;
+    const re = new RegExp('(' + words.join('|') + ')', 'gi');
+    return text.split(re).map((part, i) => (i % 2 ? h('mark', null, part) : part));
+  }
+
+  function notesEditor(p) {
+    const saved = p.note;
+    const d = { tone: saved ? saved.tone : 'normal', notes: saved ? saved.notes : '', use_in_replies: saved ? saved.use_in_replies : true };
+    let base = JSON.stringify(d);
+    const dirty = () => JSON.stringify(d) !== base;
+    S.guard = () => (dirty() ? 1 : 0);
+    const el = h('section', { class: 'card notes-card', 'aria-label': 'Mods’ notes' });
+    const preview = h('pre', { class: 'ai-preview', 'aria-live': 'polite' });
+    const previewNote = h('p', { class: 'hint', style: 'margin:6px 0 0' });
+    const saveBtn = h('button', { class: 'btn primary', type: 'button' }, saved ? 'Save note' : 'Add note');
+    const status = h('span', { class: 'notes-status' });
+    let ptimer = null, pseq = 0;
+    const refreshPreview = () => {
+      clearTimeout(ptimer);
+      ptimer = setTimeout(async () => {
+        const mine = ++pseq;
+        try {
+          const r = await api('POST', '/members/' + p.id + '/note/preview', d);
+          if (mine !== pseq) return;
+          preview.textContent = r.text || (d.use_in_replies ? 'Nothing yet: pick a tone or write a note.' : 'Nothing: this note is kept on the panel only.');
+          preview.classList.toggle('empty-preview', !r.text);
+          previewNote.textContent = r.switched_on ? 'Added before any message of theirs the bot answers, and messages that mention them.' : 'Member notes are switched off for the whole bot, so the AI gets none right now.';
+          previewNote.className = r.switched_on ? 'hint' : 'error-text';
+        } catch (_) { /* keep the last one */ }
+      }, 220);
+    };
+    const updateState = () => {
+      saveBtn.disabled = !dirty() || d.notes.length > p.max_note_chars;
+      clear(status);
+      if (dirty()) append(status, [h('span', { class: 'badge unsaved' }, h('span', { class: 'dot' }), 'Unsaved')]);
+      else if (p.note) append(status, ['Edited ' + ago(p.note.updated_ts) + ' by ', memberName(p.note.updated_by)]);
+    };
+    const tones = h('div', { class: 'tones', role: 'radiogroup', 'aria-label': 'Tone' });
+    p.tones.forEach((t) => {
+      const b = h('button', { type: 'button', class: 'tone', role: 'radio', 'aria-checked': d.tone === t.value ? 'true' : 'false',
+        onclick: () => { d.tone = t.value; tones.querySelectorAll('.tone').forEach((x) => x.setAttribute('aria-checked', x === b ? 'true' : 'false')); updateState(); refreshPreview(); } },
+        h('span', { class: 'tone-icon', 'aria-hidden': 'true' }, TONE_ICONS[t.value] || ''), h('span', null, h('b', null, t.label), h('small', null, t.about)));
+      tones.appendChild(b);
+    });
+    const ta = h('textarea', { class: 'textarea', id: 'note-text', rows: '6', maxlength: String(p.max_note_chars * 2), placeholder: 'Who they are, what they like, running jokes, things to avoid…' });
+    ta.value = d.notes;
+    const counter = h('span', { class: 'text-count' });
+    const drawCount = () => { counter.textContent = d.notes.length + ' / ' + p.max_note_chars; counter.classList.toggle('over', d.notes.length > p.max_note_chars); };
+    ta.addEventListener('input', () => { d.notes = ta.value; drawCount(); updateState(); refreshPreview(); });
+    const sw = switchEl(d.use_in_replies, 'Use when replying', (on, btn) => { btn.set(on); d.use_in_replies = on; updateState(); refreshPreview(); });
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      try {
+        const r = await api('PUT', '/members/' + p.id + '/note', d);
+        p.note = r.note; base = JSON.stringify(d);
+        toast('Saved notes for ' + p.name);
+        refreshAudit(); updateState();
+        if (!del.isConnected) actions.insertBefore(del, actions.firstChild);
+      } catch (e) { toast(e.message, 'error'); updateState(); }
+    });
+    const del = h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+      const ok = await confirmDialog({ title: 'Delete the notes for ' + p.name + '?', icon: 'trash', danger: true, body: 'The bot stops using them straight away. The change stays in the activity log.', confirm: 'Delete notes' });
+      if (!ok) return;
+      try {
+        await api('DELETE', '/members/' + p.id + '/note');
+        p.note = null; d.tone = 'normal'; d.notes = ''; d.use_in_replies = true; base = JSON.stringify(d);
+        toast('Deleted the notes for ' + p.name); refreshAudit();
+        const fresh = notesEditor(p); el.replaceWith(fresh);
+      } catch (e) { toast(e.message, 'error'); }
+    } }, icon('trash'), 'Delete');
+    const actions = h('div', { class: 'notes-actions' }, saved ? del : null, h('span', { class: 'grow' }), saveBtn);
+    append(el, [
+      h('div', { class: 'card-head' }, h('div', { class: 'grow' }, h('h2', null, 'Mods’ notes'), h('div', { class: 'sub' }, icon('shield'), ' Private to mods. Never shown to members.'))),
+      h('div', { class: 'card-body pad notes-body' },
+        h('div', null, h('span', { class: 'label' }, 'How the bot treats them'), tones),
+        h('div', null, h('div', { class: 'label-row' }, h('label', { class: 'label', for: 'note-text' }, 'Notes'), counter), ta),
+        h('div', { class: 'label-row' }, h('span', null, h('b', { class: 'label', style: 'display:inline' }, 'Use when replying'), h('small', { class: 'hint', style: 'display:block;margin:0' }, 'Off keeps the note here only.')), sw),
+        h('div', null, h('span', { class: 'label' }, 'What the AI gets'), preview, previewNote),
+        status, actions),
+    ]);
+    drawCount(); updateState(); refreshPreview();
+    return el;
+  }
+
+  function memberName(id) {
+    const span = h('span', null, '…');
+    memberById(id).then((m) => { span.textContent = m ? m.name : 'an admin'; });
+    return span;
   }
 
   // --- restart --------------------------------------------------------------------

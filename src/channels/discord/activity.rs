@@ -266,6 +266,71 @@ fn load_day(
     Ok(plan(day, &chat, &seconds))
 }
 
+// --- read by the control panel -----------------------------------------------
+
+/// Messages in an India day that earn the chat point, as set now.
+pub(crate) fn chat_bar() -> i64 {
+    chat_day_messages()
+}
+
+/// Seconds in voice in an India day that earn the voice point, as set now.
+pub(crate) fn voice_bar_secs() -> i64 {
+    voice_day_secs()
+}
+
+/// Messages per person on one India day ("YYYY-MM-DD"), leaving out the
+/// excluded channels exactly as chat days do. Optionally for one person.
+pub(crate) fn messages_on(conn: &Connection, day: &str, user: Option<u64>) -> rusqlite::Result<HashMap<u64, i64>> {
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let mut stmt = conn.prepare(
+        "SELECT user_id, channel_id, SUM(count) FROM msg_counts WHERE day = ?1 AND (?2 IS NULL OR user_id = ?2)
+         GROUP BY user_id, channel_id",
+    )?;
+    let rows = stmt.query_map(params![day, user.map(|u| u as i64)], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))
+    })?;
+    let mut out: HashMap<u64, i64> = HashMap::new();
+    for (u, channel, n) in rows.flatten() {
+        if !exclude.contains(&channel) {
+            *out.entry(u).or_insert(0) += n;
+        }
+    }
+    Ok(out)
+}
+
+/// Real voice seconds per person inside `[start, end)`, paired exactly as voice
+/// days are (AFK and excluded rooms left out, a room still open counts up to
+/// `now`). Optionally for one person. Read-only.
+pub(crate) fn voice_between(
+    conn: &Connection,
+    user: Option<u64>,
+    start: i64,
+    end: i64,
+    now: i64,
+) -> rusqlite::Result<HashMap<u64, i64>> {
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
+    let sql = if user.is_some() {
+        "SELECT user_id, action, channel_id, ts FROM voice_events WHERE user_id = ?3 AND ts >= ?1 AND ts < ?2
+         ORDER BY user_id, ts, msg_id"
+    } else {
+        "SELECT user_id, action, channel_id, ts FROM voice_events WHERE ts >= ?1 AND ts < ?2 AND ?3 IS NULL
+         ORDER BY user_id, ts, msg_id"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let events: Vec<VoiceEvent> = stmt
+        .query_map(params![start - MAX_SITTING, end + MAX_SITTING, user.map(|u| u as i64)], |r| {
+            Ok(VoiceEvent {
+                user: r.get::<_, i64>(0)? as u64,
+                left: r.get::<_, String>(1)? == "left",
+                room: r.get::<_, i64>(2)? as u64,
+                ts: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(voice_seconds(&events, (start, end), &exclude, afk, Some(now)))
+}
+
 /// Who reached the message bar, from (user, channel, messages) rows for one day.
 fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> Vec<u64> {
     let mut per_user: HashMap<u64, i64> = HashMap::new();

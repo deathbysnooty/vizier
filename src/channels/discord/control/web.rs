@@ -130,6 +130,26 @@ pub trait PanelData: Send + Sync + 'static {
     async fn save_agent_settings(&self, _settings: &agent::AgentSettings) -> anyhow::Result<()> {
         anyhow::bail!("the agent isn't reachable")
     }
+    /// A member with their join date, account age and roles.
+    async fn member_detail(&self, _id: u64) -> Option<members::MemberDetail> {
+        None
+    }
+    /// Points, activity, games and join history for a member, at `now`.
+    async fn member_stats(&self, _id: u64, _now: i64) -> members::MemberStats {
+        members::MemberStats { hours: vec![0; 24], ..Default::default() }
+    }
+    /// Their latest messages in the AI's history, newest first.
+    async fn member_seen(&self, _id: u64, _now: i64) -> Vec<members::SeenMessage> {
+        Vec::new()
+    }
+    /// Every memory the AI agent can read.
+    async fn memories(&self) -> Vec<members::MemoryEntry> {
+        Vec::new()
+    }
+    /// Who scored on today (0) or yesterday (1), with their chat and voice counts.
+    fn scorers(&self, _days_back: i64, _now: i64) -> Option<Vec<scorers::ScorerData>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,7 +162,9 @@ pub struct EmojiInfo {
 
 mod agent;
 mod houses;
+mod members;
 mod rules;
+mod scorers;
 
 // --- the live implementation ------------------------------------------------------
 
@@ -314,6 +336,45 @@ impl PanelData for LiveData {
             silent_read_initiative_chance: config.silent_read_initiative_chance,
             max_tokens: config.max_tokens,
         })
+    }
+
+    async fn member_detail(&self, id: u64) -> Option<members::MemberDetail> {
+        let ctx = CTX.get()?;
+        let gid = guild_id(ctx)?;
+        let user = UserId::new(id);
+        let cached = ctx.cache.guild(gid).and_then(|g| g.members.get(&user).cloned());
+        let member = match cached {
+            Some(m) => m,
+            None => gid.member(ctx, user).await.ok()?,
+        };
+        Some(members::MemberDetail {
+            info: member_info(&member),
+            joined_at: member.joined_at.map(|t| t.unix_timestamp()),
+            created_at: user.created_at().unix_timestamp(),
+            role_ids: member.roles.iter().map(|r| r.get().to_string()).collect(),
+        })
+    }
+
+    async fn member_stats(&self, id: u64, now: i64) -> members::MemberStats {
+        members::read_stats(AGENT.get().map(|(deps, _)| deps), id, now).await
+    }
+
+    async fn member_seen(&self, id: u64, now: i64) -> Vec<members::SeenMessage> {
+        match AGENT.get() {
+            Some((deps, agent_id)) => members::read_seen(deps, agent_id, id, now).await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn memories(&self) -> Vec<members::MemoryEntry> {
+        match AGENT.get() {
+            Some((deps, agent_id)) => members::read_memories(deps, agent_id).await,
+            None => Vec::new(),
+        }
+    }
+
+    fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<scorers::ScorerData>> {
+        scorers::read_live(days_back, now)
     }
 
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
@@ -510,6 +571,14 @@ pub fn router(panel: Panel) -> Router {
         .route("/autoreplies/{id}/toggle", post(rules::toggle))
         .route("/houses", get(houses::get))
         .route("/agent", get(agent::get).put(agent::put))
+        .route("/houses/scorers", get(scorers::get))
+        .route("/members", get(members::search))
+        .route("/members/notes", get(members::noted))
+        .route("/members/{id}", get(members::profile))
+        .route("/members/{id}/seen", get(members::seen))
+        .route("/members/{id}/memories", get(members::memories))
+        .route("/members/{id}/note", put(members::save_note).delete(members::delete_note))
+        .route("/members/{id}/note/preview", get(members::preview_saved).post(members::preview_draft))
         .route_layer(middleware::from_fn_with_state(panel.clone(), require_admin))
         .route("/login", post(login))
         .route("/logout", post(logout))
@@ -1165,6 +1234,31 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 };
                 obj.insert("label".into(), json!(format!("{} “{}”", noun, name)));
                 obj.insert("section".into(), section);
+                obj.insert("change".into(), json!(change));
+                obj.insert("old".into(), Value::Null);
+                obj.insert("new".into(), Value::Null);
+            } else if let Some(uid) = e.key.strip_prefix("member:") {
+                let body = |b: &Option<String>| b.as_deref().and_then(|t| serde_json::from_str::<super::members::MemberNote>(t).ok());
+                let (old, new) = (body(&e.old), body(&e.new));
+                let name = uid
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|id| panel.data.cached_member(id))
+                    .map(|m| m.name)
+                    .or_else(|| new.as_ref().or(old.as_ref()).map(|n| n.name.clone()))
+                    .unwrap_or_else(|| uid.to_string());
+                let change = match (&old, &new) {
+                    (None, Some(_)) => "Created",
+                    (Some(_), None) => "Deleted",
+                    (Some(o), Some(n)) if o.use_in_replies != n.use_in_replies => {
+                        if n.use_in_replies { "Switched on" } else { "Switched off" }
+                    }
+                    (Some(o), Some(n)) if o.tone != n.tone && o.notes == n.notes => "Tone changed",
+                    _ => "Edited",
+                };
+                obj.insert("label".into(), json!(format!("Notes for @{}", name)));
+                obj.insert("member_id".into(), json!(uid));
+                obj.insert("section".into(), json!({ "id": "members", "title": "Members", "icon": "👤" }));
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);

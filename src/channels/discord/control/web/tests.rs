@@ -116,16 +116,13 @@ impl PanelData for FakeData {
 
     async fn search_members(&self, query: &str, limit: usize) -> Vec<MemberInfo> {
         let q = query.to_lowercase();
-        PEOPLE
-            .iter()
-            .filter(|p| q.is_empty() || p.1.to_lowercase().contains(&q) || p.2.contains(&q))
-            .take(limit)
-            .map(person)
-            .collect()
+        let people = PEOPLE.iter().filter(|p| q.is_empty() || p.1.to_lowercase().contains(&q) || p.2.contains(&q)).map(person);
+        let roster = (0..ROSTER.len() as u64).filter_map(|i| self.cached_member(2000 + i)).filter(|m| !q.is_empty() && m.name.to_lowercase().contains(&q));
+        people.chain(roster).take(limit).collect()
     }
 
     async fn member(&self, id: u64) -> Option<MemberInfo> {
-        PEOPLE.iter().find(|p| p.0 == id).map(person)
+        self.cached_member(id)
     }
 
     fn admins(&self) -> Vec<u64> {
@@ -171,6 +168,134 @@ impl PanelData for FakeData {
     async fn save_agent_settings(&self, settings: &super::agent::AgentSettings) -> anyhow::Result<()> {
         *FAKE_AGENT.lock() = settings.clone();
         Ok(())
+    }
+
+    async fn member_detail(&self, id: u64) -> Option<super::members::MemberDetail> {
+        let info = self.cached_member(id)?;
+        let roles = match id % 4 {
+            0 => vec!["54", "53"],
+            1 => vec!["55", "51"],
+            2 => vec!["56"],
+            _ => vec!["57"],
+        };
+        let mut role_ids: Vec<String> = roles.into_iter().map(String::from).collect();
+        if id == ADMIN || id == ADMIN_TWO {
+            role_ids.push("50".into());
+        }
+        Some(super::members::MemberDetail {
+            info,
+            joined_at: Some(1_700_000_000 + (id as i64 % 97) * 86_400 * 3),
+            created_at: 1_560_000_000 + (id as i64 % 53) * 86_400 * 11,
+            role_ids,
+        })
+    }
+
+    async fn member_stats(&self, id: u64, now: i64) -> super::members::MemberStats {
+        use super::members::{JoinSummary, MemberStats};
+        if self.cached_member(id).is_none() {
+            return MemberStats { hours: vec![0; 24], ..Default::default() };
+        }
+        let (today_rows, month_rows, all_time) = {
+            let conn = fake_ledger(now).lock();
+            let sums = |since: i64| -> Vec<(String, i64)> {
+                let mut stmt = conn
+                    .prepare("SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND ts >= ?2 GROUP BY source ORDER BY 2 DESC")
+                    .unwrap();
+                stmt.query_map(rusqlite::params![id as i64, since], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().flatten().collect()
+            };
+            let today = super::scorers::day_bounds(now, 0).0;
+            (sums(today), sums(super::super::super::points::month_start(now)), sums(0).iter().map(|(_, n)| n).sum::<i64>())
+        };
+        let seed = id % 97;
+        let house = if id >= 2000 { Some(HOUSES_KEYS[((id - 2000) % 4) as usize].to_string()) } else { Some(HOUSES_KEYS[(id % 4) as usize].to_string()) };
+        let hours: Vec<i64> = (0..24).map(|h: i64| {
+            let evening = (h - 21).abs().min((h + 3).abs());
+            ((12 - evening.min(12)) * (3 + seed as i64 % 5) + if (10..14).contains(&h) { 9 } else { 0 }).max(0)
+        }).collect();
+        MemberStats {
+            house,
+            captain: id == 2000 || id == 2002,
+            muggle: id == 2043,
+            today: today_rows,
+            month: month_rows,
+            all_time: all_time + 140,
+            house_rank: Some((1 + (seed % 7) as usize, 38)),
+            weekly_this_week: 3,
+            messages_today: 17 + seed as i64 % 9,
+            chat_counted_today: 14 + seed as i64 % 9,
+            messages_7d: 164 + seed as i64 * 2,
+            messages_30d: 712 + seed as i64 * 9,
+            top_channels: vec![(21, 318), (23, 201), (22, 96), (32, 61), (24, 36)],
+            hours,
+            voice_today_secs: 42 * 60,
+            voice_7d_secs: 385 * 60,
+            quiz_all: 214,
+            quiz_month: 37,
+            fights: 58,
+            wins: 34,
+            crowns: 2,
+            snitch_month: 5,
+            joins: Some(JoinSummary {
+                joins: 3,
+                leaves: 2,
+                first_join: Some("2023-02-11T18:04:00+00:00".into()),
+                last_join: Some("2026-06-02T15:40:00+00:00".into()),
+                last_leave: Some("2026-05-28T09:12:00+00:00".into()),
+            }),
+        }
+    }
+
+    async fn member_seen(&self, id: u64, now: i64) -> Vec<super::members::SeenMessage> {
+        let lines = [
+            ("chat", 21, "Loduchand bhai, who's winning the house cup this month? Ravenclaw again?"),
+            ("silent_read", 23, "bro that last quiz question about Sholay was criminal, nobody got it"),
+            ("silent_read", 21, "chai break, back in 10"),
+            ("chat", 32, "can you give me a hint for the koto today? not the answer, just a hint"),
+            ("silent_read", 22, "this meme is literally Dev every Monday 💀"),
+            ("chat", 21, "roast Arjun's fantasy team please, he picked 4 bowlers"),
+            ("silent_read", 23, "RCB will win this year, I'm not taking questions"),
+        ];
+        let _ = id;
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, (kind, ch, text))| super::members::SeenMessage {
+                ts: now - 1300 - (i as i64) * 5_400,
+                channel_id: Some(*ch),
+                kind: kind.to_string(),
+                text: text.to_string(),
+            })
+            .collect()
+    }
+
+    async fn memories(&self) -> Vec<super::members::MemoryEntry> {
+        let now = chrono::Utc::now().timestamp();
+        let m = |slug: &str, title: &str, content: &str, days: i64, tags: &[&str]| super::members::MemoryEntry {
+            slug: slug.into(),
+            title: title.into(),
+            content: content.into(),
+            ts: now - days * 86_400,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            keywords: vec![],
+        };
+        vec![
+            m("people-sameer", "Sameer", "Sameer (DiscordId: 2012) is a Gryffindor who never misses quiz night. Supports RCB loudly and takes roasts about it well. Asked the bot to stop calling him 'Sam'.", 3, &["people"]),
+            m("running-jokes", "Running jokes", "Dev and his Monday memes. Sameer's RCB prediction every April. Zoya disappears for a month every exam season.", 12, &["jokes"]),
+            m("quiz-night", "Quiz night", "Every Friday at 9 PM in #quiz. Kabir hosts. Sameer and Yash usually top the board.", 20, &["events"]),
+            m("snitch-rules", "Snitch rules", "Drops land in general, memes and desi-banter. Nobody may camp a channel.", 30, &["games"]),
+        ]
+    }
+
+    fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
+        let (start, end) = super::scorers::day_bounds(now, days_back);
+        let conn = fake_ledger(now).lock();
+        let ledger = super::scorers::read_ledger(&conn, start, end).ok()?;
+        let members: std::collections::HashMap<u64, String> =
+            (0..ROSTER.len() as u64).map(|i| (2000 + i, HOUSES_KEYS[(i % 4) as usize].to_string())).collect();
+        let messages = (0..ROSTER.len() as u64).map(|i| (2000 + i, ((i * 7 + days_back as u64 * 3) % 31) as i64)).collect();
+        let voice = (0..ROSTER.len() as u64).map(|i| (2000 + i, (((i * 13) % 75) * 60) as i64)).collect();
+        let optouts = [2043u64].into_iter().collect();
+        Some(super::scorers::assemble(ledger, &members, &messages, &voice, &optouts, 20, 3600))
     }
 }
 
@@ -952,6 +1077,131 @@ async fn agent_settings_are_limited_checked_and_audited() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+// --- members -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn member_notes_round_trip_with_preview_and_audit() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    const ZOYA: &str = "/api/members/1004";
+    let (status, _, _) = call(&app, "PUT", &format!("{ZOYA}/note"), Some(&session), Some(json!({ "tone": "roast", "notes": "RCB fan" })), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "changes need the panel header");
+    let (status, _, _) = call(&app, "PUT", &format!("{ZOYA}/note"), None, Some(json!({ "tone": "roast" })), true).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    for (body, want) in [
+        (json!({ "tone": "savage", "notes": "x" }), StatusCode::BAD_REQUEST),
+        (json!({ "tone": "normal", "notes": "   " }), StatusCode::BAD_REQUEST),
+        (json!({ "notes": "x".repeat(1001) }), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, got, _) = call(&app, "PUT", &format!("{ZOYA}/note"), Some(&session), Some(body.clone()), true).await;
+        assert_eq!(status, want, "{body} gave {got}");
+    }
+    let (status, _, _) = call(&app, "PUT", "/api/members/4242/note", Some(&session), Some(json!({ "notes": "who?" })), true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, draft, _) = call(&app, "POST", &format!("{ZOYA}/note/preview"), Some(&session), Some(json!({ "tone": "light_roast", "notes": "Disappears in exam season." })), true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(draft["text"].as_str().unwrap().contains("- @Zoya (light friendly teasing"));
+    let (_, empty, _) = call(&app, "GET", &format!("{ZOYA}/note/preview"), Some(&session), None, false).await;
+    assert!(empty["text"].is_null(), "nothing saved yet");
+
+    let (status, saved, _) = call(&app, "PUT", &format!("{ZOYA}/note"), Some(&session), Some(json!({ "tone": "roast", "notes": "RCB fan.\r\nTakes roasts well.", "use_in_replies": true })), true).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["note"]["name"], "Zoya");
+    assert_eq!(saved["note"]["updated_by"], ADMIN.to_string());
+    let (_, preview, _) = call(&app, "GET", &format!("{ZOYA}/note/preview"), Some(&session), None, false).await;
+    let text = preview["text"].as_str().unwrap();
+    assert!(text.contains("they enjoy being roasted") && text.contains("RCB fan. Takes roasts well.") && text.contains("never quote, reveal"));
+
+    let (_, found, _) = call(&app, "GET", "/api/members?q=zoy", Some(&session), None, false).await;
+    assert_eq!(found[0]["has_note"], true);
+    let (_, listed, _) = call(&app, "GET", "/api/members/notes", Some(&session), None, false).await;
+    assert!(listed.as_array().unwrap().iter().any(|n| n["user_id"] == "1004" && n["tone"] == "roast"));
+
+    call(&app, "PUT", &format!("{ZOYA}/note"), Some(&session), Some(json!({ "tone": "roast", "notes": "RCB fan.\nTakes roasts well.", "use_in_replies": false })), true).await;
+    let (_, preview, _) = call(&app, "GET", &format!("{ZOYA}/note/preview"), Some(&session), None, false).await;
+    assert!(preview["text"].is_null(), "switched off: the AI gets nothing");
+
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == "member:1004").collect();
+    assert_eq!(mine[0]["label"], "Notes for @Zoya");
+    assert_eq!(mine[0]["change"], "Switched off");
+    assert_eq!(mine[0]["section"]["id"], "members");
+    assert!(mine[0]["new"].is_null(), "note bodies are summarised, not dumped");
+
+    let (status, _, _) = call(&app, "DELETE", &format!("{ZOYA}/note"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = call(&app, "DELETE", &format!("{ZOYA}/note"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn member_profiles_bring_everything_together() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, p, _) = call(&app, "GET", "/api/members/2012", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(p["name"], "Sameer");
+    assert_eq!(p["house"]["key"], "gryffindor");
+    assert!(p["roles"].as_array().unwrap().iter().any(|r| r["name"] == "Gryffindor" && r["color"] == "#9b1b1b"));
+    assert_eq!(p["activity"]["hours"].as_array().unwrap().len(), 24);
+    assert_eq!(p["activity"]["top_channels"][0]["name"], "general");
+    let chips = p["points"]["activities"].as_array().unwrap();
+    assert_eq!(chips[0]["key"], "chat");
+    let quiz = chips.iter().find(|c| c["key"] == "quiz").unwrap();
+    assert_eq!(quiz["cap"], 6, "caps come from the live settings");
+    assert!(p["tones"].as_array().unwrap().len() == 6);
+    assert_eq!(p["joins"]["joins"], 3);
+
+    let (_, seen, _) = call(&app, "GET", "/api/members/2012/seen", Some(&session), None, false).await;
+    let first = &seen["messages"][0];
+    assert_eq!(first["channel"], "general");
+    assert!(first["kind"] == "chat" || first["kind"] == "silent_read");
+
+    let (_, mem, _) = call(&app, "GET", "/api/members/2012/memories", Some(&session), None, false).await;
+    let titles: Vec<&str> = mem["memories"].as_array().unwrap().iter().map(|m| m["title"].as_str().unwrap()).collect();
+    assert!(titles.contains(&"Sameer") && titles.contains(&"Running jokes") && titles.contains(&"Quiz night"));
+    assert!(!titles.contains(&"Snitch rules"));
+    assert!(mem["memories"][0]["snippet"].as_str().unwrap().to_lowercase().contains("sameer"));
+
+    let (status, _, _) = call(&app, "GET", "/api/members/424242", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "GET", "/api/members/abc", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "GET", "/api/members/2012", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn scorers_show_caps_and_leave_out_muggles() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, today, _) = call(&app, "GET", "/api/houses/scorers?day=today", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{today}");
+    let rows = today["rows"].as_array().unwrap();
+    assert!(!rows.is_empty() && rows.len() <= 300);
+    assert!(rows.windows(2).all(|w| w[0]["total"].as_i64() >= w[1]["total"].as_i64()), "biggest total first");
+    assert!(rows.iter().all(|r| r["id"] != "2043"), "Muggles are left out");
+    for r in rows {
+        for chip in r["activities"].as_array().unwrap() {
+            if chip["kind"] == "capped" {
+                if let (Some(pts), Some(cap)) = (chip["points"].as_i64(), chip["cap"].as_i64()) {
+                    assert_eq!(chip["reached"].as_bool().unwrap(), pts >= cap);
+                }
+            }
+        }
+    }
+    assert_eq!(today["chat_bar"], 20);
+    let (_, g, _) = call(&app, "GET", "/api/houses/scorers?day=yesterday&house=gryffindor", Some(&session), None, false).await;
+    assert!(g["rows"].as_array().unwrap().iter().all(|r| r["house"] == "gryffindor"));
+    assert_eq!(g["which"], "yesterday");
+    let (status, _, _) = call(&app, "GET", "/api/houses/scorers?day=tomorrow", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "GET", "/api/houses/scorers?house=durmstrang", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -1095,6 +1345,22 @@ async fn demo_server() {
         let first = super::super::autoreplies::list()[1].clone();
         super::super::autoreplies::save(&first, ADMIN_TWO).unwrap();
         super::super::log_change("agent:silent_read_initiative_chance", Some("0.02"), Some("0.04"), ADMIN).unwrap();
+    }
+
+    if super::super::members::list().is_empty() {
+        use super::super::members::{MemberNote, Tone};
+        let note = |id: u64, name: &str, tone: Tone, notes: &str| MemberNote {
+            user_id: id.to_string(),
+            name: name.into(),
+            tone,
+            notes: notes.into(),
+            use_in_replies: true,
+            updated_ts: 0,
+            updated_by: String::new(),
+        };
+        super::super::members::save(&note(2012, "Sameer", Tone::Roast, "Loud RCB fan, takes roasts about it well. Never calls him Sam."), ADMIN).unwrap();
+        super::super::members::save(&note(2003, "Meera", Tone::Brief, "Prefers short replies without emoji."), ADMIN_TWO).unwrap();
+        super::super::members::save(&note(2007, "Zoya", Tone::Gentle, "Going through exams; keep it kind and don't bring up her marks."), ADMIN).unwrap();
     }
 
     // Spread today's changes over the last few hours.

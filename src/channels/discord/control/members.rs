@@ -171,6 +171,12 @@ pub fn context_block(people: &[(u64, String)]) -> Option<String> {
     block(&lines)
 }
 
+/// What the AI would be given for this note on its own, whether or not it is
+/// saved or switched on - for the panel's live preview.
+pub fn preview(note: &MemberNote, name: &str) -> Option<String> {
+    block(&line_for(note, name).into_iter().collect::<Vec<_>>())
+}
+
 fn line_for(note: &MemberNote, name: &str) -> Option<String> {
     let notes: String = note.notes.trim().chars().take(MAX_NOTE_CHARS).collect();
     let tone = note.tone.instruction();
