@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.13] - 2026-09-14
+
+### 💼 Other
+
+- Wordle results pay house points; a card when a different house takes the lead
 ## [0.11.12] - 2026-09-14
 
 ### 💼 Other
 
 - Admins can set a reminder for another member (chat or /remind member:)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.12
 ## [0.11.11] - 2026-09-14
 
 ### 💼 Other
