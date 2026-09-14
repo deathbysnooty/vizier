@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.12] - 2026-09-14
+
+### 💼 Other
+
+- Admins can set a reminder for another member (chat or /remind member:)
 ## [0.11.11] - 2026-09-14
 
 ### 💼 Other
 
 - Members set their own by asking the bot or with /remind
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.11
 ## [0.11.10] - 2026-09-14
 
 ### 💼 Other
