@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.5] - 2026-09-14
+
+### 💼 Other
+
+- Daily battle royale at a set time, tagging the houses
+- Insights - reply and mention tallies, back-and-forths, one-sided pairs, rivalries, connections
 ## [0.11.4] - 2026-09-14
 
 ### 💼 Other
 
 - Activity tiers, analyse all active members, auto-filled notes that wait for review
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.4
 ## [0.11.3] - 2026-09-14
 
 ### 💼 Other
