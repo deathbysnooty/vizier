@@ -13,6 +13,7 @@
 pub mod autoreplies;
 pub mod catalog;
 pub mod members;
+pub mod profiles;
 pub mod reminders;
 pub mod scheduler;
 pub mod web;
@@ -57,6 +58,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     reminders::migrate(&conn)?;
     autoreplies::migrate(&conn)?;
     members::migrate(&conn)?;
+    profiles::migrate(&conn)?;
     let loaded = {
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;

@@ -90,6 +90,7 @@ impl PanelData for FakeData {
             ch(41, "Lounge", Voice, voice, 0),
             ch(42, "Gaming", Voice, voice, 1),
             ch(43, "AFK", Voice, voice, 2),
+            ch(SAFE, "safe-corner", Text, chat, 4),
         ]
     }
 
@@ -286,6 +287,96 @@ impl PanelData for FakeData {
         ]
     }
 
+    async fn activity(&self, now: i64) -> Vec<super::super::profiles::Activity> {
+        let conn = fake_ledger(now).lock();
+        let mut points = std::collections::HashMap::new();
+        let _ = super::profiles::ledger_points(&conn, now - 30 * 86_400, &mut |u, _, n| {
+            points.insert(u, n);
+        });
+        (0..ROSTER.len() as u64)
+            .map(|i| super::super::profiles::Activity {
+                user_id: 2000 + i,
+                messages: ((i * 37 + 11) % 97) as i64 * 9,
+                voice_secs: ((i * 53 + 7) % 41) as i64 * 1_500,
+                points: points.get(&(2000 + i)).copied().unwrap_or(0),
+                house: Some(HOUSES_KEYS[(i % 4) as usize].to_string()),
+                muggle: i == 43,
+            })
+            .collect()
+    }
+
+    async fn member_messages(&self, id: u64, now: i64) -> Vec<super::super::profiles::RawMessage> {
+        let m = |ago: i64, channel: u64, dm: bool, text: &str| super::super::profiles::RawMessage {
+            ts: now - ago,
+            channel_id: Some(channel),
+            parent_id: None,
+            is_dm: dm,
+            text: text.to_string(),
+        };
+        let chatter = [
+            (21, "gm gm, chai ready? ☕"),
+            (23, "RCB this year for sure, write it down"),
+            (32, "koto today was brutal, took me 6 tries"),
+            (22, "this meme is Dev every monday 💀"),
+            (21, "Loduchand who is winning the house cup"),
+            (24, "Arijit on loop again"),
+            (32, "quiz night friday? I'm in"),
+            (23, "bhai <@2010> your fantasy team has 4 bowlers https://fantasy.example.com/team/9"),
+        ];
+        let mut out: Vec<_> = (0..48).map(|i| {
+            let (c, t) = chatter[i % chatter.len()];
+            m(3_000 + i as i64 * 40_000, c, false, t)
+        }).collect();
+        out.push(m(5_000, SAFE, false, "SECRET-SAFE I've been struggling a lot lately"));
+        out.push(m(6_000, 77, false, "SECRET-THREAD in a thread under safe corner"));
+        out.push(m(7_000, 5_000, true, "SECRET-DM just between you and me"));
+        out.push(m(8_000, 999, false, "SECRET-UNKNOWN somewhere private"));
+        out.push(m(9_000, 21, false, "[replying to @Dev: \"SECRET-QUOTE someone else's words\"]\nlol same"));
+        let _ = id;
+        out
+    }
+
+    fn thread_parent(&self, channel: u64) -> Option<u64> {
+        (channel == 77).then_some(SAFE)
+    }
+
+    async fn ask_model(&self, prompt: String) -> anyhow::Result<(String, String)> {
+        use std::sync::atomic::Ordering;
+        PROMPTS.lock().push(prompt);
+        let call = MODEL_CALLS.fetch_add(1, Ordering::SeqCst);
+        let delay = MODEL_DELAY_MS.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        let bad = match MODEL_MODE.load(Ordering::SeqCst) {
+            0 => false,
+            1 => {
+                MODEL_MODE.store(0, Ordering::SeqCst);
+                true
+            }
+            _ => true,
+        };
+        let _ = call;
+        if bad {
+            return Ok(("Sorry, I can't help with that.".into(), "fake/model-1".into()));
+        }
+        Ok((
+            json!({
+                "summary": "Shows up most evenings in #general and #desi-banter with cricket takes and quiz chatter. Plays Koto and quiz nights regularly, often teasing <@2010> about fantasy picks. Friendly, fast replies. See https://example.com",
+                "interests": ["cricket (RCB)", "quiz nights", "Koto", "memes", "Arijit songs"],
+                "style": "Short Hinglish messages, lots of 💀 and ☕, jokes more than arguments.",
+                "games": "Regular in quiz and Koto; wins some fights, caught a few Snitches.",
+                "vibe_with_bot": "Asks the bot for standings and hints; playful.",
+                "suggested_tone": "light_roast",
+                "tone_reason": "Enjoys banter and dishes it out himself.",
+                "roast_material": ["six tries at Koto on a good day", "the annual RCB prediction"],
+                "avoid": ["exam results"]
+            })
+            .to_string(),
+            "fake/model-1".into(),
+        ))
+    }
+
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
         let (start, end) = super::scorers::day_bounds(now, days_back);
         let conn = fake_ledger(now).lock();
@@ -298,6 +389,14 @@ impl PanelData for FakeData {
         Some(super::scorers::assemble(ledger, &members, &messages, &voice, &optouts, 20, 3600))
     }
 }
+
+const SAFE: u64 = 1543162777642868736;
+
+/// How the fake model answers: 0 well, 1 badly once then well, 2 always badly.
+static MODEL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static MODEL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MODEL_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PROMPTS: std::sync::LazyLock<parking_lot::Mutex<Vec<String>>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
 const HOUSES_KEYS: [&str; 4] = ["gryffindor", "slytherin", "ravenclaw", "hufflepuff"];
 
@@ -1202,6 +1301,158 @@ async fn scorers_show_caps_and_leave_out_muggles() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// --- member analyses -------------------------------------------------------------------
+
+async fn wait_for_job(app: &Router, session: &str) -> Value {
+    for _ in 0..400 {
+        let (_, job, _) = call(app, "GET", "/api/profiles/job", Some(session), None, false).await;
+        if job["job"]["running"] == false {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the job never finished");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_analyses_end_to_end() {
+    use std::sync::atomic::Ordering;
+    let app = panel();
+    let session = session_for(ADMIN);
+    const SAMEER: &str = "2012";
+
+    // Most active: shares per category, overall is their mean.
+    let (status, active, _) = call(&app, "GET", "/api/profiles/active?by=overall&limit=100", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{active}");
+    assert_eq!(active["window_days"], 30);
+    let rows = active["rows"].as_array().unwrap();
+    assert!(rows.windows(2).all(|w| w[0]["score"].as_f64() >= w[1]["score"].as_f64()));
+    let sum: f64 = rows.iter().map(|r| r["shares"]["chat"].as_f64().unwrap()).sum();
+    assert!((sum - 1.0).abs() < 1e-6, "chat shares add up to the whole server");
+    let r0 = &rows[0];
+    let mean = (r0["shares"]["chat"].as_f64().unwrap() + r0["shares"]["voice"].as_f64().unwrap() + r0["shares"]["games"].as_f64().unwrap()) / 3.0;
+    assert!((r0["score"].as_f64().unwrap() - mean).abs() < 1e-9);
+    assert!(rows.iter().any(|r| r["muggle"] == true), "Muggles are listed and marked");
+    let (_, by_voice, _) = call(&app, "GET", "/api/profiles/active?by=voice", Some(&session), None, false).await;
+    let v = by_voice["rows"].as_array().unwrap();
+    assert!(v.windows(2).all(|w| w[0]["voice_min"].as_i64() >= w[1]["voice_min"].as_i64()));
+    let (status, _, _) = call(&app, "GET", "/api/profiles/active?by=karma", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // What would be sent: no safe-corner, thread, DM, unknown channel or quoted words.
+    let (_, prompt, _) = call(&app, "GET", &format!("/api/profiles/{SAMEER}/prompt"), Some(&session), None, false).await;
+    let text = prompt["prompt"].as_str().unwrap();
+    assert!(!text.contains("SECRET"), "sensitive text reached the prompt");
+    assert!(text.contains("NEVER infer") && text.contains("lol same") && text.contains("@Dev your fantasy team") && text.contains("[link]"));
+    assert!(!text.contains("safe-corner"));
+    assert_eq!(prompt["messages"], 49);
+
+    // Analyse one member.
+    MODEL_MODE.store(0, Ordering::SeqCst);
+    let (status, started, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": [SAMEER], "force": true })), true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["status"], "done", "{job}");
+    assert!(PROMPTS.lock().iter().all(|p| !p.contains("SECRET")));
+    let (_, got, _) = call(&app, "GET", &format!("/api/profiles/{SAMEER}"), Some(&session), None, false).await;
+    let p = &got["profile"];
+    assert_eq!(p["status"], "draft");
+    let summary = p["fields"]["summary"]["value"].as_str().unwrap();
+    assert!(!summary.contains("<@") && !summary.contains("https"), "{summary}");
+    assert_eq!(p["fields"]["suggested_tone"]["value"], "light_roast");
+    assert_eq!(p["messages_analysed"], 49);
+
+    // Skipped when fresh, unless forced.
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": [SAMEER] })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["status"], "skipped");
+
+    // An unreadable answer is asked again once; twice fails.
+    MODEL_MODE.store(1, Ordering::SeqCst);
+    let before = MODEL_CALLS.load(Ordering::SeqCst);
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": ["2010"], "force": true })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["status"], "done");
+    assert_eq!(MODEL_CALLS.load(Ordering::SeqCst) - before, 2);
+    MODEL_MODE.store(2, Ordering::SeqCst);
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": ["2011"], "force": true })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["status"], "failed");
+    MODEL_MODE.store(0, Ordering::SeqCst);
+
+    // One job at a time, and it can be cancelled.
+    MODEL_DELAY_MS.store(150, Ordering::SeqCst);
+    let (status, _, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "top": 5, "force": true })), true).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, _, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "top": 2 })), true).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = call(&app, "DELETE", "/api/profiles/job", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let job = wait_for_job(&app, &session).await;
+    MODEL_DELAY_MS.store(0, Ordering::SeqCst);
+    assert!(job["job"]["items"].as_array().unwrap().iter().any(|i| i["status"] == "cancelled"), "{job}");
+    let (status, _, _) = call(&app, "DELETE", "/api/profiles/job", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for bad in [json!({ "top": 51 }), json!({}), json!({ "user_ids": ["abc"] })] {
+        let (status, _, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(bad), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // Editing keeps the AI's original.
+    let edit = json!({ "edits": { "summary": "Evening regular: cricket, quiz nights and Koto.", "avoid": ["exam results", "his job"] } });
+    let (status, edited, _) = call(&app, "PUT", &format!("/api/profiles/{SAMEER}"), Some(&session), Some(edit), true).await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let f = &edited["profile"]["fields"]["summary"];
+    assert_eq!(f["edited"], true);
+    assert!(f["original"].as_str().unwrap().starts_with("Shows up most evenings"));
+    for bad in [json!({ "edits": { "suggested_tone": "savage" } }), json!({ "edits": { "interests": vec!["x"; 7] } }), json!({ "edits": { "provider": "x" } })] {
+        let (status, _, _) = call(&app, "PUT", &format!("/api/profiles/{SAMEER}"), Some(&session), Some(bad.clone()), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (_, reviewed, _) = call(&app, "PUT", &format!("/api/profiles/{SAMEER}"), Some(&session), Some(json!({ "status": "reviewed" })), true).await;
+    assert_eq!(reviewed["profile"]["status"], "reviewed");
+
+    // Adding to notes: preview, then write; refused when too long.
+    super::super::members::delete(2012, ADMIN).ok();
+    let pick = json!({ "fields": ["summary", "avoid"], "tone": true });
+    let (_, preview, _) = call(&app, "POST", &format!("/api/profiles/{SAMEER}/apply/preview"), Some(&session), Some(pick.clone()), true).await;
+    assert_eq!(preview["fits"], true);
+    assert!(preview["note"].as_str().unwrap().starts_with("From the analysis:\nSummary: Evening regular"));
+    assert!(preview["context_block"].as_str().unwrap().contains("light friendly teasing"));
+    let (status, applied, _) = call(&app, "POST", &format!("/api/profiles/{SAMEER}/apply"), Some(&session), Some(pick.clone()), true).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    let note = super::super::members::get(2012).unwrap();
+    assert_eq!(note.tone, super::super::members::Tone::LightRoast);
+    assert!(note.notes.contains("Avoid: exam results; his job"));
+    let long = super::super::members::MemberNote { notes: "x".repeat(950), ..note.clone() };
+    super::super::members::save(&long, ADMIN).unwrap();
+    let (status, err, _) = call(&app, "POST", &format!("/api/profiles/{SAMEER}/apply"), Some(&session), Some(pick), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"].as_str().unwrap().contains("characters over"));
+    let (status, _, _) = call(&app, "POST", &format!("/api/profiles/{SAMEER}/apply"), Some(&session), Some(json!({ "fields": ["provider"] })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The log names actions, not text.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let changes: Vec<String> = audit.as_array().unwrap().iter().filter(|e| e["key"] == "profile:2012").map(|e| e["change"].as_str().unwrap().to_string()).collect();
+    for want in ["Generated", "Edited: Summary, Avoid", "Marked reviewed", "Added to notes: Summary, Avoid, Suggested tone"] {
+        assert!(changes.iter().any(|c| c == want), "{want} missing from {changes:?}");
+    }
+    assert!(!audit.to_string().contains("Evening regular"), "no analysis text in the log");
+
+    // Delete; auth and header like everything else.
+    let (status, _, _) = call(&app, "DELETE", &format!("/api/profiles/{SAMEER}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, gone, _) = call(&app, "GET", &format!("/api/profiles/{SAMEER}"), Some(&session), None, false).await;
+    assert!(gone["profile"].is_null());
+    let (status, _, _) = call(&app, "GET", "/api/profiles/active", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "top": 1 })), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = call(&app, "GET", "/api/profiles/active", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -1362,6 +1613,58 @@ async fn demo_server() {
         super::super::members::save(&note(2003, "Meera", Tone::Brief, "Prefers short replies without emoji."), ADMIN_TWO).unwrap();
         super::super::members::save(&note(2007, "Zoya", Tone::Gentle, "Going through exams; keep it kind and don't bring up her marks."), ADMIN).unwrap();
     }
+
+    if super::super::profiles::get(2012).is_none() {
+        use super::super::profiles::{Analysis, Profile, Status};
+        let now = chrono::Utc::now().timestamp();
+        let profile = |id: u64, name: &str, status: Status, ai: Analysis, edits: Vec<(&str, Value)>| Profile {
+            user_id: id.to_string(),
+            name: name.into(),
+            ai,
+            edits: edits.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            status,
+            stats: json!({}),
+            messages_analysed: 212,
+            chars_analysed: 11_480,
+            window_days: 30,
+            generated_ts: now - 5 * 3600,
+            generated_by: ADMIN.to_string(),
+            model: "openrouter/google/gemini-2.5-flash".into(),
+            edited_ts: now - 3600,
+            edited_by: ADMIN_TWO.to_string(),
+        };
+        let sameer = Analysis {
+            summary: "Shows up most evenings in #general and #desi-banter, usually with cricket takes, fantasy-league trash talk and quiz-night chatter. Plays Koto and the Friday quiz regularly and jumps into Snitch drops fast. Friendly and quick to reply; starts more jokes than arguments.".into(),
+            interests: vec!["Cricket, especially RCB".into(), "Friday quiz nights".into(), "Koto".into(), "Memes".into(), "Arijit Singh songs".into()],
+            style: "Short Hinglish messages, often several in a row. Heavy on 💀 and ☕, light on punctuation.".into(),
+            games: "Top-10 Gryffindor scorer: quiz and Snitch catches carry most of his points; wins a bit over half his fights.".into(),
+            vibe_with_bot: "Asks the bot for standings, Koto hints and to roast friends' fantasy teams; takes jokes back well.".into(),
+            suggested_tone: super::super::members::Tone::LightRoast,
+            tone_reason: "Enjoys banter and dishes it out himself, but keep it about the game.".into(),
+            roast_material: vec!["Needs six tries at Koto on a good day".into(), "Predicts an RCB title every single April".into()],
+            avoid: vec!["Exam or work results".into()],
+        };
+        super::super::profiles::save(
+            &profile(2012, "Sameer", Status::Draft, sameer, vec![("avoid", json!(["Exam or work results", "His fantasy team's actual rank"]))]),
+            ADMIN,
+            "generated",
+            &[],
+        )
+        .unwrap();
+        let meera = Analysis {
+            summary: "A steady presence in #quiz and #general who mostly answers other people's questions. Rarely starts conversations but is reliable at quiz nights.".into(),
+            interests: vec!["Quizzes".into(), "Books".into()],
+            style: "Full sentences, no emoji, polite.".into(),
+            games: "Quiz points almost every day; rarely fights.".into(),
+            vibe_with_bot: "Uses the bot for quiz questions only.".into(),
+            suggested_tone: super::super::members::Tone::Brief,
+            tone_reason: "Prefers short, straightforward replies.".into(),
+            roast_material: vec![],
+            avoid: vec![],
+        };
+        super::super::profiles::save(&profile(2003, "Meera", Status::Reviewed, meera, vec![]), ADMIN_TWO, "reviewed", &[]).unwrap();
+    }
+    MODEL_DELAY_MS.store(2500, std::sync::atomic::Ordering::SeqCst);
 
     // Spread today's changes over the last few hours.
     DB.get()

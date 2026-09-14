@@ -679,7 +679,9 @@
 
   function navigate(href) { if (location.hash === href) rerender(); else location.hash = href; }
 
-  function dirtyCount() { return S.fields.filter((f) => f.dirty()).length + (S.guard ? S.guard() : 0); }
+  function dirtyCount() {
+    return S.fields.filter((f) => f.dirty()).length + (S.guard ? S.guard() : 0) + (S.guards || []).reduce((n, g) => n + g.count(), 0);
+  }
 
   async function onHashChange() {
     if (!S.booted) return;
@@ -705,6 +707,7 @@
     layers.filter((l) => l.popover || l.drawer).forEach((l) => l.close());
     S.fields = [];
     S.guard = null;
+    S.guards = [];
     S.discard = null;
     if (agentBar) { agentBar.remove(); agentBar = null; }
     renderSidebar();
@@ -2802,6 +2805,8 @@
   function renderMembers(page) {
     document.title = 'Members · Loduchand';
     page.appendChild(pageHead('Members', 'Look anyone up: their points, activity, what the bot has seen from them, and the mods’ private notes it uses when it replies.'));
+    page.appendChild(activeSection());
+    page.appendChild(h('div', { class: 'section-title' }, h('h2', null, 'Find a member')));
     const input = h('input', { type: 'search', placeholder: 'Search members by name', 'aria-label': 'Search members', autocomplete: 'off', spellcheck: 'false' });
     const results = h('ul', { class: 'member-results', 'aria-live': 'polite' });
     let timer = null, seq = 0;
@@ -2837,7 +2842,6 @@
         n.use_in_replies ? null : h('span', { class: 'badge paused' }, 'Not used in replies'))));
       notesCard.appendChild(grid);
     }).catch((e) => { clear(notesCard).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); });
-    requestAnimationFrame(() => input.focus({ preventScroll: true }));
   }
 
   function toneLabel(t) { return ({ normal: 'Normal', gentle: 'Gentle', light_roast: 'Light roast', roast: 'Roast', respectful: 'Respectful', brief: 'Brief' })[t] || t; }
@@ -2846,7 +2850,7 @@
 
   async function renderProfile(page, id, tab) {
     document.title = 'Member · Loduchand';
-    profileState.tab = ['overview', 'seen', 'memories'].includes(tab) ? tab : 'overview';
+    profileState.tab = ['overview', 'seen', 'memories', 'analysis'].includes(tab) ? tab : 'overview';
     page.appendChild(h('a', { class: 'back-link', href: '#/members' }, icon('left'), 'Members'));
     const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the profile…'));
     page.appendChild(holder);
@@ -2893,12 +2897,13 @@
       const hash = '#/members/' + p.id + (key === 'overview' ? '' : '/' + key);
       if (location.hash !== hash) { history.replaceState(null, '', hash); currentHash = hash; }
       clear(panel);
-      if (key === 'seen') profileSeen(panel, p);
+      if (key === 'analysis') profileAnalysis(panel, p, show);
+      else if (key === 'seen') profileSeen(panel, p);
       else if (key === 'memories') profileMemories(panel, p);
       else profileOverview(panel, p);
     };
     const tabs = h('nav', { class: 'page-tabs', 'aria-label': 'Profile sections' },
-      [['overview', 'Overview', 'overview'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
+      [['overview', 'Overview', 'overview'], ['analysis', 'Bot’s analysis', 'flask'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
         h('a', { href: '#/members/' + p.id + (key === 'overview' ? '' : '/' + key), dataset: { tab: key }, onclick: (e) => { e.preventDefault(); show(key); } }, icon(ic), label)));
     main.appendChild(tabs);
     main.appendChild(panel);
@@ -3105,6 +3110,351 @@
     const span = h('span', null, '…');
     memberById(id).then((m) => { span.textContent = m ? m.name : 'an admin'; });
     return span;
+  }
+
+  // --- member analyses ----------------------------------------------------------------------
+
+  const activeState = { by: 'overall', limit: 20, selected: new Set(), data: null, job: null, poll: null };
+  const STATUS_LABEL = { draft: 'Draft', reviewed: 'Reviewed' };
+
+  function analysisChip(profile, id) {
+    if (!profile) return h('span', { class: 'badge off' }, 'No analysis');
+    const cls = profile.status === 'reviewed' ? 'badge on' : 'badge src-panel';
+    return h('a', { class: cls + ' analysis-chip', href: '#/members/' + id + '/analysis' }, profile.status === 'reviewed' ? icon('check') : icon('flask'), STATUS_LABEL[profile.status] || profile.status);
+  }
+
+  async function startAnalysis(body) {
+    try {
+      const r = await api('POST', '/profiles/analyse', body);
+      activeState.job = r.job;
+      return r.job;
+    } catch (e) {
+      toast(e.message, 'error');
+      return null;
+    }
+  }
+
+  /** Polls the job while `holder` is on the page, redrawing it; `onDone` runs once when it ends. */
+  function watchJob(holder, onDone) {
+    clearInterval(activeState.poll);
+    let wasRunning = activeState.job && activeState.job.running;
+    const draw = () => { clear(holder); const el = jobPanel(activeState.job); if (el) holder.appendChild(el); };
+    const tick = async () => {
+      if (!holder.isConnected) { clearInterval(activeState.poll); return; }
+      try {
+        const r = await api('GET', '/profiles/job');
+        activeState.job = r.job;
+      } catch (_) { return; }
+      draw();
+      const running = activeState.job && activeState.job.running;
+      if (wasRunning && !running) { clearInterval(activeState.poll); if (onDone) onDone(activeState.job); }
+      if (!running) clearInterval(activeState.poll);
+      wasRunning = running;
+    };
+    draw();
+    tick();
+    activeState.poll = setInterval(tick, 2000);
+  }
+
+  function jobPanel(job) {
+    if (!job) return null;
+    const finishedLongAgo = job.finished_ts && Date.now() / 1000 - job.finished_ts > 15 * 60;
+    if (finishedLongAgo) return null;
+    const settled = job.done + job.skipped + job.failed + job.items.filter((i) => i.status === 'cancelled').length;
+    const pct = job.total ? Math.round((settled / job.total) * 100) : 0;
+    const running = job.items.find((i) => i.status === 'running');
+    const title = job.running
+      ? (job.cancelled ? 'Stopping after the current member…' : 'Analysing ' + (running ? running.name : 'members') + '…')
+      : (job.cancelled ? 'Analysis cancelled' : 'Analysis finished');
+    const summary = [job.done + ' done', job.skipped ? job.skipped + ' skipped (analysed in the last day)' : null, job.failed ? job.failed + ' failed' : null].filter(Boolean).join(' · ');
+    return h('div', { class: 'job' + (job.running ? ' running' : ''), role: 'status' },
+      h('div', { class: 'job-head' }, job.running ? h('span', { class: 'spinner' }) : icon(job.failed ? 'alert' : 'check'),
+        h('div', { class: 'grow' }, h('b', null, title), h('small', null, settled + ' of ' + job.total + ' · ' + summary)),
+        job.running && !job.cancelled ? h('button', { class: 'btn sm', type: 'button', onclick: async () => {
+          try { const r = await api('DELETE', '/profiles/job'); activeState.job = r.job; toast('Stopping after the current member', 'info'); } catch (e) { toast(e.message, 'error'); }
+        } }, icon('x'), 'Cancel') : null),
+      h('div', { class: 'job-bar', 'aria-hidden': 'true' }, h('i', { style: 'width:' + pct + '%' })),
+      h('ul', { class: 'job-items' }, job.items.map((i) => h('li', { class: 'job-item ' + i.status, title: i.detail || '' },
+        h('span', { class: 'job-dot', 'aria-hidden': 'true' }), h('a', { href: '#/members/' + i.user_id + '/analysis' }, i.name),
+        h('small', null, ({ queued: 'waiting', running: 'analysing', done: 'done', skipped: 'skipped', failed: 'failed', cancelled: 'cancelled' })[i.status] || i.status)))));
+  }
+
+  function activeSection() {
+    const st = activeState;
+    const wrap = h('section', { class: 'active-wrap', 'aria-label': 'Most active members' });
+    const jobHolder = h('div', null);
+    const list = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Ranking members…'));
+    const selectedBtn = h('button', { class: 'btn sm', type: 'button', disabled: true }, icon('flask'), 'Analyse selected');
+    const topBtn = h('button', { class: 'btn sm primary', type: 'button' }, icon('zap'), 'Analyse top 20');
+    const updateSelected = () => {
+      selectedBtn.disabled = !st.selected.size;
+      selectedBtn.lastChild.textContent = st.selected.size ? 'Analyse selected (' + st.selected.size + ')' : 'Analyse selected';
+    };
+    const confirmRun = async (count, body) => {
+      const ok = await confirmDialog({ title: 'Analyse ' + plural(count, 'member') + '?', icon: 'flask', confirm: 'Start',
+        body: h('div', { class: 'restart-body' },
+          h('p', null, 'The bot’s model reads each member’s last 30 days of messages it has stored (never #safe-corner or DMs) and their numbers, one member at a time. It takes a few seconds each.'),
+          h('p', null, 'Members analysed in the last day are skipped. The results are drafts for mods; the bot doesn’t use them until you add them to notes.')) });
+      if (!ok) return;
+      const job = await startAnalysis(body);
+      if (job) { st.selected.clear(); updateSelected(); watchJob(jobHolder, () => load()); drawList(); }
+    };
+    selectedBtn.addEventListener('click', () => confirmRun(st.selected.size, { user_ids: [...st.selected] }));
+    topBtn.addEventListener('click', () => confirmRun(20, { top: 20 }));
+
+    const load = async () => {
+      try { st.data = await api('GET', '/profiles/active?by=' + st.by + '&limit=50'); }
+      catch (e) { clear(list).appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); return; }
+      drawList();
+    };
+    const drawList = () => {
+      clear(list);
+      if (!st.data) return;
+      const rows = st.data.rows.slice(0, st.limit);
+      if (!rows.length) { list.appendChild(h('div', { class: 'empty' }, icon('users'), h('h3', null, 'No activity yet'), h('p', null, 'Messages, voice and game points from the last 30 days show up here.'))); return; }
+      const max = (k) => Math.max(1, ...st.data.rows.map((r) => r[k]));
+      const [mm, mv, mp] = [max('messages'), max('voice_min'), max('points')];
+      const table = h('ol', { class: 'active-list' });
+      rows.forEach((r) => {
+        const box = h('input', { type: 'checkbox', checked: st.selected.has(r.id), 'aria-label': 'Select ' + (r.name || r.id) });
+        box.addEventListener('change', () => { if (box.checked) st.selected.add(r.id); else st.selected.delete(r.id); updateSelected(); });
+        const metric = (value, of, text, slot, sort) => h('span', { class: 'metric' + (st.by === sort ? ' sorted' : '') },
+          h('b', null, text), h('span', { class: 'metric-bar', 'aria-hidden': 'true' }, h('i', { style: 'width:' + Math.max(value ? 3 : 0, Math.round((value / of) * 100)) + '%;background:var(--s' + slot + ')' })));
+        table.appendChild(h('li', { class: 'active-row' },
+          h('label', { class: 'active-check' }, box),
+          h('span', { class: 'sr-rank' }, r.rank),
+          h('div', { class: 'sr-who' }, avatar(r.avatar, r.name || '?', 'lg'),
+            h('div', { style: 'min-width:0' }, h('a', { class: 'sr-name', href: '#/members/' + r.id }, r.name || 'Former member'),
+              h('span', { class: 'active-tags' }, r.house ? h('span', { class: 'house-chip', style: '--house:' + r.house.colour }, r.house.crest + ' ' + r.house.name) : null,
+                r.muggle ? h('span', { class: 'badge paused' }, 'Muggle') : null))),
+          metric(r.messages, mm, numberFmt.format(r.messages) + ' msgs', 1, 'chat'),
+          metric(r.voice_min, mv, duration(r.voice_min * 60), 2, 'voice'),
+          metric(r.points, mp, numberFmt.format(r.points) + ' pts', 3, 'games'),
+          h('span', { class: 'active-status' }, analysisChip(r.profile, r.id))));
+      });
+      list.appendChild(h('div', { class: 'active-head', 'aria-hidden': 'true' }, h('span', null), h('span', null), h('span', null, 'Member'),
+        h('span', null, h('i', { style: 'background:var(--s1)' }), 'Chat'), h('span', null, h('i', { style: 'background:var(--s2)' }), 'Voice'),
+        h('span', null, h('i', { style: 'background:var(--s3)' }), 'Game points'), h('span', null, 'Analysis')));
+      list.appendChild(table);
+      if (st.data.rows.length > st.limit) list.appendChild(h('div', { class: 'more-row' }, h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { st.limit = 50; drawList(); } }, 'Show top ' + Math.min(50, st.data.rows.length))));
+    };
+
+    append(wrap, [
+      h('div', { class: 'section-title' }, h('h2', null, 'Most active'), h('span', null, 'Last 30 days · chat, voice and games')),
+      h('div', { class: 'card active-card' },
+        h('div', { class: 'active-toolbar' },
+          segmented([['overall', 'Overall'], ['chat', 'Chat'], ['voice', 'Voice'], ['games', 'Games']], st.by, 'Rank by', (v) => { st.by = v; st.data = null; clear(list).appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Ranking members…')); load(); }),
+          h('span', { class: 'grow' }), selectedBtn, topBtn),
+        h('p', { class: 'active-explain' }, icon('info'), h('span', null, h('b', null, 'Overall'), ' is the average of each member’s share of all messages, all voice time and all game points on the server in the last 30 days, so being big in one counts as much as being steady in all three. Bots are left out; mods’ and weekly awards don’t count as game points.')),
+        jobHolder, list),
+    ]);
+    updateSelected();
+    load();
+    api('GET', '/profiles/job').then((r) => { activeState.job = r.job; watchJob(jobHolder, () => load()); }).catch(() => {});
+    return wrap;
+  }
+
+  // The analysis tab on a member's profile.
+  async function profileAnalysis(panel, p, show) {
+    panel.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the analysis…'));
+    let got;
+    try { got = await api('GET', '/profiles/' + p.id); } catch (e) { clear(panel).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+    if (!panel.isConnected) return;
+    clear(panel);
+    const jobHolder = h('div', null);
+    const reanalyse = async (force) => {
+      const job = await startAnalysis({ user_ids: [p.id], force: true });
+      if (!job) return;
+      watchJob(jobHolder, (j) => {
+        const item = j && j.items.find((i) => i.user_id === p.id);
+        if (item && item.status === 'failed') toast('The analysis failed: ' + (item.detail || 'unknown error'), 'error');
+        if (panel.isConnected) { clear(panel); profileAnalysis(panel, p, show); }
+      });
+    };
+    const inputBtn = h('button', { class: 'btn sm ghost', type: 'button', onclick: () => showPrompt(p) }, icon('eye'), 'Show the exact input');
+    const seenLink = h('a', { class: 'open-link', href: '#/members/' + p.id + '/seen', onclick: (e) => { e.preventDefault(); show('seen'); } }, 'What the bot sees', icon('right'));
+    const privacy = h('p', { class: 'analysis-privacy' }, icon('shield'), h('span', null, 'Drafts are for mods only. The bot doesn’t use them until you add them to notes.'));
+
+    if (!got.profile) {
+      panel.appendChild(h('section', { class: 'card' },
+        h('div', { class: 'empty analysis-empty' }, icon('flask'), h('h3', null, 'No analysis yet'),
+          h('p', null, 'The bot’s model can read what ' + p.name + ' wrote in the last 30 days (never #safe-corner or DMs) and their numbers, and draft a summary for mods to edit.'),
+          h('div', { class: 'analysis-empty-actions' }, h('button', { class: 'btn primary', type: 'button', onclick: () => reanalyse(false) }, icon('flask'), 'Analyse now'), inputBtn),
+          privacy),
+        jobHolder));
+      api('GET', '/profiles/job').then((r) => { activeState.job = r.job; if (r.job && r.job.running) watchJob(jobHolder, () => { if (panel.isConnected) { clear(panel); profileAnalysis(panel, p, show); } }); }).catch(() => {});
+      return;
+    }
+
+    const prof = got.profile;
+    const draft = {};
+    Object.keys(prof.fields).forEach((k) => { draft[k] = JSON.parse(JSON.stringify(prof.fields[k].value)); });
+    const base = JSON.stringify(draft);
+    const dirtyFields = () => Object.keys(draft).filter((k) => JSON.stringify(draft[k]) !== JSON.stringify(prof.fields[k].value));
+    S.guards = (S.guards || []).filter((g) => g.kind !== 'analysis');
+    S.guards.push({ kind: 'analysis', count: () => (panel.isConnected ? dirtyFields().length : 0) });
+
+    const saveBtn = h('button', { class: 'btn primary', type: 'button', disabled: true }, 'Save edits');
+    const dirtyNote = h('span', { class: 'notes-status' });
+    const refreshState = () => {
+      const n = dirtyFields().length;
+      saveBtn.disabled = !n;
+      clear(dirtyNote);
+      if (n) dirtyNote.appendChild(h('span', { class: 'badge unsaved' }, h('span', { class: 'dot' }), plural(n, 'unsaved edit')));
+    };
+
+    const statusChip = prof.status === 'reviewed' ? h('span', { class: 'badge on' }, icon('check'), 'Reviewed') : h('span', { class: 'badge src-panel' }, icon('flask'), 'Draft');
+    const byName = memberName(prof.generated_by);
+    const meta = h('p', { class: 'analysis-meta' },
+      'Generated ' + fmtFull.format(new Date(prof.generated_ts * 1000)) + ' IST by ', byName,
+      ' · last ' + prof.window_days + ' days · ' + plural(prof.messages_analysed, 'message') + ' (' + numberFmt.format(prof.chars_analysed) + ' characters)' + (prof.model ? ' · ' + prof.model : ''));
+
+    const fieldCard = (key) => {
+      const f = prof.fields[key];
+      const box = h('div', { class: 'afield' + (f.edited ? ' edited' : '') });
+      const origin = h('div', { class: 'afield-original', hidden: true });
+      const control = h('div', null);
+      const drawControl = () => {
+        clear(control);
+        if (key === 'suggested_tone') {
+          const tones = (p.tones || []).map((t) => [t.value, (TONE_ICONS[t.value] || '') + ' ' + t.label]);
+          control.appendChild(segmented(tones, draft[key], 'Suggested tone', (v) => { draft[key] = v; refreshState(); }));
+        } else if (f.list) {
+          const list = draft[key];
+          const chips = h('div', { class: 'chip-input' });
+          const input = h('input', { type: 'text', placeholder: list.length >= 6 ? 'Six is the most' : 'Add, then Enter', maxlength: '120', disabled: list.length >= 6, 'aria-label': 'Add to ' + f.label });
+          list.forEach((item, i) => chips.appendChild(h('span', { class: 'chip' }, h('span', { class: 'chip-text' }, item),
+            h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + item, onclick: () => { list.splice(i, 1); drawControl(); refreshState(); } }, icon('x')))));
+          input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && input.value.trim()) { e.preventDefault(); if (list.length < 6) list.push(input.value.trim()); drawControl(); refreshState(); const again = control.querySelector('input'); if (again) again.focus(); }
+          });
+          chips.appendChild(input);
+          control.appendChild(chips);
+        } else {
+          const max = key === 'summary' ? 700 : key === 'tone_reason' ? 200 : 400;
+          const ta = h('textarea', { class: 'textarea', rows: key === 'summary' ? '4' : '2', maxlength: String(max), 'aria-label': f.label });
+          ta.value = draft[key] || '';
+          const count = h('span', { class: 'text-count' }, (ta.value.length) + ' / ' + max);
+          const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(320, ta.scrollHeight + 2) + 'px'; };
+          ta.addEventListener('input', () => { draft[key] = ta.value; count.textContent = ta.value.length + ' / ' + max; grow(); refreshState(); });
+          requestAnimationFrame(grow);
+          append(control, [ta, h('div', { class: 'afield-count' }, count)]);
+        }
+      };
+      drawControl();
+      const origValue = f.original;
+      const origText = Array.isArray(origValue) ? (origValue.length ? origValue.join(' · ') : '(empty)') : key === 'suggested_tone' ? toneLabel(origValue) : (origValue || '(empty)');
+      append(origin, [h('span', { class: 'afield-original-label' }, 'AI original'), h('p', null, origText),
+        h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { draft[key] = JSON.parse(JSON.stringify(origValue)); drawControl(); refreshState(); } }, icon('reset'), 'Use the original')]);
+      const toggle = h('button', { class: 'btn sm ghost afield-toggle', type: 'button', 'aria-expanded': 'false', onclick: () => { origin.hidden = !origin.hidden; toggle.setAttribute('aria-expanded', String(!origin.hidden)); } }, icon('bot'), 'AI original');
+      append(box, [
+        h('div', { class: 'afield-head' }, h('span', { class: 'label', style: 'margin:0' }, f.label), f.edited ? h('span', { class: 'badge unsaved' }, 'Edited by mods') : null, h('span', { class: 'grow' }), toggle),
+        control, origin]);
+      return box;
+    };
+
+    const actions = h('div', { class: 'analysis-actions' },
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        const ok = await confirmDialog({ title: 'Analyse ' + p.name + ' again?', icon: 'flask', confirm: 'Analyse again', body: 'A fresh draft replaces this one, including any edits mods made to it. Notes already added stay as they are.' });
+        if (ok) reanalyse(true);
+      } }, icon('restart'), 'Re-analyse'),
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        try {
+          const r = await api('PUT', '/profiles/' + p.id, { status: prof.status === 'reviewed' ? 'draft' : 'reviewed' });
+          toast(r.profile.status === 'reviewed' ? 'Marked reviewed' : 'Back to draft'); refreshAudit(); clear(panel); profileAnalysis(panel, p, show);
+        } catch (e) { toast(e.message, 'error'); }
+      } }, icon(prof.status === 'reviewed' ? 'edit' : 'check'), prof.status === 'reviewed' ? 'Back to draft' : 'Mark reviewed'),
+      h('button', { class: 'btn danger', type: 'button', onclick: async () => {
+        const ok = await confirmDialog({ title: 'Delete this analysis?', icon: 'trash', danger: true, confirm: 'Delete', body: 'The draft and any edits are removed. Notes already added stay as they are.' });
+        if (!ok) return;
+        try { await api('DELETE', '/profiles/' + p.id); toast('Deleted the analysis'); refreshAudit(); clear(panel); profileAnalysis(panel, p, show); } catch (e) { toast(e.message, 'error'); }
+      } }, icon('trash'), 'Delete'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => {
+        if (dirtyFields().length) { toast('Save your edits first, so the notes get what you see.', 'error'); return; }
+        addToNotes(p, prof);
+      } }, icon('plus'), 'Add to notes…'));
+
+    saveBtn.addEventListener('click', async () => {
+      const edits = {};
+      dirtyFields().forEach((k) => { edits[k] = draft[k]; });
+      saveBtn.disabled = true;
+      try {
+        const r = await api('PUT', '/profiles/' + p.id, { edits });
+        toast('Saved ' + plural(r.changed.length, 'edit'));
+        refreshAudit(); clear(panel); profileAnalysis(panel, p, show);
+      } catch (e) { toast(e.message, 'error'); refreshState(); }
+    });
+
+    const grid = h('div', { class: 'afields' }, ['summary', 'interests', 'style', 'games', 'vibe_with_bot'].map(fieldCard));
+    const tone = h('div', { class: 'afields' }, ['suggested_tone', 'tone_reason', 'roast_material', 'avoid'].map(fieldCard));
+    panel.appendChild(h('section', { class: 'card analysis-card' },
+      h('div', { class: 'card-head' }, h('div', { class: 'grow' }, h('div', { class: 'title-row' }, h('h2', null, 'Bot’s analysis'), statusChip), meta)),
+      h('div', { class: 'card-body pad analysis-body' }, privacy, h('div', { class: 'analysis-tools' }, h('span', null, 'Check the basis:'), seenLink, inputBtn), jobHolder, grid,
+        h('h3', { class: 'analysis-sub' }, 'Tone'), tone,
+        h('div', { class: 'analysis-save' }, dirtyNote, h('span', { class: 'grow' }), saveBtn), actions)));
+    refreshState();
+    api('GET', '/profiles/job').then((r) => { activeState.job = r.job; if (r.job && r.job.running && r.job.items.some((i) => i.user_id === p.id)) watchJob(jobHolder, () => { if (panel.isConnected) { clear(panel); profileAnalysis(panel, p, show); } }); }).catch(() => {});
+  }
+
+  async function showPrompt(p) {
+    let r;
+    try { r = await api('GET', '/profiles/' + p.id + '/prompt'); } catch (e) { toast(e.message, 'error'); return; }
+    await confirmDialog({ title: 'What the model would read for ' + p.name, icon: 'eye', wide: true, confirm: 'Close', cancel: 'Back',
+      body: h('div', { class: 'review' },
+        h('p', { class: 'hint', style: 'margin:0' }, plural(r.messages, 'message') + ' · ' + numberFmt.format(r.prompt_chars) + ' characters in all (about ' + numberFmt.format(Math.round(r.prompt_chars / 4)) + ' tokens). #safe-corner, threads in it, DMs, unknown channels and quoted replies are already removed.'),
+        h('pre', { class: 'ai-preview prompt-preview' }, r.prompt)) });
+  }
+
+  const APPLY_FIELDS = ['summary', 'interests', 'style', 'games', 'vibe_with_bot', 'tone_reason', 'roast_material', 'avoid'];
+
+  async function addToNotes(p, prof) {
+    const chosen = new Set(['summary', 'interests', 'style', 'avoid']);
+    let tone = true;
+    const preview = h('pre', { class: 'ai-preview' });
+    const block = h('pre', { class: 'ai-preview' });
+    const fit = h('p', { class: 'hint', style: 'margin:0' });
+    let seq = 0;
+    const refresh = async () => {
+      const mine = ++seq;
+      if (!chosen.size && !tone) { preview.textContent = 'Pick at least one field, or the tone.'; block.textContent = ''; return; }
+      try {
+        const r = await api('POST', '/profiles/' + p.id + '/apply/preview', { fields: [...chosen], tone });
+        if (mine !== seq) return;
+        preview.textContent = r.note || '(no note text)';
+        block.textContent = r.context_block || 'Nothing: the note is empty and the tone is normal.';
+        fit.className = r.fits ? 'hint' : 'error-text';
+        fit.textContent = r.fits ? r.chars + ' / ' + r.max + ' characters' + (r.tone !== (p.note && p.note.tone) && tone ? ' · tone becomes ' + toneLabel(r.tone) : '') : 'Too long by ' + r.over_by + ' characters: pick fewer fields, or trim the note first.';
+      } catch (e) { preview.textContent = e.message; }
+    };
+    const boxes = h('div', { class: 'apply-fields' }, APPLY_FIELDS.map((k) => {
+      const f = prof.fields[k];
+      const empty = Array.isArray(f.value) ? !f.value.length : !String(f.value || '').trim();
+      const box = h('input', { type: 'checkbox', checked: chosen.has(k) && !empty, disabled: empty });
+      if (empty) chosen.delete(k);
+      box.addEventListener('change', () => { if (box.checked) chosen.add(k); else chosen.delete(k); refresh(); });
+      return h('label', { class: 'check' + (empty ? ' muted' : '') }, box, h('span', null, f.label, empty ? h('small', null, 'empty') : null));
+    }));
+    const toneBox = h('input', { type: 'checkbox', checked: true });
+    toneBox.addEventListener('change', () => { tone = toneBox.checked; refresh(); });
+    const dirtyWarn = S.guard && S.guard() ? h('p', { class: 'error-text' }, icon('alert'), 'Your unsaved changes in Mods’ notes will be replaced by this.') : null;
+    const body = h('div', { class: 'review' },
+      h('p', { class: 'hint', style: 'margin:0' }, 'The chosen fields are added to the end of ' + p.name + '’s note under “From the analysis:”. From then on the bot uses them when it answers them.'),
+      boxes,
+      h('label', { class: 'check' }, toneBox, h('span', null, 'Also set the tone to ' + toneLabel(prof.fields.suggested_tone.value), h('small', null, prof.fields.tone_reason.value || ''))),
+      dirtyWarn,
+      h('div', null, h('span', { class: 'label' }, 'The note after'), preview, fit),
+      h('div', null, h('span', { class: 'label' }, 'What the AI gets'), block));
+    refresh();
+    const ok = await confirmDialog({ title: 'Add to ' + p.name + '’s notes', icon: 'edit', wide: true, confirm: 'Add to notes', body });
+    if (!ok) return;
+    try {
+      await api('POST', '/profiles/' + p.id + '/apply', { fields: [...chosen], tone });
+      toast('Added to the notes for ' + p.name);
+      refreshAudit();
+      S.guard = null;
+      rerender();
+    } catch (e) { toast(e.message, 'error'); }
   }
 
   // --- restart --------------------------------------------------------------------

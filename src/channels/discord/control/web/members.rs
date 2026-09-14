@@ -228,7 +228,7 @@ fn activity_for(conn: &Connection, user: u64, now: i64, out: &mut MemberStats) -
 
 /// A read-only connection of its own to vizier.db, so a slow history search
 /// never holds the lock the bot writes its conversations through.
-fn history_conn(deps: &crate::dependencies::VizierDependencies) -> Option<&'static Mutex<Connection>> {
+pub(super) fn history_conn(deps: &crate::dependencies::VizierDependencies) -> Option<&'static Mutex<Connection>> {
     static CONN: OnceLock<Option<Mutex<Connection>>> = OnceLock::new();
     CONN.get_or_init(|| {
         if !matches!(deps.config.storage, crate::config::storage::StorageConfig::Sqlite) {

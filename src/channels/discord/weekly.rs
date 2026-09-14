@@ -47,7 +47,7 @@ const DEFAULT_CHANNELS: &[u64] = &[
     1526595367716655104,
     1525136885112897698,
 ];
-const SAFE_CORNER: u64 = 1543162777642868736;
+pub(crate) const SAFE_CORNER: u64 = 1543162777642868736;
 
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
@@ -1282,7 +1282,7 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
 
 // --- the scan -------------------------------------------------------------------------------------
 
-async fn ask_model(deps: &VizierDependencies, agent_id: &str, prompt: String) -> anyhow::Result<String> {
+pub(crate) async fn ask_model(deps: &VizierDependencies, agent_id: &str, prompt: String) -> anyhow::Result<String> {
     use crate::agents::agent::model::{VizierModel, VizierModelTrait};
     use crate::storage::agent::AgentStorage;
     use rig_core::message::{AssistantContent, Message as ModelMessage};

@@ -150,6 +150,26 @@ pub trait PanelData: Send + Sync + 'static {
     fn scorers(&self, _days_back: i64, _now: i64) -> Option<Vec<scorers::ScorerData>> {
         None
     }
+    /// Everyone's messages, voice and game points over the last 30 days.
+    async fn activity(&self, _now: i64) -> Vec<super::profiles::Activity> {
+        Vec::new()
+    }
+    /// A member's stored messages over the last 30 days, newest first.
+    async fn member_messages(&self, _id: u64, _now: i64) -> Vec<super::profiles::RawMessage> {
+        Vec::new()
+    }
+    /// The parent channel of a thread the cache knows.
+    fn thread_parent(&self, _channel: u64) -> Option<u64> {
+        None
+    }
+    /// Channels whose messages never go into an analysis.
+    fn sensitive_channels(&self) -> Vec<u64> {
+        vec![super::super::weekly::SAFE_CORNER]
+    }
+    /// One completion from the bot's model: the answer and the model's name.
+    async fn ask_model(&self, _prompt: String) -> anyhow::Result<(String, String)> {
+        anyhow::bail!("no model here")
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -163,6 +183,7 @@ pub struct EmojiInfo {
 mod agent;
 mod houses;
 mod members;
+mod profiles;
 mod rules;
 mod scorers;
 
@@ -377,6 +398,33 @@ impl PanelData for LiveData {
         scorers::read_live(days_back, now)
     }
 
+    async fn activity(&self, now: i64) -> Vec<super::profiles::Activity> {
+        tokio::task::spawn_blocking(move || profiles::read_activity_live(now)).await.unwrap_or_default()
+    }
+
+    async fn member_messages(&self, id: u64, now: i64) -> Vec<super::profiles::RawMessage> {
+        let Some((deps, agent_id)) = AGENT.get() else { return Vec::new() };
+        let Some(conn) = members::history_conn(deps) else { return Vec::new() };
+        let agent = agent_id.clone();
+        tokio::task::spawn_blocking(move || profiles::query_messages(&conn.lock(), &agent, id, now).unwrap_or_default())
+            .await
+            .unwrap_or_default()
+    }
+
+    fn thread_parent(&self, channel: u64) -> Option<u64> {
+        let ctx = CTX.get()?;
+        let g = ctx.cache.guild(guild_id(ctx)?)?;
+        g.threads.iter().find(|t| t.id.get() == channel).and_then(|t| t.parent_id).map(|p| p.get())
+    }
+
+    async fn ask_model(&self, prompt: String) -> anyhow::Result<(String, String)> {
+        use crate::storage::agent::AgentStorage;
+        let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+        let model = deps.storage.get_agent(agent_id).await.ok().flatten().map(|c| c.model).unwrap_or_default();
+        let answer = super::super::weekly::ask_model(deps, agent_id, prompt).await?;
+        Ok((answer, model))
+    }
+
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -572,6 +620,13 @@ pub fn router(panel: Panel) -> Router {
         .route("/houses", get(houses::get))
         .route("/agent", get(agent::get).put(agent::put))
         .route("/houses/scorers", get(scorers::get))
+        .route("/profiles/active", get(profiles::active))
+        .route("/profiles/analyse", post(profiles::start_job))
+        .route("/profiles/job", get(profiles::get_job).delete(profiles::cancel_job))
+        .route("/profiles/{id}", get(profiles::get).put(profiles::put).delete(profiles::delete))
+        .route("/profiles/{id}/apply", post(profiles::apply))
+        .route("/profiles/{id}/apply/preview", post(profiles::apply_preview))
+        .route("/profiles/{id}/prompt", get(profiles::prompt_preview))
         .route("/members", get(members::search))
         .route("/members/notes", get(members::noted))
         .route("/members/{id}", get(members::profile))
@@ -1234,6 +1289,36 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 };
                 obj.insert("label".into(), json!(format!("{} “{}”", noun, name)));
                 obj.insert("section".into(), section);
+                obj.insert("change".into(), json!(change));
+                obj.insert("old".into(), Value::Null);
+                obj.insert("new".into(), Value::Null);
+            } else if let Some(uid) = e.key.strip_prefix("profile:") {
+                let note: Value = e.new.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
+                let name = uid
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|id| panel.data.cached_member(id))
+                    .map(|m| m.name)
+                    .or_else(|| note.get("name").and_then(Value::as_str).map(String::from))
+                    .unwrap_or_else(|| uid.to_string());
+                let fields: Vec<&str> = note
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(super::profiles::field_label).collect())
+                    .unwrap_or_default();
+                let with = |what: &str| if fields.is_empty() { what.to_string() } else { format!("{}: {}", what, fields.join(", ")) };
+                let change = match note.get("action").and_then(Value::as_str).unwrap_or("") {
+                    "generated" => "Generated".to_string(),
+                    "edited" => with("Edited"),
+                    "reviewed" => "Marked reviewed".to_string(),
+                    "draft" => "Back to draft".to_string(),
+                    "applied" => with("Added to notes"),
+                    "deleted" => "Deleted".to_string(),
+                    other => other.to_string(),
+                };
+                obj.insert("label".into(), json!(format!("Analysis of @{}", name)));
+                obj.insert("member_id".into(), json!(uid));
+                obj.insert("section".into(), json!({ "id": "members", "title": "Members", "icon": "👤" }));
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);
