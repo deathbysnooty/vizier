@@ -12,6 +12,7 @@
 
 pub mod autoreplies;
 pub mod catalog;
+pub mod insights;
 pub mod members;
 pub mod profiles;
 pub mod reminders;
@@ -59,6 +60,10 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     autoreplies::migrate(&conn)?;
     members::migrate(&conn)?;
     profiles::migrate(&conn)?;
+    // Reply and mention counts keep their own file; losing it must not stop the panel.
+    if let Err(err) = insights::open(workspace) {
+        tracing::warn!("insights: store not opened: {}", err);
+    }
     let loaded = {
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;

@@ -166,6 +166,26 @@ pub trait PanelData: Send + Sync + 'static {
     fn sensitive_channels(&self) -> Vec<u64> {
         vec![super::super::weekly::SAFE_CORNER]
     }
+    /// Every 1v1 since `since` as (winner, loser, ts).
+    fn duels(&self, _since: i64) -> Vec<(u64, u64, i64)> {
+        Vec::new()
+    }
+    /// Messages per member since an India day: (member, 00-05h, 05-09h, all).
+    fn hour_counts(&self, _since_day: &str) -> Vec<(u64, i64, i64, i64)> {
+        Vec::new()
+    }
+    /// The bot's own user id.
+    fn bot_id(&self) -> Option<u64> {
+        None
+    }
+    /// The bot's stored requests since `since`, for filling in insights.
+    async fn history_requests(
+        &self,
+        _since: i64,
+        _progress: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> anyhow::Result<Vec<super::insights::StoredRequest>> {
+        anyhow::bail!("no stored history here")
+    }
     /// One completion from the bot's model: the answer and the model's name.
     async fn ask_model(&self, _prompt: String) -> anyhow::Result<(String, String)> {
         anyhow::bail!("no model here")
@@ -182,6 +202,7 @@ pub struct EmojiInfo {
 
 mod agent;
 mod houses;
+mod insights;
 mod members;
 mod profiles;
 mod rules;
@@ -417,6 +438,37 @@ impl PanelData for LiveData {
         g.threads.iter().find(|t| t.id.get() == channel).and_then(|t| t.parent_id).map(|p| p.get())
     }
 
+    fn duels(&self, since: i64) -> Vec<(u64, u64, i64)> {
+        super::super::battle::duels_since(since)
+    }
+
+    fn hour_counts(&self, since_day: &str) -> Vec<(u64, i64, i64, i64)> {
+        let Some(db) = super::super::stats::db() else { return Vec::new() };
+        let conn = db.lock();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT user_id, SUM(CASE WHEN hour < 5 THEN count ELSE 0 END), SUM(CASE WHEN hour >= 5 AND hour < 9 THEN count ELSE 0 END),
+             SUM(count) FROM msg_counts WHERE day >= ?1 GROUP BY user_id",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(rusqlite::params![since_day], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    fn bot_id(&self) -> Option<u64> {
+        CTX.get().map(|ctx| ctx.cache.current_user().id.get())
+    }
+
+    async fn history_requests(
+        &self,
+        since: i64,
+        progress: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> anyhow::Result<Vec<super::insights::StoredRequest>> {
+        let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+        insights::read_live_history(deps, agent_id, since, progress).await
+    }
+
     async fn ask_model(&self, prompt: String) -> anyhow::Result<(String, String)> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -464,7 +516,16 @@ pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agen
         return;
     }
     let bind = super::var("VIZIER_PANEL_BIND").unwrap_or_else(|| "127.0.0.1:8787".to_string());
-    let app = router(Panel::new(Arc::new(LiveData), catalog::sections));
+    let panel = Panel::new(Arc::new(LiveData), catalog::sections);
+    let app = router(panel.clone());
+    // Insights: fill the reply counts in from the stored history once, after the
+    // cache has had time to learn the channels.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        if super::insights::meta_get("backfill_done").is_none() {
+            insights::start_rebuild(panel);
+        }
+    });
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(&bind).await {
             Ok(listener) => {
@@ -620,6 +681,10 @@ pub fn router(panel: Panel) -> Router {
         .route("/houses", get(houses::get))
         .route("/agent", get(agent::get).put(agent::put))
         .route("/houses/scorers", get(scorers::get))
+        .route("/insights", get(insights::overview))
+        .route("/insights/pair", get(insights::pair))
+        .route("/insights/rebuild", get(insights::rebuild_status).post(insights::rebuild))
+        .route("/members/{id}/connections", get(insights::connections))
         .route("/profiles/active", get(profiles::active))
         .route("/profiles/analyse", post(profiles::start_job))
         .route("/profiles/job", get(profiles::get_job).delete(profiles::cancel_job))

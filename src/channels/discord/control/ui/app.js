@@ -61,6 +61,7 @@
     chevron: '<path d="m6 9 6 6 6-6"/>',
     right: '<path d="m9 6 6 6-6 6"/>',
     left: '<path d="m15 6-6 6 6 6"/>',
+    spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
     x: '<path d="M6 6l12 12M18 6 6 18"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
@@ -548,6 +549,7 @@
       navItem('#/reminders', icon('bell'), 'Reminders', count(active, S.reminders.length)),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
+      navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
       navItem('#/commands', icon('slash'), 'Commands')));
@@ -589,6 +591,7 @@
       ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
       ['Members', '#/members', 'users', 'Profiles, what the bot sees, mods’ notes'],
+      ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
       ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
       ['Activity log', '#/activity', 'activity', 'Who changed what'],
@@ -720,6 +723,7 @@
       case 'houses': if (r.parts[1] === 'scorers') renderScorers(page); else renderHouses(page); break;
       case 'members': if (r.parts[1]) renderProfile(page, r.parts[1], r.parts[2]); else renderMembers(page); break;
       case 'agent': renderAgent(page); break;
+      case 'insights': renderInsights(page); break;
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
       case 'settings': renderSettings(page); break;
@@ -2898,7 +2902,7 @@
 
   async function renderProfile(page, id, tab) {
     document.title = 'Member · Loduchand';
-    profileState.tab = ['overview', 'seen', 'memories', 'analysis'].includes(tab) ? tab : 'overview';
+    profileState.tab = ['overview', 'seen', 'memories', 'analysis', 'connections'].includes(tab) ? tab : 'overview';
     page.appendChild(h('a', { class: 'back-link', href: '#/members' }, icon('left'), 'Members'));
     const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the profile…'));
     page.appendChild(holder);
@@ -2945,13 +2949,14 @@
       const hash = '#/members/' + p.id + (key === 'overview' ? '' : '/' + key);
       if (location.hash !== hash) { history.replaceState(null, '', hash); currentHash = hash; }
       clear(panel);
-      if (key === 'analysis') profileAnalysis(panel, p, show);
+      if (key === 'connections') profileConnections(panel, p);
+      else if (key === 'analysis') profileAnalysis(panel, p, show);
       else if (key === 'seen') profileSeen(panel, p);
       else if (key === 'memories') profileMemories(panel, p);
       else profileOverview(panel, p);
     };
     const tabs = h('nav', { class: 'page-tabs', 'aria-label': 'Profile sections' },
-      [['overview', 'Overview', 'overview'], ['analysis', 'Bot’s analysis', 'flask'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
+      [['overview', 'Overview', 'overview'], ['connections', 'Connections', 'spark'], ['analysis', 'Bot’s analysis', 'flask'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
         h('a', { href: '#/members/' + p.id + (key === 'overview' ? '' : '/' + key), dataset: { tab: key }, onclick: (e) => { e.preventDefault(); show(key); } }, icon(ic), label)));
     main.appendChild(tabs);
     main.appendChild(panel);
@@ -3577,6 +3582,264 @@
       S.guard = null;
       rerender();
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // --- insights -------------------------------------------------------------------------------
+
+  const INSIGHT_PERIODS = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All recorded']];
+  const insightState = { period: '7d', talkTab: 'magnets', data: null, rebuild: null };
+
+  function who(p) {
+    const name = (p && p.name) || 'Former member';
+    return h('a', { class: 'who-link', href: '#/members/' + p.id }, name);
+  }
+  function whoPlain(p) { return (p && p.name) || 'Former member'; }
+
+  function dayPart(ts) {
+    const d = new Date((ts + 19800) * 1000);
+    const hr = d.getUTCHours();
+    const day = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', weekday: 'long' }).format(new Date(ts * 1000));
+    const part = hr < 5 ? 'late night' : hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : hr < 21 ? 'evening' : 'night';
+    return day + ' ' + part;
+  }
+
+  function tidbitCards(d) {
+    const cards = [];
+    const card = (emoji, body, onclick) => h(onclick ? 'button' : 'div', { class: 'tidbit', type: onclick ? 'button' : null, onclick }, h('span', { class: 'tidbit-emoji', 'aria-hidden': 'true' }, emoji), h('p', null, body));
+    if (d.longest) {
+      const r = d.longest.run;
+      cards.push(card('🏓', [h('b', null, whoPlain(r.starter)), ' and ', h('b', null, whoPlain(r.other)), ' had a ', h('b', null, r.len + '-reply'), ' back-and-forth', r.channel ? ' in #' + r.channel : '', ' on ' + dayPart(r.start_ts) + (r.minutes > 1 ? ' (' + r.minutes + ' min)' : '')], () => openPair(r.starter.id, r.other.id)));
+    }
+    if (d.duos[0]) {
+      const p = d.duos[0];
+      cards.push(card('👯', [h('b', null, whoPlain(p.a)), ' and ', h('b', null, whoPlain(p.b)), ' replied to each other ', h('b', null, p.replies + ' times'), ', more than any other pair'], () => openPair(p.a.id, p.b.id)));
+    }
+    if (d.magnets[0]) {
+      const m = d.magnets[0];
+      cards.push(card('🧲', [h('b', null, whoPlain(m.member)), ' was replied to by ', h('b', null, m.people + ' different people'), ' (' + plural(m.count, 'reply', 'replies') + ')']));
+    }
+    if (d.one_sided[0]) {
+      const o = d.one_sided[0];
+      cards.push(card('🙈', [h('b', null, whoPlain(o.from)), ' replied to ', h('b', null, whoPlain(o.to)), ' ' + o.replies + ' times; ' + whoPlain(o.to) + ' replied ' + plural(o.back, 'time')], () => openPair(o.from.id, o.to.id)));
+    }
+    if (d.mentioned[0]) {
+      const m = d.mentioned[0];
+      cards.push(card('📣', [h('b', null, whoPlain(m.member)), ' got @-mentioned ', h('b', null, m.count + ' times'), ' by ' + plural(m.people, 'person', 'people')]));
+    }
+    if (d.arena[0]) {
+      const a = d.arena[0];
+      const lead = a.a_wins === a.b_wins ? 'level at ' + a.a_wins + '–' + a.b_wins : (a.a_wins > a.b_wins ? whoPlain(a.a) : whoPlain(a.b)) + ' leads ' + Math.max(a.a_wins, a.b_wins) + '–' + Math.min(a.a_wins, a.b_wins);
+      cards.push(card('⚔️', [h('b', null, whoPlain(a.a)), ' and ', h('b', null, whoPlain(a.b)), ' fought ', h('b', null, a.fights + ' times'), ' — ' + lead]));
+    }
+    if (d.night_owls[0]) {
+      const n = d.night_owls[0];
+      cards.push(card('🦉', [h('b', null, Math.round(n.share * 100) + '%'), ' of ', h('b', null, whoPlain(n.member)), '’s messages come between midnight and 5 am']));
+    }
+    if (d.new_connections[0]) {
+      const p = d.new_connections[0];
+      cards.push(card('🌱', [h('b', null, whoPlain(p.a)), ' and ', h('b', null, whoPlain(p.b)), ' started replying to each other ' + (p.first_ts ? ago(p.first_ts) : 'recently') + ' — ' + plural(p.replies, 'reply', 'replies') + ' since'], () => openPair(p.a.id, p.b.id)));
+    }
+    return cards.slice(0, 6);
+  }
+
+  function twoWay(aCount, bCount, max) {
+    const total = Math.max(1, max);
+    return h('span', { class: 'twoway', 'aria-hidden': 'true' },
+      h('span', { class: 'tw-left' }, h('i', { style: 'width:' + Math.round((aCount / total) * 100) + '%' })),
+      h('span', { class: 'tw-right' }, h('i', { style: 'width:' + Math.round((bCount / total) * 100) + '%' })));
+  }
+
+  function balanceWords(p) {
+    if (!p.a_to_b || !p.b_to_a) return 'one way';
+    if (p.balance >= 0.75) return 'even';
+    return 'mostly ' + whoPlain(p.a_to_b > p.b_to_a ? p.a : p.b);
+  }
+
+  function renderInsights(page) {
+    document.title = 'Insights · Loduchand';
+    const st = insightState;
+    page.appendChild(pageHead('Insights', 'Who talks to whom: replies, mentions, the longest back-and-forths and a few fun tidbits.', null, h('span', { class: 'feature-icon', 'aria-hidden': 'true' }, '✨')));
+    const body = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Counting replies…'));
+    page.appendChild(h('div', { class: 'toolbar' }, segmented(INSIGHT_PERIODS, st.period, 'Period', (v) => { st.period = v; load(); })));
+    page.appendChild(body);
+    const load = async () => {
+      clear(body).appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Counting replies…'));
+      try { st.data = await api('GET', '/insights?period=' + st.period); } catch (e) { clear(body).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+      if (!page.isConnected) return;
+      draw();
+    };
+    const draw = () => {
+      const d = st.data;
+      clear(body);
+      if (!d.counts.replies && !d.counts.mentions) {
+        body.appendChild(h('div', { class: 'card empty' }, icon('message'), h('h3', null, 'Nothing counted yet'), h('p', null, 'Replies and mentions between members show up here as they happen.')));
+        body.appendChild(dataNote(d));
+        return;
+      }
+      body.appendChild(h('p', { class: 'insight-counts' }, h('b', null, numberFmt.format(d.counts.replies)), ' replies and ', h('b', null, numberFmt.format(d.counts.mentions)), ' mentions between ', h('b', null, numberFmt.format(d.counts.people)), ' members'));
+      body.appendChild(h('div', { class: 'tidbits' }, tidbitCards(d)));
+
+      // top duos
+      const maxDir = Math.max(1, ...d.duos.map((p) => Math.max(p.a_to_b, p.b_to_a)));
+      const duoList = h('ol', { class: 'duo-list' }, d.duos.map((p, i) => h('li', null, h('button', { type: 'button', class: 'duo', onclick: () => openPair(p.a.id, p.b.id) },
+        h('span', { class: 'sr-rank' }, i + 1),
+        h('span', { class: 'duo-names' }, avatar(p.a.avatar, whoPlain(p.a), 'xs'), h('b', null, whoPlain(p.a)), h('span', { class: 'duo-amp' }, '⇄'), avatar(p.b.avatar, whoPlain(p.b), 'xs'), h('b', null, whoPlain(p.b))),
+        h('span', { class: 'duo-bar' }, h('small', null, p.a_to_b), twoWay(p.a_to_b, p.b_to_a, maxDir), h('small', null, p.b_to_a)),
+        h('span', { class: 'duo-meta' }, h('span', { class: 'badge' + (p.balance >= 0.75 ? ' on' : '') }, balanceWords(p)),
+          p.longest ? h('span', { class: 'duo-run', title: 'Longest back-and-forth' }, '🏓 ' + p.longest.len + ' in a row') : null,
+          p.top_channel && p.top_channel.name ? h('span', { class: 'duo-ch' }, '#' + p.top_channel.name) : null),
+        h('span', { class: 'duo-last' }, ago(p.last_ts))))));
+      body.appendChild(card('ins-duos', 'Top duos', 'Replies both ways · click a pair for the detail', h('div', { class: 'card-body' }, duoList)));
+
+      // who talks most
+      const talkLists = { magnets: ['Replied to', d.magnets, (m) => plural(m.people, 'person', 'people') + ' · ' + plural(m.count, 'reply', 'replies')], replies_sent: ['Replies sent', d.replies_sent, (m) => plural(m.count, 'reply', 'replies') + ' to ' + plural(m.people, 'person', 'people')], mentions_sent: ['Mentions sent', d.mentions_sent, (m) => plural(m.count, 'mention') + ' of ' + plural(m.people, 'person', 'people')], mentioned: ['Mentioned', d.mentioned, (m) => plural(m.count, 'mention') + ' from ' + plural(m.people, 'person', 'people')] };
+      const talkBody = h('div', null);
+      const drawTalk = () => {
+        clear(talkBody);
+        const [, list, words] = talkLists[st.talkTab];
+        const max = Math.max(1, ...list.map((m) => (st.talkTab === 'magnets' ? m.people : m.count)));
+        talkBody.appendChild(list.length ? h('ol', { class: 'rank-list' }, list.map((m, i) => h('li', null, h('span', { class: 'sr-rank' }, i + 1), avatar(m.member.avatar, whoPlain(m.member), 'xs'), who(m.member),
+          h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.round(((st.talkTab === 'magnets' ? m.people : m.count) / max) * 100) + '%' })), h('small', null, words(m))))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nothing yet.'));
+      };
+      drawTalk();
+      const talkCard = card('ins-talk', 'Who talks most', null, h('div', { class: 'card-body' }, h('div', { class: 'talk-tabs' }, segmented(Object.keys(talkLists).map((k) => [k, talkLists[k][0]]), st.talkTab, 'List', (v) => { st.talkTab = v; drawTalk(); })), talkBody));
+
+      const oneSided = card('ins-one', 'One-sided', 'At least 15 replies one way, a fifth or fewer back', h('div', { class: 'card-body' }, d.one_sided.length ? h('ul', { class: 'plain-list' }, d.one_sided.map((o) => h('li', null, h('button', { type: 'button', class: 'line-btn', onclick: () => openPair(o.from.id, o.to.id) },
+        h('span', null, h('b', null, whoPlain(o.from)), ' keeps replying to ', h('b', null, whoPlain(o.to))), h('small', null, o.replies + ' → · ' + o.back + ' ←'))))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nobody is being left on read this period.')));
+
+      const arena = card('ins-arena', 'Arena rivalries', '1v1 fights, head to head', h('div', { class: 'card-body' }, d.arena.length ? h('ul', { class: 'plain-list' }, d.arena.map((a) => h('li', { class: 'rival' },
+        h('span', { class: 'rival-name left' }, who(a.a), h('b', null, a.a_wins)),
+        h('span', { class: 'rival-bar', 'aria-label': a.a_wins + ' to ' + a.b_wins }, h('i', { class: 'l', style: 'flex-grow:' + Math.max(0.2, a.a_wins) }), h('i', { class: 'r', style: 'flex-grow:' + Math.max(0.2, a.b_wins) })),
+        h('span', { class: 'rival-name right' }, h('b', null, a.b_wins), who(a.b))))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'No fights this period.')));
+      const hoursList = (list, label) => list.length ? h('ol', { class: 'rank-list' }, list.map((m, i) => h('li', null, h('span', { class: 'sr-rank' }, i + 1), avatar(m.member.avatar, whoPlain(m.member), 'xs'), who(m.member),
+        h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.round(m.share * 100) + '%' })), h('small', null, Math.round(m.share * 100) + '% ' + label)))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nobody with 100+ messages yet.');
+      const owls = card('ins-owls', 'Night owls & early birds', 'Share of messages, India time, 100+ messages', h('div', { class: 'card-body owls' },
+        h('div', null, h('h4', { class: 'mini-title', style: 'padding:12px 16px 0' }, '🦉 00:00–05:00'), hoursList(d.night_owls, 'at night')),
+        h('div', null, h('h4', { class: 'mini-title', style: 'padding:12px 16px 0' }, '🐦 05:00–09:00'), hoursList(d.early_birds, 'early'))));
+      body.appendChild(h('div', { class: 'two-col ins-cols' }, talkCard, h('div', { class: 'ins-stack' }, oneSided, arena)));
+      body.appendChild(owls);
+
+      if (d.period !== 'all') {
+        body.appendChild(card('ins-new', 'New connections', 'Pairs whose first reply to each other came in this period' + (d.coverage.earliest ? ', since counting began ' + fmtDate(d.coverage.earliest * 1000) : ''),
+          h('div', { class: 'card-body' }, d.new_connections.length ? h('ul', { class: 'plain-list' }, d.new_connections.map((p) => h('li', null, h('button', { type: 'button', class: 'line-btn', onclick: () => openPair(p.a.id, p.b.id) },
+            h('span', null, '🌱 ', h('b', null, whoPlain(p.a)), ' & ', h('b', null, whoPlain(p.b))), h('small', null, plural(p.replies, 'reply', 'replies') + ' · first ' + (p.first_ts ? fmtDate(p.first_ts * 1000) : '')))))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'No new pairs this period.'))));
+      }
+      body.appendChild(dataNote(d));
+    };
+    load();
+  }
+
+  function dataNote(d) {
+    const holder = h('div', { class: 'data-note' });
+    const since = d.coverage.earliest ? fmtDate(d.coverage.earliest * 1000) : 'the start';
+    const liveSince = d.coverage.live_since ? fmtDate(d.coverage.live_since * 1000) : null;
+    const status = h('span', { class: 'rebuild-status' });
+    const btn = h('button', { class: 'btn sm', type: 'button' }, icon('restart'), 'Rebuild from history');
+    const poll = async () => {
+      try {
+        const r = await api('GET', '/insights/rebuild');
+        const s = r.rebuild;
+        clear(status);
+        if (s.running) { append(status, [h('span', { class: 'spinner' }), ' Reading stored messages… ' + numberFmt.format(s.scanned)]); btn.disabled = true; setTimeout(() => { if (holder.isConnected) poll(); }, 1500); }
+        else if (s.finished_ts) { btn.disabled = false; append(status, s.error ? h('span', { class: 'error-text' }, 'Last rebuild failed: ' + s.error) : 'Last rebuilt ' + ago(s.finished_ts) + ' · ' + numberFmt.format(s.added) + ' replies and mentions from ' + numberFmt.format(s.scanned) + ' stored messages'); }
+      } catch (_) { /* ignore */ }
+    };
+    btn.addEventListener('click', async () => {
+      const ok = await confirmDialog({ title: 'Rebuild from the stored history?', icon: 'restart', confirm: 'Rebuild',
+        body: 'Replies are read again from the bot’s stored messages of the last ' + d.coverage.retention_days + ' days and replace the earlier fill-in. Counts recorded live stay as they are. It runs in the background and takes a minute or so.' });
+      if (!ok) return;
+      try { await api('POST', '/insights/rebuild'); toast('Rebuilding in the background', 'info'); poll(); } catch (e) { toast(e.message, 'error'); }
+    });
+    append(holder, [icon('info'), h('div', { class: 'grow' },
+      h('p', null, 'Counts replies and mentions between members in channels the bot can see; #safe-corner and DMs are never counted. No message text is kept. ' +
+        (liveSince ? 'History before ' + liveSince + ' is filled in from the bot’s stored messages, so quieter channels may be under-counted. ' : '') + 'Counted since ' + since + '; older than ' + d.coverage.retention_days + ' days is dropped.'),
+      h('div', { class: 'rebuild-row' }, btn, status))]);
+    poll();
+    return holder;
+  }
+
+  /** A read-only side panel. */
+  function openSheet(title, sub) {
+    const before = document.activeElement;
+    const body = h('div', { class: 'drawer-body' });
+    const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', null, title), sub ? h('div', { class: 'sub' }, sub) : null),
+        h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Close', onclick: () => close() }, icon('x'))), body);
+    const scrim = h('div', { class: 'scrim', onclick: () => close() });
+    const close = () => { drawer.remove(); scrim.remove(); popLayer(layer); if (before && before.isConnected && before.focus) before.focus(); };
+    const layer = pushLayer({ drawer: true, close });
+    drawer.addEventListener('keydown', (e) => { if (e.key === 'Tab') trapFocus(drawer, e); });
+    $('#layers').appendChild(scrim);
+    $('#layers').appendChild(drawer);
+    return { body, close, drawer };
+  }
+
+  async function openPair(a, b, period) {
+    period = period || insightState.period || '30d';
+    const sheet = openSheet('Pair detail', INSIGHT_PERIODS.find((p) => p[0] === period)[1]);
+    sheet.body.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…'));
+    let d;
+    try { d = await api('GET', '/insights/pair?a=' + a + '&b=' + b + '&period=' + period); } catch (e) { clear(sheet.body).appendChild(h('p', { class: 'error-text' }, e.message)); return; }
+    clear(sheet.body);
+    const s = d.summary || { a_to_b: 0, b_to_a: 0, mentions_a_to_b: 0, mentions_b_to_a: 0, longest: null };
+    const nameA = whoPlain(d.a), nameB = whoPlain(d.b);
+    sheet.drawer.querySelector('.drawer-head h2').textContent = nameA + ' ⇄ ' + nameB;
+    const periodSwitch = segmented(INSIGHT_PERIODS, period, 'Period', (v) => { sheet.close(); openPair(a, b, v); });
+    const maxDay = Math.max(1, ...d.days.map((x) => Math.max(x.a_to_b, x.b_to_a)));
+    const chart = h('div', { class: 'mirror', role: 'img', 'aria-label': 'Replies per day each way' }, d.days.map((x) => {
+      const col = h('span', { class: 'mirror-col' },
+        h('span', { class: 'mirror-up' }, h('i', { style: 'height:' + Math.round((x.a_to_b / maxDay) * 100) + '%' })),
+        h('span', { class: 'mirror-down' }, h('i', { style: 'height:' + Math.round((x.b_to_a / maxDay) * 100) + '%' })));
+      col.addEventListener('mousemove', (e) => showTip(e, [fmtDay(x.day), nameA + ' → ' + nameB + ': ' + x.a_to_b, nameB + ' → ' + nameA + ': ' + x.b_to_a]));
+      col.addEventListener('mouseleave', hideTip);
+      return col;
+    }));
+    const chMax = Math.max(1, ...d.channels.map((c) => c.replies));
+    append(sheet.body, [
+      h('div', { class: 'pair-head' }, h('span', { class: 'pair-person' }, avatar(d.a.avatar, nameA, 'lg'), who(d.a)), h('span', { class: 'duo-amp big' }, '⇄'), h('span', { class: 'pair-person' }, avatar(d.b.avatar, nameB, 'lg'), who(d.b))),
+      h('div', null, periodSwitch),
+      h('div', { class: 'stat-row four' },
+        stat(nameA + ' → ' + nameB, String(s.a_to_b), 'replies'),
+        stat(nameB + ' → ' + nameA, String(s.b_to_a), 'replies'),
+        stat('Mentions', String(s.mentions_a_to_b + s.mentions_b_to_a), s.mentions_a_to_b + ' · ' + s.mentions_b_to_a),
+        stat('Arena', d.arena.a_wins + '–' + d.arena.b_wins, 'head to head')),
+      s.longest ? h('p', { class: 'pair-run' }, '🏓 Longest back-and-forth: ', h('b', null, s.longest.len + ' replies'), (s.longest.channel ? ' in #' + s.longest.channel : '') + ', ' + dayPart(s.longest.start_ts) + ' ' + fmtDate(s.longest.start_ts * 1000) + (s.longest.minutes > 1 ? ' · ' + s.longest.minutes + ' min' : '')) : null,
+      h('section', { class: 'form-card' }, h('h3', null, icon('chart'), 'Replies per day'),
+        d.days.length ? [h('div', { class: 'legend' }, h('span', { class: 'legend-item' }, h('i', { style: 'background:var(--s1)' }), nameA + ' → ' + nameB), h('span', { class: 'legend-item' }, h('i', { style: 'background:var(--s2)' }), nameB + ' → ' + nameA)), chart,
+          h('div', { class: 'range-scale' }, h('span', null, fmtDay(d.days[0].day)), h('span', null, fmtDay(d.days[d.days.length - 1].day)))] : h('p', { class: 'empty-small' }, 'No replies this period.')),
+      d.channels.length ? h('section', { class: 'form-card' }, h('h3', null, icon('hash'), 'Where'), h('ul', { class: 'hbars compact' }, d.channels.map((c) => h('li', null, h('span', { class: 'hb-label' }, '#' + (c.name || 'unknown')), h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.round((c.replies / chMax) * 100) + '%' })), h('b', null, c.replies))))) : null,
+      h('section', { class: 'form-card' }, h('h3', null, icon('clock'), 'Latest exchanges', h('span', { class: 'right hint', style: 'margin:0' }, 'times and places only')),
+        d.recent.length ? h('ul', { class: 'exchanges' }, d.recent.map((e) => h('li', null, h('small', null, exchangeTime(e.ts)), h('span', null, h('b', null, e.from === d.a.id ? nameA : nameB), ' → ', e.to === d.a.id ? nameA : nameB), h('span', { class: 'badge' }, e.kind === 'mention' ? '@ mention' : 'reply'), e.channel ? h('small', { class: 'ex-ch' }, '#' + e.channel) : null))) : h('p', { class: 'empty-small' }, 'Nothing yet.')),
+    ]);
+  }
+
+  function exchangeTime(ts) { return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(ts * 1000)); }
+
+  async function profileConnections(panel, p) {
+    const periodHolder = h('div', { class: 'toolbar', style: 'margin-bottom:12px' });
+    const list = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Counting…'));
+    let period = insightState.period === 'today' ? '30d' : insightState.period;
+    const load = async () => {
+      let d;
+      try { d = await api('GET', '/members/' + p.id + '/connections?period=' + period); } catch (e) { clear(list).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+      clear(list);
+      if (!d.partners.length) { list.appendChild(h('div', { class: 'card empty' }, icon('users'), h('h3', null, 'No connections counted'), h('p', null, 'Replies and mentions with other members show up here.'))); return; }
+      const max = Math.max(1, ...d.partners.map((x) => Math.max(x.to_them, x.from_them)));
+      list.appendChild(card('pf-conn', 'Connections', p.name + ' sent ' + plural(d.sent, 'reply', 'replies') + ' and got ' + d.received + ' back · click a row for the pair', h('div', { class: 'card-body' },
+        h('ul', { class: 'conn-list' }, d.partners.map((x) => h('li', null, h('button', { type: 'button', class: 'conn', onclick: () => openPair(p.id, x.member.id, period) },
+          avatar(x.member.avatar, whoPlain(x.member), 'lg'),
+          h('span', { class: 'conn-main' }, h('b', null, whoPlain(x.member)),
+            h('span', { class: 'conn-bar' }, h('small', { title: 'Replies to them' }, x.to_them + ' →'), twoWay(x.to_them, x.from_them, max), h('small', { title: 'Replies from them' }, '← ' + x.from_them)),
+            h('span', { class: 'conn-facts' },
+              x.mentions_to_them || x.mentions_from_them ? h('span', null, '@ ' + x.mentions_to_them + ' · ' + x.mentions_from_them) : null,
+              x.longest ? h('span', null, '🏓 ' + x.longest.len + ' in a row') : null,
+              x.arena.wins || x.arena.losses ? h('span', null, '⚔️ ' + x.arena.wins + '–' + x.arena.losses) : null,
+              h('span', { class: 'muted' }, ago(x.last_ts)))),
+          icon('right'))))))));
+    };
+    periodHolder.appendChild(segmented(INSIGHT_PERIODS.filter((x) => x[0] !== 'today'), period, 'Period', (v) => { period = v; load(); }));
+    append(panel, [periodHolder, list]);
+    load();
   }
 
   // --- restart --------------------------------------------------------------------

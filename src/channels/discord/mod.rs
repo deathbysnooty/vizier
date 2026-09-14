@@ -2773,6 +2773,11 @@ Ye message sirf tumhe dikh raha hai."#,
         if !is_dm {
             snitch::note_message(&msg);
         }
+        // Insights for the panel: who replies to and mentions whom. Queued, never
+        // blocks; #safe-corner, its threads and DMs are never counted.
+        if !is_dm {
+            control::insights::on_message(&ctx, &msg);
+        }
         if !is_dm && snitch::on_message(&ctx, &msg).await {
             return;
         }

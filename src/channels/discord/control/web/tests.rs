@@ -340,6 +340,56 @@ impl PanelData for FakeData {
         (channel == 77).then_some(SAFE)
     }
 
+    fn duels(&self, since: i64) -> Vec<(u64, u64, i64)> {
+        let now = chrono::Utc::now().timestamp();
+        let pairs = [(2012u64, 2010u64, 9usize, 5usize), (2004, 2016, 6, 6), (2023, 2001, 7, 2), (2008, 2020, 3, 4), (2030, 2005, 4, 1)];
+        let mut out = Vec::new();
+        for (i, (a, b, wa, wb)) in pairs.iter().enumerate() {
+            for k in 0..(*wa + *wb) {
+                let ts = now - ((k * 7 + i * 3) as i64 % 28) * 86_400 - (k as i64 * 3_600);
+                out.push(if k < *wa { (*a, *b, ts) } else { (*b, *a, ts) });
+            }
+        }
+        out.into_iter().filter(|d| d.2 >= since).collect()
+    }
+
+    fn hour_counts(&self, _since_day: &str) -> Vec<(u64, i64, i64, i64)> {
+        (0..ROSTER.len() as u64)
+            .map(|i| {
+                let total = 150 + ((i * 97) % 900) as i64;
+                let night = total * ((i * 13) % 37) as i64 / 100;
+                let early = total * ((i * 29) % 23) as i64 / 100;
+                (2000 + i, night, early, total)
+            })
+            .collect()
+    }
+
+    async fn history_requests(
+        &self,
+        since: i64,
+        progress: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> anyhow::Result<Vec<super::super::insights::StoredRequest>> {
+        use super::super::insights::StoredRequest;
+        let base = since.max(chrono::Utc::now().timestamp() - 86_400);
+        let r = |ts: i64, author: u64, id: u64, channel: u64, replied: Option<u64>| StoredRequest {
+            ts: base + ts,
+            author,
+            message_id: id,
+            channel_id: Some(channel),
+            is_dm: false,
+            replied_message_id: replied,
+            mentions: vec![],
+        };
+        progress(5);
+        Ok(vec![
+            r(10, 3101, 910_001, 21, None),
+            r(20, 3102, 910_002, 21, Some(910_001)),
+            r(30, 3101, 910_003, 21, Some(910_002)),
+            r(40, 3102, 910_004, SAFE, Some(910_003)),
+            r(50, 3103, 910_005, 21, Some(999_999_999)),
+        ])
+    }
+
     async fn ask_model(&self, prompt: String) -> anyhow::Result<(String, String)> {
         use std::sync::atomic::Ordering;
         PROMPTS.lock().push(prompt);
@@ -1584,6 +1634,94 @@ fn the_notes_preview_has_its_placeholders() {
     }
 }
 
+// --- insights ------------------------------------------------------------------------------
+
+fn talk(ts: i64, from: u64, to: u64, channel: u64, id: u64, kind: super::super::insights::Kind) -> super::super::insights::Interaction {
+    super::super::insights::Interaction { ts, channel_id: channel, from_user: from, to_user: to, message_id: id, replied_message_id: None, kind, source: "live" }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn insights_api_counts_pairs_and_shares_no_text() {
+    use super::super::insights::{self, Kind};
+    let app = panel();
+    let session = session_for(ADMIN);
+    let now = chrono::Utc::now().timestamp();
+    let mut rows = Vec::new();
+    // A four-reply back-and-forth between 3001 and 3002, then one more each way later.
+    for (i, (from, to)) in [(3001, 3002), (3002, 3001), (3001, 3002), (3002, 3001)].iter().enumerate() {
+        rows.push(talk(now - 7200 + i as i64 * 120, *from, *to, 21, 800_000 + i as u64, Kind::Reply));
+    }
+    rows.push(talk(now - 3000, 3001, 3002, 23, 800_010, Kind::Reply));
+    rows.push(talk(now - 2000, 3002, 3001, 21, 800_011, Kind::Mention));
+    // 3003 keeps replying to 3004, who answers once.
+    for i in 0..16 {
+        rows.push(talk(now - 50_000 + i * 900 + 3000, 3003, 3004, 22, 810_000 + i as u64, Kind::Reply));
+    }
+    rows.push(talk(now - 1000, 3004, 3003, 22, 810_100, Kind::Reply));
+    insights::insert(&rows).unwrap();
+    assert_eq!(insights::insert(&rows).unwrap(), 0, "the same message and target are recorded once");
+
+    let (status, got, _) = call(&app, "GET", "/api/insights?period=7d", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{got}");
+    let duo = got["duos"].as_array().unwrap().iter().find(|d| d["a"]["id"] == "3001").expect("the duo is listed");
+    assert_eq!((duo["a_to_b"].as_u64(), duo["b_to_a"].as_u64(), duo["longest"]["len"].as_u64()), (Some(3), Some(2), Some(4)));
+    let lopsided = got["one_sided"].as_array().unwrap().iter().find(|o| o["from"]["id"] == "3003").expect("one-sided pair");
+    assert_eq!((lopsided["replies"].as_u64(), lopsided["back"].as_u64()), (Some(16), Some(1)));
+    assert!(got["magnets"].as_array().unwrap().iter().any(|m| m["member"]["id"] == "3004" && m["people"] == 1));
+    assert!(got["mentioned"].as_array().unwrap().iter().any(|m| m["member"]["id"] == "3001"));
+    assert!(got["arena"].as_array().unwrap().len() >= 1);
+    assert!(got["night_owls"].as_array().unwrap().len() <= 10);
+
+    let (status, pair, _) = call(&app, "GET", "/api/insights/pair?a=3002&b=3001&period=all", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{pair}");
+    assert_eq!(pair["a"]["id"], "3001", "pairs are ordered by id");
+    assert_eq!(pair["recent"].as_array().unwrap().len(), 6);
+    for e in pair["recent"].as_array().unwrap() {
+        let keys: std::collections::BTreeSet<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["channel", "from", "kind", "to", "ts"].into_iter().collect(), "metadata only, never text");
+    }
+    assert!(pair["days"].as_array().unwrap().iter().map(|d| d["a_to_b"].as_u64().unwrap()).sum::<u64>() == 3);
+    let (status, _, _) = call(&app, "GET", "/api/insights/pair?a=3001&b=3001", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "GET", "/api/insights/pair?a=x&b=3001", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, conn, _) = call(&app, "GET", "/api/members/3001/connections?period=30d", Some(&session), None, false).await;
+    let first = &conn["partners"][0];
+    assert_eq!(first["member"]["id"], "3002");
+    assert_eq!((first["to_them"].as_u64(), first["from_them"].as_u64(), first["mentions_from_them"].as_u64()), (Some(3), Some(2), Some(1)));
+
+    for bad in ["/api/insights?period=year", "/api/members/3001/connections?period=forever"] {
+        let (status, _, _) = call(&app, "GET", bad, Some(&session), None, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (status, _, _) = call(&app, "GET", "/api/insights", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "GET", "/api/insights", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = call(&app, "POST", "/api/insights/rebuild", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "rebuilding needs the panel header");
+
+    // Filling in from history: resolved replies only, #safe-corner left out.
+    let (status, _, _) = call(&app, "POST", "/api/insights/rebuild", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let mut state = Value::Null;
+    for _ in 0..200 {
+        let (_, s, _) = call(&app, "GET", "/api/insights/rebuild", Some(&session), None, false).await;
+        state = s;
+        if state["rebuild"]["running"] == false {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(state["rebuild"]["error"], Value::Null, "{state}");
+    assert_eq!(state["rebuild"]["found"], 2, "{state}");
+    let history: Vec<_> = insights::rows_between(0, now + 200_000).into_iter().filter(|r| r.source == "history").collect();
+    assert!(history.iter().any(|r| (r.from_user, r.to_user) == (3102, 3101)));
+    assert!(history.iter().all(|r| r.channel_id != SAFE));
+    assert!(insights::meta_get("backfill_done").is_some());
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -1806,6 +1944,76 @@ async fn demo_server() {
         for (id, name, tone, text) in fills {
             super::super::members::save(&auto(id, name, tone, text), super::super::members::AUTO_FILL_BY).unwrap();
         }
+    }
+    if super::super::insights::meta_get("demo_seeded").is_none() {
+        use super::super::insights::{self, Interaction, Kind};
+        let now = chrono::Utc::now().timestamp();
+        let mut seed: u64 = 0xdecaf;
+        let mut roll = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n.max(1)
+        };
+        let channels = [21u64, 23, 22, 32, 24, 31];
+        let mut rows: Vec<Interaction> = Vec::new();
+        let mut id = 5_000_000u64;
+        let mut push = |rows: &mut Vec<Interaction>, ts: i64, from: u64, to: u64, channel: u64, kind: Kind, id: &mut u64| {
+            *id += 1;
+            let source = if ts < now - 6 * 86_400 { "history" } else { "live" };
+            rows.push(Interaction { ts, channel_id: channel, from_user: from, to_user: to, message_id: *id, replied_message_id: None, kind, source });
+        };
+        // Close pairs, with how often they talk and the channel they favour.
+        let duos: [(u64, u64, u64, usize); 8] = [
+            (2012, 2010, 23, 26), (2004, 2016, 21, 18), (2003, 2017, 32, 14), (2001, 2023, 21, 12),
+            (2020, 2008, 31, 11), (2030, 2005, 22, 9), (2007, 2034, 24, 8), (2011, 2027, 23, 7),
+        ];
+        for day in 0..30i64 {
+            for (a, b, ch, weight) in duos {
+                let sessions = roll((weight / 9 + 2) as u64) as usize;
+                for _ in 0..sessions {
+                    let start = now - day * 86_400 - roll(80_000) as i64;
+                    let len = 1 + roll(if a == 2012 { 11 } else { 6 }) as usize;
+                    let (mut from, mut to) = if roll(2) == 0 { (a, b) } else { (b, a) };
+                    let mut ts = start;
+                    for _ in 0..len {
+                        push(&mut rows, ts, from, to, ch, Kind::Reply, &mut id);
+                        std::mem::swap(&mut from, &mut to);
+                        ts += 30 + roll(400) as i64;
+                    }
+                }
+            }
+            // General chatter: anyone replying to anyone.
+            for _ in 0..(40 + roll(30)) {
+                let from = 2000 + roll(43);
+                let to = 2000 + roll(43);
+                if from != to {
+                    let kind = if roll(5) == 0 { Kind::Mention } else { Kind::Reply };
+                    push(&mut rows, now - day * 86_400 - roll(86_000) as i64, from, to, channels[roll(6) as usize], kind, &mut id);
+                }
+            }
+            // Dev keeps replying to Zoya; she rarely answers.
+            for _ in 0..(2 + roll(3)) {
+                push(&mut rows, now - day * 86_400 - roll(80_000) as i64, 2010, 2007, 21, Kind::Reply, &mut id);
+            }
+            // Everyone pings Om.
+            for _ in 0..roll(4) {
+                push(&mut rows, now - day * 86_400 - roll(80_000) as i64, 2000 + roll(43), 2036, channels[roll(3) as usize], Kind::Mention, &mut id);
+            }
+        }
+        // The month's great back-and-forth: Sunday night in #desi-banter.
+        let sunday = now - 2 * 86_400 - 2 * 3_600;
+        for i in 0..23 {
+            let (from, to) = if i % 2 == 0 { (2012, 2010) } else { (2010, 2012) };
+            push(&mut rows, sunday + i * 95, from, to, 23, Kind::Reply, &mut id);
+        }
+        // A new friendship this week.
+        for i in 0..9 {
+            let (from, to) = if i % 2 == 0 { (2041, 2019) } else { (2019, 2041) };
+            push(&mut rows, now - 3 * 86_400 + i * 200, from, to, 24, Kind::Reply, &mut id);
+        }
+        rows.retain(|r| r.from_user != r.to_user && !(r.from_user == 2007 && r.to_user == 2010));
+        insights::insert(&rows).unwrap();
+        insights::meta_set("backfill_done", &(now - 6 * 86_400).to_string());
+        insights::meta_set("demo_seeded", "1");
     }
     MODEL_DELAY_MS.store(2500, std::sync::atomic::Ordering::SeqCst);
 

@@ -416,6 +416,20 @@ pub fn wins_per_user(since: Option<i64>) -> std::collections::HashMap<u64, u64> 
     out
 }
 
+/// Every 1v1 since `since` as (winner, loser, ts), for the panel's rivalries.
+pub(crate) fn duels_since(since: i64) -> Vec<(u64, u64, i64)> {
+    let Some(db) = DB.get() else {
+        return Vec::new();
+    };
+    let conn = db.lock();
+    let Ok(mut stmt) = conn.prepare("SELECT winner, loser, ts FROM results WHERE loser IS NOT NULL AND kind != 'champion' AND ts >= ?1") else {
+        return Vec::new();
+    };
+    stmt.query_map(params![since], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
 /// Fights fought, fights won and battles won outright, for the control panel.
 pub(crate) fn record_of(user: u64) -> (i64, i64, i64) {
     let (fights, wins) = tally(user);
