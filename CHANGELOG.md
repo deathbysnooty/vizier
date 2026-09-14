@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.9] - 2026-09-14
+
+### 💼 Other
+
+- Chat pays per tier (20/60/150), voice pays per hour with company, up to 3 and 4 a day
 ## [0.11.8] - 2026-09-14
 
 ### 💼 Other
 
 - Several daily battle times; lobby tags in their own message that stays; lobby logging
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.8
 ## [0.11.7] - 2026-09-14
 
 ### 💼 Other
