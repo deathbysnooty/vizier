@@ -733,8 +733,20 @@ pub fn sections() -> Vec<Section> {
                     back to the server, posting a welcome line. A slot is posted once, only while it's fresh - after \
                     downtime the bot doesn't catch up on missed ones - and a reminder with an end date switches itself \
                     off after it.",
-            settings: vec![],
-            commands: vec![],
+            settings: vec![toggle(
+                "VIZIER_MEMBER_REMINDERS",
+                "Members' own reminders",
+                "Let members set their own reminders by asking the bot (\"@Loduchand remind me in 2 hours to…\") or with /remind. Off stops new ones and pauses sending.",
+            )],
+            commands: vec![
+                command(
+                    "remind",
+                    EVERYONE,
+                    "/remind when: what:",
+                    "Set yourself a reminder (in 2 hours, 30m, at 9pm, tomorrow 9am, 2026-09-20 18:00 - India time); the bot pings you in that channel. You can also just ask the bot in chat. Up to 20 waiting, 60 days ahead.",
+                ),
+                command("reminders", EVERYONE, "/reminders", "See your waiting reminders and cancel any of them. Private."),
+            ],
         },
         Section {
             id: "members",

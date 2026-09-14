@@ -1377,6 +1377,8 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
 
@@ -1464,6 +1466,10 @@ impl EventHandler for Handler {
             let id = component.data.custom_id.clone();
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("remindcancel:") {
+                control::remind::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("weekly") {
@@ -1957,6 +1963,12 @@ impl EventHandler for Handler {
             }
             if command.data.name == "today" {
                 standings::today_command(&ctx, &command).await;
+            }
+            if command.data.name == "remind" {
+                control::remind::remind_command(&ctx, &command).await;
+            }
+            if command.data.name == "reminders" {
+                control::remind::reminders_command(&ctx, &command).await;
             }
             if command.data.name == "housetop" {
                 standings::housetop_command(&ctx, &command).await;

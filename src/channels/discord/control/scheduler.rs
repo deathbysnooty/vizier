@@ -158,6 +158,27 @@ pub fn spawn(ctx: Context) {
             for reminder in reminders::list().into_iter().filter(|r| r.enabled) {
                 tick(&ctx, reminder, now).await;
             }
+            // Members' own reminders ("remind me in 2 hours…").
+            if super::super::control::on("VIZIER_MEMBER_REMINDERS", true) {
+                for memo in super::memos::due(now, 25) {
+                    let channel = memo.channel_id.parse::<u64>().ok().filter(|c| *c != 0).map(ChannelId::new);
+                    let user = memo.user_id.parse::<u64>().ok();
+                    let result = match channel {
+                        Some(channel) => post(&ctx, channel, super::memos::message_text(&memo), user).await,
+                        None => Err("no channel".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            tracing::info!("reminders: member reminder {} sent", memo.id);
+                            super::memos::mark_sent(memo.id, now);
+                        }
+                        Err(err) => {
+                            tracing::warn!("reminders: member reminder {} not sent: {}", memo.id, err);
+                            super::memos::mark_failed_try(memo.id);
+                        }
+                    }
+                }
+            }
         }
     });
 }

@@ -365,3 +365,131 @@ impl VizierTool for SearchDiscordHistory {
     }
 
 }
+
+// --- members' reminders ------------------------------------------------------------
+
+/// The Discord channel a tool call came from, when it came from Discord.
+fn session_channel(ctx: &ToolContext) -> Option<u64> {
+    match ctx.session.1 {
+        VizierChannelId::DiscordChanel(id) => Some(id),
+        _ => None,
+    }
+}
+
+pub struct SetMemberReminder;
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct SetMemberReminderArgs {
+    #[schemars(description = "Discord id of the member who asked for the reminder, as a string - the number in their (DiscordId: ...)")]
+    user_id: Snowflake,
+
+    #[schemars(description = "When, in India time, written the way people say it: 'in 2 hours', '30m', '1h30m', 'at 9pm', '21:30', 'tomorrow 9am', '2026-09-20 18:00'")]
+    when: String,
+
+    #[schemars(description = "What to remind them about, short and in their words (e.g. 'call mom', 'join the quiz')")]
+    what: String,
+}
+
+#[async_trait::async_trait]
+impl VizierTool for SetMemberReminder {
+    type Input = SetMemberReminderArgs;
+    type Output = String;
+
+    fn name() -> String {
+        "set_member_reminder".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Save a reminder when a Discord member asks you to remind them about something (\"remind me in 2 hours to...\", \"remind me tomorrow at 9\"). \
+         The bot pings that member in this channel at the time - no need to schedule a task or send anything yourself. \
+         Only set reminders for the person asking. Tell them the time it returns."
+            .into()
+    }
+
+    async fn call(&self, args: Self::Input, ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
+        use crate::channels::discord::control::memos;
+        let channel = session_channel(ctx).ok_or_else(|| VizierError("reminders only work from a Discord channel".into()))?;
+        let now = Utc::now().timestamp();
+        let due = memos::parse_when(&args.when, now).ok_or_else(|| {
+            VizierError(format!(
+                "could not read '{}' as a time; use e.g. 'in 2 hours', 'at 9pm', 'tomorrow 9am' or 'YYYY-MM-DD HH:MM' (India time)",
+                args.when
+            ))
+        })?;
+        let memo = memos::create(args.user_id.get(), channel, &args.what, due, "chat").map_err(VizierError)?;
+        Ok(format!(
+            "Reminder #{} saved for {} ({}): \"{}\". The bot will ping them then.",
+            memo.id,
+            memos::describe(memo.due_ts, now),
+            format!("<t:{}:R>", memo.due_ts),
+            memo.text
+        ))
+    }
+}
+
+pub struct ListMemberReminders;
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ListMemberRemindersArgs {
+    #[schemars(description = "Discord id of the member, as a string")]
+    user_id: Snowflake,
+}
+
+#[async_trait::async_trait]
+impl VizierTool for ListMemberReminders {
+    type Input = ListMemberRemindersArgs;
+    type Output = String;
+
+    fn name() -> String {
+        "list_member_reminders".to_string()
+    }
+
+    fn description(&self) -> String {
+        "List a Discord member's waiting reminders (when they ask what reminders they have)".into()
+    }
+
+    async fn call(&self, args: Self::Input, _ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
+        use crate::channels::discord::control::memos;
+        let now = Utc::now().timestamp();
+        let mine = memos::pending_for(args.user_id.get());
+        if mine.is_empty() {
+            return Ok("They have no reminders waiting.".into());
+        }
+        Ok(mine.iter().map(|m| format!("#{} {}: {}", m.id, memos::describe(m.due_ts, now), m.text)).collect::<Vec<_>>().join("\n"))
+    }
+}
+
+pub struct CancelMemberReminder;
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct CancelMemberReminderArgs {
+    #[schemars(description = "Discord id of the member who owns the reminder, as a string")]
+    user_id: Snowflake,
+
+    #[schemars(description = "The reminder number from list_member_reminders")]
+    reminder_id: i64,
+}
+
+#[async_trait::async_trait]
+impl VizierTool for CancelMemberReminder {
+    type Input = CancelMemberReminderArgs;
+    type Output = String;
+
+    fn name() -> String {
+        "cancel_member_reminder".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Cancel one of a Discord member's own waiting reminders when they ask".into()
+    }
+
+    async fn call(&self, args: Self::Input, _ctx: &ToolContext) -> anyhow::Result<Self::Output, VizierError> {
+        use crate::channels::discord::control::memos;
+        Ok(if memos::cancel(args.reminder_id, Some(args.user_id.get())) {
+            format!("Reminder #{} cancelled.", args.reminder_id)
+        } else {
+            "No waiting reminder with that number belongs to them.".into()
+        })
+    }
+}
+

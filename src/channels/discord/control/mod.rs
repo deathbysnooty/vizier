@@ -15,6 +15,8 @@ pub mod catalog;
 pub mod help;
 pub mod insights;
 pub mod members;
+pub mod memos;
+pub mod remind;
 pub mod profiles;
 pub mod reminders;
 pub mod scheduler;
@@ -60,6 +62,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     reminders::migrate(&conn)?;
     autoreplies::migrate(&conn)?;
     members::migrate(&conn)?;
+    memos::migrate(&conn)?;
     profiles::migrate(&conn)?;
     // Reply and mention counts keep their own file; losing it must not stop the panel.
     if let Err(err) = insights::open(workspace) {
