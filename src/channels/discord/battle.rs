@@ -1238,16 +1238,32 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
         Ping::Everyone => ("@everyone".into(), CreateAllowedMentions::new().everyone(true)),
         Ping::Nobody => ("⚔️".into(), CreateAllowedMentions::new()),
     };
+    // The tags go in a message of their own that stays put: the lobby card moves
+    // down as chat piles up (and the old copy is deleted), which used to take
+    // the tags with it.
+    if ping != Ping::Nobody {
+        let heads_up = CreateMessage::new()
+            .content(format!("{} — a battle royale is starting! Join the lobby below 👇", tag))
+            .allowed_mentions(mentions);
+        if let Err(err) = call(arena.send_message(&ctx.http, heads_up)).await {
+            tracing::warn!("battle: lobby tags not posted in {}: {}", arena, err);
+        }
+    }
     let embed = lobby_embed(&[], ends, minutes, theme);
     let msg = CreateMessage::new()
-        .content(format!("{} — a battle royale is starting! Join below 👇", tag))
-        .allowed_mentions(mentions)
+        .content("⚔️ Battle royale lobby · hit Join 👇")
+        .allowed_mentions(CreateAllowedMentions::new())
         .embed(embed)
         .components(lobby_buttons(0, true));
-    let Ok(posted) = arena.send_message(&ctx.http, msg).await else {
-        BUSY.lock().remove(&arena.get());
-        return;
+    let posted = match call(arena.send_message(&ctx.http, msg)).await {
+        Ok(posted) => posted,
+        Err(err) => {
+            tracing::warn!("battle: lobby not posted in {}: {}", arena, err);
+            BUSY.lock().remove(&arena.get());
+            return;
+        }
     };
+    tracing::info!("battle: lobby {} open in {} for {} min", posted.id, arena, minutes);
     let lobby_id = posted.id.get();
     let rows = lobby_buttons(lobby_id, true);
     let mut posted = posted;
@@ -1279,7 +1295,7 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
             break;
         };
         let fresh = CreateMessage::new()
-            .content("⚔️ A battle royale is starting! Join below 👇")
+            .content("⚔️ Battle royale lobby · hit Join 👇")
             .allowed_mentions(CreateAllowedMentions::new())
             .embed(lobby_embed(&names, ends, minutes, theme))
             .components(lobby_buttons(lobby_id, true));
@@ -1311,6 +1327,7 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
     LOBBIES.lock().remove(&lobby_id);
 
     let needed = min_players();
+    tracing::info!("battle: lobby {} closed with {} joined", lobby_id, joined.len());
     if joined.len() < needed {
         let _ = arena
             .say(&ctx.http, format!("Only {} joined. Battle cancelled — {} are needed.", joined.len(), needed))
@@ -1378,14 +1395,17 @@ fn clock_secs(time: &str) -> Option<i64> {
     ((0..24).contains(&h) && (0..60).contains(&m)).then_some(h * 3600 + m * 60)
 }
 
-/// Today's slot if it is due now: its India day, when `now` is within the grace
-/// after the time and that day hasn't had its battle yet.
-fn daily_due(now: i64, time: &str, last_day: Option<&str>) -> Option<String> {
+/// The first of today's slots that is due now, as `(day, time)`: `now` is within
+/// the grace after it and it hasn't opened yet (`done` says whether a day's slot
+/// already ran).
+fn daily_due(now: i64, times: &str, done: impl Fn(&str, &str) -> bool) -> Option<(String, String)> {
     let offset = super::stats::ist().local_minus_utc() as i64;
     let midnight = (now + offset).div_euclid(86_400) * 86_400 - offset;
-    let slot = midnight + clock_secs(time)?;
-    let day = super::points::ist_day(slot);
-    (now >= slot && now - slot <= DAILY_GRACE_SECS && last_day != Some(day.as_str())).then_some(day)
+    times.split(',').map(str::trim).filter(|t| !t.is_empty()).find_map(|time| {
+        let slot = midnight + clock_secs(time)?;
+        let day = super::points::ist_day(slot);
+        (now >= slot && now - slot <= DAILY_GRACE_SECS && !done(&day, time)).then(|| (day, time.to_string()))
+    })
 }
 
 /// The theme a daily battle uses: a fixed one, or a different one at random.
@@ -1411,31 +1431,38 @@ pub fn spawn_daily(ctx: Context) {
             if !super::control::on("VIZIER_BATTLE_DAILY", false) {
                 continue;
             }
-            let time = super::control::var("VIZIER_BATTLE_DAILY_TIME").unwrap_or_else(|| "21:00".into());
+            let times = super::control::var("VIZIER_BATTLE_DAILY_TIME").unwrap_or_else(|| "21:00".into());
             let now = Utc::now().timestamp();
-            let Some(day) = daily_due(now, &time, meta_get("daily_battle_day").as_deref()) else {
+            // Each time of day opens once: its day and time are remembered. The
+            // single key from before several times were allowed still counts.
+            let legacy = meta_get("daily_battle_day");
+            let done = |day: &str, time: &str| {
+                meta_get(&format!("daily_battle:{}:{}", day, time)).is_some() || legacy.as_deref() == Some(day) && time == times.split(',').next().unwrap_or("").trim()
+            };
+            let Some((day, time)) = daily_due(now, &times, done) else {
                 continue;
             };
+            let slot_key = format!("daily_battle:{}:{}", day, time);
             let Some(guild) = ctx.cache.guilds().first().copied() else {
                 continue;
             };
             let Some(fallback) = super::control::id("VIZIER_FIGHT_CHANNEL").map(ChannelId::new) else {
                 tracing::warn!("battle: daily battle is on but VIZIER_FIGHT_CHANNEL is not set");
-                meta_set("daily_battle_day", &day);
+                meta_set(&slot_key, "skipped");
                 continue;
             };
             let arena = arena(&ctx, guild, fallback).await;
             if !BUSY.lock().insert(arena.get()) {
                 continue;
             }
-            meta_set("daily_battle_day", &day);
+            meta_set(&slot_key, "opened");
             let minutes = (super::control::number("VIZIER_BATTLE_DAILY_MINUTES", 10) as i64).clamp(MIN_WAIT, max_lobby_minutes());
             let theme = daily_theme(
                 &super::control::var("VIZIER_BATTLE_DAILY_THEME").unwrap_or_else(|| "classic".into()),
                 now as u64,
             );
             let ping = Ping::from_key(&super::control::var("VIZIER_BATTLE_DAILY_PING").unwrap_or_default());
-            tracing::info!("battle: daily battle opening for {} ({} min, {:?}, {:?})", day, minutes, theme, ping);
+            tracing::info!("battle: daily battle opening for {} {} ({} min, {:?}, {:?})", day, time, minutes, theme, ping);
             let ctx = ctx.clone();
             tokio::spawn(async move {
                 open_lobby(&ctx, guild, arena, arena, minutes, theme, ping).await;
@@ -2013,11 +2040,15 @@ mod tests {
         // 2026-09-14 21:00 India time is 15:30 UTC.
         let slot = 1_789_399_800;
         assert_eq!(super::super::points::ist_day(slot), "2026-09-14");
-        assert_eq!(daily_due(slot - 60, "21:00", None), None, "not before the time");
-        assert_eq!(daily_due(slot + 60, "21:00", None).as_deref(), Some("2026-09-14"));
-        assert_eq!(daily_due(slot + 60, "21:00", Some("2026-09-14")), None, "once a day");
-        assert_eq!(daily_due(slot + DAILY_GRACE_SECS + 1, "21:00", None), None, "too late after downtime");
-        assert_eq!(daily_due(slot, "25:00", None), None);
+        let never = |_: &str, _: &str| false;
+        assert_eq!(daily_due(slot - 60, "21:00", never), None, "not before the time");
+        assert_eq!(daily_due(slot + 60, "21:00", never), Some(("2026-09-14".into(), "21:00".into())));
+        assert_eq!(daily_due(slot + 60, "21:00", |d, t| d == "2026-09-14" && t == "21:00"), None, "once a day");
+        assert_eq!(daily_due(slot + DAILY_GRACE_SECS + 1, "21:00", never), None, "too late after downtime");
+        assert_eq!(daily_due(slot, "25:00", never), None);
+        // Several times: the afternoon one is long past, the evening one is due.
+        assert_eq!(daily_due(slot + 60, "14:00,21:00", never), Some(("2026-09-14".into(), "21:00".into())));
+        assert_eq!(daily_due(slot - 7 * 3600 + 60, "14:00, 21:00", never), Some(("2026-09-14".into(), "14:00".into())));
         assert_eq!(Ping::from_key("everyone"), Ping::Everyone);
         assert_eq!(Ping::from_key("anything"), Ping::Houses);
         assert_eq!(daily_theme("pokemon", 3), Theme::Pokemon);

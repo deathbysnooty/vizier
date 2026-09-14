@@ -26,6 +26,8 @@ pub enum Kind {
     Text,
     /// A time of day in India time, "HH:MM".
     Time,
+    /// Several India times of day, "HH:MM,HH:MM".
+    Times,
     /// One of fixed values: (value, label).
     Choice { options: &'static [(&'static str, &'static str)] },
 }
@@ -548,9 +550,9 @@ pub fn sections() -> Vec<Section> {
                 ),
                 setting(
                     "VIZIER_BATTLE_DAILY_TIME",
-                    "Daily battle time",
-                    "India time the daily lobby opens. If a fight is running then, it opens as soon as the arena is free (up to 30 minutes late).",
-                    Kind::Time,
+                    "Daily battle times",
+                    "India times a lobby opens each day - add as many as you like, one battle each. If a fight is running at a time, that lobby opens as soon as the arena is free (up to 30 minutes late).",
+                    Kind::Times,
                     "21:00",
                 ),
                 setting("VIZIER_BATTLE_DAILY_MINUTES", "Daily lobby length", "How long the daily lobby stays open for joining.", number(1, 60, "minutes"), "10"),

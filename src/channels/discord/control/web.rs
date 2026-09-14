@@ -1077,6 +1077,23 @@ async fn validate(panel: &Panel, setting: &Setting, raw: &str) -> Result<String,
         }
         Kind::Text => Ok(value.to_string()),
         Kind::Time => parse_time(value).ok_or_else(|| "Use a time like 09:30.".to_string()),
+        Kind::Times => {
+            let mut times = Vec::new();
+            for part in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                let t = parse_time(part).ok_or_else(|| format!("\"{}\" isn't a time like 09:30.", part))?;
+                if !times.contains(&t) {
+                    times.push(t);
+                }
+            }
+            if times.is_empty() {
+                return Err("Add at least one time.".into());
+            }
+            if times.len() > 24 {
+                return Err("That's more than 24 times a day.".into());
+            }
+            times.sort();
+            Ok(times.join(","))
+        }
         Kind::Choice { options } => options
             .iter()
             .find(|(v, _)| *v == value)

@@ -952,6 +952,7 @@
         return el;
       }
       case 'choice': { const o = (kind.options || []).find((x) => x[0] === value); return wrap(o ? o[1] : value); }
+      case 'times': return wrap(value.split(',').filter(Boolean).join(', '));
       case 'number': case 'decimal': return wrap(value + (kind.unit ? ' ' + kind.unit : ''));
       default: return wrap(value.length > 60 ? value.slice(0, 57) + '…' : value);
     }
@@ -1061,6 +1062,7 @@
       case 'weighted_channels': return v.split(',').map((p) => { const [id, w] = p.split(':'); const c = chan((id || '').trim()); return (c ? '#' + c.name : id) + ' ×' + (w || 1); }).join(', ');
       case 'role': { const r = role(v); return r ? '@' + r.name : v; }
       case 'choice': { const o = (kind.options || []).find((x) => x[0] === v); return o ? o[1] : v; }
+      case 'times': return v.split(',').filter(Boolean).join(', ');
       case 'number': case 'decimal': return v + (kind.unit ? ' ' + kind.unit : '');
       default: return v;
     }
@@ -1146,6 +1148,7 @@
       if (n < k.min || n > k.max) return 'Between ' + k.min + ' and ' + k.max + '.';
     }
     if (k.type === 'time' && v !== '' && parseHm(v) === null) return 'Use a time like 09:30.';
+    if (k.type === 'times' && !v.split(',').filter(Boolean).length) return 'Add at least one time.';
     if (k.type === 'weighted_channels' && v.split(',').filter(Boolean).some((p) => !chan(p.split(':')[0]))) return 'Pick a channel on every row.';
     return null;
   }
@@ -1205,6 +1208,24 @@
         input.addEventListener('input', () => { set(input.value.trim()); input.classList.toggle('invalid', !!validateDraft(s, input.value.trim())); });
         input.classList.toggle('invalid', !!validateDraft(s, f.draft));
         return h('div', null, h('div', { class: 'input-group' }, input, k.unit ? h('span', { class: 'addon' }, k.unit) : null), h('div', { class: 'hint' }, k.min + ' to ' + k.max + (s.default ? ' · default ' + s.default : '')));
+      }
+      case 'times': {
+        const list = f.draft.split(',').map((t) => t.trim()).filter(Boolean);
+        const times = h('div', { class: 'times' });
+        list.forEach((t) => times.appendChild(h('span', { class: 'chip' }, icon('clock'), h('span', { class: 'chip-text mono' }, t),
+          h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + t, onclick: () => set(list.filter((x) => x !== t).join(','), true) }, icon('x')))));
+        if (!list.length) times.appendChild(h('span', { class: 'hint', style: 'margin:0' }, 'No times yet.'));
+        const tIn = h('input', { class: 'input', type: 'time', id, 'aria-label': 'Time to add', 'aria-describedby': described });
+        const add = () => {
+          if (parseHm(tIn.value) === null) { tIn.focus(); return; }
+          const v = hm(parseHm(tIn.value));
+          if (!list.includes(v)) { list.push(v); list.sort(); }
+          set(list.join(','), true);
+          const again = f.el.querySelector('.field-control input[type=time]');
+          if (again) again.focus();
+        };
+        tIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+        return h('div', null, times, h('div', { class: 'time-add', style: 'margin-top:8px' }, h('div', { class: 'input-group', style: 'max-width:220px' }, tIn, h('span', { class: 'addon' }, 'IST')), h('button', { class: 'btn sm', type: 'button', onclick: add }, icon('plus'), 'Add time')));
       }
       case 'time': {
         const input = h('input', { class: 'input', type: 'time', id, value: f.draft, 'aria-describedby': described });
