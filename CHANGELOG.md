@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.11] - 2026-09-14
+
+### 💼 Other
+
+- Members set their own by asking the bot or with /remind
 ## [0.11.10] - 2026-09-14
 
 ### 💼 Other
 
 - A daily limit of 100 or more means no limit; /today and chips say so
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.10
 ## [0.11.9] - 2026-09-14
 
 ### 💼 Other
