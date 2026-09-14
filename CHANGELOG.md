@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.18] - 2026-09-14
+
+### 💼 Other
+
+- /frogdrop for admins - drop a frog (any or a chosen rarity) in this channel now
 ## [0.11.17] - 2026-09-14
 
 ### 💼 Other
@@ -10,6 +15,10 @@ All notable changes to this project will be documented in this file.
 - Chocolate Frog Discord flow (drop, riddle pop-up, win, escape, /frogs)
 - Chocolate Frog game - riddle cards, collection, /frogs, /frogcard, panel page
 - Cards as assets - earned cards, trades and selling full sets
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.17
 ## [0.11.16] - 2026-09-14
 
 ### 💼 Other
