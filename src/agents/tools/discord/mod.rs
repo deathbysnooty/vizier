@@ -380,8 +380,11 @@ pub struct SetMemberReminder;
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SetMemberReminderArgs {
-    #[schemars(description = "Discord id of the member who asked for the reminder, as a string - the number in their (DiscordId: ...)")]
+    #[schemars(description = "Discord id of the member to remind, as a string. Usually the person asking; an admin may name someone else (use the id of the member they mentioned)")]
     user_id: Snowflake,
+
+    #[schemars(description = "Discord id of the person who asked for this reminder, as a string - the number in their (DiscordId: ...)")]
+    requested_by: Snowflake,
 
     #[schemars(description = "When, in India time, written the way people say it: 'in 2 hours', '30m', '1h30m', 'at 9pm', '21:30', 'tomorrow 9am', '2026-09-20 18:00'")]
     when: String,
@@ -402,7 +405,7 @@ impl VizierTool for SetMemberReminder {
     fn description(&self) -> String {
         "Save a reminder when a Discord member asks you to remind them about something (\"remind me in 2 hours to...\", \"remind me tomorrow at 9\"). \
          The bot pings that member in this channel at the time - no need to schedule a task or send anything yourself. \
-         Only set reminders for the person asking. Tell them the time it returns."
+ Members can only remind themselves; a bot admin can ask you to remind another member (set user_id to that member). Tell them the time it returns."
             .into()
     }
 
@@ -416,7 +419,8 @@ impl VizierTool for SetMemberReminder {
                 args.when
             ))
         })?;
-        let memo = memos::create(args.user_id.get(), channel, &args.what, due, "chat").map_err(VizierError)?;
+        let memo =
+            memos::create(args.user_id.get(), channel, &args.what, due, "chat", args.requested_by.get()).map_err(VizierError)?;
         Ok(format!(
             "Reminder #{} saved for {} ({}): \"{}\". The bot will ping them then.",
             memo.id,

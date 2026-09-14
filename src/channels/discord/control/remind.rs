@@ -18,6 +18,7 @@ pub fn remind_builder() -> CreateCommand {
                 .required(true),
         )
         .add_option(CreateCommandOption::new(CommandOptionType::String, "what", "what to remind you about").required(true))
+        .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "admins only: remind someone else"))
 }
 
 pub fn reminders_builder() -> CreateCommand {
@@ -39,20 +40,28 @@ pub async fn remind_command(ctx: &Context, command: &CommandInteraction) {
             })
         };
         let (when, what) = (opt("when").unwrap_or_default(), opt("what").unwrap_or_default());
+        let asker = command.user.id.get();
+        let target = command
+            .data
+            .options
+            .iter()
+            .find_map(|o| match o.value {
+                CommandDataOptionValue::User(id) => Some(id.get()),
+                _ => None,
+            })
+            .unwrap_or(asker);
         let now = Utc::now().timestamp();
         match memos::parse_when(&when, now) {
             None => whisper(format!(
                 "I couldn't read \"{}\" as a time. Try `in 2 hours`, `30m`, `at 9pm`, `tomorrow 9am` or `2026-09-20 18:00` (India time).",
                 when
             )),
-            Some(due) => match memos::create(command.user.id.get(), command.channel_id.get(), &what, due, "command") {
-                Ok(m) => CreateInteractionResponseMessage::new().content(format!(
-                    "⏰ Got it, <@{}> — I'll remind you **{}** (<t:{}:R>): {}",
-                    m.user_id,
-                    memos::describe(m.due_ts, now),
-                    m.due_ts,
-                    m.text
-                ))
+            Some(due) => match memos::create(target, command.channel_id.get(), &what, due, "command", asker) {
+                Ok(m) => CreateInteractionResponseMessage::new().content(if target == asker {
+                    format!("⏰ Got it, <@{}> — I'll remind you **{}** (<t:{}:R>): {}", m.user_id, memos::describe(m.due_ts, now), m.due_ts, m.text)
+                } else {
+                    format!("⏰ Got it — I'll remind <@{}> **{}** (<t:{}:R>): {}", m.user_id, memos::describe(m.due_ts, now), m.due_ts, m.text)
+                })
                 .allowed_mentions(serenity::all::CreateAllowedMentions::new()),
                 Err(err) => whisper(err),
             },

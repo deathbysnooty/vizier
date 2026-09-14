@@ -28,6 +28,8 @@ pub struct Memo {
     /// "pending", "sent", "cancelled" or "failed".
     pub status: String,
     pub sent_ts: i64,
+    /// Who set it, when an admin set it for someone else ("0" otherwise).
+    pub set_by: String,
 }
 
 const SCHEMA: &str = "
@@ -40,7 +42,15 @@ const SCHEMA: &str = "
 ";
 
 pub(super) fn migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    // Added after the first version: who set a reminder for someone else.
+    let has_set_by: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('member_reminders') WHERE name = 'set_by'")?
+        .exists([])?;
+    if !has_set_by {
+        conn.execute_batch("ALTER TABLE member_reminders ADD COLUMN set_by INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
 }
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Memo> {
@@ -54,10 +64,11 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Memo> {
         via: r.get(6)?,
         status: r.get(7)?,
         sent_ts: r.get(8)?,
+        set_by: r.get::<_, i64>(9)?.to_string(),
     })
 }
 
-const COLUMNS: &str = "id, user_id, channel_id, text, due_ts, created_ts, via, status, sent_ts";
+const COLUMNS: &str = "id, user_id, channel_id, text, due_ts, created_ts, via, status, sent_ts, set_by";
 
 // --- when --------------------------------------------------------------------------
 
@@ -195,8 +206,13 @@ pub fn describe(due: i64, now: i64) -> String {
 
 // --- store ----------------------------------------------------------------------------
 
-/// Saves a reminder after checking it; the error says what to fix.
-pub fn create(user: u64, channel: u64, text: &str, due: i64, via: &str) -> Result<Memo, String> {
+/// Saves a reminder for `user` after checking it; the error says what to fix.
+/// `set_by` is who asked: someone setting a reminder for another member must
+/// be a bot admin.
+pub fn create(user: u64, channel: u64, text: &str, due: i64, via: &str, set_by: u64) -> Result<Memo, String> {
+    if set_by != 0 && set_by != user && !super::super::admin_ids().contains(&set_by) {
+        return Err("Only admins can set reminders for someone else - you can remind yourself.".into());
+    }
     let now = Utc::now().timestamp();
     let text = text.trim();
     if text.is_empty() {
@@ -220,8 +236,8 @@ pub fn create(user: u64, channel: u64, text: &str, due: i64, via: &str) -> Resul
         return Err(format!("You already have {} reminders waiting. Cancel one with /reminders first.", MAX_PENDING));
     }
     conn.execute(
-        "INSERT INTO member_reminders (user_id, channel_id, text, due_ts, created_ts, via) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![user as i64, channel as i64, text, due, now, via],
+        "INSERT INTO member_reminders (user_id, channel_id, text, due_ts, created_ts, via, set_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![user as i64, channel as i64, text, due, now, via, if set_by == user { 0 } else { set_by as i64 }],
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
@@ -305,7 +321,11 @@ pub(super) fn mark_failed_try(id: i64) {
 
 /// What a reminder posts.
 pub fn message_text(m: &Memo) -> String {
-    format!("⏰ <@{}> reminder: {}", m.user_id, m.text)
+    if m.set_by != "0" && m.set_by != m.user_id {
+        format!("⏰ <@{}> reminder from <@{}>: {}", m.user_id, m.set_by, m.text)
+    } else {
+        format!("⏰ <@{}> reminder: {}", m.user_id, m.text)
+    }
 }
 
 #[cfg(test)]
