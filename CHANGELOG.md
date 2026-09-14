@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.1] - 2026-09-14
+
+### 💼 Other
+
+- Member notes and tones handed to the AI when it answers; fix derive crate version pin
+- Members profiles with mods' notes, and live scorers with daily cap progress
 ## [0.11.0] - 2026-09-13
 
 ### 💼 Other
@@ -11,6 +17,10 @@ All notable changes to this project will be documented in this file.
 - Auto-responses - react to or answer messages with set words, per channel
 - The web panel - sign-in via /panel, settings, reminders, commands, activity log
 - House Cup live page, auto-responses page, bot behaviour page
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.0
 ## [0.10.98] - 2026-09-13
 
 ### 💼 Other
