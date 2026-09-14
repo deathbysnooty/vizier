@@ -17,8 +17,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use serenity::all::{ChannelId, Context, CreateAllowedMentions, CreateMessage, UserId};
+use serenity::all::{
+    ChannelId, Context, CreateAllowedMentions, CreateAttachment, CreateEmbed, CreateEmbedFooter, CreateMessage, MessageId, UserId,
+};
 
+use super::posts;
 use super::reminders::{self, Order, Reminder, Schedule};
 
 const TICK: Duration = Duration::from_secs(30);
@@ -222,26 +225,141 @@ async fn tick(ctx: &Context, r: Reminder, now: i64) {
     if !is_due(&r.schedule, r.last_sent, now) {
         return;
     }
-    let Some(line) = pick_line(&r.lines, r.order, r.sent_count, rand::random::<f64>()) else {
+    let Some(prepared) = prepare(&r, &name, user, now).await else {
+        // Waits like a failed post, so an empty one doesn't ask the AI every tick.
+        FAILED.lock().insert(r.id, Instant::now());
         return;
     };
-    let text = render(line, &name, user, &r.since, now);
-    match post(ctx, channel, text, user).await {
-        Ok(()) => {
+    match deliver(ctx, channel, &prepared, user).await {
+        Ok(message) => {
             FAILED.lock().remove(&r.id);
             // Logged either way: a silent success is indistinguishable from a
             // thread that died, which cost an evening of guessing once already.
             tracing::info!("reminders: posted '{}' ({} so far)", r.name, r.sent_count + 1);
-            update(r.id, |fresh| {
-                fresh.last_sent = now;
-                fresh.sent_count += 1;
-            });
+            if let Some(old) = posts::previous_to_delete(&r, message) {
+                match tokio::time::timeout(HTTP_WAIT, channel.delete_message(&ctx.http, MessageId::new(old))).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => tracing::info!("reminders: '{}' previous post not deleted: {}", r.name, err),
+                    Err(_) => tracing::info!("reminders: '{}' previous post not deleted in time", r.name),
+                }
+            }
+            update(r.id, |fresh| posts::record_post(fresh, now, message, prepared.ai_text.as_deref()));
         }
         Err(err) => {
             FAILED.lock().insert(r.id, Instant::now());
             tracing::warn!("reminders: '{}' not posted: {}", r.name, err);
         }
     }
+}
+
+// --- richer posts ------------------------------------------------------------------------
+
+/// How long the AI may take to write a post before the lines are used.
+const AI_WAIT: Duration = Duration::from_secs(60);
+/// How long a post with a picture may take to upload.
+const UPLOAD_WAIT: Duration = Duration::from_secs(60);
+
+/// A post worked out and ready to send.
+pub(super) struct Prepared {
+    pub outgoing: posts::Outgoing,
+    pub bytes: Option<Vec<u8>>,
+    pub reactions: Vec<String>,
+    /// The AI's text, when it wrote this one.
+    pub ai_text: Option<String>,
+}
+
+/// Works out what a reminder posts now: the AI's text or the next line, the
+/// placeholders filled, the picture, plain or card. `None` when there is
+/// nothing to send.
+async fn prepare(r: &Reminder, name: &str, user: Option<u64>, now: i64) -> Option<Prepared> {
+    let texts = r.lines.iter().map(String::as_str).chain([r.title.as_str(), r.footer.as_str(), r.ai_prompt.as_str()]);
+    let table = if posts::needs_houses(texts) { posts::standings_now(now) } else { Vec::new() };
+    let fill = |text: &str| {
+        let mut roll = || rand::random::<f64>();
+        render(&posts::fill_extras(text, now, &table, &mut roll), name, user, &r.since, now)
+    };
+
+    let mut reply = None;
+    if !r.ai_prompt.trim().is_empty() {
+        let prompt = posts::ai_prompt(&fill(&r.ai_prompt), &r.ai_recent, now);
+        match tokio::time::timeout(AI_WAIT, super::web::ask_bot_model(prompt)).await {
+            Ok(Ok(answer)) => reply = Some(answer),
+            Ok(Err(err)) => tracing::warn!("reminders: '{}' AI call failed, using a line: {}", r.name, err),
+            Err(_) => tracing::warn!("reminders: '{}' AI took too long, using a line", r.name),
+        }
+    }
+    let line = pick_line(&r.lines, r.order, r.sent_count, rand::random::<f64>()).map(|line| fill(line));
+    let (text, ai_text) = posts::choose_text(reply.as_deref(), line);
+    if reply.is_some() && ai_text.is_none() {
+        tracing::warn!("reminders: '{}' AI reply was not usable, using a line", r.name);
+    }
+
+    let picture = posts::pick_image(&r.images, r.image_order, r.sent_count, rand::random::<f64>()).and_then(|id| {
+        let found = super::media::get(id);
+        if found.is_none() {
+            tracing::warn!("reminders: '{}' picture {} is gone, posting without it", r.name, id);
+        }
+        found
+    });
+    let attachment = picture.as_ref().map(|(info, _)| info.attachment_name());
+    let outgoing = posts::compose(r.style, &text, &fill(&r.title), &r.colour, &fill(&r.footer), attachment.as_deref());
+    if outgoing.is_empty() {
+        tracing::warn!("reminders: '{}' had nothing to post", r.name);
+        return None;
+    }
+    Some(Prepared { outgoing, bytes: picture.map(|(_, bytes)| bytes), reactions: r.reactions.clone(), ai_text })
+}
+
+/// Sends a prepared post and adds its reactions; gives back the message id.
+async fn deliver(ctx: &Context, channel: ChannelId, p: &Prepared, user: Option<u64>) -> Result<u64, String> {
+    // Only the member the reminder is about may be pinged, and only by {mention}.
+    let mentions = CreateAllowedMentions::new().users(user.map(UserId::new).into_iter().collect::<Vec<_>>());
+    let mut message = CreateMessage::new().allowed_mentions(mentions);
+    if !p.outgoing.content.is_empty() {
+        message = message.content(p.outgoing.content.clone());
+    }
+    if let Some(card) = &p.outgoing.card {
+        let mut embed = CreateEmbed::new().colour(card.colour);
+        if !card.title.is_empty() {
+            embed = embed.title(card.title.clone());
+        }
+        if !card.description.is_empty() {
+            embed = embed.description(card.description.clone());
+        }
+        if let Some(image) = &card.image {
+            embed = embed.image(image.clone());
+        }
+        if !card.footer.is_empty() {
+            embed = embed.footer(CreateEmbedFooter::new(card.footer.clone()));
+        }
+        message = message.embed(embed);
+    }
+    if let (Some(name), Some(bytes)) = (&p.outgoing.attachment, &p.bytes) {
+        message = message.add_file(CreateAttachment::bytes(bytes.clone(), name.clone()));
+    }
+    let wait = if p.bytes.is_some() { UPLOAD_WAIT } else { HTTP_WAIT };
+    let sent = match tokio::time::timeout(wait, channel.send_message(&ctx.http, message)).await {
+        Ok(Ok(sent)) => sent,
+        Ok(Err(err)) => return Err(err.to_string()),
+        Err(_) => return Err(format!("no answer from Discord in {}s", wait.as_secs())),
+    };
+    for emoji in p.reactions.iter().filter_map(|e| super::autoreplies::reaction(e)) {
+        if let Ok(Err(err)) = tokio::time::timeout(HTTP_WAIT, channel.create_reaction(&ctx.http, sent.id, emoji)).await {
+            tracing::info!("reminders: a reaction was not added: {}", err);
+        }
+    }
+    Ok(sent.id.get())
+}
+
+/// Posts a reminder once, now, as it would go out, without touching its count,
+/// its last post or what the AI remembers: the panel's "Send a test now".
+pub async fn send_test(ctx: &Context, r: &Reminder) -> Result<(), String> {
+    let channel = r.channel_id.trim().parse::<u64>().ok().filter(|id| *id != 0).map(ChannelId::new).ok_or("Pick a channel first.")?;
+    let user = r.user_id.trim().parse::<u64>().ok().filter(|id| *id != 0);
+    let name = display_name(ctx, r, user);
+    let now = Utc::now().timestamp();
+    let prepared = prepare(r, &name, user, now).await.ok_or("There's nothing to send yet: add a line, a picture or an AI prompt.")?;
+    deliver(ctx, channel, &prepared, user).await.map(|_| ())
 }
 
 /// Changes only what the scheduler owns, on the stored copy read afresh, so an
@@ -345,6 +463,7 @@ fn old_nudge() -> Reminder {
         ends: String::new(),
         last_sent: 0,
         sent_count: 0,
+        ..Default::default()
     }
 }
 

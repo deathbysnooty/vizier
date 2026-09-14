@@ -14,6 +14,9 @@ pub mod autoreplies;
 pub mod catalog;
 pub mod help;
 pub mod insights;
+// Richer scheduled posts: the picture library and how a post is put together.
+pub mod media;
+pub mod posts;
 pub mod members;
 pub mod memos;
 pub mod remind;
@@ -63,6 +66,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     autoreplies::migrate(&conn)?;
     members::migrate(&conn)?;
     memos::migrate(&conn)?;
+    media::migrate(&conn)?;
     profiles::migrate(&conn)?;
     // Reply and mention counts keep their own file; losing it must not stop the panel.
     if let Err(err) = insights::open(workspace) {

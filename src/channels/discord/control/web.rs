@@ -190,6 +190,15 @@ pub trait PanelData: Send + Sync + 'static {
     async fn ask_model(&self, _prompt: String) -> anyhow::Result<(String, String)> {
         anyhow::bail!("no model here")
     }
+    // Richer scheduled posts.
+    /// This month's House Cup table, for `{leader}` and `{standings}`.
+    fn house_standings(&self, _now: i64) -> Vec<super::posts::Standing> {
+        Vec::new()
+    }
+    /// Posts a reminder once, now, without touching its bookkeeping.
+    async fn send_test_post(&self, _reminder: &Reminder) -> Result<(), String> {
+        Err("Discord isn't connected right now.".into())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -203,7 +212,10 @@ pub struct EmojiInfo {
 mod agent;
 mod houses;
 mod insights;
+mod media;
 mod members;
+mod memos;
+mod posts;
 mod profiles;
 mod rules;
 mod scorers;
@@ -477,6 +489,15 @@ impl PanelData for LiveData {
         Ok((answer, model))
     }
 
+    fn house_standings(&self, now: i64) -> Vec<super::posts::Standing> {
+        super::posts::standings_now(now)
+    }
+
+    async fn send_test_post(&self, reminder: &Reminder) -> Result<(), String> {
+        let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
+        super::scheduler::send_test(ctx, reminder).await
+    }
+
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -503,6 +524,12 @@ impl PanelData for LiveData {
 
 /// The agent's dependencies and id, for the Bot behaviour page.
 static AGENT: OnceLock<(crate::dependencies::VizierDependencies, String)> = OnceLock::new();
+
+/// One completion from the bot's model, for the scheduler's AI-written posts.
+pub(crate) async fn ask_bot_model(prompt: String) -> anyhow::Result<String> {
+    let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+    super::super::weekly::ask_model(deps, agent_id, prompt).await
+}
 
 /// Starts the panel once per process and (re)registers `/panel`. Called from
 /// `ready`, which fires again on every reconnect.
@@ -671,6 +698,16 @@ pub fn router(panel: Panel) -> Router {
         .route("/reminders", get(list_reminders).post(create_reminder))
         .route("/reminders/{id}", get(get_reminder).put(update_reminder).delete(delete_reminder))
         .route("/reminders/{id}/toggle", post(toggle_reminder))
+        // Richer scheduled posts, members' own reminders and the picture library.
+        .route("/reminders/templates", get(posts::templates))
+        .route("/reminders/placeholders", get(posts::placeholders))
+        .route("/reminders/ai-preview", post(posts::ai_preview))
+        .route("/reminders/{id}/test", post(posts::send_test))
+        .route("/memos", get(memos::list).post(memos::create))
+        .route("/memos/when", get(memos::when))
+        .route("/memos/{id}/cancel", post(memos::cancel))
+        .route("/media", get(media::list).post(media::upload).layer(axum::extract::DefaultBodyLimit::max(media::UPLOAD_LIMIT)))
+        .route("/media/{id}", get(media::serve).delete(media::delete))
         .route("/audit", get(audit))
         .route("/restart", post(restart))
         .route("/discord/emojis", get(emojis))
@@ -754,7 +791,10 @@ async fn security_headers(req: Request, next: Next) -> Response {
 
 async fn no_store(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
-    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Pictures from the library never change under their id, so they may say otherwise.
+    if !res.headers().contains_key(header::CACHE_CONTROL) {
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     res
 }
 
@@ -1179,7 +1219,8 @@ async fn check_reminder(panel: &Panel, mut r: Reminder) -> Result<Reminder, ApiE
         ApiError::bad(if r.channel_id.trim().is_empty() { "Pick a channel to post in.".to_string() } else { e })
     })?;
     r.lines = r.lines.iter().map(|l| l.trim_end().to_string()).filter(|l| !l.trim().is_empty()).collect();
-    if r.lines.is_empty() {
+    posts::check_extras(&mut r)?;
+    if r.lines.is_empty() && r.ai_prompt.is_empty() && r.images.is_empty() {
         return Err(ApiError::bad("Add at least one message line."));
     }
     if r.lines.len() > 200 {
@@ -1272,6 +1313,8 @@ async fn create_reminder(
     r.id = 0;
     r.last_sent = 0;
     r.sent_count = 0;
+    r.last_message_id.clear();
+    r.ai_recent.clear();
     let id = reminders::save(&r, user).map_err(ApiError::internal)?;
     let saved = reminders::get(id).ok_or_else(|| ApiError::internal("reminder vanished after saving"))?;
     Ok((StatusCode::CREATED, axum::Json(saved)).into_response())
@@ -1290,6 +1333,9 @@ async fn update_reminder(
     r.id = id;
     r.last_sent = old.last_sent;
     r.sent_count = old.sent_count;
+    // A post in another channel can't be tidied from this one.
+    r.last_message_id = if r.channel_id == old.channel_id { old.last_message_id } else { String::new() };
+    r.ai_recent = old.ai_recent;
     reminders::save(&r, user).map_err(ApiError::internal)?;
     ok(reminders::get(id))
 }
@@ -1379,6 +1425,9 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);
+            } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {
+                let entry = posts::audit_entry(&panel, e);
+                obj.extend(entry);
             } else if let Some(uid) = e.key.strip_prefix("profile:") {
                 let note: Value = e.new.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
                 let name = uid

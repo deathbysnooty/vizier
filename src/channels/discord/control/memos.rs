@@ -213,6 +213,26 @@ pub fn create(user: u64, channel: u64, text: &str, due: i64, via: &str, set_by: 
     if set_by != 0 && set_by != user && !super::super::admin_ids().contains(&set_by) {
         return Err("Only admins can set reminders for someone else - you can remind yourself.".into());
     }
+    store(user, channel, text, due, via, set_by)
+}
+
+/// `create` for the panel, whose own sign-in has already checked that `set_by`
+/// is an admin.
+pub fn create_by_admin(user: u64, channel: u64, text: &str, due: i64, set_by: u64) -> Result<Memo, String> {
+    store(user, channel, text, due, "panel", set_by)
+}
+
+/// One reminder, whatever its status.
+pub fn get(id: i64) -> Option<Memo> {
+    let db = DB.get()?;
+    db.lock()
+        .query_row(&format!("SELECT {} FROM member_reminders WHERE id = ?1", COLUMNS), params![id], row)
+        .optional()
+        .ok()
+        .flatten()
+}
+
+fn store(user: u64, channel: u64, text: &str, due: i64, via: &str, set_by: u64) -> Result<Memo, String> {
     let now = Utc::now().timestamp();
     let text = text.trim();
     if text.is_empty() {

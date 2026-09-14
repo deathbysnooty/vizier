@@ -411,6 +411,12 @@ impl PanelData for FakeData {
         if bad {
             return Ok(("Sorry, I can't help with that.".into(), "fake/model-1".into()));
         }
+        if PROMPTS.lock().last().is_some_and(|p| p.contains("writing one scheduled post")) {
+            return Ok((
+                "\"Chai or coffee, and what's your go-to order at the tapri? ☕ Bonus points if it's as dramatic as <@2010>'s. @everyone answer below!\"".into(),
+                "fake/model-1".into(),
+            ));
+        }
         Ok((
             json!({
                 "summary": "Shows up most evenings in #general and #desi-banter with cricket takes and quiz chatter. Plays Koto and quiz nights regularly, often teasing <@2010> about fantasy picks. Friendly, fast replies. See https://example.com",
@@ -426,6 +432,17 @@ impl PanelData for FakeData {
             .to_string(),
             "fake/model-1".into(),
         ))
+    }
+
+    fn house_standings(&self, now: i64) -> Vec<super::super::posts::Standing> {
+        let conn = fake_ledger(now).lock();
+        let points = |f: fn(&rusqlite::Connection, i64) -> rusqlite::Result<std::collections::HashMap<&'static str, i64>>| f(&conn, super::super::super::points::month_start(now)).unwrap_or_default();
+        super::super::posts::standings_from(&points(super::super::super::points::house_totals))
+    }
+
+    async fn send_test_post(&self, reminder: &Reminder) -> Result<(), String> {
+        TEST_POSTS.lock().push(reminder.id);
+        Ok(())
     }
 
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
@@ -447,6 +464,7 @@ const SAFE: u64 = 1543162777642868736;
 static MODEL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static MODEL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static MODEL_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEST_POSTS: std::sync::LazyLock<parking_lot::Mutex<Vec<i64>>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 static PROMPTS: std::sync::LazyLock<parking_lot::Mutex<Vec<String>>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
 const HOUSES_KEYS: [&str; 4] = ["gryffindor", "slytherin", "ravenclaw", "hufflepuff"];
@@ -1723,6 +1741,350 @@ async fn insights_api_counts_pairs_and_shares_no_text() {
     assert!(insights::meta_get("backfill_done").is_some());
 }
 
+// --- members' reminders ----------------------------------------------------------------
+
+#[tokio::test]
+async fn member_reminders_list_create_cancel_and_audit() {
+    use super::super::memos;
+    let app = panel();
+    let session = session_for(ADMIN);
+    let make = |body: Value| {
+        let app = app.clone();
+        let session = session.clone();
+        async move { call(&app, "POST", "/api/memos", Some(&session), Some(body), true).await }
+    };
+
+    // Problems read as something to fix.
+    let good = json!({ "user_id": MEMBER.to_string(), "channel_id": "22", "when": "in 2 hours", "text": "call mum MEMO-SECRET" });
+    for (field, value, says) in [
+        ("when", json!("whenever"), "couldn't read “whenever”"),
+        ("when", json!(""), "Say when"),
+        ("when", json!("in 90 days"), "at most 60 days"),
+        ("text", json!("  "), "What should the reminder say"),
+        ("user_id", json!("4242"), "isn't in the server"),
+        ("user_id", json!(""), "Pick the member"),
+        ("channel_id", json!("41"), "not a text channel"),
+        ("channel_id", json!(""), "Pick the channel"),
+    ] {
+        let mut body = good.clone();
+        body[field] = value.clone();
+        let (status, res, _) = make(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value} gave {res}");
+        assert!(res["error"].as_str().unwrap().contains(says), "{field}={value}: {res}");
+    }
+    let (status, _, _) = call(&app, "POST", "/api/memos", Some(&session), Some(good.clone()), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "needs the panel header");
+
+    // An admin sets one for a member, and one for themself.
+    let (status, created, _) = make(good.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!(created["user"]["name"], "Rohan");
+    assert_eq!(created["set_by"]["name"], "Kabir");
+    assert_eq!((created["via"].as_str(), created["status"].as_str()), (Some("panel"), Some("pending")));
+    assert_eq!(created["channel"]["name"], "memes");
+    assert!(created["due_words"].as_str().unwrap().ends_with("IST"));
+    let stored = memos::get(id).unwrap();
+    assert_eq!((stored.set_by.as_str(), stored.via.as_str()), ("1001", "panel"));
+    let (_, mine, _) = make(json!({ "user_id": ADMIN.to_string(), "channel_id": "21", "when": "tomorrow 9am", "text": "own one" })).await;
+    assert!(mine["set_by"].is_null(), "no “set by” on your own: {mine}");
+
+    // Ones members set somewhere private keep their text off the panel.
+    let now = chrono::Utc::now().timestamp();
+    let safe = memos::create(MEMBER, SAFE, "SAFE-MEMO private", now + 3600, "chat", 0).unwrap();
+    let thread = memos::create(MEMBER, 77, "THREAD-MEMO private", now + 3600, "command", 0).unwrap();
+    let dm = memos::create(MEMBER, 5_000, "DM-MEMO private", now + 3600, "chat", 0).unwrap();
+
+    let (status, list, _) = call(&app, "GET", "/api/memos?status=pending", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["enabled"], true);
+    let items = list["items"].as_array().unwrap();
+    assert!(list["pending"].as_u64().unwrap() >= 5);
+    let by_id = |id: i64| items.iter().find(|m| m["id"] == id).cloned().unwrap();
+    assert_eq!(by_id(id)["text"], "call mum MEMO-SECRET");
+    for private in [safe.id, thread.id, dm.id] {
+        assert_eq!(by_id(private)["private"], true);
+        assert!(by_id(private)["text"].is_null());
+    }
+    let text = list.to_string();
+    assert!(!text.contains("SAFE-MEMO") && !text.contains("THREAD-MEMO") && !text.contains("DM-MEMO"));
+    let (status, _, _) = call(&app, "GET", "/api/memos?status=later", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The live "when" preview.
+    let (_, when, _) = call(&app, "GET", "/api/memos/when?text=in%2030m", Some(&session), None, false).await;
+    assert_eq!(when["ok"], true);
+    assert!((1790..=1810).contains(&when["in_secs"].as_i64().unwrap()));
+    assert!(when["words"].as_str().unwrap().contains(" at "));
+    let (_, when, _) = call(&app, "GET", "/api/memos/when?text=someday", Some(&session), None, false).await;
+    assert_eq!(when["ok"], false);
+    assert!(when["error"].as_str().unwrap().contains("someday"));
+
+    // Cancelling: once.
+    let (status, cancelled, _) = call(&app, "POST", &format!("/api/memos/{id}/cancel"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["status"], "cancelled");
+    let (status, again, _) = call(&app, "POST", &format!("/api/memos/{id}/cancel"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{again}");
+    let (status, _, _) = call(&app, "POST", "/api/memos/999999/cancel", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, done, _) = call(&app, "GET", "/api/memos?status=done", Some(&session), None, false).await;
+    assert!(done["items"].as_array().unwrap().iter().any(|m| m["id"] == id && m["status"] == "cancelled"));
+    assert!(done["items"].as_array().unwrap().iter().all(|m| m["status"] != "pending"));
+
+    // The log says who and when, never what.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let entries: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == format!("memo:{id}")).collect();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["change"], "Cancelled");
+    assert!(entries[1]["change"].as_str().unwrap().starts_with("Created · due "));
+    assert_eq!(entries[0]["label"], "Member reminder for @Rohan");
+    assert_eq!(entries[0]["section"]["id"], "reminders");
+    assert!(!audit.to_string().contains("MEMO-SECRET"));
+    let raw = super::super::audit(1000);
+    assert!(raw.iter().filter(|e| e.key.starts_with("memo:")).all(|e| !format!("{:?}{:?}", e.old, e.new).contains("MEMO-SECRET")));
+}
+
+// --- pictures and richer posts ------------------------------------------------------------
+
+fn png(len: usize) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+    b.resize(len, 7);
+    b
+}
+
+async fn upload(app: &Router, session: &str, content_type: &str, filename: Option<&str>, body: Vec<u8>) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/media")
+        .header("cookie", format!("mlci_panel={}", session))
+        .header("x-panel", "1")
+        .header("content-type", content_type);
+    if let Some(name) = filename {
+        req = req.header("x-filename", name);
+    }
+    let res = app.clone().oneshot(req.body(Body::from(body)).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into())))
+}
+
+#[tokio::test]
+async fn pictures_are_checked_served_and_kept_while_used() {
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    // Raw bytes over the usual 256 KB body limit, with a name that needs tidying.
+    let (status, pic, _) = {
+        let (s, v) = upload(&app, &session, "image/png", Some("Good%20Morning%21.png"), png(1_500_000)).await;
+        (s, v, ())
+    };
+    assert_eq!(status, StatusCode::CREATED, "{pic}");
+    let id = pic["id"].as_str().unwrap().to_string();
+    assert_eq!((pic["name"].as_str(), pic["mime"].as_str(), pic["size"].as_i64()), (Some("Good Morning.png"), Some("image/png"), Some(1_500_000)));
+
+    // Multipart, and the file's real type wins over its name.
+    let boundary = "XyZboundary";
+    let mut form = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"dance.png\"\r\nContent-Type: image/png\r\n\r\n").into_bytes();
+    form.extend_from_slice(b"GIF89a-not-really-a-png");
+    form.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let (status, gif) = upload(&app, &session, &format!("multipart/form-data; boundary={boundary}"), None, form).await;
+    assert_eq!(status, StatusCode::CREATED, "{gif}");
+    assert_eq!((gif["name"].as_str(), gif["mime"].as_str()), (Some("dance.gif"), Some("image/gif")));
+
+    // What isn't a picture, or is too big.
+    for (kind, name, body, code, says) in [
+        ("image/svg+xml", "x.svg", b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>".to_vec(), StatusCode::BAD_REQUEST, "Only PNG"),
+        ("image/png", "fake.png", b"just text pretending".to_vec(), StatusCode::BAD_REQUEST, "Only PNG"),
+        ("image/jpeg", "empty.jpg", Vec::new(), StatusCode::BAD_REQUEST, "empty"),
+        ("image/png", "huge.png", png(8 * 1024 * 1024 + 1), StatusCode::PAYLOAD_TOO_LARGE, "8 MB"),
+    ] {
+        let (status, res) = upload(&app, &session, kind, Some(name), body).await;
+        assert_eq!(status, code, "{name}: {res}");
+        assert!(res["error"].as_str().unwrap_or_default().contains(says), "{name}: {res}");
+    }
+    let (status, _) = upload(&app, &session_for(MEMBER), "image/png", Some("a.png"), png(100)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Listed, and served only to admins, with its real type.
+    let (_, list, _) = call(&app, "GET", "/api/media", Some(&session), None, false).await;
+    assert!(list["items"].as_array().unwrap().iter().any(|m| m["id"] == id && m["url"] == format!("/api/media/{id}")));
+    let (status, body, headers) = call(&app, "GET", &format!("/api/media/{id}"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "image/png");
+    assert!(headers.get("cache-control").unwrap().to_str().unwrap().starts_with("private"));
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    assert!(body.as_str().map_or(true, |t| t.len() > 1000));
+    let (status, _, _) = call(&app, "GET", &format!("/api/media/{id}"), None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for bad in ["../../control.db", "ABCDEF0123456789", "0000000000000000"] {
+        let (status, _, _) = call(&app, "GET", &format!("/api/media/{bad}"), Some(&session), None, false).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{bad}");
+    }
+
+    // A reminder that uses it keeps it from being deleted, and says which.
+    let mut r = sample_reminder();
+    r["name"] = json!("Morning picture");
+    r["images"] = json!([id, id, gif["id"]]);
+    r["stop_when_back"] = json!(false);
+    let (status, saved, _) = call(&app, "POST", "/api/reminders", Some(&session), Some(r.clone()), true).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(saved["images"].as_array().unwrap().len(), 2, "duplicates dropped");
+    let rid = saved["id"].as_i64().unwrap();
+    let (status, refused, _) = call(&app, "DELETE", &format!("/api/media/{id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(refused["error"].as_str().unwrap().contains("“Morning picture”"), "{refused}");
+    let (_, list, _) = call(&app, "GET", "/api/media", Some(&session), None, false).await;
+    let listed = list["items"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone();
+    assert_eq!(listed["used_by"][0]["name"], "Morning picture");
+
+    let mut without = saved.clone();
+    without["images"] = json!([gif["id"]]);
+    let (status, _, _) = call(&app, "PUT", &format!("/api/reminders/{rid}"), Some(&session), Some(without), true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = call(&app, "DELETE", &format!("/api/media/{id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = call(&app, "GET", &format!("/api/media/{id}"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A picture that's gone can't be picked.
+    r["images"] = json!([id]);
+    let (status, res, _) = call(&app, "POST", "/api/reminders", Some(&session), Some(r), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(res["error"].as_str().unwrap().contains("no longer in the library"));
+
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let changes: Vec<&str> = audit.as_array().unwrap().iter().filter(|e| e["key"] == format!("media:{id}")).map(|e| e["change"].as_str().unwrap()).collect();
+    assert_eq!(changes, vec!["Deleted", "Uploaded"]);
+    call(&app, "DELETE", &format!("/api/reminders/{rid}"), Some(&session), None, true).await;
+}
+
+#[tokio::test]
+async fn richer_reminders_are_checked_and_keep_the_schedulers_fields() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let base = || {
+        let mut r = sample_reminder();
+        r["stop_when_back"] = json!(false);
+        r
+    };
+    for (field, value, says) in [
+        ("colour", json!("red"), "#8b93ff"),
+        ("reactions", json!(["fire"]), "isn't an emoji"),
+        ("reactions", json!(["😀", "😁", "😂", "🤣", "😃", "😄"]), "at most 5"),
+        ("title", json!("t".repeat(257)), "256"),
+        ("ai_prompt", json!("p".repeat(1001)), "1000"),
+        ("style", json!("poster"), "missing something"),
+        ("image_order", json!("sideways"), "missing something"),
+    ] {
+        let mut r = base();
+        r[field] = value.clone();
+        let (status, res, _) = call(&app, "POST", "/api/reminders", Some(&session), Some(r), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value}: {res}");
+        assert!(res["error"].as_str().unwrap().contains(says), "{field}={value}: {res}");
+    }
+
+    // A card written by the AI needs no lines of its own.
+    let mut r = base();
+    r["lines"] = json!([]);
+    r["style"] = json!("card");
+    r["title"] = json!("  ❓ Question of the day  ");
+    r["colour"] = json!("#E0A43A");
+    r["reactions"] = json!(["👀", " <:pog:912345678901234000> ", "👀"]);
+    r["ai_prompt"] = json!("A fun question");
+    r["delete_previous"] = json!(true);
+    r["last_message_id"] = json!("123");
+    r["ai_recent"] = json!(["made up"]);
+    let (status, card, _) = call(&app, "POST", "/api/reminders", Some(&session), Some(r), true).await;
+    assert_eq!(status, StatusCode::CREATED, "{card}");
+    assert_eq!((card["style"].as_str(), card["title"].as_str(), card["colour"].as_str()), (Some("card"), Some("❓ Question of the day"), Some("#e0a43a")));
+    assert_eq!(card["reactions"], json!(["👀", "<:pog:912345678901234000>"]));
+    assert_eq!((card["last_message_id"].as_str(), card["ai_recent"].as_array().unwrap().len()), (Some(""), 0), "a new one starts clean");
+    let id = card["id"].as_i64().unwrap();
+
+    // What the scheduler keeps survives an edit from the page.
+    let mut stored = super::super::reminders::get(id).unwrap();
+    super::super::posts::record_post(&mut stored, 1_789_381_800, 555, Some("What's your comfort food?"));
+    super::super::reminders::save(&stored, 0).unwrap();
+    let mut edited = card.clone();
+    edited["name"] = json!("QOTD");
+    edited["last_message_id"] = json!("999");
+    edited["ai_recent"] = json!([]);
+    edited["sent_count"] = json!(0);
+    let (status, updated, _) = call(&app, "PUT", &format!("/api/reminders/{id}"), Some(&session), Some(edited), true).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!((updated["name"].as_str(), updated["last_message_id"].as_str(), updated["sent_count"].as_i64()), (Some("QOTD"), Some("555"), Some(1)));
+    assert_eq!(updated["ai_recent"], json!(["What's your comfort food?"]));
+
+    // Old stored reminders, without any of the new fields, still read.
+    {
+        let conn = super::super::DB.get().unwrap().lock();
+        let old = r#"{"name":"Old style","enabled":true,"channel_id":"21","lines":["hi"],"order":"rotate","schedule":{"kind":"every","minutes":60}}"#;
+        conn.execute("INSERT INTO reminders (body, updated_by, updated_ts) VALUES (?1, 0, 0)", rusqlite::params![old]).unwrap();
+    }
+    let old = super::super::reminders::list().into_iter().find(|r| r.name == "Old style").unwrap();
+    assert!(old.images.is_empty() && old.style == super::super::reminders::Style::Plain && !old.delete_previous);
+    super::super::reminders::delete(old.id, ADMIN).unwrap();
+
+    // "Send a test now" posts without counting, and not twice in a row.
+    let (status, _, _) = call(&app, "POST", &format!("/api/reminders/{id}/test"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(TEST_POSTS.lock().contains(&id));
+    let (status, _, _) = call(&app, "POST", &format!("/api/reminders/{id}/test"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let after = super::super::reminders::get(id).unwrap();
+    assert_eq!((after.sent_count, after.last_sent, after.last_message_id.as_str()), (1, 1_789_381_800, "555"));
+    let (status, _, _) = call(&app, "POST", "/api/reminders/987654/test", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "POST", &format!("/api/reminders/{id}/test"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Moving it to another channel forgets the post it would tidy away.
+    let mut moved = updated.clone();
+    moved["channel_id"] = json!("23");
+    let (_, moved, _) = call(&app, "PUT", &format!("/api/reminders/{id}"), Some(&session), Some(moved), true).await;
+    assert_eq!((moved["last_message_id"].as_str(), moved["sent_count"].as_i64()), (Some(""), Some(1)));
+    call(&app, "DELETE", &format!("/api/reminders/{id}"), Some(&session), None, true).await;
+}
+
+#[tokio::test]
+async fn templates_placeholders_and_the_ai_preview() {
+    use std::sync::atomic::Ordering;
+    let _turn = JOB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    MODEL_MODE.store(0, Ordering::SeqCst);
+    MODEL_DELAY_MS.store(0, Ordering::SeqCst);
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+
+    // Every template saves as it is once it has a channel.
+    let (status, templates, _) = call(&app, "GET", "/api/reminders/templates", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(templates.as_array().unwrap().len(), 5);
+    for t in templates.as_array().unwrap() {
+        let mut r = t["reminder"].clone();
+        r["channel_id"] = json!("21");
+        let (status, saved, _) = call(&app, "POST", "/api/reminders", Some(&session), Some(r), true).await;
+        assert_eq!(status, StatusCode::CREATED, "{}: {saved}", t["key"]);
+        call(&app, "DELETE", &format!("/api/reminders/{}", saved["id"]), Some(&session), None, true).await;
+    }
+
+    let (_, values, _) = call(&app, "GET", "/api/reminders/placeholders", Some(&session), None, false).await;
+    assert_eq!(values["standings"].as_str().unwrap().matches(" · ").count(), 3, "{values}");
+    assert!(!values["date"].as_str().unwrap().is_empty() && !values["leader"].as_str().unwrap().is_empty());
+
+    // The preview fills the prompt, asks, and cleans the answer.
+    let before = PROMPTS.lock().len();
+    let (status, preview, _) = call(&app, "POST", "/api/reminders/ai-preview", Some(&session), Some(json!({ "prompt": "Cheer on {leader}: {standings}" })), true).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let text = preview["text"].as_str().unwrap();
+    assert!(text.chars().count() <= 400 && !text.contains("<@"), "{text}");
+    assert_eq!(preview["model"], "fake/model-1");
+    let asked = PROMPTS.lock()[before..].join("\n");
+    assert!(asked.contains(values["standings"].as_str().unwrap()) && !asked.contains("{standings}"), "{asked}");
+    let (status, res, _) = call(&app, "POST", "/api/reminders/ai-preview", Some(&session), Some(json!({ "prompt": "  " })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -1806,6 +2168,7 @@ async fn demo_server() {
         ends: String::new(),
         last_sent: 0,
         sent_count: 0,
+        ..Default::default()
     };
     let zoya = Reminder {
         name: "Where is Zoya?".into(),
@@ -1842,6 +2205,114 @@ async fn demo_server() {
         super::super::reminders::save(&water, 0).unwrap();
         let r = super::super::reminders::list()[0].clone();
         super::super::reminders::save(&r, ADMIN).unwrap();
+
+        // Richer posts, with pictures from PANEL_DEMO_MEDIA_DIR when it's set.
+        use super::super::reminders::{ImageOrder, Style};
+        let mut pics: HashMap<String, String> = HashMap::new();
+        if let Ok(dir) = std::env::var("PANEL_DEMO_MEDIA_DIR") {
+            let mut files: Vec<_> = std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+            files.sort();
+            for path in files {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if let Ok(saved) = super::super::media::save(&name, &std::fs::read(&path).unwrap(), ADMIN_TWO) {
+                    pics.insert(name, saved.id);
+                }
+            }
+        }
+        let pic = |name: &str| pics.get(name).cloned().into_iter().collect::<Vec<_>>();
+        let morning = Reminder {
+            name: "Good morning".into(),
+            channel_id: "21".into(),
+            lines: vec![
+                "Good morning, legends! ☀️ **{day}** is here. Chai ready hai?".into(),
+                "Suprabhat, {date}! Aaj ka plan kya hai? ☕".into(),
+            ],
+            schedule: Schedule::Daily { times: vec!["08:00".into()] },
+            images: [pic("good-morning.png"), pic("chai-time.jpg")].concat(),
+            image_order: ImageOrder::Rotate,
+            reactions: vec!["☀️".into(), "<:mlci_heart:912345678901234004>".into()],
+            last_sent: now - 5 * 3600,
+            sent_count: 38,
+            ..base.clone()
+        };
+        let cup = Reminder {
+            name: "House Cup standings".into(),
+            channel_id: "33".into(),
+            style: Style::Card,
+            title: "🏆 House Cup · {date}".into(),
+            colour: "#c28b2c".into(),
+            footer: "Points reset on the 1st · /houses for more".into(),
+            lines: vec!["{standings}\n\n**{leader}** lead the month. Everyone else, it's not over yet!".into()],
+            schedule: Schedule::Daily { times: vec!["22:00".into()] },
+            images: pic("house-cup.png"),
+            delete_previous: true,
+            last_message_id: "1290000000000000001".into(),
+            last_sent: now - 20 * 3600,
+            sent_count: 12,
+            ..base.clone()
+        };
+        let qotd = Reminder {
+            name: "Question of the day".into(),
+            channel_id: "22".into(),
+            style: Style::Card,
+            title: "❓ Question of the day".into(),
+            colour: "#e0a43a".into(),
+            footer: "Answer below 👇".into(),
+            ai_prompt: "A fun, easy question for everyone to answer in chat: this-or-that, food, films, cricket or games. One question only.".into(),
+            lines: vec!["Chai or coffee, and why is it chai?".into(), "What's one song you've had on repeat this week?".into()],
+            order: Order::Random,
+            schedule: Schedule::Daily { times: vec!["18:00".into()] },
+            reactions: vec!["👀".into()],
+            ai_recent: vec!["Would you rather give up biryani or pani puri forever?".into()],
+            last_sent: now - 23 * 3600,
+            sent_count: 9,
+            ..base.clone()
+        };
+        let hydrate = Reminder {
+            name: "Pani break".into(),
+            channel_id: "23".into(),
+            lines: vec!["💧 {random:Pani pee lo, doston|Hydration check|Sip sip, hooray} — it's {time}.".into()],
+            schedule: Schedule::Every { minutes: 120 },
+            active_from: "10:00".into(),
+            active_to: "23:00".into(),
+            images: [pic("pani-pee-lo.gif"), pic("stretch.webp")].concat(),
+            image_order: ImageOrder::Random,
+            delete_previous: true,
+            last_sent: now - 3600,
+            sent_count: 77,
+            ..base.clone()
+        };
+        for r in [&morning, &cup, &qotd, &hydrate] {
+            super::super::reminders::save(r, ADMIN).unwrap();
+        }
+    }
+
+    // Members' own reminders: some waiting, some done.
+    if super::super::memos::all(1).is_empty() {
+        use super::super::memos;
+        let set = |user: u64, channel: u64, text: &str, due: i64, via: &str, by: u64| {
+            if by == 0 { memos::create(user, channel, text, due, via, 0).unwrap() } else { memos::create_by_admin(user, channel, text, due, by).unwrap() }
+        };
+        let conn_done = |id: i64, status: &str, created: i64, sent: i64| {
+            DB.get()
+                .unwrap()
+                .lock()
+                .execute(
+                    "UPDATE member_reminders SET status = ?2, created_ts = ?3, due_ts = ?4, sent_ts = ?4 WHERE id = ?1",
+                    rusqlite::params![id, status, created, sent],
+                )
+                .unwrap();
+        };
+        let a = set(2003, 21, "call mum before the quiz starts", now + 3 * 3600, "chat", 0);
+        conn_done(a.id, "sent", now - 30 * 3600, now - 26 * 3600);
+        let b = set(2011, 32, "check if the quiz leaderboard reset", now + 3600, "command", 0);
+        conn_done(b.id, "cancelled", now - 9 * 3600, now - 4 * 3600);
+        set(MEMBER, 21, "submit the fantasy team before the toss", now + 47 * 60, "chat", 0);
+        set(2007, 22, "post the meme of the week", now + 5 * 3600 + 20 * 60, "command", 0);
+        set(1004, 31, "rematch with Dev in the arena", now + 26 * 3600, "panel", ADMIN_TWO);
+        set(2015, SAFE, "private note", now + 2 * 3600, "chat", 0);
+        set(1005, 5_000, "take medicine", now + 8 * 3600, "chat", 0);
+        set(2020, 23, "wish Tanvi happy birthday 🎂", now + 3 * 86_400, "panel", ADMIN);
     }
     if super::super::autoreplies::list().is_empty() {
         let rule = |v: Value| serde_json::from_value::<super::super::autoreplies::AutoReply>(v).unwrap();

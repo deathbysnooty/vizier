@@ -284,7 +284,7 @@ fn in_scope(rule: &AutoReply, channel: u64, parent: Option<u64>) -> bool {
 
 /// A reaction as Discord wants it: a unicode emoji, or a custom one written
 /// `<:name:id>`, `<a:name:id>` or `name:id`.
-fn reaction(text: &str) -> Option<ReactionType> {
+pub(crate) fn reaction(text: &str) -> Option<ReactionType> {
     let t = text.trim();
     if t.is_empty() {
         return None;

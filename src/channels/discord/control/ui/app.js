@@ -102,6 +102,9 @@
     flask: '<path d="M9 3h6M10 3v6L4.5 18.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3"/><path d="M7 15h10"/>',
     table: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M9 4v16"/>',
     chart: '<path d="M4 20V4M4 20h16"/><rect x="7" y="12" width="3" height="5"/><rect x="12" y="8" width="3" height="9"/><rect x="17" y="5" width="3" height="12"/>',
+    upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
+    send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   };
 
@@ -360,6 +363,9 @@
     reminders: [],
     rules: [],
     emojis: null,
+    media: null, // the picture library, loaded when a page needs it
+    templates: null,
+    placeholders: null,
     guard: null, // unsaved-change count for pages outside the settings form
     audit: [],
     members: new Map(),
@@ -718,7 +724,7 @@
     removeSavebar();
     switch (r.name) {
       case 'section': renderSection(page, r.parts[1], r.q.get('k')); break;
-      case 'reminders': renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1]); break;
+      case 'reminders': if (r.parts[1] === 'members') renderMemos(page); else { renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1], r.q); } break;
       case 'autoreplies': renderRules(page); if (r.parts[1]) openRuleEditor(r.parts[1]); break;
       case 'houses': if (r.parts[1] === 'scorers') renderScorers(page); else renderHouses(page); break;
       case 'members': if (r.parts[1]) renderProfile(page, r.parts[1], r.parts[2]); else renderMembers(page); break;
@@ -1521,17 +1527,255 @@
 
   /** A line with its placeholders marked, as written. */
   function templated(line) {
-    return line.split(/(\{(?:name|mention|hours|days)\})/g).map((part, i) => (i % 2 ? h('span', { class: 'ph-inline' }, part) : part));
+    return String(line).split(/(\{(?:name|mention|hours|days|date|day|time|leader|standings|countdown:[^{}]*|random:[^{}]*)\})/g).map((part, i) => (i % 2 ? h('span', { class: 'ph-inline' }, part) : part));
+  }
+
+  // --- richer posts: pictures, placeholders, the Discord preview ------------------------
+
+  async function loadMedia(force) {
+    if (S.media && !force) return S.media;
+    try { S.media = (await api('GET', '/media')).items; } catch (_) { S.media = S.media || []; }
+    return S.media;
+  }
+  async function loadPlaceholders() {
+    if (S.placeholders && Date.now() - S.placeholders.at < 60000) return S.placeholders;
+    try { S.placeholders = Object.assign(await api('GET', '/reminders/placeholders'), { at: Date.now() }); } catch (_) { /* the preview shows samples */ }
+    return S.placeholders;
+  }
+  const mediaById = (id) => (S.media || []).find((m) => m.id === id);
+  function mediaImg(id, cls, alt) {
+    return h('img', { class: cls || '', src: '/api/media/' + encodeURIComponent(id), alt: alt || '', loading: 'lazy', decoding: 'async' });
+  }
+  function fileSize(n) { return n >= 1048576 ? (Math.round(n / 104857.6) / 10) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+
+  /** India's today as YYYY-MM-DD. */
+  function istToday() {
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: IST, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    return (S.placeholders && S.placeholders.today) || p;
+  }
+  function addDays(ymd, n) { const [y, m, d] = ymd.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); }
+  function countdownWords(ymd, today) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ymd).trim())) return null;
+    const [y, m, d] = String(ymd).trim().split('-').map(Number);
+    const [ty, tm, td] = (today || istToday()).split('-').map(Number);
+    const days = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(ty, tm - 1, td)) / 86400000);
+    if (isNaN(days)) return null;
+    return days <= 0 ? 'today' : days === 1 ? '1 day' : days + ' days';
+  }
+  function fromNow(ts) {
+    const s = Math.round(ts - Date.now() / 1000);
+    if (s < 60) return 'in under a minute';
+    if (s < 3600) return 'in ' + Math.round(s / 60) + ' min';
+    if (s < 86400) { const total = Math.round(s / 60), hrs = Math.floor(total / 60), min = total % 60; return 'in ' + hrs + ' h' + (min ? ' ' + min + ' min' : ''); }
+    const days = Math.round(s / 86400);
+    return days === 1 ? 'in a day' : 'in ' + days + ' days';
+  }
+
+  const istParts = (ms, opts) => new Intl.DateTimeFormat('en-GB', Object.assign({ timeZone: IST }, opts)).format(new Date(ms));
+  /**
+   * `{date}`, `{standings}`, `{countdown:…}`, `{random:…}` filled the way the bot fills them.
+   * `pick` steps the random choices; `at` (ms) is when the post goes out, for the date and time.
+   */
+  function fillExtras(text, pick, at) {
+    const P = Object.assign({}, S.placeholders || {});
+    if (at) {
+      // Built by hand: browsers disagree on "Sep" and "Sept"; the bot writes "Mon 14 Sep".
+      const [wd, dd, mm] = [istParts(at, { weekday: 'short' }), istParts(at, { day: 'numeric' }), +new Intl.DateTimeFormat('en-GB', { timeZone: IST, month: 'numeric' }).format(new Date(at))];
+      P.date = wd.slice(0, 3) + ' ' + dd + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][mm - 1];
+      P.day = istParts(at, { weekday: 'long' });
+      P.time = istParts(at, { hour: '2-digit', minute: '2-digit', hour12: false });
+      P.today = new Intl.DateTimeFormat('en-CA', { timeZone: IST, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at));
+    }
+    let out = '', rest = String(text || ''), n = 0;
+    for (;;) {
+      const start = rest.indexOf('{');
+      if (start < 0) break;
+      let depth = 0, end = -1;
+      for (let i = start + 1; i < rest.length; i++) {
+        if (rest[i] === '{') depth++;
+        else if (rest[i] === '}') { if (!depth) { end = i; break; } depth--; }
+      }
+      if (end < 0) break;
+      out += rest.slice(0, start);
+      const inner = rest.slice(start + 1, end);
+      if (inner.startsWith('random:')) { const opts = inner.slice(7).split('|'); out += opts[((pick || 0) + n++) % opts.length].trim(); }
+      else if (inner.startsWith('countdown:')) { const w = countdownWords(inner.slice(10), P.today); out += w === null ? rest.slice(start, end + 1) : w; }
+      else out += rest.slice(start, end + 1);
+      rest = rest.slice(end + 1);
+    }
+    out += rest;
+    const val = (k, sample) => (P[k] !== undefined ? P[k] : sample);
+    return out.replace(/\{date\}/g, val('date', 'Mon 14 Sep')).replace(/\{day\}/g, val('day', 'Monday')).replace(/\{time\}/g, val('time', '21:00'))
+      .replace(/\{leader\}/g, val('leader', '🦅 Ravenclaw')).replace(/\{standings\}/g, val('standings', '🦅 413 · 🦁 397 · 🐍 249 · 🦡 249'));
+  }
+
+  /** Discord's **bold** in text pieces; mentions and other nodes pass through. */
+  function discordMarkup(parts) {
+    const out = [];
+    [].concat(parts).forEach((p) => {
+      if (typeof p !== 'string') { out.push(p); return; }
+      p.split(/(\*\*[^*\n]+\*\*)/g).forEach((bit, i) => { if (!bit) return; out.push(i % 2 ? h('strong', null, bit.slice(2, -2)) : bit); });
+    });
+    return out;
+  }
+
+  /** One bot message as Discord shows it: text or a card, the picture, the reactions. */
+  function postMessage(p) {
+    const body = [];
+    if (p.style === 'card') {
+      const colour = /^#[0-9a-f]{6}$/i.test(p.colour || '') ? p.colour : '#8b93ff';
+      body.push(h('div', { class: 'embed', style: '--embed:' + colour },
+        p.title ? h('div', { class: 'embed-title' }, discordMarkup(p.title)) : null,
+        p.text && [].concat(p.text).length ? h('div', { class: 'embed-desc' }, discordMarkup(p.text)) : null,
+        p.image ? h('div', { class: 'embed-image' }, p.image) : null,
+        p.footer ? h('div', { class: 'embed-footer' }, p.footer) : null));
+    } else {
+      if (p.text && [].concat(p.text).some((x) => x && (typeof x !== 'string' || x.trim()))) body.push(h('div', { class: 'msg-text' }, discordMarkup(p.text)));
+      if (p.image) body.push(h('div', { class: 'msg-attach' }, p.image));
+    }
+    return h('div', { class: 'msg' }, h('span', { class: 'brand-mark' }, h('span', null, 'L')),
+      h('div', { style: 'min-width:0' }, h('div', { class: 'msg-head' }, h('b', null, 'Loduchand'), h('span', { class: 'msg-bot' }, 'BOT'), h('span', { class: 'msg-time' }, p.time || 'Today')),
+        body,
+        p.reactions && p.reactions.length ? h('div', { class: 'msg-reactions' }, p.reactions.map((r) => h('span', { class: 'msg-reaction' }, emojiEl(r), h('b', null, '1')))) : null));
+  }
+
+  /** Uploads picture files one by one; returns the saved ones. */
+  async function uploadPictures(files) {
+    const saved = [];
+    for (const file of Array.from(files || [])) {
+      if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { toast(file.name + ': only PNG, JPG, GIF and WebP pictures can be used', 'error'); continue; }
+      if (file.size > 8 * 1048576) { toast(file.name + ' is ' + fileSize(file.size) + '. Pictures can be at most 8 MB.', 'error'); continue; }
+      let res, data = null;
+      try {
+        res = await fetch('/api/media', { method: 'POST', credentials: 'same-origin', headers: { 'X-Panel': '1', 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name) }, body: file });
+        try { data = await res.json(); } catch (_) { /* empty */ }
+      } catch (_) { toast("Can't reach the bot. It may be restarting.", 'error'); break; }
+      if (res.status === 401) { renderSignIn({ error: 'Your session has ended. Run /panel in Discord to sign in again.' }); break; }
+      if (!res.ok) { toast(file.name + ': ' + ((data && data.error) || 'upload failed (' + res.status + ')'), 'error'); continue; }
+      saved.push(data);
+      S.media = [data].concat((S.media || []).filter((m) => m.id !== data.id));
+    }
+    if (saved.length) refreshAudit();
+    return saved;
+  }
+
+  /** A drop target that also opens the file chooser. */
+  function dropZone(label, sub, onFiles) {
+    const input = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true });
+    const zone = h('button', { class: 'dropzone', type: 'button' }, icon('upload'), h('span', null, h('b', null, label), h('small', null, sub)), input);
+    zone.addEventListener('click', (e) => { if (e.target !== input) input.click(); });
+    input.addEventListener('change', () => { const files = Array.from(input.files); input.value = ''; if (files.length) onFiles(files); });
+    ['dragenter', 'dragover'].forEach((t) => zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach((t) => zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.remove('over'); }));
+    zone.addEventListener('drop', (e) => { const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []); if (files.length) onFiles(files); });
+    return zone;
+  }
+
+  /** The picture library: pick for a reminder (`selected` is its list), upload, delete. */
+  async function openLibrary(selected, onDone) {
+    const sheet = openSheet('Picture library', 'PNG, JPG, GIF or WebP, up to 8 MB each. Only admins can see these until they are posted.', onDone);
+    const grid = h('div', { class: 'lib-grid' });
+    const count = h('span', { class: 'count' });
+    let busy = false;
+    const draw = () => {
+      clear(grid);
+      const all = S.media || [];
+      count.textContent = plural(all.length, 'picture') + (selected ? ' · ' + selected.length + ' picked' : '');
+      if (!all.length) grid.appendChild(h('p', { class: 'hint', style: 'grid-column:1/-1;margin:0' }, 'No pictures yet. Upload a few above.'));
+      all.forEach((m) => {
+        const on = selected && selected.includes(m.id);
+        const used = (m.used_by || []).map((u) => u.name);
+        const tile = h('div', { class: 'lib-tile' + (on ? ' is-on' : '') },
+          h('button', { class: 'lib-pick', type: 'button', 'aria-pressed': selected ? String(!!on) : null, 'aria-label': (on ? 'Remove ' : 'Use ') + m.name,
+            onclick: () => { if (!selected) return; const i = selected.indexOf(m.id); if (i >= 0) selected.splice(i, 1); else selected.push(m.id); draw(); } },
+            mediaImg(m.id, 'lib-img', m.name), on ? h('span', { class: 'lib-check' }, icon('check'), String(selected.indexOf(m.id) + 1)) : null),
+          h('div', { class: 'lib-meta' }, h('span', { class: 'lib-name', title: m.name }, m.name),
+            h('small', null, fileSize(m.size) + (m.mime === 'image/gif' ? ' · GIF' : '') + (used.length ? ' · in ' + used.join(', ') : '')),
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Delete ' + m.name, disabled: used.length > 0, 'data-tip': used.length ? 'Used by ' + used.join(', ') : null, onclick: async () => {
+              const ok = await confirmDialog({ title: 'Delete “' + m.name + '”?', icon: 'trash', danger: true, body: 'It goes from the library for good. Posts already in Discord keep their copy.', confirm: 'Delete picture' });
+              if (!ok) return;
+              try { await api('DELETE', '/media/' + m.id); S.media = S.media.filter((x) => x.id !== m.id); if (selected) { const i = selected.indexOf(m.id); if (i >= 0) selected.splice(i, 1); } draw(); toast('Deleted ' + m.name); refreshAudit(); }
+              catch (e) { toast(e.message, 'error'); }
+            } }, icon('trash'))));
+        grid.appendChild(tile);
+      });
+    };
+    const upload = async (files) => {
+      if (busy) return;
+      busy = true; zone.classList.add('busy');
+      const saved = await uploadPictures(files);
+      if (selected) saved.forEach((m) => { if (!selected.includes(m.id)) selected.push(m.id); });
+      busy = false; zone.classList.remove('busy');
+      draw();
+    };
+    const zone = dropZone('Upload pictures', 'Drop them here or choose files', upload);
+    append(sheet.body, [zone, h('div', { class: 'toolbar', style: 'margin:0' }, count, h('span', { class: 'grow' }), selected ? h('button', { class: 'btn primary sm', type: 'button', onclick: () => sheet.close() }, 'Done') : null), grid]);
+    draw();
+    await loadMedia(true);
+    if (grid.isConnected) draw();
+  }
+
+  const PLACEHOLDERS = [
+    ['{name}', 'The display name below'], ['{mention}', 'Pings the member (plain text only)'], ['{hours}', 'Hours since “since”'], ['{days}', 'Days since “since”'],
+    ['{date}', 'Like Mon 14 Sep'], ['{day}', 'Like Monday'], ['{time}', 'The time it posts, IST'], ['{leader}', 'This month’s House Cup leader'],
+    ['{standings}', '🦅 413 · 🦁 397 · 🐍 249 · 🦡 249'], ['{countdown}', 'Days until a date: change the date after inserting'], ['{random}', 'One of the choices, picked each time'],
+  ];
+
+  // --- reminders page ------------------------------------------------------------------
+
+  function reminderTabs(active) {
+    const pending = S.memoPending;
+    return h('nav', { class: 'page-tabs', 'aria-label': 'Reminder views' },
+      h('a', { href: '#/reminders', 'aria-current': active === 'posts' ? 'page' : null }, icon('calendar'), h('span', { class: 'hide-sm' }, 'Scheduled posts'), h('span', { class: 'show-sm' }, 'Posts'), h('span', { class: 'tab-count' }, String(S.reminders.length))),
+      h('a', { href: '#/reminders/members', 'aria-current': active === 'members' ? 'page' : null }, icon('users'), h('span', { class: 'hide-sm' }, 'Members’ reminders'), h('span', { class: 'show-sm' }, 'Members'),
+        h('span', { class: 'tab-count' + (pending ? ' is-live' : ''), id: 'memo-tab-count', hidden: pending === undefined }, String(pending || 0))));
+  }
+  async function refreshMemoCount() {
+    try {
+      const data = await api('GET', '/memos?status=pending');
+      S.memoPending = data.pending;
+      const el = document.getElementById('memo-tab-count');
+      if (el) { el.textContent = String(data.pending); el.hidden = false; el.classList.toggle('is-live', data.pending > 0); }
+      return data;
+    } catch (_) { return null; }
   }
 
   function renderReminders(page) {
     document.title = 'Reminders · Loduchand';
-    page.appendChild(pageHead('Reminders', 'Messages Loduchand posts on a schedule. Switch one off to pause it without losing it.',
-      h('a', { class: 'btn primary', href: '#/reminders/new' }, icon('plus'), 'New reminder')));
+    const newBtn = h('button', { class: 'btn primary', type: 'button', onclick: () => chooseTemplate() }, icon('plus'), 'New post');
+    page.appendChild(pageHead('Reminders', 'Posts Loduchand makes on a schedule, and the reminders members set for themselves.', newBtn));
+    page.appendChild(reminderTabs('posts'));
     const grid = h('div', { class: 'reminders' });
-    S.reminders.forEach((r) => grid.appendChild(reminderCard(r)));
-    grid.appendChild(h('a', { class: 'new-card', href: '#/reminders/new' }, icon('plus'), S.reminders.length ? 'New reminder' : 'Make your first reminder'));
+    const draw = () => {
+      clear(grid);
+      S.reminders.forEach((r) => grid.appendChild(reminderCard(r)));
+      grid.appendChild(h('button', { class: 'new-card', type: 'button', onclick: () => chooseTemplate() }, icon('plus'), S.reminders.length ? 'New post' : 'Make your first scheduled post', h('small', null, 'Start blank or from a template')));
+    };
+    draw();
     page.appendChild(grid);
+    refreshMemoCount();
+    const needs = S.reminders.some((r) => (r.images || []).length || (r.reactions || []).some((x) => /:\d+>?$/.test(x)));
+    if (needs && (!S.media || !S.emojis)) Promise.all([loadMedia(), loadEmojis()]).then(() => { if (grid.isConnected) draw(); });
+  }
+
+  async function chooseTemplate() {
+    const sheet = openSheet('Start from…', 'Pick a template to fill in the editor, or start blank. Nothing is saved until you save.');
+    const list = h('div', { class: 'tpl-list' });
+    const go = (key) => { sheet.close(); navigate('#/reminders/new' + (key ? '?t=' + key : '')); };
+    list.appendChild(h('button', { class: 'tpl', type: 'button', onclick: () => go('') }, h('span', { class: 'tpl-icon', 'aria-hidden': 'true' }, icon('plus')), h('span', { class: 'grow' }, h('b', null, 'Blank'), h('small', null, 'Your own lines, schedule and look.'))));
+    sheet.body.appendChild(list);
+    if (!S.templates) {
+      const wait = h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading templates…');
+      sheet.body.appendChild(wait);
+      try { S.templates = await api('GET', '/reminders/templates'); } catch (e) { toast(e.message, 'error'); S.templates = []; }
+      wait.remove();
+    }
+    S.templates.forEach((t) => {
+      const r = t.reminder;
+      const bits = [r.style === 'card' ? 'Card' : 'Plain text', r.ai_prompt ? 'AI-written' : null, r.image_order === 'random' || t.key === 'good_morning' ? 'Pictures' : null, scheduleWords(r.schedule)].filter(Boolean);
+      list.appendChild(h('button', { class: 'tpl', type: 'button', onclick: () => go(t.key) }, h('span', { class: 'tpl-icon', 'aria-hidden': 'true' }, t.icon),
+        h('span', { class: 'grow' }, h('b', null, t.name), h('small', null, t.about), h('span', { class: 'tpl-tags' }, bits.map((b) => h('span', { class: 'badge' }, b))))));
+    });
   }
 
   function reminderCard(r) {
@@ -1547,6 +1791,7 @@
         refreshAudit();
       } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
     }, { noText: true });
+    const images = r.images || [];
     const facts = h('ul', { class: 'reminder-facts' },
       h('li', null, icon('hash'), h('span', null, channelRef(r.channel_id, { category: true, bare: true }))),
       h('li', null, icon(r.schedule.kind === 'every' ? 'repeat' : 'calendar'), h('span', null, scheduleWords(r.schedule), r.active_from ? h('span', { style: 'color:var(--faint)' }, ' · ' + r.active_from + '–' + r.active_to) : null)));
@@ -1558,13 +1803,22 @@
     const next = r.enabled ? nextPost(r) : null;
     if (next) facts.appendChild(h('li', null, icon('clock'), h('span', null, 'Next ' + next.day + ' at ' + next.time)));
     if (r.ends) facts.appendChild(h('li', null, icon('power'), h('span', null, 'Ends ' + fmtFull.format(new Date(r.ends)))));
+    if ((r.reactions || []).length || r.delete_previous) facts.appendChild(h('li', null, icon('smile'), h('span', { class: 'reaction-row' }, (r.reactions || []).map(emojiEl), r.delete_previous ? h('span', { style: 'color:var(--faint)' }, ((r.reactions || []).length ? ' · ' : '') + 'keeps only the latest post') : null)));
+    const badges = [
+      r.enabled ? h('span', { class: 'badge on' }, h('span', { class: 'dot' }), 'Running') : h('span', { class: 'badge paused' }, 'Paused'),
+      r.style === 'card' ? h('span', { class: 'badge kind' }, h('span', { class: 'swatch', style: 'background:' + (/^#[0-9a-f]{6}$/i.test(r.colour || '') ? r.colour : '#8b93ff') }), 'Card') : null,
+      r.ai_prompt ? h('span', { class: 'badge kind' }, icon('spark'), 'AI') : null,
+      images.length ? h('span', { class: 'badge kind', title: plural(images.length, 'picture') }, '🖼️ ' + images.length) : null,
+      r.lines.length ? h('span', { class: 'badge' }, icon(r.order === 'random' ? 'shuffle' : 'repeat'), plural(r.lines.length, 'line')) : null,
+    ];
     el.appendChild(h('div', { class: 'reminder-head' },
-      h('div', { class: 'grow' }, h('h3', null, r.name),
-        h('div', { class: 'sub' }, r.enabled ? h('span', { class: 'badge on' }, h('span', { class: 'dot' }), 'Running') : h('span', { class: 'badge paused' }, 'Paused'),
-          h('span', { class: 'badge' }, icon(r.order === 'random' ? 'shuffle' : 'repeat'), plural(r.lines.length, 'line')))),
+      images.length ? h('a', { class: 'reminder-thumb', href: '#/reminders/' + r.id, 'aria-label': 'Edit ' + r.name, tabindex: '-1' }, mediaImg(images[0]), images.length > 1 ? h('span', null, '+' + (images.length - 1)) : null) : null,
+      h('div', { class: 'grow' }, h('h3', null, r.name), h('div', { class: 'sub' }, badges)),
       sw));
     el.appendChild(facts);
-    if (r.lines[0]) el.appendChild(h('p', { class: 'reminder-quote', title: r.lines[0] }, templated(r.lines[0])));
+    if (r.ai_prompt) el.appendChild(h('p', { class: 'reminder-quote ai', title: r.ai_prompt }, icon('spark'), ' ', r.ai_prompt));
+    else if (r.style === 'card' && r.title) el.appendChild(h('p', { class: 'reminder-quote', title: r.title, style: 'border-left-color:' + (/^#[0-9a-f]{6}$/i.test(r.colour || '') ? r.colour : '#8b93ff') }, h('b', null, templated(r.title)), r.lines[0] ? [' · ', templated(r.lines[0].split('\n')[0].replace(/\*\*/g, ''))] : null));
+    else if (r.lines[0]) el.appendChild(h('p', { class: 'reminder-quote', title: r.lines[0] }, templated(r.lines[0].replace(/\*\*/g, ''))));
     el.appendChild(h('div', { class: 'reminder-foot' },
       h('span', { class: 'grow' }, r.sent_count ? 'Sent ' + plural(r.sent_count, 'time') + (r.last_sent ? ' · last ' + ago(r.last_sent) : '') : 'Not sent yet'),
       h('a', { class: 'btn sm', href: '#/reminders/' + r.id }, icon('edit'), 'Edit')));
@@ -1574,14 +1828,206 @@
   function blankReminder() {
     const general = S.channels.find((c) => c.kind === 'text' && c.name === 'general');
     return { id: 0, name: '', enabled: true, channel_id: general ? general.id : '', lines: [''], order: 'rotate', schedule: { kind: 'every', minutes: 60 },
-      active_from: '', active_to: '', user_id: '', user_name: '', since: '', stop_when_back: false, welcome_line: '', ends: '', last_sent: 0, sent_count: 0 };
+      active_from: '', active_to: '', user_id: '', user_name: '', since: '', stop_when_back: false, welcome_line: '', ends: '', last_sent: 0, sent_count: 0,
+      images: [], image_order: 'rotate', style: 'plain', title: '', colour: '', footer: '', reactions: [], delete_previous: false, last_message_id: '', ai_prompt: '', ai_recent: [] };
   }
 
-  function openReminderEditor(which) {
+  // --- members' reminders --------------------------------------------------------------
+
+  const memoView = { status: 'pending', q: '' };
+  const VIA = { chat: ['Asked the bot', 'message'], command: ['/remind', 'slash'], panel: ['Panel', 'sliders'] };
+  const MEMO_STATUS = { pending: ['Waiting', 'waiting'], sent: ['Sent', 'on'], cancelled: ['Cancelled', 'paused'], failed: ['Not delivered', 'failed'] };
+
+  function memberRemindersSetting() {
+    for (const sec of S.sections) { const st = sec.settings.find((x) => x.key === 'VIZIER_MEMBER_REMINDERS'); if (st) return { sec, st }; }
+    return null;
+  }
+
+  function renderMemos(page) {
+    document.title = 'Members’ reminders · Loduchand';
+    page.appendChild(pageHead('Reminders', 'Posts Loduchand makes on a schedule, and the reminders members set for themselves.',
+      h('button', { class: 'btn primary', type: 'button', onclick: () => openMemoForm(() => load()) }, icon('plus'), 'New member reminder')));
+    page.appendChild(reminderTabs('members'));
+    const found = memberRemindersSetting();
+    const settingLink = found ? h('a', { href: '#/s/' + found.sec.id + '?k=VIZIER_MEMBER_REMINDERS' }, h('code', null, 'VIZIER_MEMBER_REMINDERS')) : h('code', null, 'VIZIER_MEMBER_REMINDERS');
+    const banner = h('div');
+    page.appendChild(banner);
+    const input = h('input', { type: 'search', placeholder: 'Search by member, text or channel', 'aria-label': 'Search reminders', value: memoView.q });
+    const count = h('span', { class: 'count', 'aria-live': 'polite' });
+    const list = h('div', { class: 'memo-list card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading reminders…'));
+    let data = null;
+    const drawBanner = () => {
+      clear(banner);
+      const on = data ? data.enabled : true;
+      banner.appendChild(h('div', { class: 'memo-note' + (on ? '' : ' is-off') }, icon(on ? 'info' : 'pause'),
+        h('p', null, on ? null : h('b', null, 'Member reminders are switched off, so none of these go out. '),
+          'Members set these by asking the bot (“remind me in 2 hours to…”) or with ', h('code', null, '/remind'), '. The master switch is ', settingLink, '.')));
+    };
+    const draw = () => {
+      clear(list);
+      if (!data) return;
+      const q = memoView.q.trim().toLowerCase();
+      const items = data.items.filter((m) => !q || [m.user && m.user.name, m.set_by && m.set_by.name, m.text, m.channel && m.channel.name, (VIA[m.via] || [m.via])[0]].filter(Boolean).join(' ').toLowerCase().includes(q));
+      count.textContent = items.length === data.items.length ? plural(items.length, 'reminder') : items.length + ' of ' + data.items.length;
+      if (!items.length) {
+        list.appendChild(h('div', { class: 'empty' }, h('p', null, q ? 'No reminder matches “' + memoView.q.trim() + '”.' : memoView.status === 'pending' ? 'Nobody has a reminder waiting.' : 'Nothing here yet.'),
+          !q && memoView.status === 'pending' ? h('small', null, 'Members can ask: “@Loduchand remind me at 9pm to join quiz”.') : null));
+        return;
+      }
+      items.forEach((m) => list.appendChild(memoRow(m, async () => {
+        const who = (m.user && m.user.name) || 'this member';
+        const ok = await confirmDialog({ title: 'Cancel ' + who + '’s reminder?', icon: 'trash', danger: true, body: 'It was due ' + m.due_words + '. It won’t be sent, and ' + who + ' isn’t told.', confirm: 'Cancel reminder', cancel: 'Keep it' });
+        if (!ok) return;
+        try { await api('POST', '/memos/' + m.id + '/cancel'); toast('Cancelled ' + who + '’s reminder'); refreshAudit(); load(); }
+        catch (e) { toast(e.message, 'error'); load(); }
+      })));
+    };
+    const load = async () => {
+      try {
+        data = await api('GET', '/memos?status=' + memoView.status);
+        S.memoPending = data.pending;
+        const el = document.getElementById('memo-tab-count');
+        if (el) { el.textContent = String(data.pending); el.hidden = false; el.classList.toggle('is-live', data.pending > 0); }
+      } catch (e) { clear(list); list.appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); return; }
+      if (!list.isConnected) return;
+      drawBanner();
+      draw();
+    };
+    input.addEventListener('input', () => { memoView.q = input.value; draw(); });
+    page.appendChild(h('div', { class: 'toolbar' },
+      segmented([['pending', 'Waiting'], ['done', 'Done'], ['all', 'All']], memoView.status, 'Which reminders', (v) => { memoView.status = v; data = null; clear(list); list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); load(); }),
+      h('label', { class: 'search-box' }, icon('search'), input), count));
+    page.appendChild(list);
+    drawBanner();
+    load();
+  }
+
+  function memoRow(m, onCancel) {
+    const name = (m.user && m.user.name) || (m.user ? 'Member ' + m.user.id : 'Unknown member');
+    const [statusText, statusCls] = MEMO_STATUS[m.status] || [m.status, ''];
+    const [viaText, viaIcon] = VIA[m.via] || [m.via, 'message'];
+    const ch = m.channel || {};
+    const place = ch.name ? '#' + ch.name + (ch.thread ? ' › thread' : '') : ch.thread ? 'a thread' : 'a DM or private channel';
+    let whenEl;
+    if (m.status === 'pending') whenEl = [h('b', null, m.due_words), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, fromNow(m.due_ts))];
+    else if (m.status === 'sent') whenEl = [h('b', null, 'Sent ' + ago(m.sent_ts || m.due_ts)), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, 'was due ' + when(m.due_ts))];
+    else whenEl = [h('b', null, m.status === 'failed' ? 'Couldn’t post' : 'Cancelled'), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, 'was due ' + when(m.due_ts))];
+    return h('div', { class: 'memo-row is-' + m.status },
+      m.user ? h('a', { href: '#/members/' + m.user.id, class: 'memo-avatar', tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.user.avatar, name, 'lg')) : h('span', { class: 'memo-avatar' }, avatar(null, '?', 'lg')),
+      h('div', { class: 'memo-main' },
+        h('div', { class: 'memo-who' }, m.user ? h('a', { href: '#/members/' + m.user.id }, name) : h('b', null, name),
+          m.set_by ? h('span', { class: 'memo-by' }, 'set by ', h('span', { class: 'inline-ref' }, avatar(m.set_by.avatar, m.set_by.name || '?', 'xs'), '@' + (m.set_by.name || m.set_by.id))) : null),
+        m.private ? h('p', { class: 'memo-text private' }, icon('shield'), ' Set somewhere private, so the text isn’t shown here.') : h('p', { class: 'memo-text' }, m.text),
+        h('div', { class: 'memo-meta' },
+          h('span', { class: 'badge ' + statusCls }, m.status === 'pending' ? h('span', { class: 'dot' }) : null, statusText),
+          h('span', { class: 'memo-fact' }, icon(ch.name ? 'hash' : 'shield'), place),
+          h('span', { class: 'memo-fact' }, icon(viaIcon), viaText),
+          h('span', { class: 'memo-fact hide-sm', title: fmtFull.format(new Date(m.created_ts * 1000)) + ' IST' }, 'made ' + ago(m.created_ts)))),
+      h('div', { class: 'memo-when' }, whenEl),
+      h('div', { class: 'memo-actions' }, m.status === 'pending' ? h('button', { class: 'btn sm', type: 'button', onclick: onCancel, 'aria-label': 'Cancel ' + name + '’s reminder' }, icon('x'), 'Cancel') : null));
+  }
+
+  function openMemoForm(onSaved) {
+    const general = S.channels.find((c) => c.kind === 'text' && c.name === 'general');
+    const f = { user_id: '', channel_id: general ? general.id : '', when: '', text: '' };
+    let member = null;
+    let parsed = null;
+    let seq = 0;
+    const dr = openDrawer({
+      title: 'New member reminder', sub: 'Loduchand pings the member in the channel when it’s due.', saveLabel: 'Set reminder',
+      isDirty: () => !!(f.user_id || f.when.trim() || f.text.trim()),
+      onSave: async (btn) => {
+        if (!f.user_id) { toast('Pick the member to remind.', 'error'); return; }
+        if (!f.channel_id) { toast('Pick the channel the reminder goes to.', 'error'); return; }
+        if (!f.when.trim()) { toast('Say when, like “in 2 hours” or “tomorrow 9am”.', 'error'); return; }
+        if (!f.text.trim()) { toast('What should the reminder say?', 'error'); return; }
+        btn.disabled = true;
+        try {
+          const saved = await api('POST', '/memos', f);
+          dr.finish();
+          toast('Reminder set for ' + (saved.user && saved.user.name || 'the member') + ', ' + saved.due_words);
+          refreshAudit();
+          onSaved && onSaved(saved);
+        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      },
+    });
+    const body = dr.body;
+    const field = (label, control, hint, id) => h('div', null, h('label', { class: 'label', for: id || null }, label), control, hint || null);
+    const whenNote = h('div', { class: 'hint when-note', 'aria-live': 'polite' }, 'India time. Like “in 2 hours”, “at 9pm”, “tomorrow 9am” or “20/09 18:00”.');
+    const preview = h('div', { class: 'preview' });
+    const counter = h('div', { class: 'line-count' });
+    const drawPreview = () => {
+      clear(preview);
+      const who = h('span', { class: 'mention' }, '@' + (member ? member.name : 'member'));
+      const text = f.text.trim() || 'what to remember';
+      const me = S.me ? S.me.name : 'admin';
+      const line = f.user_id && f.user_id !== (S.me && S.me.id) ? ['⏰ ', who, ' reminder from ', h('span', { class: 'mention' }, '@' + me), ': ', text] : ['⏰ ', who, ' reminder: ', text];
+      preview.appendChild(postMessage({ text: line, time: parsed && parsed.ok ? parsed.words.replace(/^today at /, 'Today at ').replace(/^tomorrow at /, 'Tomorrow at ').replace(/ IST$/, '') : 'When it’s due' }));
+    };
+    const check = async () => {
+      const mine = ++seq;
+      const text = f.when.trim();
+      if (!text) { parsed = null; whenNote.className = 'hint when-note'; whenNote.textContent = 'India time. Like “in 2 hours”, “at 9pm”, “tomorrow 9am” or “20/09 18:00”.'; drawPreview(); return; }
+      try {
+        const res = await api('GET', '/memos/when?text=' + encodeURIComponent(text));
+        if (mine !== seq) return;
+        parsed = res;
+        clear(whenNote);
+        if (res.ok) { whenNote.className = 'when-note ok'; append(whenNote, [icon('right'), h('b', null, res.words), h('span', null, ' · ' + fromNow(res.due_ts))]); }
+        else { whenNote.className = 'error-text when-note'; append(whenNote, [icon('alert'), res.error]); }
+        drawPreview();
+      } catch (_) { /* keep the last answer */ }
+    };
+    let timer = null;
+    const draw = () => {
+      clear(body);
+      const mBtn = h('button', { class: 'picker-btn', type: 'button', id: 'm-member', 'aria-haspopup': 'listbox' },
+        member ? avatar(member.avatar, member.name, 'xs') : icon('user'), h('span', { class: 'value' + (member ? '' : ' placeholder') }, member ? member.name : 'Choose a member'), icon('chevron'));
+      mBtn.addEventListener('click', () => openPicker(mBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180, load: memberItems, onPick: (it) => { f.user_id = it.id; member = it.member; draw(); } }));
+      const c = chan(f.channel_id);
+      const chBtn = h('button', { class: 'picker-btn', type: 'button', id: 'm-channel', 'aria-haspopup': 'listbox' }, h('span', { class: 'glyph' }, '#'),
+        h('span', { class: 'value' + (c ? '' : ' placeholder') }, c ? c.name : 'Choose a channel'), c && c.category ? h('small', { style: 'color:var(--faint)' }, c.category) : null, icon('chevron'));
+      chBtn.addEventListener('click', () => openPicker(chBtn, { title: 'Channel', placeholder: 'Search channels', load: channelItems('text', [f.channel_id]), onPick: (it) => { f.channel_id = it.id; draw(); } }));
+      const when = h('input', { class: 'input', id: 'm-when', value: f.when, placeholder: 'e.g. at 9pm', autocomplete: 'off', maxlength: '80' });
+      when.addEventListener('input', () => { f.when = when.value; clearTimeout(timer); timer = setTimeout(check, 220); });
+      const quick = h('div', { class: 'quick-when' }, ['in 30m', 'in 2 hours', 'at 9pm', 'tomorrow 9am'].map((q) => h('button', { class: 'ph', type: 'button', onclick: () => { f.when = q; when.value = q; check(); } }, q)));
+      const text = h('textarea', { class: 'textarea', id: 'm-text', rows: '3', maxlength: '400', placeholder: 'e.g. join quiz night in #quiz' });
+      text.value = f.text;
+      const count = () => { counter.textContent = f.text.length > 300 ? f.text.length + ' / 400' : ''; counter.classList.toggle('over', f.text.length > 400); };
+      text.addEventListener('input', () => { f.text = text.value; count(); drawPreview(); });
+      count();
+      append(body, [
+        h('section', { class: 'form-card' }, h('h3', null, icon('bell'), 'Reminder'),
+          h('div', { class: 'form-grid' }, field('Member', mBtn, null, 'm-member'), field('Posts in', chBtn, null, 'm-channel')),
+          field('When', h('div', null, when, quick), whenNote, 'm-when'),
+          field('What to remind them', h('div', null, text, counter), null, 'm-text')),
+        h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'Preview'), preview,
+          h('p', { class: 'hint', style: 'margin:0' }, 'Only the member is pinged. They can see and cancel it with ', h('code', null, '/reminders'), '.')),
+      ]);
+      drawPreview();
+    };
+    draw();
+    requestAnimationFrame(() => { const b = body.querySelector('#m-member'); if (b) b.focus({ preventScroll: true }); });
+  }
+
+  async function openReminderEditor(which, q) {
     const existing = which === 'new' ? null : S.reminders.find((r) => String(r.id) === String(which));
     if (which !== 'new' && !existing) { toast('That reminder no longer exists', 'error'); history.replaceState(null, '', '#/reminders'); currentHash = '#/reminders'; return; }
-    const d = JSON.parse(JSON.stringify(existing || blankReminder()));
+    let start = blankReminder();
+    const tplKey = !existing && q ? q.get('t') : null;
+    if (tplKey) {
+      if (!S.templates) { try { S.templates = await api('GET', '/reminders/templates'); } catch (_) { S.templates = []; } }
+      const tpl = S.templates.find((t) => t.key === tplKey);
+      if (tpl) start = Object.assign(start, JSON.parse(JSON.stringify(tpl.reminder)), { channel_id: start.channel_id });
+      if (!location.hash.startsWith('#/reminders/new')) return;
+    }
+    const d = Object.assign(blankReminder(), JSON.parse(JSON.stringify(existing || start)));
     if (!d.lines.length) d.lines = [''];
+    let aiOn = !!d.ai_prompt;
+    let aiDraft = d.ai_prompt;
+    let aiSample = null;
+    let reroll = 0;
+    let testing = false;
     const original = JSON.stringify(d);
     let member = d.user_id ? S.members.get(d.user_id) || null : null;
     let previewIndex = d.lines.length ? d.sent_count % d.lines.length : 0;
@@ -1590,19 +2036,35 @@
 
     const titleId = 'drawer-title';
     const body = h('div', { class: 'drawer-body' });
-    const saveBtn = h('button', { class: 'btn primary', type: 'button' }, existing ? 'Save changes' : 'Create reminder');
+    const saveBtn = h('button', { class: 'btn primary', type: 'button' }, existing ? 'Save changes' : 'Create post');
     const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId },
-      h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', { id: titleId }, existing ? 'Edit reminder' : 'New reminder'),
+      h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', { id: titleId }, existing ? 'Edit scheduled post' : tplKey ? 'New post from a template' : 'New scheduled post'),
         h('div', { class: 'sub' }, existing ? (existing.sent_count ? 'Sent ' + plural(existing.sent_count, 'time') + (existing.last_sent ? ', last ' + ago(existing.last_sent) : '') : 'Not sent yet') : 'Posts on its own once saved and switched on')),
         h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Close', onclick: () => attemptClose() }, icon('x'))),
       body,
       h('div', { class: 'drawer-foot' },
-        existing ? h('button', { class: 'btn danger', type: 'button', onclick: remove }, icon('trash'), 'Delete') : null,
+        existing ? h('button', { class: 'btn danger', type: 'button', onclick: remove, 'aria-label': 'Delete' }, icon('trash'), h('span', { class: 'hide-sm' }, 'Delete')) : null,
+        existing ? h('button', { class: 'btn', type: 'button', onclick: sendTest }, icon('send'), h('span', { class: 'hide-sm' }, 'Send a test now'), h('span', { class: 'show-sm' }, 'Test')) : null,
         h('span', { class: 'grow' }),
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => attemptClose() }, 'Cancel'),
+        h('button', { class: 'btn ghost hide-sm', type: 'button', onclick: () => attemptClose() }, 'Cancel'),
         saveBtn));
     const scrim = h('div', { class: 'scrim', onclick: () => attemptClose() });
     const layer = pushLayer({ drawer: true, close: () => finish(true), attempt: () => attemptClose() });
+    async function sendTest() {
+      if (testing) return;
+      const c = chan(existing.channel_id);
+      const dirty = JSON.stringify(d) !== original;
+      const ok = await confirmDialog({ title: 'Send a test post now?', icon: 'send', confirm: 'Send test',
+        body: h('div', null,
+          h('p', null, 'Loduchand posts “' + existing.name + '” once in ', h('b', null, c ? '#' + c.name : 'its channel'), ', exactly as it would go out' + (existing.ai_prompt ? ', with a fresh AI-written text' : '') + '. Everyone in the channel sees it.'),
+          h('p', null, 'It doesn’t count as a scheduled post and doesn’t change when the next one goes out.'),
+          dirty ? h('p', { class: 'error-text' }, icon('alert'), 'Your unsaved changes aren’t in it. Save first to test them.') : null) });
+      if (!ok) return;
+      testing = true;
+      try { await api('POST', '/reminders/' + existing.id + '/test'); toast('Test posted in ' + (c ? '#' + c.name : 'the channel')); }
+      catch (e) { toast(e.message, 'error'); }
+      testing = false;
+    }
     drawer.addEventListener('keydown', (e) => { if (e.key === 'Tab' && !layers.some((l) => l.popover)) trapFocus(drawer, e); });
     $('#layers').appendChild(scrim);
     $('#layers').appendChild(drawer);
@@ -1651,7 +2113,8 @@
     function localCheck() {
       if (!d.name.trim()) return 'Give the reminder a name.';
       if (!d.channel_id) return 'Pick a channel to post in.';
-      if (!d.lines.some((l) => l.trim())) return 'Add at least one message line.';
+      if (!d.lines.some((l) => l.trim()) && !d.ai_prompt.trim() && !d.images.length) return 'Add at least one message line.';
+      if (d.colour && !/^#[0-9a-f]{6}$/i.test(d.colour)) return 'The card colour should look like #8b93ff.';
       if (d.lines.some((l) => l.length > 1800)) return 'A line is longer than 1800 characters.';
       if (d.schedule.kind === 'every' && (d.schedule.minutes < 5 || d.schedule.minutes > 10080)) return 'Post at most every 5 minutes and at least once a week.';
       if (d.schedule.kind === 'daily' && !(d.schedule.times || []).length) return 'Add at least one time of day.';
@@ -1666,24 +2129,34 @@
       const lines = d.lines.filter((l) => l.trim());
       const idx = lines.length ? Math.min(previewIndex, lines.length - 1) : 0;
       const next = nextPost(d);
-      const msg = (text, time) => h('div', { class: 'msg' }, h('span', { class: 'brand-mark' }, h('span', null, 'L')),
-        h('div', { style: 'min-width:0' }, h('div', { class: 'msg-head' }, h('b', null, 'Loduchand'), h('span', { class: 'msg-bot' }, 'BOT'), h('span', { class: 'msg-time' }, time)),
-          h('div', { class: 'msg-text' }, text)));
+      const time = next ? (next.day === 'today' ? 'Today at ' : next.day === 'tomorrow' ? 'Tomorrow at ' : '') + next.time : 'Today';
+      const imgs = d.images || [];
+      const imgId = !imgs.length ? null : d.image_order === 'same' ? imgs[0] : d.image_order === 'random' ? imgs[reroll % imgs.length] : imgs[(d.sent_count + (lines.length ? idx : 0)) % imgs.length];
+      const image = imgId ? mediaImg(imgId, 'post-img', (mediaById(imgId) || {}).name || 'picture') : null;
+      const useAi = aiOn && d.ai_prompt.trim();
+      const at = next ? next.at : null;
+      const text = useAi && aiSample ? aiSample : lines.length ? fillLine(fillExtras(lines[idx], reroll, at), d, member) : null;
       const chName = chan(d.channel_id);
+      const hasRandom = /\{random:/.test(d.lines.join(' ') + d.title + d.footer) || (d.image_order === 'random' && imgs.length > 1);
       append(preview, [
-        h('div', { class: 'preview-tools' }, h('span', null, chName ? '#' + chName.name : 'No channel yet'), h('span', { class: 'grow' }),
-          lines.length > 1 ? [
+        h('div', { class: 'preview-tools' }, h('span', null, chName ? '#' + chName.name : 'No channel yet'), useAi ? h('span', { class: 'badge kind' }, icon('spark'), aiSample ? 'AI sample' : 'Fallback line') : null, h('span', { class: 'grow' }),
+          hasRandom ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { reroll++; drawPreview(); } }, icon('shuffle'), 'Another pick') : null,
+          lines.length > 1 && !(useAi && aiSample) ? [
             h('span', null, (d.order === 'random' ? 'Random · ' : 'Line ') + (idx + 1) + ' of ' + lines.length),
             h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Previous line', onclick: () => { previewIndex = (idx - 1 + lines.length) % lines.length; drawPreview(); } }, icon('up')),
             h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Next line', onclick: () => { previewIndex = (idx + 1) % lines.length; drawPreview(); } }, icon('down')),
           ] : null),
         h('div', { class: 'preview' },
-          lines.length ? msg(fillLine(lines[idx], d, member), next ? (next.day === 'today' ? 'Today at ' : next.day === 'tomorrow' ? 'Tomorrow at ' : '') + next.time : 'Today') : h('p', { style: 'color:#949ba4' }, 'Write a line to see it here.'),
-          d.stop_when_back && d.welcome_line.trim() ? msg(fillLine(d.welcome_line, d, member), 'When they’re back') : null),
+          text || image || (d.style === 'card' && d.title) ? postMessage({ style: d.style, colour: d.colour, title: d.style === 'card' ? fillExtras(d.title, reroll, at) : '', footer: d.style === 'card' ? fillExtras(d.footer, reroll, at) : '', text, image, reactions: d.reactions, time })
+            : h('p', { style: 'color:#949ba4' }, 'Write a line to see it here.'),
+          d.stop_when_back && d.welcome_line.trim() ? postMessage({ text: fillLine(d.welcome_line, d, member), time: 'When they’re back' }) : null),
+        useAi && !aiSample ? h('p', { class: 'hint', style: 'margin:0' }, 'The AI writes each post. Press “Try it” under Extras to see a sample; the line above is what goes out if the AI can’t answer.') : null,
+        d.style === 'card' && /\{mention\}/.test(d.lines.join(' ')) ? h('p', { class: 'error-text', style: 'margin:0' }, icon('alert'), 'Mentions inside a card don’t ping anyone. Use plain text to ping the member.') : null,
         h('p', { class: 'next-note' }, icon('clock'), next ? 'Next post around ' + next.time + ' IST ' + next.day + (d.enabled ? '' : ' once switched on') + '.' : 'No post is due in the next week with these settings.'),
       ]);
     };
 
+    let lastFocused = null;
     const field = (label, control, hint, opt) => h('div', { class: opt && opt.full ? 'full' : '' },
       h('label', { class: 'label', for: control.id || null }, label, opt && opt.optional ? h('span', { class: 'opt' }, ' · optional') : null), control, hint ? h('div', { class: 'hint' }, hint) : null);
 
@@ -1704,14 +2177,13 @@
 
       // lines
       const lines = h('div', { class: 'lines' });
-      let lastFocused = null;
       d.lines.forEach((line, i) => {
         const ta = h('textarea', { class: 'textarea', rows: '1', 'aria-label': 'Line ' + (i + 1), placeholder: i === 0 ? 'e.g. {mention}, it has been {days} days!' : 'Another line', maxlength: '2000' });
         ta.value = line;
         const counter = h('div', { class: 'line-count' + (line.length > 1800 ? ' over' : ''), 'aria-live': 'polite' }, line.length > 1500 ? line.length + ' / 1800' : '');
         const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(220, ta.scrollHeight + 2) + 'px'; };
         ta.addEventListener('input', () => { d.lines[i] = ta.value; grow(); counter.textContent = ta.value.length > 1500 ? ta.value.length + ' / 1800' : ''; counter.classList.toggle('over', ta.value.length > 1800); previewIndex = i; drawPreview(); });
-        ta.addEventListener('focus', () => { lastFocused = ta; lastFocused.dataset.i = i; });
+        ta.addEventListener('focus', () => { lastFocused = ta; });
         requestAnimationFrame(grow);
         const move = (dir) => { const j = i + dir; if (j < 0 || j >= d.lines.length) return; const t = d.lines[i]; d.lines[i] = d.lines[j]; d.lines[j] = t; draw(); const again = body.querySelectorAll('.line-row textarea')[j]; if (again) again.focus(); };
         lines.appendChild(h('div', { class: 'line-row' }, h('span', { class: 'line-n', 'aria-hidden': 'true' }, i + 1),
@@ -1723,6 +2195,7 @@
       });
       const insert = (ph) => {
         const ta = lastFocused && lastFocused.isConnected ? lastFocused : body.querySelector('.line-row textarea');
+        if (ta && ta.id === 'r-ai' && /^\{(name|mention|hours|days)\}$/.test(ph)) { toast(ph + ' works in lines, not the AI prompt.', 'error'); return; }
         if (!ta) return;
         const at = ta.selectionStart || ta.value.length;
         ta.value = ta.value.slice(0, at) + ph + ta.value.slice(ta.selectionEnd || at);
@@ -1735,7 +2208,98 @@
         lines,
         h('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' },
           h('button', { class: 'btn sm', type: 'button', onclick: () => { d.lines.push(''); draw(); const all = body.querySelectorAll('.line-row textarea'); all[all.length - 1].focus(); } }, icon('plus'), 'Add line'),
-          h('div', { class: 'placeholders' }, 'Insert:', ['{name}', '{mention}', '{hours}', '{days}'].map((ph) => h('button', { class: 'ph', type: 'button', onmousedown: (e) => e.preventDefault(), onclick: () => insert(ph), 'data-tip': ph === '{name}' ? 'The display name below' : ph === '{mention}' ? 'Pings the member' : 'Counted from “since”' }, ph))))));
+          h('div', { class: 'placeholders' }, 'Insert:', PLACEHOLDERS.map(([ph, tip]) => h('button', { class: 'ph', type: 'button', onmousedown: (e) => e.preventDefault(), onclick: () => insert(ph === '{countdown}' ? '{countdown:' + addDays(istToday(), 7) + '}' : ph === '{random}' ? '{random:first|second|third}' : ph), 'data-tip': tip }, ph === '{countdown}' ? '{countdown:date}' : ph === '{random}' ? '{random:a|b}' : ph)))),
+        aiOn && d.ai_prompt.trim() ? h('p', { class: 'hint', style: 'margin:0' }, 'The AI writes the posts. These lines go out only when it can’t.') : null));
+
+      // picture
+      const imgs = d.images;
+      const strip = h('div', { class: 'pic-strip' });
+      imgs.forEach((id, i) => {
+        const m = mediaById(id);
+        strip.appendChild(h('div', { class: 'pic' }, mediaImg(id, 'pic-img', m ? m.name : 'picture'),
+          imgs.length > 1 ? h('span', { class: 'pic-n' }, String(i + 1)) : null,
+          h('button', { class: 'pic-x', type: 'button', 'aria-label': 'Remove ' + (m ? m.name : 'picture ' + (i + 1)), onclick: () => { imgs.splice(i, 1); draw(); } }, icon('x'))));
+      });
+      const libBtn = h('button', { class: 'btn', type: 'button', onclick: () => openLibrary(imgs, () => draw()) }, icon('image'), 'Library');
+      const zone = dropZone(imgs.length ? 'Add another picture' : 'Upload a picture', 'Drop PNG, JPG, GIF or WebP here, up to 8 MB', async (files) => {
+        zone.classList.add('busy');
+        const saved = await uploadPictures(files);
+        saved.forEach((m) => { if (!imgs.includes(m.id)) imgs.push(m.id); });
+        draw();
+      });
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('image'), 'Picture', h('span', { class: 'right' }, imgs.length > 1 ? segmented([['rotate', 'In turn', 'repeat'], ['random', 'Random', 'shuffle'], ['same', 'Always #1']], d.image_order, 'Which picture', (v) => { d.image_order = v; draw(); }) : h('span', { style: 'color:var(--faint);font-size:12.5px' }, 'optional'))),
+        imgs.length ? strip : null,
+        h('div', { class: 'pic-tools' }, zone, libBtn),
+        h('p', { class: 'hint', style: 'margin:0' }, imgs.length > 1 ? (d.image_order === 'same' ? 'The first picture goes with every post.' : d.image_order === 'random' ? 'One of these at random with each post.' : 'Each post takes the next picture in turn.') : imgs.length ? 'This picture goes with every post. Add more to take turns or pick at random.' : 'Attached to each post. Add a few and they take turns, or one is picked at random.')));
+
+      // style
+      const colourText = h('input', { class: 'input mono', id: 'r-colour', value: d.colour, placeholder: '#8b93ff', maxlength: '7', style: 'max-width:110px', 'aria-label': 'Card colour' });
+      const colourPick = h('input', { type: 'color', class: 'colour-pick', value: /^#[0-9a-f]{6}$/i.test(d.colour) ? d.colour : '#8b93ff', 'aria-label': 'Pick the card colour' });
+      colourPick.addEventListener('input', () => { d.colour = colourPick.value; colourText.value = d.colour; drawPreview(); });
+      colourText.addEventListener('input', () => { d.colour = colourText.value.trim(); colourText.classList.toggle('invalid', !!d.colour && !/^#[0-9a-f]{6}$/i.test(d.colour)); if (/^#[0-9a-f]{6}$/i.test(d.colour)) colourPick.value = d.colour; drawPreview(); });
+      const swatches = h('div', { class: 'swatches' }, [['#8b93ff', 'Loduchand'], ['#9b1b1b', 'Gryffindor'], ['#1a6b4a', 'Slytherin'], ['#1f4e8c', 'Ravenclaw'], ['#d6a318', 'Hufflepuff'], ['#e0a43a', 'Amber'], ['#3ba55d', 'Green'], ['#eb459e', 'Pink']]
+        .map(([hex, label]) => h('button', { class: 'swatch-btn' + ((d.colour || '').toLowerCase() === hex ? ' is-on' : ''), type: 'button', style: 'background:' + hex, 'aria-label': label + ' ' + hex, 'data-tip': label, onclick: () => { d.colour = hex; draw(); } })));
+      const title = h('input', { class: 'input', id: 'r-title', value: d.title, maxlength: '256', placeholder: 'e.g. 🏆 House Cup · {date}' });
+      title.addEventListener('input', () => { d.title = title.value; drawPreview(); });
+      title.addEventListener('focus', () => { lastFocused = title; });
+      const footer = h('input', { class: 'input', id: 'r-footer', value: d.footer, maxlength: '300', placeholder: 'e.g. Points reset on the 1st' });
+      footer.addEventListener('input', () => { d.footer = footer.value; drawPreview(); });
+      footer.addEventListener('focus', () => { lastFocused = footer; });
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('table'), 'Style', h('span', { class: 'right' }, segmented([['plain', 'Plain text', 'message'], ['card', 'Card', 'table']], d.style, 'Post style', (v) => { d.style = v; draw(); }))),
+        d.style === 'card' ? h('div', { class: 'form-grid' },
+          field('Title', title, 'Placeholders work here too.', { full: true, optional: true }),
+          field('Colour', h('div', { class: 'colour-row' }, colourPick, colourText, swatches), null, { full: true }),
+          field('Footer', footer, null, { full: true, optional: true }))
+          : h('p', { class: 'hint', style: 'margin:0' }, 'The line as an ordinary message, with the picture under it. A card puts it in a coloured box with a title and a footer.')));
+
+      // extras
+      const reactions = h('div', { class: 'chip-input' });
+      const rIn = h('input', { type: 'text', id: 'r-reaction', placeholder: d.reactions.length ? 'Add…' : 'Paste an emoji, then Enter', 'aria-label': 'Add a reaction', autocomplete: 'off' });
+      const addReaction = () => { rIn.value.split(',').map((x) => x.trim()).filter(Boolean).forEach((x) => { if (!d.reactions.includes(x) && d.reactions.length < 5) d.reactions.push(x); }); rIn.value = ''; draw(); const again = body.querySelector('#r-reaction'); if (again) again.focus(); };
+      d.reactions.forEach((t, i) => reactions.appendChild(h('span', { class: 'chip' }, emojiEl(t), h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + t, onclick: () => { d.reactions.splice(i, 1); draw(); } }, icon('x')))));
+      rIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addReaction(); } else if (e.key === 'Backspace' && !rIn.value && d.reactions.length) { d.reactions.pop(); draw(); const again = body.querySelector('#r-reaction'); if (again) again.focus(); } });
+      rIn.addEventListener('blur', () => { if (rIn.value.trim()) addReaction(); });
+      if (d.reactions.length < 5) reactions.appendChild(rIn);
+      reactions.addEventListener('click', (e) => { if (e.target === reactions) rIn.focus(); });
+      const serverEmoji = h('button', { class: 'btn sm', type: 'button', disabled: d.reactions.length >= 5 }, icon('smile'), 'Server emoji');
+      serverEmoji.addEventListener('click', async () => {
+        const list = await loadEmojis();
+        openPicker(serverEmoji, { title: 'Server emoji', placeholder: 'Search the server’s emoji', empty: 'This server has no custom emoji.',
+          load: (q) => list.filter((e) => !q || e.name.toLowerCase().includes(q.toLowerCase())).map((e) => ({ id: e.id, label: ':' + e.name + ':', sub: e.animated ? 'animated' : '', lead: h('img', { class: 'emoji-img', src: e.url, alt: '' }), emoji: e })),
+          onPick: (it) => { const code = '<' + (it.emoji.animated ? 'a' : '') + ':' + it.emoji.name + ':' + it.emoji.id + '>'; if (!d.reactions.includes(code) && d.reactions.length < 5) d.reactions.push(code); draw(); } });
+      });
+      const tidy = h('input', { type: 'checkbox', checked: d.delete_previous });
+      tidy.addEventListener('change', () => { d.delete_previous = tidy.checked; });
+      const aiBox = h('input', { type: 'checkbox', checked: aiOn });
+      aiBox.addEventListener('change', () => { aiOn = aiBox.checked; if (aiOn) d.ai_prompt = aiDraft || ''; else { aiDraft = d.ai_prompt; d.ai_prompt = ''; aiSample = null; } draw(); if (aiOn) { const t = body.querySelector('#r-ai'); if (t) t.focus(); } });
+      const aiText = h('textarea', { class: 'textarea', id: 'r-ai', rows: '3', maxlength: '1000', placeholder: 'e.g. A fun, easy question for everyone: this-or-that, food, films or cricket. One question only.' });
+      aiText.value = d.ai_prompt;
+      aiText.addEventListener('input', () => { d.ai_prompt = aiText.value; aiDraft = aiText.value; });
+      aiText.addEventListener('focus', () => { lastFocused = aiText; });
+      const aiOut = h('div', { class: 'ai-out', 'aria-live': 'polite' }, aiSample ? h('small', null, 'The preview shows the AI’s sample.') : h('small', null, '{date}, {leader}, {standings} and the rest are filled in before the AI reads it.'));
+      const tryBtn = h('button', { class: 'btn sm', type: 'button' }, icon('spark'), 'Try it');
+      tryBtn.addEventListener('click', async () => {
+        if (!d.ai_prompt.trim()) { toast('Write what the AI should post first.', 'error'); aiText.focus(); return; }
+        tryBtn.disabled = true;
+        clear(aiOut); aiOut.appendChild(h('span', { class: 'ai-wait' }, h('span', { class: 'spinner' }), 'Asking the AI…'));
+        try {
+          const res = await api('POST', '/reminders/ai-preview', { prompt: d.ai_prompt });
+          aiSample = res.text;
+          clear(aiOut); aiOut.appendChild(h('small', null, 'Sample from ' + (res.model || 'the model') + ', shown in the preview. Each real post is written fresh.'));
+          drawPreview();
+          const pv = body.querySelector('.preview'); if (pv) pv.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        } catch (e) { clear(aiOut); aiOut.appendChild(h('span', { class: 'error-text', style: 'margin:0' }, icon('alert'), e.message)); }
+        tryBtn.disabled = false;
+      });
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('zap'), 'Extras', h('span', { class: 'right', style: 'color:var(--faint);font-size:12.5px' }, 'optional')),
+        h('div', null, h('label', { class: 'label', for: 'r-reaction' }, 'React to its own post with'), reactions, h('div', { class: 'hint-row' }, h('span', { class: 'hint', style: 'margin:0' }, 'Up to 5. Unicode emoji, or the server’s own.'), serverEmoji)),
+        h('label', { class: 'check' }, tidy, h('span', null, 'Delete the previous post when a new one goes out', h('small', null, 'Keeps the channel tidy: only the latest one stays. Test posts are never deleted.'))),
+        h('div', { class: 'ai-block' + (aiOn ? ' is-on' : '') },
+          h('label', { class: 'check' }, aiBox, h('span', null, h('span', { class: 'ai-label' }, icon('spark'), 'Let the AI write each post'), h('small', null, 'It follows your prompt, remembers its last 5 posts so it doesn’t repeat itself, and stays under 400 characters with no pings. If it can’t answer, a line from Messages goes out.'))),
+          aiOn ? h('div', { class: 'ai-edit' }, aiText, h('div', { class: 'hint-row' }, aiOut, tryBtn)) : null)));
 
       body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'Preview'), preview));
 
@@ -1821,6 +2385,7 @@
     };
     draw();
     requestAnimationFrame(() => { const n = body.querySelector('#r-name'); if (n) n.focus({ preventScroll: true }); });
+    Promise.all([loadPlaceholders(), loadMedia(), d.reactions.length ? loadEmojis() : null]).then(() => { if (body.isConnected) draw(); });
   }
 
   // --- drawers ------------------------------------------------------------------------
@@ -2261,7 +2826,7 @@
     { id: 'chat', label: 'Chat', icon: '💬', sources: ['chat'] },
     { id: 'voice', label: 'Voice', icon: '🎙️', sources: ['voice'] },
     { id: 'quiz', label: 'Quiz', icon: '🧠', sources: ['quiz'] },
-    { id: 'games', label: 'Koto, anagram, cats', icon: '🔤', sources: ['koto', 'anagram', 'cat'] },
+    { id: 'games', label: 'Koto, anagram, cats, Wordle', icon: '🔤', sources: ['koto', 'anagram', 'cat', 'wordle'] },
     { id: 'arena', label: 'Arena & royale', icon: '⚔️', sources: ['arena', 'royale'] },
     { id: 'snitch', label: 'Snitch', icon: '🪽', sources: ['snitch', 'golden_snitch'] },
     { id: 'weekly', label: 'Weekly posts', icon: '📝', sources: ['weekly'] },
@@ -3058,7 +3623,7 @@
     return h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), h('b', null, value), sub ? h('small', null, sub) : null);
   }
   function sourceLabel(key) {
-    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', cat: '🐱 Cat Bot', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
+    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', cat: '🐱 Cat Bot', wordle: '🟩 Wordle', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
     return labels[key] || key;
   }
 
@@ -3782,14 +4347,14 @@
   }
 
   /** A read-only side panel. */
-  function openSheet(title, sub) {
+  function openSheet(title, sub, onClose) {
     const before = document.activeElement;
     const body = h('div', { class: 'drawer-body' });
     const drawer = h('div', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
       h('div', { class: 'drawer-head' }, h('div', { class: 'grow' }, h('h2', null, title), sub ? h('div', { class: 'sub' }, sub) : null),
         h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Close', onclick: () => close() }, icon('x'))), body);
     const scrim = h('div', { class: 'scrim', onclick: () => close() });
-    const close = () => { drawer.remove(); scrim.remove(); popLayer(layer); if (before && before.isConnected && before.focus) before.focus(); };
+    const close = () => { drawer.remove(); scrim.remove(); popLayer(layer); if (before && before.isConnected && before.focus) before.focus(); if (onClose) onClose(); };
     const layer = pushLayer({ drawer: true, close });
     drawer.addEventListener('keydown', (e) => { if (e.key === 'Tab') trapFocus(drawer, e); });
     $('#layers').appendChild(scrim);

@@ -17,6 +17,35 @@ pub enum Schedule {
     Daily { times: Vec<String> },
 }
 
+impl Default for Schedule {
+    fn default() -> Self {
+        Schedule::Every { minutes: 60 }
+    }
+}
+
+/// Which picture goes with a post.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOrder {
+    /// Each picture in turn.
+    #[default]
+    Rotate,
+    Random,
+    /// The first picture every time.
+    Same,
+}
+
+/// How a post looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Style {
+    /// Text, with the picture attached under it.
+    #[default]
+    Plain,
+    /// An embed: a coloured card with an optional title and footer.
+    Card,
+}
+
 /// Which line goes out next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -27,7 +56,7 @@ pub enum Order {
     Random,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct Reminder {
     /// 0 for one not saved yet.
     #[serde(default)]
@@ -69,6 +98,39 @@ pub struct Reminder {
     pub last_sent: i64,
     #[serde(default)]
     pub sent_count: i64,
+
+    // --- richer posts --------------------------------------------------------
+    /// Picture ids from the media library; one goes with each post.
+    #[serde(default)]
+    pub images: Vec<String>,
+    #[serde(default)]
+    pub image_order: ImageOrder,
+    #[serde(default)]
+    pub style: Style,
+    /// Card only. Placeholders work here too.
+    #[serde(default)]
+    pub title: String,
+    /// Card only: "#rrggbb", or empty for the default.
+    #[serde(default)]
+    pub colour: String,
+    /// Card only.
+    #[serde(default)]
+    pub footer: String,
+    /// Emoji the bot reacts to its own post with.
+    #[serde(default)]
+    pub reactions: Vec<String>,
+    /// Delete the previous post when a new one goes out.
+    #[serde(default)]
+    pub delete_previous: bool,
+    /// Kept by the scheduler: the last post, for `delete_previous`.
+    #[serde(default)]
+    pub last_message_id: String,
+    /// When set, the AI writes each post from this; the lines are the fallback.
+    #[serde(default)]
+    pub ai_prompt: String,
+    /// Kept by the scheduler: the latest AI-written posts, so it doesn't repeat itself.
+    #[serde(default)]
+    pub ai_recent: Vec<String>,
 }
 
 const SCHEMA: &str = "
