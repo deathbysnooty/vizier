@@ -309,7 +309,7 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
                 left += cap - pts(s);
                 lines.push(format!("{} {}/{}", s.label(), pts(s), cap));
             }
-            _ => lines.push(format!("{} {}", s.label(), pts(s))),
+            _ => lines.push(format!("{} {} · no limit", s.label(), pts(s))),
         }
     }
     for s in [Source::GoldenSnitch, Source::Royale, Source::Weekly, Source::Mod] {

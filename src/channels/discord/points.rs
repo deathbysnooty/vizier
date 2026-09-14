@@ -43,6 +43,9 @@ pub enum Cap {
     None,
 }
 
+/// A daily limit set this high or higher means the source has no limit.
+pub const NO_LIMIT: u64 = 100;
+
 impl Source {
     pub const ALL: [Source; 12] = [
         Source::Chat,
@@ -100,7 +103,8 @@ impl Source {
     /// Read from the settings at the moment of writing, so a changed limit
     /// applies to the very next award.
     pub fn cap(self) -> Cap {
-        let day = |limit: u64| Cap::PerDay(limit as i64);
+        // A limit of NO_LIMIT or more reads as no limit at all.
+        let day = |limit: u64| if limit >= NO_LIMIT { Cap::None } else { Cap::PerDay(limit as i64) };
         match self {
             Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 3)),
             Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 4)),

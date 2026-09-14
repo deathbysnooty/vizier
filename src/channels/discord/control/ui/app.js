@@ -2722,7 +2722,7 @@
     } else if (c.kind === 'capped') {
       pct = c.cap ? Math.min(1, pts / c.cap) : 0;
       if (c.reached) { cls += ' reached'; text = [icon('check'), 'max ' + c.cap]; }
-      else text = pts + (c.cap ? '/' + c.cap : '');
+      else text = c.cap ? pts + '/' + c.cap : pts + ' · no limit';
       if (!pts) cls += ' zero';
       title = c.label + ': ' + pts + (c.cap ? ' of ' + c.cap + ' today' : ' today') + (c.reached ? ', daily limit reached' : '');
     } else if (c.kind === 'weekly') {
