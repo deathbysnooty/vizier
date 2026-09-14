@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.14] - 2026-09-14
+
+### 💼 Other
+
+- Richer scheduled posts (pictures, cards, reactions, tidy-up, AI text, placeholders, templates, test send) and members' reminders on the panel
 ## [0.11.13] - 2026-09-14
 
 ### 💼 Other
 
 - Wordle results pay house points; a card when a different house takes the lead
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.13
 ## [0.11.12] - 2026-09-14
 
 ### 💼 Other
