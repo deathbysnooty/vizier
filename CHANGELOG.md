@@ -2,11 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.17] - 2026-09-14
+
+### 💼 Other
+
+- 1,000 checked riddles for the Chocolate Frog game (8 topics, writer + checker logs)
+- Chocolate Frog Discord flow (drop, riddle pop-up, win, escape, /frogs)
+- Chocolate Frog game - riddle cards, collection, /frogs, /frogcard, panel page
+- Cards as assets - earned cards, trades and selling full sets
 ## [0.11.16] - 2026-09-14
 
 ### 💼 Other
 
 - Special welcomes for particular members, posted the moment they join, managed on the panel
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.16
 ## [0.11.15] - 2026-09-14
 
 ### ⚙️ Miscellaneous Tasks
