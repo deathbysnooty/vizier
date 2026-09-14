@@ -482,6 +482,55 @@ pub fn command() -> CreateCommand {
         .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "whose cards to show (you if left out)"))
 }
 
+/// The `/frogdrop` command, to register.
+pub fn drop_command_builder() -> CreateCommand {
+    let mut kind = CreateCommandOption::new(CommandOptionType::String, "rarity", "which kind of frog (random by the usual odds if left out)");
+    for r in Rarity::ALL {
+        kind = kind.add_string_choice(r.name(), r.key());
+    }
+    CreateCommand::new("frogdrop").description("admin only: drop a Chocolate Frog right here, right now").add_option(kind)
+}
+
+/// `/frogdrop [rarity]` - admins only. Drops a frog in the channel it is run in,
+/// straight away, whether or not scheduled drops are on. It is a real frog under
+/// the same rules and doesn't use up a scheduled drop.
+pub async fn drop_command(ctx: &Context, command: &CommandInteraction) {
+    let whisper = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    if command.guild_id.is_none() {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.".into())).await;
+        return;
+    }
+    if !super::admin_ids().contains(&command.user.id.get()) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods can drop a frog.".into())).await;
+        return;
+    }
+    let rarity = command.data.options.iter().find_map(|o| match (&o.name[..], &o.value) {
+        ("rarity", CommandDataOptionValue::String(key)) => Rarity::from_key(key),
+        _ => None,
+    });
+    let channel = command.channel_id.get();
+    if store::db().is_some_and(|db| store::channel_busy(&db.lock(), channel)) {
+        let text = "A frog is already hopping about here. Wait for it to be caught or escape.".to_string();
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+    let text = match rarity {
+        Some(r) => format!("Releasing {} {} frog.", r.emoji(), r.name()),
+        None => "Releasing a frog.".to_string(),
+    };
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
+    if let Err(err) = release(ctx, channel, Some(command.user.id.get()), rarity).await {
+        let _ = command
+            .create_followup(
+                &ctx.http,
+                serenity::all::CreateInteractionResponseFollowup::new().content(err).ephemeral(true),
+            )
+            .await;
+    }
+}
+
 pub fn card_command() -> CreateCommand {
     CreateCommand::new("frogcard").description("look at one Chocolate Frog card by its number").add_option(
         CreateCommandOption::new(CommandOptionType::Integer, "number", "the card's No., like 42 for No. 0042").required(true).min_int_value(1),
@@ -699,7 +748,7 @@ fn is_safe_corner(ctx: &Context, channel: u64) -> bool {
 }
 
 /// Posts a frog in a channel and opens it. The error says why not.
-async fn release(ctx: &Context, channel: u64, by: Option<u64>) -> Result<Drop, String> {
+async fn release(ctx: &Context, channel: u64, by: Option<u64>, rarity: Option<Rarity>) -> Result<Drop, String> {
     if is_safe_corner(ctx, channel) {
         return Err("Frogs never drop in #safe-corner.".into());
     }
@@ -707,8 +756,8 @@ async fn release(ctx: &Context, channel: u64, by: Option<u64>) -> Result<Drop, S
     let now = Utc::now().timestamp();
     let pending = {
         let conn = db.lock();
-        let wizard = store::pick_wizard(&conn, rand::random::<f64>(), rand::random::<f64>())
-            .ok_or("No card is switched on, so there's nothing to drop.")?;
+        let wizard = store::pick_wizard_of(&conn, rarity, rand::random::<f64>(), rand::random::<f64>())
+            .ok_or("No card of that kind is switched on, so there's nothing to drop.")?;
         let riddle = store::pick_riddle(&conn, wizard.rarity.difficulty(), rand::random::<f64>())
             .ok_or("The riddle bank is empty: copy riddlebank/ into the workspace.")?;
         store::start_drop(&conn, channel, &wizard, &riddle, now, by).map_err(|e| e.to_string())?
@@ -746,7 +795,7 @@ async fn release(ctx: &Context, channel: u64, by: Option<u64>) -> Result<Drop, S
         channel,
         drop.id,
         drop.riddle_id,
-        by.map(|b| format!(", from the panel by {}", b)).unwrap_or_default()
+        by.map(|b| format!(", asked for by {}", b)).unwrap_or_default()
     );
     Ok(drop)
 }
@@ -758,7 +807,7 @@ pub async fn drop_now(ctx: &Context, channel: u64, by: u64) -> Result<Drop, Stri
     if busy {
         return Err("A frog is already hopping about in that channel. Wait for it to be caught or escape.".into());
     }
-    release(ctx, channel, Some(by)).await
+    release(ctx, channel, Some(by), None).await
 }
 
 /// Lets the frog escape when its time is up.
@@ -1027,7 +1076,7 @@ async fn schedule(ctx: Context) {
             retry_at = now + RETRY_AFTER;
             continue;
         };
-        match release(&ctx, channel, None).await {
+        match release(&ctx, channel, None, None).await {
             Ok(d) => {
                 current.done += 1;
                 current.last_drop = Some(d.dropped_at);

@@ -483,12 +483,20 @@ pub fn update_wizard(conn: &Connection, id: i64, name: &str, rarity: Rarity, ima
 /// A random enabled wizard of the rolled rarity. Rarities with nobody enabled
 /// are left out of the roll.
 pub fn pick_wizard(conn: &Connection, rarity_roll: f64, wizard_roll: f64) -> Option<Wizard> {
+    pick_wizard_of(conn, None, rarity_roll, wizard_roll)
+}
+
+/// Like `pick_wizard`, but a `rarity` asked for (by `/frogdrop`) skips the roll.
+pub fn pick_wizard_of(conn: &Connection, rarity: Option<Rarity>, rarity_roll: f64, wizard_roll: f64) -> Option<Wizard> {
     let all: Vec<Wizard> = wizards(conn).into_iter().filter(|w| w.enabled).collect();
     let weights: Vec<(Rarity, u64)> = Rarity::ALL
         .into_iter()
         .map(|r| (r, if all.iter().any(|w| w.rarity == r) { r.weight() } else { 0 }))
         .collect();
-    let rarity = choose_rarity(rarity_roll, &weights)?;
+    let rarity = match rarity {
+        Some(r) => r,
+        None => choose_rarity(rarity_roll, &weights)?,
+    };
     let pool: Vec<&Wizard> = all.iter().filter(|w| w.rarity == rarity).collect();
     let index = ((wizard_roll.clamp(0.0, 1.0) * pool.len() as f64) as usize).min(pool.len().checked_sub(1)?);
     pool.get(index).map(|w| (*w).clone())
@@ -1395,6 +1403,18 @@ pub(crate) mod tests {
         assert_eq!(choose_rarity(0.999, &no_uncommon), Some(Rarity::Legendary));
         assert_eq!(choose_rarity(0.5, &[(Rarity::Common, 0)]), None);
         assert_eq!(choose_rarity(0.5, &[]), None);
+    }
+
+    #[test]
+    fn an_asked_for_rarity_skips_the_roll() {
+        let conn = memory();
+        for i in 0..50 {
+            let w = pick_wizard_of(&conn, Some(Rarity::Legendary), 0.0, i as f64 / 50.0).unwrap();
+            assert_eq!(w.rarity, Rarity::Legendary);
+        }
+        conn.execute("UPDATE wizards SET enabled = 0 WHERE rarity = 'legendary'", []).unwrap();
+        assert!(pick_wizard_of(&conn, Some(Rarity::Legendary), 0.0, 0.0).is_none());
+        assert_eq!(pick_wizard_of(&conn, Some(Rarity::Common), 0.999, 0.0).unwrap().rarity, Rarity::Common);
     }
 
     #[test]

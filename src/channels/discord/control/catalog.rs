@@ -400,6 +400,12 @@ pub fn sections() -> Vec<Section> {
                     "Hand in one copy of every card in play for house points. Your highest-numbered copies go unless you pick others; the copies are spent.",
                 ),
                 command(
+                    "frogdrop",
+                    ADMINS,
+                    "/frogdrop rarity:",
+                    "Drops a Chocolate Frog (Common, Uncommon, Legendary or random by the usual odds) in this channel right now, even while scheduled drops are off. It plays like any other frog but doesn't use up a scheduled drop.",
+                ),
+                command(
                     "frogcard",
                     EVERYONE,
                     "/frogcard number:",

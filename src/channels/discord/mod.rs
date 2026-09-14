@@ -1408,6 +1408,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::card_command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog::drop_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
@@ -2017,6 +2018,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "frogs" {
                 frog::frogs_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "frogdrop" {
+                frog::drop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogcard" {
