@@ -1182,14 +1182,52 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         return;
     }
     let _ = command.create_response(&ctx.http, whisper(format!("Lobby open for {} minutes.", minutes))).await;
+    open_lobby(ctx, guild, arena, here, minutes, theme, Ping::Warriors).await;
+}
 
+/// Who a lobby tags when it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ping {
+    Warriors,
+    Houses,
+    Everyone,
+    Nobody,
+}
+
+impl Ping {
+    fn from_key(key: &str) -> Ping {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "warriors" | "warrior" => Ping::Warriors,
+            "everyone" => Ping::Everyone,
+            "none" | "nobody" => Ping::Nobody,
+            _ => Ping::Houses,
+        }
+    }
+}
+
+/// Opens a lobby in the arena, waits it out, and runs the battle. The arena
+/// must already be marked busy; it is freed at the end.
+#[allow(clippy::too_many_arguments)]
+async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: ChannelId, minutes: i64, theme: Theme, ping: Ping) {
     let ends = Utc::now().timestamp() + minutes * 60;
-    let role = warrior_role(ctx, guild).await;
-    let ping = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
+    let (tag, mentions) = match ping {
+        Ping::Warriors => {
+            let role = warrior_role(ctx, guild).await;
+            let tag = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
+            (tag, CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
+        }
+        Ping::Houses => {
+            let roles = super::house::house_roles(ctx, guild).await;
+            let tag = roles.iter().map(|r| format!("<@&{}>", r)).collect::<Vec<_>>().join(" ");
+            (if tag.is_empty() { "Houses".into() } else { tag }, CreateAllowedMentions::new().roles(roles))
+        }
+        Ping::Everyone => ("@everyone".into(), CreateAllowedMentions::new().everyone(true)),
+        Ping::Nobody => ("⚔️".into(), CreateAllowedMentions::new()),
+    };
     let embed = lobby_embed(&[], ends, minutes, theme);
     let msg = CreateMessage::new()
-        .content(format!("{} — a battle royale is starting! Join below 👇", ping))
-        .allowed_mentions(CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
+        .content(format!("{} — a battle royale is starting! Join below 👇", tag))
+        .allowed_mentions(mentions)
         .embed(embed)
         .components(lobby_buttons(0, true));
     let Ok(posted) = arena.send_message(&ctx.http, msg).await else {
@@ -1311,6 +1349,85 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
         ))
         .colour(0xE67E22)
         .footer(CreateEmbedFooter::new("Every fight is a coin toss — just here for the banter"))
+}
+
+// --- the daily battle ---------------------------------------------------------
+
+/// How late a daily battle may still open after its time, if the arena was busy
+/// or the bot was down.
+const DAILY_GRACE_SECS: i64 = 30 * 60;
+
+/// Seconds after India midnight for an "HH:MM" time.
+fn clock_secs(time: &str) -> Option<i64> {
+    let (h, m) = time.trim().split_once(':')?;
+    let (h, m) = (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?);
+    ((0..24).contains(&h) && (0..60).contains(&m)).then_some(h * 3600 + m * 60)
+}
+
+/// Today's slot if it is due now: its India day, when `now` is within the grace
+/// after the time and that day hasn't had its battle yet.
+fn daily_due(now: i64, time: &str, last_day: Option<&str>) -> Option<String> {
+    let offset = super::stats::ist().local_minus_utc() as i64;
+    let midnight = (now + offset).div_euclid(86_400) * 86_400 - offset;
+    let slot = midnight + clock_secs(time)?;
+    let day = super::points::ist_day(slot);
+    (now >= slot && now - slot <= DAILY_GRACE_SECS && last_day != Some(day.as_str())).then_some(day)
+}
+
+/// The theme a daily battle uses: a fixed one, or a different one at random.
+fn daily_theme(key: &str, roll: u64) -> Theme {
+    match Theme::from_key(key) {
+        Some(theme) => theme,
+        None => Theme::ALL[(roll % Theme::ALL.len() as u64) as usize],
+    }
+}
+
+/// Opens a battle royale every day at `VIZIER_BATTLE_DAILY_TIME` (India time)
+/// when `VIZIER_BATTLE_DAILY` is on - the same lobby /battle opens, so nothing
+/// about the battle itself differs. If a fight is running at that moment it
+/// tries again every half minute for up to half an hour.
+pub fn spawn_daily(ctx: Context) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            if !super::control::on("VIZIER_BATTLE_DAILY", false) {
+                continue;
+            }
+            let time = super::control::var("VIZIER_BATTLE_DAILY_TIME").unwrap_or_else(|| "21:00".into());
+            let now = Utc::now().timestamp();
+            let Some(day) = daily_due(now, &time, meta_get("daily_battle_day").as_deref()) else {
+                continue;
+            };
+            let Some(guild) = ctx.cache.guilds().first().copied() else {
+                continue;
+            };
+            let Some(fallback) = super::control::id("VIZIER_FIGHT_CHANNEL").map(ChannelId::new) else {
+                tracing::warn!("battle: daily battle is on but VIZIER_FIGHT_CHANNEL is not set");
+                meta_set("daily_battle_day", &day);
+                continue;
+            };
+            let arena = arena(&ctx, guild, fallback).await;
+            if !BUSY.lock().insert(arena.get()) {
+                continue;
+            }
+            meta_set("daily_battle_day", &day);
+            let minutes = (super::control::number("VIZIER_BATTLE_DAILY_MINUTES", 10) as i64).clamp(MIN_WAIT, max_lobby_minutes());
+            let theme = daily_theme(
+                &super::control::var("VIZIER_BATTLE_DAILY_THEME").unwrap_or_else(|| "classic".into()),
+                now as u64,
+            );
+            let ping = Ping::from_key(&super::control::var("VIZIER_BATTLE_DAILY_PING").unwrap_or_default());
+            tracing::info!("battle: daily battle opening for {} ({} min, {:?}, {:?})", day, minutes, theme, ping);
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                open_lobby(&ctx, guild, arena, arena, minutes, theme, ping).await;
+            });
+        }
+    });
 }
 
 /// Knockout rounds until one is left, on a draw fixed at the start: winners
@@ -1875,6 +1992,23 @@ mod tests {
         assert_eq!(stage_title(4), "Quarter-final");
         assert_eq!(stage_title(8), "Round of 16");
         assert_eq!(title_case("QUARTER-FINALS"), "Quarter-finals");
+    }
+
+    #[test]
+    fn the_daily_battle_opens_once_in_its_window() {
+        // 2026-09-14 21:00 India time is 15:30 UTC.
+        let slot = 1_789_399_800;
+        assert_eq!(super::super::points::ist_day(slot), "2026-09-14");
+        assert_eq!(daily_due(slot - 60, "21:00", None), None, "not before the time");
+        assert_eq!(daily_due(slot + 60, "21:00", None).as_deref(), Some("2026-09-14"));
+        assert_eq!(daily_due(slot + 60, "21:00", Some("2026-09-14")), None, "once a day");
+        assert_eq!(daily_due(slot + DAILY_GRACE_SECS + 1, "21:00", None), None, "too late after downtime");
+        assert_eq!(daily_due(slot, "25:00", None), None);
+        assert_eq!(Ping::from_key("everyone"), Ping::Everyone);
+        assert_eq!(Ping::from_key("anything"), Ping::Houses);
+        assert_eq!(daily_theme("pokemon", 3), Theme::Pokemon);
+        let themes: std::collections::HashSet<_> = (0..20).map(|r| daily_theme("random", r)).collect();
+        assert!(themes.len() > 3);
     }
 
     #[test]

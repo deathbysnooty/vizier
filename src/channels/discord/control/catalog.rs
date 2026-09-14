@@ -517,13 +517,13 @@ pub fn sections() -> Vec<Section> {
             id: "arena",
             title: "Arena",
             icon: "⚔️",
-            about: "1v1 fights and battle royales, just for fun. /fight challenges someone; if they accept, both press \
-                    △ ○ □ ✕ each turn and the winner of each clash lands the blow, until one runs out of health. \
+            about: "1v1 fights and battle royales, just for fun. /fight challenges someone; if they accept, both pick \
+                    △ ○ □ ✕ once at the start and the winner of that clash wins the fight, which then plays out. \
                     Winning a 1v1 earns a house point (only the first fight between the same two people each day \
                     counts). /battle opens a lobby, pings the Warrior role, and knocks the joiners out on a bracket \
                     until one champion is left, who wears the Battle Champion role and wins house points, as does the \
                     runner-up. Early rounds of a big battle are quick rounds posted as a list; later rounds are fought \
-                    out in full.",
+                    out in full. A daily battle can open by itself at a set time, tagging the houses.",
             settings: vec![
                 setting(
                     "VIZIER_FIGHT_CHANNEL",
@@ -531,6 +531,48 @@ pub fn sections() -> Vec<Section> {
                     "Where challenges, fights and battles are posted. Empty means a channel named fight-fight-fight, or wherever the command was used.",
                     Kind::Channel,
                     "",
+                ),
+                setting(
+                    "VIZIER_BATTLE_DAILY",
+                    "Daily battle royale",
+                    "Open a battle royale by itself every day at the time below, exactly as /battle does. Needs the fight channel set.",
+                    Kind::Toggle,
+                    "off",
+                ),
+                setting(
+                    "VIZIER_BATTLE_DAILY_TIME",
+                    "Daily battle time",
+                    "India time the daily lobby opens. If a fight is running then, it opens as soon as the arena is free (up to 30 minutes late).",
+                    Kind::Time,
+                    "21:00",
+                ),
+                setting("VIZIER_BATTLE_DAILY_MINUTES", "Daily lobby length", "How long the daily lobby stays open for joining.", number(1, 60, "minutes"), "10"),
+                setting(
+                    "VIZIER_BATTLE_DAILY_THEME",
+                    "Daily battle style",
+                    "The fight type for the daily battle, or a random one each day.",
+                    Kind::Choice {
+                        options: &[
+                            ("random", "Random each day"),
+                            ("classic", "Classic"),
+                            ("pokemon", "Pokémon"),
+                            ("harrypotter", "Harry Potter"),
+                            ("dbz", "Dragon Ball Z"),
+                            ("wwe", "WWE"),
+                            ("cs2", "Counter-Strike 2"),
+                            ("eldenring", "Elden Ring"),
+                        ],
+                    },
+                    "classic",
+                ),
+                setting(
+                    "VIZIER_BATTLE_DAILY_PING",
+                    "Daily battle tags",
+                    "Who the daily lobby tags. Houses tags all four house roles (the bot needs permission to mention roles); Warriors tags the Warrior role.",
+                    Kind::Choice {
+                        options: &[("houses", "All 4 houses"), ("warriors", "Warrior role"), ("everyone", "@everyone"), ("none", "Nobody")],
+                    },
+                    "houses",
                 ),
                 setting("VIZIER_FIGHT_COOLDOWN_SECS", "Challenge cooldown", "How long a member waits between two /fight challenges.", number(0, 3600, "seconds"), "60"),
                 setting("VIZIER_FIGHT_EXPIRY_SECS", "Challenge expiry", "How long a challenge waits for an answer before it is cancelled.", number(10, 3600, "seconds"), "120"),

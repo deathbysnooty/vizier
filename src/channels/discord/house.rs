@@ -318,6 +318,17 @@ async fn role_for(ctx: &Context, guild: GuildId, house: &'static House) -> Optio
     find_or_create(ctx, guild, &format!("role_{}", house.key), house.name, house.colour).await
 }
 
+/// The four house roles, for tagging every house at once.
+pub(crate) async fn house_roles(ctx: &Context, guild: GuildId) -> Vec<RoleId> {
+    let mut out = Vec::new();
+    for house in HOUSES {
+        if let Some(role) = role_for(ctx, guild, house).await {
+            out.push(role);
+        }
+    }
+    out
+}
+
 async fn captain_role(ctx: &Context, guild: GuildId) -> Option<RoleId> {
     find_or_create(ctx, guild, "role_captain", CAPTAIN_ROLE, CAPTAIN_COLOUR).await
 }
