@@ -32,6 +32,8 @@ pub enum Source {
     GoldenSnitch,
     Weekly,
     Mod,
+    /// Discord's Wordle app: the day's results post, once per person per day.
+    Wordle,
 }
 
 /// How much one person may earn from a source.
@@ -47,7 +49,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 12] = [
+    pub const ALL: [Source; 13] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -60,6 +62,7 @@ impl Source {
         Source::GoldenSnitch,
         Source::Weekly,
         Source::Mod,
+        Source::Wordle,
     ];
 
     pub fn key(self) -> &'static str {
@@ -76,6 +79,7 @@ impl Source {
             Source::GoldenSnitch => "golden_snitch",
             Source::Weekly => "weekly",
             Source::Mod => "mod",
+            Source::Wordle => "wordle",
         }
     }
 
@@ -97,6 +101,7 @@ impl Source {
             Source::GoldenSnitch => "🥇 Golden Snitch",
             Source::Weekly => "📝 Weekly posts",
             Source::Mod => "🛡️ Mods",
+            Source::Wordle => "🟩 Wordle",
         }
     }
 
@@ -117,7 +122,8 @@ impl Source {
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.
-            Source::Royale | Source::GoldenSnitch | Source::Mod => Cap::None,
+            // Wordle is once a day by nature: each person is paid once per results post.
+            Source::Royale | Source::GoldenSnitch | Source::Mod | Source::Wordle => Cap::None,
         }
     }
 }

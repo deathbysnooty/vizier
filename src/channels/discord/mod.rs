@@ -1434,6 +1434,8 @@ impl EventHandler for Handler {
         }
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
+        // A card in the houses channel when a different house takes the lead.
+        standings::spawn_lead_watch(ctx.clone());
         // The daily battle royale, when switched on in the panel.
         battle::spawn_daily(ctx.clone());
         // Snitch drops: restores cards left live by a restart, then schedules.

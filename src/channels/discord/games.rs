@@ -24,6 +24,8 @@ use super::points::Source;
 pub const KOTO_BOT: u64 = 1_164_654_805_730_472_018;
 pub const ANAGRAM_BOT: u64 = 888_013_540_705_832_961;
 pub const CAT_BOT: u64 = 966_695_034_340_663_367;
+/// Discord's own Wordle app, which posts the group's results for the day before.
+pub const WORDLE_BOT: u64 = 1_211_781_489_931_452_447;
 
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 /// Human messages remembered per channel. Only the last few seconds before a
@@ -122,6 +124,7 @@ pub fn on_message(ctx: &Context, msg: &Message) {
         }
         ANAGRAM_BOT => on_anagram(ctx, msg),
         CAT_BOT => on_cat(ctx, msg),
+        WORDLE_BOT => on_wordle(msg),
         _ => {}
     }
 }
@@ -543,6 +546,82 @@ fn cat_points(kind: &str) -> i64 {
     points as i64
 }
 
+// --- Wordle -----------------------------------------------------------------------
+
+/// A score group in the results post: "👑 4/6: <@1> <@2>" or "X/6: <@3>".
+static WORDLE_GROUP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(👑\s*)?\b([1-6Xx])/6:\s*((?:<@!?\d+>[\s,]*)+)").expect("regex"));
+static MENTION_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@!?(\d+)>").expect("regex"));
+
+/// Who played yesterday's Wordle and how: (member, guesses or None for X, crowned).
+fn parse_wordle(text: &str) -> Vec<(u64, Option<u8>, bool)> {
+    if !text.to_lowercase().contains("results") {
+        return Vec::new();
+    }
+    let mut out: Vec<(u64, Option<u8>, bool)> = Vec::new();
+    for g in WORDLE_GROUP.captures_iter(text) {
+        let crowned = g.get(1).is_some();
+        let guesses = g[2].parse::<u8>().ok();
+        for m in MENTION_ID.captures_iter(&g[3]) {
+            if let Ok(id) = m[1].parse::<u64>() {
+                if !out.iter().any(|(u, _, _)| *u == id) {
+                    out.push((id, guesses, crowned));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Points for a Wordle result, from the panel's settings.
+fn wordle_points(guesses: Option<u8>, crowned: bool) -> i64 {
+    let base = match guesses {
+        Some(1 | 2) => super::control::number("VIZIER_POINTS_WORDLE_1_2", 4),
+        Some(3) => super::control::number("VIZIER_POINTS_WORDLE_3", 3),
+        Some(4) => super::control::number("VIZIER_POINTS_WORDLE_4", 2),
+        Some(5 | 6) => super::control::number("VIZIER_POINTS_WORDLE_5_6", 1),
+        _ => 0,
+    } as i64;
+    // The crown goes to the day's best solve; an unsolved day earns nothing extra.
+    let crown = if crowned && guesses.is_some() { super::control::number("VIZIER_POINTS_WORDLE_CROWN", 1) as i64 } else { 0 };
+    base + crown
+}
+
+/// The results post covers the day before it, so the points are dated inside
+/// that India day and keyed to it: a re-posted summary never pays twice.
+fn on_wordle(msg: &Message) {
+    if !super::control::on("VIZIER_WORDLE_POINTS", true) {
+        return;
+    }
+    let results = parse_wordle(&all_text(msg));
+    if results.is_empty() {
+        return;
+    }
+    let posted = msg.timestamp.unix_timestamp();
+    let offset = super::stats::ist().local_minus_utc() as i64;
+    let today_start = (posted + offset).div_euclid(86_400) * 86_400 - offset;
+    let at = today_start - 1;
+    let day = super::points::ist_day(at);
+    tracing::info!("games: Wordle results for {}: {} player(s)", day, results.len());
+    for (user, guesses, crowned) in results {
+        let points = wordle_points(guesses, crowned);
+        if points <= 0 {
+            continue;
+        }
+        let reason = match guesses {
+            Some(g) => format!("Wordle {} in {}/6{}", day, g, if crowned { " 👑" } else { "" }),
+            None => format!("Wordle {}", day),
+        };
+        let dedupe = format!("wordle:{}:{}", day, user);
+        tokio::task::spawn_blocking(move || {
+            match super::house::award_person_at(user, Source::Wordle, points, &reason, None, Some(dedupe.clone()), None, at) {
+                Some((house, outcome)) => tracing::info!("games: {} -> {} ({}): {:?}", dedupe, user, house.name, outcome),
+                None => tracing::info!("games: {} -> {} earns nothing (unsorted or opted out)", dedupe, user),
+            }
+        });
+    }
+}
+
 fn on_cat(ctx: &Context, msg: &Message) {
     let Some(catch) = parse_cat(&all_text(msg)) else { return };
     let seen = recent_humans(msg.channel_id);
@@ -582,6 +661,21 @@ mod tests {
         assert!(parse_cat("anyone who cought a Fine cat gets a bonus").is_none());
         assert!(parse_cat("Everyone cought <:fine:123> Fine cat!").is_none());
         assert!(parse_cat("youngster\\_07 cought <:fine:123> Fine cat!").is_some(), "a name that only starts with 'you' is a person");
+    }
+
+    #[test]
+    fn wordle_results_pay_by_guesses_with_a_crown_bonus() {
+        let text = "**Your group is on a 2 day streak!** 🔥 Here are yesterday's results:\n👑 3/6: <@11> <@22>\n5/6: <@33>\nX/6: <@44>";
+        let got = parse_wordle(text);
+        assert_eq!(got, vec![(11, Some(3), true), (22, Some(3), true), (33, Some(5), false), (44, None, false)]);
+        assert_eq!(wordle_points(Some(3), true), 4);
+        assert_eq!(wordle_points(Some(2), false), 4);
+        assert_eq!(wordle_points(Some(4), false), 2);
+        assert_eq!(wordle_points(Some(6), false), 1);
+        assert_eq!(wordle_points(None, true), 0);
+        assert!(parse_wordle("Anya is playing").is_empty());
+        // All on one line, as the app sometimes sends it.
+        assert_eq!(parse_wordle("Here are yesterday's results: 👑 4/6: <@7> X/6: <@8>").len(), 2);
     }
 
     #[test]

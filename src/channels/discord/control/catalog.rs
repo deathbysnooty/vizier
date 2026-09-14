@@ -342,6 +342,9 @@ pub fn sections() -> Vec<Section> {
                     (set under Houses), only when points actually moved, and only for the hours below.",
             settings: vec![
                 toggle("VIZIER_HOUSE_SUMMARY", "Hourly summary", "Post the hourly points summary."),
+                toggle("VIZIER_LEAD_CARD", "Lead change card", "Post a card in the houses channel when a different house takes the lead in this month's House Cup."),
+                setting("VIZIER_LEAD_CARD_GAP_MINUTES", "Lead card cooldown", "Least time between two lead cards, so a close race doesn't flood the channel.", number(0, 1440, "minutes"), "30"),
+                setting("VIZIER_LEAD_CARD_MIN_POINTS", "Lead card from", "No lead card until the leading house has at least this many points in the month (quiet early days).", number(0, 10000, "points"), "20"),
                 setting(
                     "VIZIER_HOUSE_SUMMARY_FIRST_HOUR",
                     "First hour",
@@ -412,6 +415,12 @@ pub fn sections() -> Vec<Section> {
                     usual. Each game, restart or edit can only pay once, and the daily limits apply.",
             settings: vec![
                 toggle("VIZIER_GAME_POINTS", "Pay for game wins", "Give house points for Koto, Anagram Bot and Cat Bot wins. Off pays nothing; the games themselves carry on."),
+                toggle("VIZIER_WORDLE_POINTS", "Wordle points", "Pay house points from the Wordle app's daily results post (the day before's scores)."),
+                setting("VIZIER_POINTS_WORDLE_1_2", "Wordle in 1-2", "Points for solving Wordle in one or two guesses.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_WORDLE_3", "Wordle in 3", "Points for solving Wordle in three guesses.", number(0, 100, "points"), "3"),
+                setting("VIZIER_POINTS_WORDLE_4", "Wordle in 4", "Points for solving Wordle in four guesses.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_WORDLE_5_6", "Wordle in 5-6", "Points for solving Wordle in five or six guesses.", number(0, 100, "points"), "1"),
+                setting("VIZIER_POINTS_WORDLE_CROWN", "Wordle crown bonus", "Extra points for the day's best Wordle score (the 👑 in the results).", number(0, 100, "points"), "1"),
                 setting("VIZIER_POINTS_KOTO_WIN", "Koto solved", "Points for solving a Koto game.", number(0, 100, "points"), "3"),
                 setting("VIZIER_POINTS_KOTO_PLAYED", "Koto played", "Points for each other player who guessed in a solved Koto game.", number(0, 100, "points"), "1"),
                 setting("VIZIER_POINTS_ANAGRAM", "Anagram solved", "Points for solving an Anagram Bot puzzle.", number(0, 100, "points"), "3"),

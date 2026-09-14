@@ -210,7 +210,7 @@ pub fn activity_chips(sources: &HashMap<String, i64>, messages: i64, voice_secs:
             "points": pts(s), "cap": cap, "reached": cap.is_some_and(|c| pts(s) >= c),
         }));
     }
-    for s in [Source::GoldenSnitch, Source::Royale, Source::Mod] {
+    for s in [Source::Wordle, Source::GoldenSnitch, Source::Royale, Source::Mod] {
         if pts(s) != 0 {
             let (icon, name) = label(s);
             out.push(json!({ "key": s.key(), "icon": icon, "label": name, "kind": "extra", "points": pts(s) }));

@@ -66,6 +66,11 @@ const CRESTS: [(&str, &[u8]); 4] = [
     ("hufflepuff", include_bytes!("crests/hufflepuff.png")),
 ];
 
+/// A house's crest PNG as supplied, for attaching to messages.
+pub(super) fn crest_png(house: &str) -> Option<&'static [u8]> {
+    CRESTS.iter().find(|(key, _)| *key == house).map(|(_, bytes)| *bytes)
+}
+
 /// Side of the crest artwork on the card. The source is 64px, so this is an
 /// enlargement; kept a little under the badge so the ivory keyline has room.
 const CREST_ART: f32 = 112.0;

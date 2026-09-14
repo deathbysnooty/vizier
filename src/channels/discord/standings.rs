@@ -108,6 +108,135 @@ pub fn spawn(ctx: Context) {
     });
 }
 
+// --- the lead card -------------------------------------------------------------------
+
+/// The house strictly ahead this month, if one is: a tie at the top has no leader.
+fn leader(month: &HashMap<&'static str, i64>) -> Option<(&'static House, i64, i64)> {
+    let mut rows: Vec<(&'static House, i64)> = HOUSES.iter().map(|h| (h, month.get(h.key).copied().unwrap_or(0))).collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let (top, second) = (rows.first()?, rows.get(1)?);
+    (top.1 > second.1).then_some((top.0, top.1, top.1 - second.1))
+}
+
+/// What happens to the lead on a check: nothing, remember it quietly, or post a card.
+#[derive(Debug, PartialEq, Eq)]
+enum LeadStep {
+    Nothing,
+    Remember(&'static str),
+    Announce(&'static str),
+}
+
+/// `announced` is the house last announced this month ("" when none yet),
+/// `seeded` whether this month has been seen before.
+fn lead_step(
+    current: Option<(&'static House, i64, i64)>,
+    announced: &str,
+    seeded: bool,
+    since_last: i64,
+    gap_secs: i64,
+    min_points: i64,
+) -> LeadStep {
+    let Some((house, points, _)) = current else { return LeadStep::Nothing };
+    if house.key == announced {
+        return LeadStep::Nothing;
+    }
+    if !seeded {
+        // The very first look (a deploy into a month already under way):
+        // take the current leader as known rather than announcing old news.
+        return LeadStep::Remember(house.key);
+    }
+    if points < min_points || since_last < gap_secs {
+        return LeadStep::Nothing;
+    }
+    LeadStep::Announce(house.key)
+}
+
+fn lead_embed(house: &House, points: i64, margin: i64, previous: Option<&House>, month: &HashMap<&'static str, i64>) -> serenity::all::CreateEmbed {
+    let mut rows: Vec<&House> = HOUSES.iter().collect();
+    rows.sort_by(|a, b| month.get(b.key).cmp(&month.get(a.key)).then(a.name.cmp(b.name)));
+    let table: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let n = month.get(h.key).copied().unwrap_or(0);
+            if h.key == house.key { format!("**{}. {} {} — {}**", i + 1, h.crest, h.name, n) } else { format!("{}. {} {} — {}", i + 1, h.crest, h.name, n) }
+        })
+        .collect();
+    let title = match previous {
+        Some(p) => format!("{} {} takes the lead from {} {}!", house.crest, house.name, p.crest, p.name),
+        None => format!("{} {} takes the early lead!", house.crest, house.name),
+    };
+    serenity::all::CreateEmbed::new()
+        .title(title)
+        .description(format!("**{}** points this month · **{}** ahead\n\n{}", points, margin, table.join("\n")))
+        .colour(house.colour)
+        .thumbnail(format!("attachment://{}.png", house.key))
+        .footer(serenity::all::CreateEmbedFooter::new("House Cup · check your day with /today"))
+}
+
+/// Watches the month's standings and posts a card in the houses channel when a
+/// different house takes the lead - with a cooldown so a close race doesn't
+/// flood the channel, and never for a tie.
+pub fn spawn_lead_watch(ctx: Context) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if !super::control::on("VIZIER_LEAD_CARD", true) {
+                continue;
+            }
+            let now = Utc::now().timestamp();
+            let month_key = ledger::ist_day(ledger::month_start(now));
+            // House meta reads take the house lock, so all of them come before it.
+            // Seeded once ever: a new month then starts with no leader announced,
+            // so its first leader gets the "early lead" card.
+            let stored_month = house::meta_get("lead_month");
+            let seeded = stored_month.is_some();
+            let announced = if stored_month.as_deref() == Some(month_key.as_str()) {
+                house::meta_get("lead_house").unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let last_ts = house::meta_get("lead_ts").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            let month = {
+                let Some(db) = house::db() else { continue };
+                let conn = db.lock();
+                ledger::house_totals(&conn, ledger::month_start(now)).unwrap_or_default()
+            };
+            let current = leader(&month);
+            let gap = super::control::number("VIZIER_LEAD_CARD_GAP_MINUTES", 30) as i64 * 60;
+            let min_points = super::control::number("VIZIER_LEAD_CARD_MIN_POINTS", 20) as i64;
+            match lead_step(current, &announced, seeded, now - last_ts, gap, min_points) {
+                LeadStep::Nothing => {}
+                LeadStep::Remember(key) => {
+                    house::meta_set("lead_month", &month_key);
+                    house::meta_set("lead_house", key);
+                }
+                LeadStep::Announce(key) => {
+                    let (Some((h, points, margin)), Some(channel)) = (current, houses_channel()) else { continue };
+                    let previous = house::house(&announced);
+                    let mut msg = CreateMessage::new().embed(lead_embed(h, points, margin, previous, &month)).allowed_mentions(CreateAllowedMentions::new());
+                    if let Some(png) = super::house_card::crest_png(h.key) {
+                        msg = msg.add_file(serenity::all::CreateAttachment::bytes(png, format!("{}.png", h.key)));
+                    }
+                    match channel.send_message(&ctx.http, msg).await {
+                        Ok(_) => {
+                            tracing::info!("standings: {} took the lead ({} points, +{})", h.name, points, margin);
+                            house::meta_set("lead_month", &month_key);
+                            house::meta_set("lead_house", key);
+                            house::meta_set("lead_ts", &now.to_string());
+                        }
+                        Err(err) => tracing::warn!("standings: lead card not posted: {}", err),
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn post_hour(ctx: &Context, start: i64, end: i64) {
     if !super::control::on("VIZIER_HOUSE_SUMMARY", true) {
         return;
@@ -312,7 +441,7 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
             _ => lines.push(format!("{} {} · no limit", s.label(), pts(s))),
         }
     }
-    for s in [Source::GoldenSnitch, Source::Royale, Source::Weekly, Source::Mod] {
+    for s in [Source::Wordle, Source::GoldenSnitch, Source::Royale, Source::Weekly, Source::Mod] {
         if pts(s) != 0 {
             lines.push(format!("{} {}{}", s.label(), if pts(s) > 0 { "+" } else { "" }, pts(s)));
         }
@@ -517,6 +646,22 @@ fn month_label(day: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lead_card_waits_for_a_real_change() {
+        let m = |g: i64, s: i64, r: i64, h: i64| -> HashMap<&'static str, i64> {
+            [("gryffindor", g), ("slytherin", s), ("ravenclaw", r), ("hufflepuff", h)].into_iter().collect()
+        };
+        assert!(leader(&m(10, 10, 5, 0)).is_none(), "a tie at the top has no leader");
+        let (h, pts, margin) = leader(&m(40, 12, 55, 3)).unwrap();
+        assert_eq!((h.key, pts, margin), ("ravenclaw", 55, 15));
+        let now_r = leader(&m(40, 12, 55, 3));
+        assert_eq!(lead_step(now_r, "", false, 0, 1800, 20), LeadStep::Remember("ravenclaw"), "first sight of a month is remembered");
+        assert_eq!(lead_step(now_r, "ravenclaw", true, 99_999, 1800, 20), LeadStep::Nothing);
+        assert_eq!(lead_step(now_r, "gryffindor", true, 99_999, 1800, 20), LeadStep::Announce("ravenclaw"));
+        assert_eq!(lead_step(now_r, "gryffindor", true, 600, 1800, 20), LeadStep::Nothing, "cooldown");
+        assert_eq!(lead_step(leader(&m(5, 0, 9, 0)), "", true, 99_999, 1800, 20), LeadStep::Nothing, "too early in the month");
+    }
 
     #[test]
     fn today_marks_maxed_limits_and_counts_whats_left() {
