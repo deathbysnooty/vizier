@@ -679,6 +679,22 @@ pub fn sections() -> Vec<Section> {
             commands: vec![],
         },
         Section {
+            id: "members",
+            title: "Member notes",
+            icon: "🗒️",
+            about: "Private notes the mods keep about members on the Members page, with a tone for each (gentle, \
+                    light teasing, roast freely, respectful, brief). Whenever the bot answers a message, the notes for \
+                    its author, anyone mentioned in it and whoever it replies to are handed to the AI with an \
+                    instruction never to reveal them, so the bot treats people the way the mods intend. Notes are \
+                    never used on messages the bot only reads quietly.",
+            settings: vec![toggle(
+                "VIZIER_MEMBER_NOTES",
+                "Use member notes",
+                "Give the AI the mods' notes and tones when it answers. Off keeps the notes on the panel but the bot stops using them.",
+            )],
+            commands: vec![],
+        },
+        Section {
             id: "autoreplies",
             title: "Auto-responses",
             icon: "💬",

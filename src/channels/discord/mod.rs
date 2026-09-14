@@ -2917,6 +2917,11 @@ Ye message sirf tumhe dikh raha hai."#,
             // Carry the quoted message's text, not just its id. Without this a
             // "@bot factcheck this" reply gives the model an id it would have to
             // go and fetch, and it usually just guesses instead.
+            let replied_person = msg
+                .referenced_message
+                .as_deref()
+                .filter(|m| !m.author.bot)
+                .map(|m| (m.author.id.get(), m.author.display_name().to_string()));
             let (replied_to, replied_author, replied_content) = match msg.referenced_message {
                 None => (None, None, None),
                 Some(message) => (
@@ -2955,6 +2960,23 @@ Ye message sirf tumhe dikh raha hai."#,
                     readable
                 ),
                 _ => readable,
+            };
+
+            // Mods' private notes about the people in a message the bot will
+            // answer: the author, anyone mentioned, and whoever is replied to.
+            // Only on answered messages - silent reads never carry them.
+            let readable = if (silence_this_author || (!is_mention && !is_dm))
+                || !control::on("VIZIER_MEMBER_NOTES", true)
+            {
+                readable
+            } else {
+                let mut people = vec![(msg.author.id.get(), msg.author.display_name().to_string())];
+                people.extend(msg.mentions.iter().filter(|u| !u.bot).map(|u| (u.id.get(), u.display_name().to_string())));
+                people.extend(replied_person);
+                match control::members::context_block(&people) {
+                    Some(notes) => format!("{}\n{}", notes, readable),
+                    None => readable,
+                }
             };
 
             // Names, not ids - both for what we answer and for what we record,
