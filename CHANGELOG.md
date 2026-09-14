@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.7] - 2026-09-14
+
+### 💼 Other
+
+- /help is written from the catalog, per viewer, with a topic option
 ## [0.11.6] - 2026-09-14
 
 ### 💼 Other
 
 - /today shows the day's points and maxed limits, for yourself or a housemate
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.6
 ## [0.11.5] - 2026-09-14
 
 ### 💼 Other
