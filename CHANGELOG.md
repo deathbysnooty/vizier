@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.2] - 2026-09-14
+
+### 💼 Other
+
+- Keep the royale lobby card at the bottom while it is open
 ## [0.11.1] - 2026-09-14
 
 ### 💼 Other
 
 - Member notes and tones handed to the AI when it answers; fix derive crate version pin
 - Members profiles with mods' notes, and live scorers with daily cap progress
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.1
 ## [0.11.0] - 2026-09-13
 
 ### 💼 Other
