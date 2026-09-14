@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.8] - 2026-09-14
+
+### 💼 Other
+
+- Several daily battle times; lobby tags in their own message that stays; lobby logging
 ## [0.11.7] - 2026-09-14
 
 ### 💼 Other
 
 - /help is written from the catalog, per viewer, with a topic option
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.7
 ## [0.11.6] - 2026-09-14
 
 ### 💼 Other
