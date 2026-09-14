@@ -1019,6 +1019,7 @@
       S.fields.push(f);
       rows.appendChild(f.el);
     });
+    if (sec.id === 'frogs') renderFrogs(page);
     if (sec.id === 'autoreplies') {
       page.appendChild(h('a', { class: 'banner inline info link-banner', href: '#/autoreplies' }, icon('reply'),
         h('p', null, h('b', null, 'The rules live on the Auto-responses page. '), h('span', null, plural(S.rules.length, 'rule') + ', ' + S.rules.filter((r) => r.enabled).length + ' switched on.')), icon('right')));
@@ -2824,6 +2825,323 @@
     requestAnimationFrame(() => { const first = body.querySelector(existing ? '.line-row textarea' : '#w-member'); if (first) first.focus({ preventScroll: true }); });
   }
 
+  // --- chocolate frogs -------------------------------------------------------------------
+
+  const FROG = { data: null, allDrops: false, ownerMode: 'member', member: null, wizard: '', owners: null, ownersBusy: false };
+
+  async function loadFrogs() {
+    FROG.data = await api('GET', '/frogs');
+    return FROG.data;
+  }
+
+  function rarityOf(key) {
+    return ((FROG.data && FROG.data.rarities) || []).find((r) => r.key === key) || { key, name: key, emoji: '🐸', colour: '#8b93ff', points: 0, difficulty: 'easy', chance: 0 };
+  }
+  function rarityChip(key) {
+    const r = rarityOf(key);
+    return h('span', { class: 'badge rarity', style: '--rarity:' + r.colour }, h('span', { class: 'swatch', style: 'background:' + r.colour }), r.emoji + ' ' + r.name);
+  }
+  function frogArt(url, cls) {
+    return url ? h('img', { class: 'frog-art' + (cls ? ' ' + cls : ''), src: url, alt: '', loading: 'lazy', decoding: 'async' })
+      : h('span', { class: 'frog-art placeholder' + (cls ? ' ' + cls : ''), 'aria-hidden': 'true' }, '🐸');
+  }
+  const serialLabel = (n) => 'No. ' + String(n).padStart(4, '0');
+  const pointsWords = (n) => n + (n === 1 ? ' point' : ' points');
+  function secsWords(n) { if (n < 60) return n + ' s'; const m = Math.floor(n / 60), s = n % 60; return m + ' min' + (s ? ' ' + s + ' s' : ''); }
+
+  /** The extra parts of the Chocolate Frogs page, above its settings. */
+  function renderFrogs(page) {
+    const holder = h('div', { class: 'frog-page' });
+    page.appendChild(holder);
+    const draw = () => {
+      clear(holder);
+      const d = FROG.data;
+      if (!d) { holder.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the frogs…')); return; }
+      drawFrogTiles(holder, d);
+      holder.appendChild(frogWizardsCard(d, draw));
+      holder.appendChild(frogDropsCard(d, draw));
+      holder.appendChild(frogOwnersCard(d));
+      holder.appendChild(frogBankCard(d));
+    };
+    draw();
+    loadFrogs().then(() => { if (holder.isConnected) draw(); }).catch((e) => { if (holder.isConnected) { clear(holder); holder.appendChild(h('div', { class: 'banner inline', role: 'alert' }, icon('alert'), h('p', null, e.message))); } });
+  }
+
+  function drawFrogTiles(holder, d) {
+    const t = d.totals;
+    const chans = d.channels.map((c) => '#' + (c.name || c.id) + (d.channels.length > 1 ? ' ×' + c.weight : '')).join(', ');
+    const onTile = tile('Scheduled drops', 'zap', d.enabled ? 'On' : 'Off',
+      d.enabled ? h('span', null, h('span', { class: 'ok' }, '● '), 'Frogs drop on their own') : h('a', { href: '#/s/frogs?k=VIZIER_FROGS' }, 'Switch on in the settings below'));
+    holder.appendChild(h('div', { class: 'tiles frog-tiles' },
+      onTile,
+      tile('Drop channels', 'hash', d.channels.length ? String(d.channels.length) : 'None',
+        d.channels.length ? h('span', { title: chans }, (d.channels_from === 'snitch' ? 'The Snitch’s: ' : '') + chans) : 'Set drop channels below'),
+      tile('Frogs dropped', 'activity', numberFmt.format(t.dropped), t.caught + ' caught · ' + t.escaped + ' escaped' + (t.open ? ' · ' + t.open + ' open' : '')),
+      tile('Cards owned', 'tag', numberFmt.format(t.cards), plural(t.collectors, 'collector') + ' · ' + plural(t.full_sets, 'full set'))));
+  }
+
+  function frogWizardsCard(d, redraw) {
+    const legend = h('div', { class: 'frog-legend' }, d.rarities.map((r) =>
+      h('span', { class: 'frog-legend-item', style: '--rarity:' + r.colour, 'data-tip': r.wizards ? 'About ' + r.chance + '% of drops · ' + r.difficulty + ' riddles' : 'No card of this rarity is switched on, so it never drops' },
+        h('span', { class: 'swatch' }), h('b', null, r.emoji + ' ' + r.name), h('span', null, pointsWords(r.points) + ' · ' + r.chance + '%'))));
+    const grid = h('div', { class: 'frog-grid' });
+    d.wizards.forEach((w) => {
+      const r = rarityOf(w.rarity);
+      const sw = switchEl(w.enabled, (w.enabled ? 'Switch off ' : 'Switch on ') + w.name, async (on, btn) => {
+        btn.disabled = true;
+        try {
+          const saved = await api('PUT', '/frogs/wizards/' + w.id, { name: w.name, rarity: w.rarity, image: w.image, enabled: on });
+          Object.assign(w, saved);
+          toast(w.name + (on ? ' is back in the game' : ' won’t drop any more'));
+          refreshAudit();
+          redraw();
+        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      }, { small: true, noText: true });
+      grid.appendChild(h('article', { class: 'frog-wizard' + (w.enabled ? '' : ' is-off'), style: '--rarity:' + r.colour, 'data-wizard': w.id },
+        h('button', { class: 'frog-wizard-open', type: 'button', 'aria-label': 'Edit ' + w.name, onclick: () => openWizardEditor(w, redraw) },
+          frogArt(w.image_url), h('span', { class: 'frog-wizard-rarity' }, r.emoji)),
+        h('div', { class: 'frog-wizard-meta' },
+          h('b', { title: w.name }, w.name),
+          h('small', null, r.name + ' · ' + pointsWords(r.points)),
+          h('small', { class: 'frog-copies' }, w.copies ? '×' + w.copies + ' owned' : 'none owned yet')),
+        h('div', { class: 'frog-wizard-foot' }, sw, h('button', { class: 'btn sm ghost', type: 'button', onclick: () => openWizardEditor(w, redraw) }, icon('edit'), 'Edit'))));
+    });
+    if (d.wizards.length < d.max_wizards) grid.appendChild(h('button', { class: 'new-card frog-new', type: 'button', onclick: () => openWizardEditor(null, redraw) }, icon('plus'), 'Add a card', h('small', null, 'Another one to collect')));
+    const on = d.wizards.filter((w) => w.enabled).length;
+    return card('frog-wizards', 'Cards', on + ' of ' + d.wizards.length + ' in the game', [legend, grid], {
+      pad: true, actions: h('button', { class: 'btn sm', type: 'button', onclick: () => openWizardEditor(null, redraw) }, icon('plus'), h('span', { class: 'hide-sm' }, 'Add a card')),
+    });
+  }
+
+  function frogStatus(x) {
+    if (x.status === 'caught') {
+      const who = x.winner || {};
+      return h('div', { class: 'frog-status' }, avatar(who.avatar, who.name || '?', 'xs'),
+        h('span', null, h('b', null, who.name || 'Member ' + (who.id || '')), h('small', null, 'caught it in ' + secsWords(x.solved_secs || 0))));
+    }
+    if (x.status === 'open') {
+      const left = Math.max(0, x.closes_at - Math.round(Date.now() / 1000));
+      return h('span', { class: 'badge live' }, h('span', { class: 'dot' }), left ? 'Open · ' + Math.ceil(left / 60) + ' min left' : 'Closing');
+    }
+    return h('span', { class: 'badge paused' }, 'Escaped');
+  }
+
+  function frogDropsCard(d, redraw) {
+    const dropBtn = h('button', { class: 'btn sm primary', type: 'button' }, icon('send'), h('span', { class: 'hide-sm' }, 'Drop a frog now'), h('span', { class: 'show-sm' }, 'Drop'));
+    dropBtn.addEventListener('click', () => openPicker(dropBtn, { title: 'Channel', placeholder: 'Drop a frog in…',
+      load: (q) => channelItems('text')(q).filter((c) => !/safe-corner/i.test(c.label)),
+      onPick: async (it) => {
+        const ok = await confirmDialog({ title: 'Drop a frog in #' + it.label + ' now?', icon: 'send', confirm: 'Drop the frog',
+          body: h('div', null, h('p', null, 'A real Chocolate Frog hops in straight away, with a random card and riddle. Whoever answers first keeps the card and scores the points.'),
+            h('p', null, 'It works even when scheduled drops are off, and doesn’t use up one of today’s drops.')) });
+        if (!ok) return;
+        try {
+          const res = await api('POST', '/frogs/drop', { channel_id: it.id });
+          toast(rarityOf(res.rarity).emoji + ' ' + res.wizard + ' hopped into #' + (res.channel.name || it.label));
+          refreshAudit();
+          await loadFrogs();
+          redraw();
+        } catch (e) { toast(e.message, 'error'); }
+      } }));
+    let body;
+    if (!d.drops.length) {
+      body = h('div', { class: 'empty' }, h('span', { class: 'frog-empty', 'aria-hidden': 'true' }, '🐸'), h('h3', null, 'No frogs yet'), h('p', null, 'Drops show here with who caught them. Try one with “Drop a frog now”.'));
+    } else {
+      body = h('div', { class: 'table-wrap' }, h('table', { class: 'log frog-drops' },
+        h('thead', null, h('tr', null, ['When', 'Where', 'Card', 'What happened', 'Number', ''].map((t) => h('th', null, t)))),
+        h('tbody', null, d.drops.slice(0, FROG.allDrops ? d.drops.length : 12).map((x) => {
+          const r = rarityOf(x.rarity);
+          const riddle = x.riddle;
+          return h('tr', null,
+            h('td', { class: 'when', title: fmtFull.format(new Date(x.ts * 1000)) + ' IST' }, ago(x.ts), h('small', null, fmtDateTime.format(new Date(x.ts * 1000)))),
+            h('td', { class: 'where' }, channelRef(x.channel.id), x.by ? h('small', { class: 'frog-test' }, 'test by ' + (x.by.name || 'an admin')) : null),
+            h('td', { class: 'wizard' }, h('b', null, r.emoji + ' ' + x.wizard), h('small', null, r.name + ' · ' + pointsWords(x.points))),
+            h('td', { class: 'change-cell' }, frogStatus(x)),
+            h('td', { class: 'serial mono' }, x.serial ? '#' + x.edition + ' · ' + serialLabel(x.serial) : '—'),
+            h('td', { class: 'row-actions' }, riddle ? h('button', { class: 'btn sm ghost' + (riddle.retired ? ' is-retired' : ''), type: 'button', onclick: () => riddleDialog(riddle, redraw) },
+              icon(riddle.retired ? 'pause' : 'message'), riddle.retired ? 'Retired' : 'Riddle') : null));
+        }))));
+      if (d.drops.length > 12) {
+        body = [body, h('div', { class: 'frog-more' }, h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { FROG.allDrops = !FROG.allDrops; redraw(); } },
+          icon(FROG.allDrops ? 'up' : 'down'), FROG.allDrops ? 'Show fewer' : 'Show all ' + d.drops.length))];
+      }
+    }
+    return card('frog-drops', 'Recent drops', d.drops.length ? 'The last ' + d.drops.length + ' · frogs stay open ' + d.open_minutes + ' min' : null, body, { actions: dropBtn });
+  }
+
+  async function riddleDialog(riddle, redraw) {
+    const retire = !riddle.retired;
+    const ok = await confirmDialog({ title: 'Riddle ' + riddle.id, icon: 'message', wide: true, danger: retire,
+      confirm: retire ? 'Retire this riddle' : 'Put it back in play',
+      body: h('div', { class: 'frog-riddle' },
+        h('blockquote', null, riddle.text),
+        h('p', null, h('b', null, 'Answer: '), riddle.answer, riddle.answers.length > 1 ? h('span', { class: 'frog-alts' }, ' · also accepted: ' + riddle.answers.slice(1).join(', ')) : null),
+        h('p', { class: 'hint' }, riddle.difficulty + ' · ' + (riddle.topic || 'no topic') + (riddle.retired ? ' · retired: it is never asked' : '')),
+        retire ? h('p', null, 'Retire it if the answer is wrong, unclear or unfair. It stops being asked; frogs already in chat keep it.') : null) });
+    if (!ok) return;
+    try {
+      await api('POST', '/frogs/riddles/' + encodeURIComponent(riddle.id) + '/retire', { retired: retire });
+      toast(retire ? 'Riddle ' + riddle.id + ' won’t be asked again' : 'Riddle ' + riddle.id + ' is back in play');
+      refreshAudit();
+      await loadFrogs();
+      redraw();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function frogOwnersCard(d) {
+    const body = h('div', { class: 'frog-owners' });
+    const results = h('div', { class: 'frog-owner-results', 'aria-live': 'polite' });
+    const fetchOwners = async (query) => {
+      FROG.ownersBusy = true; drawResults();
+      try { FROG.owners = await api('GET', '/frogs/owners?' + query); } catch (e) { FROG.owners = null; toast(e.message, 'error'); }
+      FROG.ownersBusy = false; if (results.isConnected) drawResults();
+    };
+    const drawResults = () => {
+      clear(results);
+      if (FROG.ownersBusy) { results.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Looking…')); return; }
+      const o = FROG.owners;
+      if (!o) { results.appendChild(h('p', { class: 'hint' }, FROG.ownerMode === 'member' ? 'Pick a member to see their cards.' : 'Pick a card to see who owns its copies.')); return; }
+      if (o.member && FROG.ownerMode === 'member') {
+        const m = o.member;
+        results.appendChild(h('div', { class: 'person-row' }, avatar(m.avatar, m.name || '?', 'lg'),
+          h('div', { class: 'grow' }, h('b', null, m.name || 'Member ' + m.id), h('small', null, plural(o.cards.length, 'card') + ' · ' + o.collected + ' of ' + o.of + ' collected · ' + pointsWords(o.points) + ' from frogs'))));
+        if (!o.cards.length) results.appendChild(h('p', { class: 'hint' }, 'No cards yet.'));
+        else results.appendChild(h('ul', { class: 'frog-cards' }, o.cards.map((c) => h('li', { style: '--rarity:' + rarityOf(c.rarity).colour },
+          h('span', null, rarityOf(c.rarity).emoji + ' ' + c.wizard + ' #' + c.edition), h('span', { class: 'mono' }, serialLabel(c.serial)), h('small', null, dayMonth(c.ts))))));
+      } else if (o.wizard && FROG.ownerMode === 'wizard') {
+        const w = o.wizard;
+        results.appendChild(h('div', { class: 'person-row' }, frogArt(w.image_url, 'sm'),
+          h('div', { class: 'grow' }, h('b', null, w.name), h('small', null, plural(w.copies, 'card') + ' · ' + plural(o.owners.length, 'owner')))));
+        if (!o.owners.length) results.appendChild(h('p', { class: 'hint' }, 'Nobody has caught ' + w.name + ' yet.'));
+        else results.appendChild(h('ul', { class: 'frog-holders' }, o.owners.map((x) => h('li', null,
+          avatar(x.member.avatar, x.member.name || '?', 'xs'), h('b', null, x.member.name || 'Member ' + x.member.id),
+          h('span', { class: 'frog-serials' }, x.copies.map((c) => h('span', { class: 'chip mono', title: 'Copy #' + c.edition + ', card ' + serialLabel(c.serial) }, '#' + c.edition + ' · ' + serialLabel(c.serial))))))));
+      }
+    };
+    const controls = h('div', { class: 'frog-owner-controls' });
+    const drawControls = () => {
+      clear(controls);
+      controls.appendChild(segmented([['member', 'By member', 'user'], ['wizard', 'By card', 'tag']], FROG.ownerMode, 'Find cards', (v) => { FROG.ownerMode = v; FROG.owners = null; drawControls(); drawResults(); }));
+      if (FROG.ownerMode === 'member') {
+        const btn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox' }, icon('search'), h('span', { class: 'value' + (FROG.member ? '' : ' placeholder') }, FROG.member ? FROG.member.name : 'Search members'), icon('chevron'));
+        btn.addEventListener('click', () => openPicker(btn, { title: 'Member', placeholder: 'Search members by name', debounce: 180, load: memberItems,
+          onPick: (it) => { FROG.member = it.member; drawControls(); fetchOwners('member=' + encodeURIComponent(it.id)); } }));
+        controls.appendChild(btn);
+      } else {
+        const sel = h('select', { class: 'select', 'aria-label': 'Card' }, h('option', { value: '' }, 'Pick a card'),
+          d.wizards.map((w) => h('option', { value: w.id, selected: String(FROG.wizard) === String(w.id) }, rarityOf(w.rarity).emoji + ' ' + w.name + (w.copies ? ' (' + w.copies + ')' : ''))));
+        sel.addEventListener('change', () => { FROG.wizard = sel.value; if (sel.value) fetchOwners('wizard=' + encodeURIComponent(sel.value)); else { FROG.owners = null; drawResults(); } });
+        controls.appendChild(sel);
+      }
+    };
+    drawControls();
+    drawResults();
+    append(body, [controls, results]);
+    return card('frog-owners', 'Card owners', 'Who owns which numbered cards', body, { pad: true });
+  }
+
+  function frogBankCard(d) {
+    const total = d.bank.reduce((n, b) => n + b.playable, 0);
+    const forRarity = { easy: 'Common', medium: 'Uncommon', hard: 'Legendary' };
+    const rows = h('div', { class: 'frog-bank' }, d.bank.map((b) => {
+      const pct = b.playable ? Math.round((b.unused / b.playable) * 100) : 0;
+      return h('div', { class: 'frog-bank-row' },
+        h('div', { class: 'frog-bank-label' }, h('b', null, b.difficulty[0].toUpperCase() + b.difficulty.slice(1)), h('small', null, forRarity[b.difficulty])),
+        h('div', { class: 'frog-bar', role: 'img', 'aria-label': b.unused + ' of ' + b.playable + ' not asked yet' }, h('span', { style: 'width:' + pct + '%' })),
+        h('div', { class: 'frog-bank-num' }, h('b', null, numberFmt.format(b.unused)), ' of ' + numberFmt.format(b.playable) + ' left', b.retired ? h('small', null, b.retired + ' retired') : null));
+    }));
+    const note = h('p', { class: 'hint', style: 'margin:0' }, 'Each riddle is asked once before any repeats; when a level runs out it starts over. The bank is read from riddlebank/ai on every start. Retire a bad riddle from its drop above.');
+    return card('frog-bank', 'Riddle bank', numberFmt.format(total) + ' riddles in play', [rows, note], { pad: true });
+  }
+
+  function openWizardEditor(w, redraw) {
+    const d = w ? { name: w.name, rarity: w.rarity, image: w.image, enabled: w.enabled } : { name: '', rarity: 'common', image: '', enabled: true };
+    const original = JSON.stringify(d);
+    const dirty = () => JSON.stringify(d) !== original;
+    const data = FROG.data;
+    const dr = openDrawer({
+      title: w ? w.name : 'New card',
+      sub: w ? (w.copies ? plural(w.copies, 'card') + ' owned so far' : 'Nobody owns this card yet') : 'A new card for the Chocolate Frog game',
+      saveLabel: w ? 'Save changes' : 'Add card', isDirty: dirty,
+      onSave: async (btn) => {
+        if (!d.name.trim()) { toast('Give the card a name.', 'error'); return; }
+        btn.disabled = true;
+        try {
+          const saved = w ? await api('PUT', '/frogs/wizards/' + w.id, d) : await api('POST', '/frogs/wizards', d);
+          dr.finish(true);
+          await loadFrogs().catch(() => null);
+          redraw();
+          toast(w ? 'Saved ' + saved.name : saved.name + ' joined the game');
+          refreshAudit();
+        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      },
+    });
+    const body = dr.body;
+    body.classList.add('frog-editor');
+    const artUrl = () => (d.image ? '/api/media/' + encodeURIComponent(d.image) : (w && w.image_source === 'file' && !w.image ? w.image_url : null));
+    const field = (label, control, hint, id) => h('div', null, h('label', { class: 'label', for: id || null }, label), control, hint ? h('div', { class: 'hint' }, hint) : null);
+
+    const draw = () => {
+      const scroll = body.scrollTop;
+      clear(body);
+      const r = rarityOf(d.rarity);
+      const name = d.name.trim() || 'Card name';
+
+      // preview
+      const url = artUrl();
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'How it drops'),
+        h('div', { class: 'preview' }, h('div', { class: 'msg' }, h('span', { class: 'brand-mark' }, h('span', null, 'L')),
+          h('div', { style: 'min-width:0' }, h('div', { class: 'msg-head' }, h('b', null, 'Loduchand'), h('span', { class: 'msg-bot' }, 'BOT'), h('span', { class: 'msg-time' }, 'Today')),
+            h('div', { class: 'embed frog-embed', style: '--embed:' + r.colour },
+              h('div', { class: 'frog-embed-main' },
+                h('div', { class: 'embed-title' }, '🐸 A Chocolate Frog hopped in!'),
+                h('div', { class: 'embed-desc' }, h('strong', null, name), ' · ' + r.emoji + ' ' + r.name + ' · ', h('strong', null, pointsWords(r.points))),
+                h('div', { class: 'frog-subtext' }, 'First correct answer keeps the card · 3 tries · ' + data.open_minutes + ' min')),
+              url ? h('img', { class: 'frog-thumb', src: url, alt: '' }) : null),
+            h('span', { class: 'frog-discord-btn' }, '🐸 Catch it'))))));
+
+      // details
+      const nameIn = h('input', { class: 'input', id: 'fw-name', value: d.name, maxlength: String(data.max_name), placeholder: 'e.g. The Moonkeeper', autocomplete: 'off' });
+      nameIn.addEventListener('input', () => { d.name = nameIn.value; const t = body.querySelector('.frog-embed strong'); if (t) t.textContent = d.name.trim() || 'Card name'; });
+      const enabled = switchEl(d.enabled, 'In the game', (on, btn) => { d.enabled = on; btn.set(on); });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('tag'), 'Card', h('span', { class: 'right' }, enabled)),
+        field('Name', nameIn, 'Up to ' + data.max_name + ' characters. Shown on the card and in the pop-up title.', 'fw-name'),
+        h('div', null, h('span', { class: 'label' }, 'Rarity'),
+          segmented(data.rarities.map((x) => [x.key, x.emoji + ' ' + x.name]), d.rarity, 'Rarity', (v) => { d.rarity = v; draw(); }),
+          h('div', { class: 'hint' }, pointsWords(r.points) + ' · ' + r.difficulty + ' riddles · about ' + r.chance + '% of drops are ' + r.name + '. Points and odds are in the settings below.')),
+        h('p', { class: 'hint', style: 'margin:0' }, d.enabled ? 'In the game: this card can turn up on a drop.' : 'Out of the game: this card stops dropping. Copies already caught stay with their owners.')));
+
+      // picture
+      const pics = h('div', { class: 'frog-pic-row' }, url ? h('img', { class: 'frog-pic', src: url, alt: 'The card picture' }) : h('span', { class: 'frog-pic placeholder', 'aria-hidden': 'true' }, '🐸'),
+        h('div', { class: 'frog-pic-tools' },
+          h('button', { class: 'btn sm', type: 'button', onclick: () => { const sel = d.image ? [d.image] : []; openLibrary(sel, () => { const next = sel.length ? sel[sel.length - 1] : ''; if (next !== d.image) { d.image = next; draw(); } }); } }, icon('image'), 'Choose from library'),
+          d.image ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { d.image = ''; draw(); } }, icon('x'), 'Remove picture') : null,
+          h('div', { class: 'hint' }, d.image ? 'From the picture library.' : w && w.image_source === 'file' && !w.image ? 'Using frogcards/' + w.slug + ' from the server.' : 'No picture: the card drops without one. You can also put frogcards/' + (w ? w.slug : 'name') + '.png on the server.')));
+      const zone = dropZone('Upload a picture', 'PNG, JPG or WebP, up to 8 MB. Square pictures look best; Discord gets a small copy.', async (files) => {
+        zone.classList.add('busy');
+        const saved = await uploadPictures([files[0]]);
+        zone.classList.remove('busy');
+        if (saved[0]) { d.image = saved[0].id; draw(); }
+      });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('image'), 'Picture'), pics, zone));
+
+      // owners
+      if (w) {
+        const list = h('div', { class: 'frog-owner-results' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading owners…'));
+        body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('users'), 'Owners', h('span', { class: 'right', style: 'color:var(--faint);font-size:12.5px' }, plural(w.copies, 'card'))), list));
+        api('GET', '/frogs/owners?wizard=' + w.id).then((o) => {
+          clear(list);
+          if (!o.owners.length) { list.appendChild(h('p', { class: 'hint', style: 'margin:0' }, 'Nobody has caught ' + w.name + ' yet.')); return; }
+          list.appendChild(h('ul', { class: 'frog-holders' }, o.owners.map((x) => h('li', null, avatar(x.member.avatar, x.member.name || '?', 'xs'), h('b', null, x.member.name || 'Member ' + x.member.id),
+            h('span', { class: 'frog-serials' }, x.copies.map((c) => h('span', { class: 'chip mono', title: 'Copy #' + c.edition + ', card ' + serialLabel(c.serial) }, '#' + c.edition + ' · ' + serialLabel(c.serial))))))));
+        }).catch((e) => { clear(list); list.appendChild(h('p', { class: 'error-text' }, e.message)); });
+      }
+      body.scrollTop = scroll;
+    };
+    draw();
+    requestAnimationFrame(() => { const n = body.querySelector('#fw-name'); if (n && !w) n.focus({ preventScroll: true }); });
+  }
+
   // --- drawers ------------------------------------------------------------------------
 
   /** A side panel editor. `isDirty()` guards closing; returns { body, finish, saveBtn }. */
@@ -3263,7 +3581,7 @@
     { id: 'chat', label: 'Chat', icon: '💬', sources: ['chat'] },
     { id: 'voice', label: 'Voice', icon: '🎙️', sources: ['voice'] },
     { id: 'quiz', label: 'Quiz', icon: '🧠', sources: ['quiz'] },
-    { id: 'games', label: 'Koto, anagram, cats, Wordle', icon: '🔤', sources: ['koto', 'anagram', 'cat', 'wordle'] },
+    { id: 'games', label: 'Koto, anagram, cats, Wordle, frogs', icon: '🔤', sources: ['koto', 'anagram', 'cat', 'wordle', 'frog'] },
     { id: 'arena', label: 'Arena & royale', icon: '⚔️', sources: ['arena', 'royale'] },
     { id: 'snitch', label: 'Snitch', icon: '🪽', sources: ['snitch', 'golden_snitch'] },
     { id: 'weekly', label: 'Weekly posts', icon: '📝', sources: ['weekly'] },
@@ -4060,7 +4378,7 @@
     return h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), h('b', null, value), sub ? h('small', null, sub) : null);
   }
   function sourceLabel(key) {
-    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', cat: '🐱 Cat Bot', wordle: '🟩 Wordle', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
+    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', cat: '🐱 Cat Bot', wordle: '🟩 Wordle', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', frog: '🐸 Chocolate Frog', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
     return labels[key] || key;
   }
 

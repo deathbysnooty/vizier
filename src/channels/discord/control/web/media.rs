@@ -129,6 +129,11 @@ pub async fn serve(Path(id): Path<String>) -> Result<Response, ApiError> {
 pub async fn delete(Path(id): Path<String>, axum::Extension(Caller(user)): axum::Extension<Caller>) -> ApiResult {
     let id = valid_id(&id).ok_or_else(|| ApiError::not_found("No such picture."))?;
     let info = media::info(id).ok_or_else(|| ApiError::not_found("No such picture."))?;
+    let card = super::super::super::frog_store::db()
+        .and_then(|db| super::super::super::frog_store::wizards(&db.lock()).into_iter().find(|w| w.image == id));
+    if let Some(w) = card {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{} is the picture on the {} frog card. Give that card another picture first.", info.name, w.name)));
+    }
     let users = used_by(id);
     if !users.is_empty() {
         let names: Vec<String> = users.iter().map(|(_, n)| format!("“{}”", n)).collect();

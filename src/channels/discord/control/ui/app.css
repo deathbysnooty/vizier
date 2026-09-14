@@ -1895,3 +1895,115 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .welcome-editor .segmented { width: 100%; }
   .welcome-editor .segmented button { flex: 1; justify-content: center; }
 }
+
+/* --- chocolate frogs -------------------------------------------------------------------- */
+
+.frog-page { display: block; }
+.frog-tiles { margin-bottom: var(--gap); }
+.frog-tiles .tile-sub a { color: var(--accent-text); }
+.badge.rarity { color: var(--text-2); }
+.frog-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 14px; font-size: 13px; color: var(--muted); }
+.frog-legend-item { display: inline-flex; align-items: center; gap: 7px; }
+.frog-legend-item .swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--rarity); }
+.frog-legend-item b { color: var(--text); font-weight: 600; }
+
+.frog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+.frog-wizard {
+  position: relative; display: grid; grid-template-rows: auto 1fr auto; min-width: 0;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden;
+  box-shadow: inset 0 3px 0 var(--rarity);
+  transition: border-color .15s, transform .15s;
+}
+.frog-wizard:hover { border-color: color-mix(in srgb, var(--rarity) 55%, var(--line-2)); }
+.frog-wizard.is-off .frog-wizard-open, .frog-wizard.is-off .frog-wizard-meta { opacity: .5; }
+.frog-wizard-open { position: relative; display: block; width: 100%; aspect-ratio: 1 / 1; padding: 0; border: 0; background: color-mix(in srgb, var(--rarity) 12%, var(--surface-3)); cursor: pointer; }
+.frog-wizard-open:focus-visible { outline-offset: -3px; border-radius: 0; }
+.frog-art { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frog-art.placeholder { display: grid; place-items: center; font-size: 44px; filter: grayscale(.2); background: radial-gradient(circle at 50% 38%, color-mix(in srgb, var(--rarity, var(--accent)) 26%, transparent), transparent 70%); }
+.frog-art.sm { width: 44px; height: 44px; border-radius: 6px; flex: none; font-size: 20px; }
+.frog-wizard-rarity { position: absolute; left: 8px; top: 8px; width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; font-size: 15px; background: rgba(10, 12, 18, .72); box-shadow: 0 0 0 1px color-mix(in srgb, var(--rarity) 70%, transparent); }
+.frog-wizard-meta { padding: 10px 12px 4px; min-width: 0; }
+.frog-wizard-meta b { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frog-wizard-meta small { display: block; color: var(--muted); font-size: 12.5px; }
+.frog-wizard-meta .frog-copies { color: var(--faint); }
+.frog-wizard-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 8px 10px 12px; }
+.new-card.frog-new { min-height: 200px; }
+
+.frog-drops td { vertical-align: middle; }
+.frog-drops td small { display: block; color: var(--faint); font-size: 12px; }
+.frog-drops .wizard b { font-weight: 600; white-space: nowrap; }
+.frog-drops .where { white-space: nowrap; }
+.frog-drops .frog-test { color: var(--accent-text); }
+.frog-drops .serial { white-space: nowrap; color: var(--text-2); }
+.frog-drops .row-actions { text-align: right; white-space: nowrap; padding-right: var(--pad-card); }
+.frog-drops .btn.is-retired { color: var(--warn); }
+.frog-status { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.frog-status b { font-weight: 600; white-space: nowrap; }
+.frog-status small { color: var(--muted); }
+.frog-more { padding: 8px var(--pad-card); border-top: 1px solid var(--line); display: flex; justify-content: center; }
+.frog-empty { font-size: 34px; display: block; margin-bottom: 6px; }
+
+.frog-riddle { display: grid; gap: 10px; }
+.frog-riddle blockquote { margin: 0; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 var(--r) var(--r) 0; color: var(--text); line-height: 1.5; }
+.frog-riddle .frog-alts { color: var(--muted); }
+
+.frog-owners { display: grid; gap: 14px; }
+.frog-owner-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.frog-owner-controls .picker-btn, .frog-owner-controls .select { flex: 1; min-width: 200px; max-width: 360px; }
+.frog-owner-results { display: grid; gap: 10px; }
+.frog-owner-results .cup-loading { padding: 12px 0; justify-content: flex-start; }
+.frog-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; }
+.frog-cards li { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-left: 3px solid var(--rarity); border-radius: var(--r-sm); background: var(--surface); min-width: 0; font-size: 13px; }
+.frog-cards li .mono { color: var(--text-2); white-space: nowrap; }
+.frog-cards li span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frog-cards li small { color: var(--faint); white-space: nowrap; }
+.frog-holders { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.frog-holders li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13.5px; }
+.frog-holders li:first-child { border-top: 0; }
+.frog-holders b { font-weight: 600; }
+.frog-serials { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.frog-serials .chip { height: 22px; font-size: 11.5px; padding: 0 7px; }
+
+.frog-bank { display: grid; gap: 12px; margin-bottom: 14px; }
+.frog-bank-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 170px; gap: 14px; align-items: center; }
+.frog-bank-label b { display: block; font-weight: 600; }
+.frog-bank-label small, .frog-bank-num small { display: block; color: var(--faint); font-size: 12px; }
+.frog-bar { height: 10px; border-radius: 6px; background: var(--surface-3); overflow: hidden; }
+.frog-bar span { display: block; height: 100%; border-radius: 6px; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, var(--ok)), var(--accent)); }
+.frog-bank-num { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.frog-bank-num b { color: var(--text); font-weight: 650; }
+
+.frog-editor .segmented { flex-wrap: wrap; }
+.frog-embed { grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; align-items: start; max-width: 460px; }
+.frog-embed-main { display: grid; gap: 4px; min-width: 0; }
+.frog-subtext { font-size: 12px; color: #949ba4; line-height: 1.35; }
+[data-theme="light"] .frog-subtext { color: #5c5e66; }
+.frog-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 4px; margin-top: 4px; }
+.frog-discord-btn { display: inline-flex; align-items: center; margin-top: 8px; height: 32px; padding: 0 14px; border-radius: 4px; background: #248046; color: #fff; font-size: 14px; font-weight: 500; }
+.frog-pic-row { display: flex; gap: 14px; align-items: flex-start; }
+.frog-pic { width: 110px; aspect-ratio: 1 / 1; object-fit: cover; border-radius: var(--r); border: 1px solid var(--line); background: var(--surface-3); flex: none; }
+.frog-pic.placeholder { display: grid; place-items: center; font-size: 36px; }
+.frog-pic-tools { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }
+
+@media (max-width: 900px) {
+  .frog-bank-row { grid-template-columns: 110px minmax(0, 1fr); }
+  .frog-bank-num { grid-column: 2; margin-top: -6px; }
+}
+@media (max-width: 640px) {
+  .frog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .frog-art.placeholder { font-size: 34px; }
+  .frog-wizard-foot .btn { padding: 0 6px; }
+  .new-card.frog-new { min-height: 170px; }
+  .frog-drops tr { grid-template-columns: minmax(0, 1fr) auto; }
+  .frog-drops td.wizard { grid-column: 1; grid-row: 1; }
+  .frog-drops td.when { grid-column: 2; grid-row: 1; }
+  .frog-drops td.where { grid-column: 1; grid-row: 2; }
+  .frog-drops td.serial { grid-column: 2; grid-row: 2; text-align: right; }
+  .frog-drops td.change-cell { grid-column: 1; grid-row: 3; }
+  .frog-drops td.row-actions { grid-column: 2; grid-row: 3; padding-right: 0 !important; }
+  .frog-drops .when small { display: none; }
+  .frog-owner-controls .segmented { width: 100%; }
+  .frog-owner-controls .segmented button { flex: 1; justify-content: center; }
+  .frog-owner-controls .picker-btn, .frog-owner-controls .select { max-width: none; }
+  .frog-editor .segmented button { flex: 1 1 45%; justify-content: center; }
+}

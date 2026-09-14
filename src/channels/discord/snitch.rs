@@ -24,7 +24,7 @@
 //! only changes from the next plan.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
@@ -420,9 +420,14 @@ fn ordinal(place: usize) -> &'static str {
 /// scheduled drops off. Set but with nothing usable in it (blank, or just `on`)
 /// means the two default channels.
 fn parse_channels(raw: Option<&str>) -> Option<Vec<(u64, u32)>> {
-    let raw = raw?;
-    let parsed: Vec<(u64, u32)> = raw
-        .split(',')
+    let parsed = parse_weighted(raw?);
+    Some(if parsed.is_empty() { DEFAULT_CHANNELS.to_vec() } else { parsed })
+}
+
+/// `id:weight` pairs, a bare id weighing 1; anything unreadable or weighted 0 is
+/// skipped. Shared with the Chocolate Frog's channel setting.
+pub(super) fn parse_weighted(raw: &str) -> Vec<(u64, u32)> {
+    raw.split(',')
         .filter_map(|part| {
             let part = part.trim();
             let (id, weight) = match part.split_once(':') {
@@ -432,18 +437,19 @@ fn parse_channels(raw: Option<&str>) -> Option<Vec<(u64, u32)>> {
             let id = id.parse::<u64>().ok()?;
             (weight > 0).then_some((id, weight))
         })
-        .collect();
-    Some(if parsed.is_empty() { DEFAULT_CHANNELS.to_vec() } else { parsed })
+        .collect()
 }
 
-fn channels() -> Option<Vec<(u64, u32)>> {
+/// The Snitch's drop channels, or `None` when its scheduled drops are off. The
+/// Chocolate Frog falls back to these when it has none of its own.
+pub(super) fn channels() -> Option<Vec<(u64, u32)>> {
     parse_channels(control::var("VIZIER_SNITCH_CHANNELS").as_deref())
 }
 
 /// Picks where a drop goes from a roll in `[0, 1)`, by weight. A quiet pick falls
 /// back to the home channel (the first); if that is quiet too there is nowhere
 /// worth dropping, and the caller tries again later with a fresh roll.
-fn choose_channel(channels: &[(u64, u32)], roll: f64, awake: impl Fn(u64) -> bool) -> Option<u64> {
+pub(super) fn choose_channel(channels: &[(u64, u32)], roll: f64, awake: impl Fn(u64) -> bool) -> Option<u64> {
     let total: u64 = channels.iter().map(|(_, w)| *w as u64).sum();
     if total == 0 {
         return None;
@@ -469,6 +475,22 @@ static LAST_SEEN: LazyLock<Mutex<HashMap<u64, i64>>> = LazyLock::new(|| Mutex::n
 fn awake(channel: u64, now: i64) -> bool {
     let quiet = quiet_after();
     LAST_SEEN.lock().get(&channel).is_some_and(|seen| now - seen <= quiet)
+}
+
+/// When a person last spoke in a channel, as far as this run has seen.
+pub(super) fn last_spoke(channel: u64) -> Option<i64> {
+    LAST_SEEN.lock().get(&channel).copied()
+}
+
+/// The last Snitch that dropped, of any kind, and the next one planned (0 for none).
+static LAST_RELEASE: AtomicI64 = AtomicI64::new(0);
+static NEXT_PLANNED: AtomicI64 = AtomicI64::new(0);
+
+/// When the last Snitch dropped and when the next is planned, so another game
+/// can keep clear of it.
+pub(super) fn drop_times() -> (Option<i64>, Option<i64>) {
+    let some = |v: i64| (v > 0).then_some(v);
+    (some(LAST_RELEASE.load(Ordering::Relaxed)), some(NEXT_PLANNED.load(Ordering::Relaxed)))
 }
 
 // --- the day's plan ---------------------------------------------------------
@@ -692,6 +714,7 @@ async fn release(ctx: &Context, channel: ChannelId, kind: Kind) -> Option<Flight
         }
     }
     LIVE.lock().insert(flight.message, flight.clone());
+    LAST_RELEASE.store(flight.dropped_at, Ordering::Relaxed);
     arm(ctx.clone(), flight.message, flight.channel, flight.dropped_at + flight.lifetime);
     tracing::info!("snitch: {} Snitch dropped in {} ({})", kind.key(), channel, flight.message);
     Some(flight)
@@ -891,6 +914,7 @@ async fn schedule(ctx: Context) {
             // Off: nothing pending carries over to when it comes back on.
             watching = None;
             rematch_at = None;
+            NEXT_PLANNED.store(0, Ordering::Relaxed);
             continue;
         };
         let now = Utc::now().timestamp();
@@ -904,6 +928,8 @@ async fn schedule(ctx: Context) {
         if rematches.0 != current.day {
             rematches = (current.day.clone(), 0);
         }
+        let planned = [current.times.get(current.done).copied(), rematch_at].into_iter().flatten().min();
+        NEXT_PLANNED.store(planned.unwrap_or(0), Ordering::Relaxed);
         {
             // Mods' test drops land here too, and nobody waits on them.
             let mut uncaught = UNCAUGHT.lock();

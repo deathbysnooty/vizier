@@ -212,6 +212,10 @@ pub trait PanelData: Send + Sync + 'static {
     async fn send_unpinged(&self, _channel: u64, _text: String) -> Result<(), String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// Drops a Chocolate Frog in a channel now, for testing.
+    async fn drop_frog(&self, _channel: u64, _by: u64) -> Result<super::super::frog_store::Drop, String> {
+        Err("Discord isn't connected right now.".into())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +227,7 @@ pub struct EmojiInfo {
 }
 
 mod agent;
+mod frogs;
 mod houses;
 mod insights;
 mod media;
@@ -541,6 +546,11 @@ impl PanelData for LiveData {
         super::welcomes::post_unpinged(ctx, channel, text).await
     }
 
+    async fn drop_frog(&self, channel: u64, by: u64) -> Result<super::super::frog_store::Drop, String> {
+        let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
+        super::super::frog::drop_now(ctx, channel, by).await
+    }
+
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -751,6 +761,13 @@ pub fn router(panel: Panel) -> Router {
         .route("/welcomes/lookup", get(welcomes::lookup))
         .route("/welcomes/{id}", put(welcomes::update).delete(welcomes::delete))
         .route("/welcomes/{id}/test", post(welcomes::send_test))
+        .route("/frogs", get(frogs::overview))
+        .route("/frogs/wizards", post(frogs::create_wizard))
+        .route("/frogs/wizards/{id}", put(frogs::update_wizard))
+        .route("/frogs/wizards/{id}/image", get(frogs::wizard_image))
+        .route("/frogs/owners", get(frogs::owners))
+        .route("/frogs/riddles/{id}/retire", post(frogs::retire_riddle))
+        .route("/frogs/drop", post(frogs::drop_now))
         .route("/memos", get(memos::list).post(memos::create))
         .route("/memos/when", get(memos::when))
         .route("/memos/{id}/cancel", post(memos::cancel))
@@ -1475,6 +1492,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("new".into(), Value::Null);
             } else if e.key.starts_with("welcome:") {
                 obj.extend(welcomes::audit_entry(&panel, e));
+            } else if e.key.starts_with("frog:") {
+                obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {
                 let entry = posts::audit_entry(&panel, e);
                 obj.extend(entry);

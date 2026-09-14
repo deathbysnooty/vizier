@@ -56,7 +56,7 @@ fn cut(text: &str, limit: usize) -> String {
 fn overview(sections: &[Section], is_admin: bool) -> CreateEmbed {
     let mut text = String::from(
         "MLCI's own bot. **@mention me** in chat to talk - otherwise I just read along. \
-         Houses, points, the Snitch, quiz, arena and more below.\n",
+         Houses, points, the Snitch, Chocolate Frogs, quiz, arena and more below.\n",
     );
     for s in sections {
         // Message menu entries (like Quote) aren't slash commands; they're
@@ -72,7 +72,7 @@ fn overview(sections: &[Section], is_admin: bool) -> CreateEmbed {
         }
         text.push_str(&line);
     }
-    text.push_str("\n\n**Without a command:** reply **ACCIO** to a Snitch card to catch it · right-click a message → Apps → **Quote** for a quote card.");
+    text.push_str("\n\n**Without a command:** reply **ACCIO** to a Snitch card to catch it · press 🐸 **Catch it** on a Chocolate Frog and answer its riddle · right-click a message → Apps → **Quote** for a quote card.");
     let footer = if is_admin {
         "/help topic: for details · admin commands included because you're a bot admin"
     } else {
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn every_command_the_bot_registers_is_explained() {
         let names: Vec<&str> = catalog::sections().iter().flat_map(|s| s.commands.iter().map(|c| c.name)).collect();
-        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "panel"] {
+        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "frogs", "frogcard", "panel"] {
             assert!(names.contains(&needed), "/{} is missing from the catalog", needed);
         }
     }

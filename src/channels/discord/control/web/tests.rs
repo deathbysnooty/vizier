@@ -465,6 +465,23 @@ impl PanelData for FakeData {
         Ok(())
     }
 
+    /// A frog opened straight in the store, as if Discord took the post.
+    async fn drop_frog(&self, channel: u64, by: u64) -> Result<super::super::super::frog_store::Drop, String> {
+        use super::super::super::frog_store as store;
+        let db = store::db().ok_or("The frog store isn't open.")?;
+        let conn = db.lock();
+        if store::channel_busy(&conn, channel) {
+            return Err("A frog is already hopping about in that channel.".into());
+        }
+        let wizard = store::pick_wizard(&conn, 0.1, 0.6).ok_or("No wizard is switched on.")?;
+        let riddle = store::pick_riddle(&conn, wizard.rarity.difficulty(), 0.0).ok_or("The riddle bank is empty.")?;
+        let now = chrono::Utc::now().timestamp();
+        let pending = store::start_drop(&conn, channel, &wizard, &riddle, now, Some(by)).map_err(|e| e.to_string())?;
+        store::mark_open(&conn, pending.id, 1_300_000_000_000_000_000 + pending.id as u64, now, 300)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "The frog vanished.".to_string())
+    }
+
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
         let (start, end) = super::scorers::day_bounds(now, days_back);
         let conn = fake_ledger(now).lock();
@@ -673,6 +690,18 @@ pub fn fake_catalog() -> Vec<Section> {
     ]
 }
 
+/// The demo's catalog: the fake sections plus the real Chocolate Frogs one.
+fn demo_catalog() -> Vec<Section> {
+    let mut sections = fake_catalog();
+    sections.extend(super::super::catalog::sections().into_iter().filter(|s| s.id == "frogs"));
+    sections
+}
+
+fn demo_panel() -> Router {
+    store();
+    router(Panel::new(Arc::new(FakeData), demo_catalog))
+}
+
 static STORE: OnceLock<tempfile::TempDir> = OnceLock::new();
 
 /// Opens control.db once for the whole test binary.
@@ -680,6 +709,22 @@ pub fn store() {
     STORE.get_or_init(|| {
         let dir = tempfile::tempdir().expect("temp dir");
         super::super::open(dir.path().to_str().unwrap()).expect("control store");
+        // A small riddle bank for the Chocolate Frog page.
+        let bank = dir.path().join("riddlebank/ai");
+        std::fs::create_dir_all(&bank).unwrap();
+        let riddles = [
+            ("t-001", "easy", "I have keys but open no locks. What am I?", "keyboard"),
+            ("t-002", "easy", "The more you take, the more you leave behind. What are they?", "footsteps"),
+            ("t-003", "easy", "What has a neck but no head?", "bottle"),
+            ("t-004", "medium", "I speak without a mouth and hear without ears. What am I?", "echo"),
+            ("t-005", "hard", "The more of me there is, the less you see. What am I?", "darkness"),
+        ];
+        let lines: Vec<String> = riddles
+            .iter()
+            .map(|(id, d, r, a)| json!({ "id": id, "topic": "test", "difficulty": d, "riddle": r, "answers": [a], "lang": "en" }).to_string())
+            .collect();
+        std::fs::write(bank.join("test.jsonl"), lines.join("\n")).unwrap();
+        super::super::super::frog_store::open(dir.path().to_str().unwrap()).expect("frog store");
         dir
     });
 }
@@ -2308,6 +2353,159 @@ async fn special_welcomes_round_trip() {
     assert_eq!(entries[0]["user_name"], "Kabir");
 }
 
+// --- chocolate frogs -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn chocolate_frogs_round_trip() {
+    use super::super::super::frog_store as store;
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    // Signed in, admins only, and changes from the panel's own page only.
+    for (method, path) in [
+        ("GET", "/api/frogs"),
+        ("POST", "/api/frogs/wizards"),
+        ("PUT", "/api/frogs/wizards/1"),
+        ("GET", "/api/frogs/wizards/1/image"),
+        ("GET", "/api/frogs/owners?wizard=1"),
+        ("POST", "/api/frogs/riddles/t-001/retire"),
+        ("POST", "/api/frogs/drop"),
+    ] {
+        let (status, _, _) = call(&app, method, path, None, Some(json!({})), true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        if method != "GET" {
+            let (status, _, _) = call(&app, method, path, Some(&session), Some(json!({ "channel_id": "21" })), false).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} without the panel header");
+        }
+    }
+    let (status, _, _) = call(&app, "GET", "/api/frogs", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The overview: twelve wizards, four rarities, the bank.
+    let (status, page, _) = call(&app, "GET", "/api/frogs", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["enabled"], false, "off until the owner switches it on");
+    assert_eq!(page["wizards"].as_array().unwrap().len(), 10);
+    assert_eq!((page["wizards"][1]["name"].as_str(), page["wizards"][1]["slug"].as_str()), (Some("Luna Lovegood"), Some("luna")));
+    assert_eq!(page["wizards"][1]["image_url"], Value::Null);
+    let rarities = page["rarities"].as_array().unwrap();
+    assert_eq!(rarities.iter().map(|r| r["chance"].as_f64().unwrap()).collect::<Vec<_>>(), vec![58.0, 35.0, 7.0]);
+    assert_eq!((rarities[2]["emoji"].as_str(), rarities[2]["points"].as_i64(), rarities[2]["colour"].as_str()), (Some("🔥"), Some(10), Some("#e8572a")));
+    assert_eq!(page["bank"][0], json!({ "difficulty": "easy", "playable": 3, "unused": 3, "retired": 0 }));
+    assert_eq!(page["modal_mode"], "text block");
+
+    // Wizards: checked, made, edited, pictured.
+    for (body, says) in [
+        (json!({ "name": "Dobby", "rarity": "rare" }), "Pick Common, Uncommon or Legendary"),
+        (json!({ "name": "", "rarity": "common" }), "Give the card a name"),
+        (json!({ "name": "x".repeat(39), "rarity": "common" }), "at most 38"),
+        (json!({ "name": "Merlin", "rarity": "common" }), "already a card"),
+        (json!({ "name": "Dobby", "rarity": "common", "image": "0123456789abcdef" }), "isn't in the library"),
+    ] {
+        let (status, res, _) = call(&app, "POST", "/api/frogs/wizards", Some(&session), Some(body.clone()), true).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} gave {res}");
+        assert!(res["error"].as_str().unwrap().contains(says), "{body}: {res}");
+    }
+    let (status, dobby, _) = call(&app, "POST", "/api/frogs/wizards", Some(&session), Some(json!({ "name": "Dobby", "rarity": "uncommon" })), true).await;
+    assert_eq!(status, StatusCode::CREATED, "{dobby}");
+    let dobby_id = dobby["id"].as_i64().unwrap();
+    assert_eq!((dobby["slug"].as_str(), dobby["enabled"].as_bool(), dobby["copies"].as_i64()), (Some("dobby"), Some(true), Some(0)));
+    let (status, _, _) = call(&app, "GET", &format!("/api/frogs/wizards/{dobby_id}/image"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no picture yet");
+
+    let (status, pic) = upload(&app, &session, "image/png", Some("dobby.png"), png(2048)).await;
+    assert_eq!(status, StatusCode::CREATED, "{pic}");
+    let pic_id = pic["id"].as_str().unwrap().to_string();
+    let (status, edited, _) = call(&app, "PUT", &format!("/api/frogs/wizards/{dobby_id}"), Some(&session),
+        Some(json!({ "name": "Dobby the Free Elf", "rarity": "legendary", "image": pic_id, "enabled": false })), true).await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!((edited["name"].as_str(), edited["slug"].as_str(), edited["rarity"].as_str(), edited["enabled"].as_bool()), (Some("Dobby the Free Elf"), Some("dobby"), Some("legendary"), Some(false)));
+    assert_eq!(edited["image_source"], "media");
+    let (status, body, headers) = call(&app, "GET", edited["image_url"].as_str().unwrap(), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(headers["content-type"].to_str().unwrap(), "image/png" | "image/jpeg"), "{headers:?}");
+    assert!(body.as_str().is_some_and(|b| !b.is_empty()), "the picture comes back");
+    let (status, refused, _) = call(&app, "DELETE", &format!("/api/media/{pic_id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "a card's picture can't be deleted from under it");
+    assert!(refused["error"].as_str().unwrap().contains("Dobby the Free Elf frog card"), "{refused}");
+    let (status, _, _) = call(&app, "PUT", "/api/frogs/wizards/99999", Some(&session), Some(json!({ "name": "Nobody", "rarity": "common" })), true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "PUT", "/api/frogs/wizards/abc", Some(&session), Some(json!({ "name": "Nobody", "rarity": "common" })), true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A test drop: a text channel only, never #safe-corner, one frog at a time.
+    for (channel, code, says) in [
+        ("", StatusCode::BAD_REQUEST, "Pick a channel"),
+        ("41", StatusCode::BAD_REQUEST, "not a text channel"),
+        ("777", StatusCode::BAD_REQUEST, "no channel 777"),
+        (&SAFE.to_string()[..], StatusCode::BAD_REQUEST, "safe-corner"),
+    ] {
+        let (status, res, _) = call(&app, "POST", "/api/frogs/drop", Some(&session), Some(json!({ "channel_id": channel })), true).await;
+        assert_eq!(status, code, "{channel}: {res}");
+        assert!(res["error"].as_str().unwrap().contains(says), "{channel}: {res}");
+    }
+    let (status, dropped, _) = call(&app, "POST", "/api/frogs/drop", Some(&session), Some(json!({ "channel_id": "21" })), true).await;
+    assert_eq!(status, StatusCode::OK, "{dropped}");
+    assert_eq!((dropped["open"].as_bool(), dropped["channel"]["name"].as_str()), (Some(true), Some("general")));
+    let drop_id = dropped["id"].as_i64().unwrap();
+    let (status, busy, _) = call(&app, "POST", "/api/frogs/drop", Some(&session), Some(json!({ "channel_id": "21" })), true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+
+    // Someone catches it.
+    let won = {
+        let db = store::db().unwrap();
+        let mut conn = db.lock();
+        let d = store::get_drop(&conn, drop_id).unwrap();
+        let answer = store::riddle(&conn, &d.riddle_id).unwrap().canonical().to_string();
+        store::submit(&mut conn, drop_id, 1004, "Zoya", &format!("the {answer}"), d.dropped_at + 31).unwrap()
+    };
+    assert!(matches!(won, store::Submit::Won(_)), "{won:?}");
+    let (_, page, _) = call(&app, "GET", "/api/frogs", Some(&session), None, false).await;
+    let row = page["drops"].as_array().unwrap().iter().find(|d| d["id"] == drop_id).cloned().expect("listed");
+    assert_eq!((row["status"].as_str(), row["winner"]["name"].as_str(), row["solved_secs"].as_i64()), (Some("caught"), Some("Zoya"), Some(31)));
+    assert_eq!(row["edition"], 1);
+    assert_eq!((row["by"]["name"].as_str(), row["channel"]["name"].as_str()), (Some("Kabir"), Some("general")));
+    let riddle_id = row["riddle"]["id"].as_str().unwrap().to_string();
+    assert!(row["riddle"]["text"].as_str().unwrap().ends_with('?'));
+    let wizard_id = row["wizard_id"].as_i64().unwrap();
+    assert_eq!(page["totals"]["cards"], 1);
+
+    // Owners, both ways.
+    let (status, mine, _) = call(&app, "GET", "/api/frogs/owners?member=1004", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!((mine["member"]["name"].as_str(), mine["cards"].as_array().unwrap().len(), mine["collected"].as_i64(), mine["of"].as_i64()), (Some("Zoya"), 1, Some(1), Some(10)));
+    assert_eq!(mine["cards"][0]["edition"], 1);
+    let (_, owners, _) = call(&app, "GET", &format!("/api/frogs/owners?wizard={wizard_id}"), Some(&session), None, false).await;
+    assert_eq!(owners["owners"][0]["member"]["name"], "Zoya");
+    assert_eq!(owners["owners"][0]["serials"], json!([mine["cards"][0]["serial"]]));
+    assert_eq!(owners["owners"][0]["copies"], json!([{ "serial": mine["cards"][0]["serial"], "edition": 1 }]));
+    let (status, _, _) = call(&app, "GET", "/api/frogs/owners", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "GET", "/api/frogs/owners?member=abc", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Retiring the riddle, and putting it back.
+    let (status, retired, _) = call(&app, "POST", &format!("/api/frogs/riddles/{riddle_id}/retire"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK, "{retired}");
+    assert_eq!(retired["retired"], true);
+    let (_, back, _) = call(&app, "POST", &format!("/api/frogs/riddles/{riddle_id}/retire"), Some(&session), Some(json!({ "retired": false })), true).await;
+    assert_eq!(back["retired"], false);
+    let (status, _, _) = call(&app, "POST", "/api/frogs/riddles/nope/retire", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The activity log says what happened in words.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let frog_rows: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"].as_str().unwrap_or("").starts_with("frog:")).collect();
+    let said: Vec<(String, String)> = frog_rows.iter().map(|e| (e["label"].as_str().unwrap().to_string(), e["change"].as_str().unwrap().to_string())).collect();
+    assert_eq!(said[0], (format!("Riddle {riddle_id}"), "Back in play".to_string()));
+    assert!(said[1].1.starts_with("Retired · answer "), "{said:?}");
+    assert_eq!(said[2].0, "Test frog drop");
+    assert!(said[2].1.starts_with("Dropped ") && said[2].1.ends_with(" in #general"), "{said:?}");
+    assert_eq!(said[3], ("Frog card “Dobby the Free Elf”".to_string(), "Renamed from Dobby, now legendary, picture changed, switched off".to_string()));
+    assert_eq!(said[4], ("Frog card “Dobby”".to_string(), "Added".to_string()));
+    assert!(frog_rows.iter().all(|e| e["section"]["id"] == "frogs"));
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -2768,8 +2966,64 @@ async fn demo_server() {
         )
         .unwrap();
 
+
+    // Chocolate Frogs: the real riddle bank, Luna's picture, three days of drops.
+    {
+        use super::super::super::frog_store::{self as store, Submit};
+        let db = store::db().unwrap();
+        let mut conn = db.lock();
+        if store::meta_get(&conn, "demo_seeded").is_none() {
+            let bank = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("riddlebank/ai");
+            store::import_riddles(&mut conn, &bank).unwrap();
+            // The owner's card pictures, as they would sit in {workspace}/frogcards.
+            if let Ok(dir) = std::env::var("PANEL_DEMO_FROGCARDS") {
+                let into = STORE.get().unwrap().path().join("frogcards");
+                std::fs::create_dir_all(&into).unwrap();
+                for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                    let _ = std::fs::copy(entry.path(), into.join(entry.file_name()));
+                }
+            }
+            store::update_wizard(&conn, 6, "Nicolas Flamel", store::Rarity::Uncommon, "", false).unwrap();
+            let mut seed: u64 = 0xf0_9f_90_b8;
+            let mut roll = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (seed >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let channels = [21u64, 21, 23, 22, 21, 23];
+            for i in 0..34i64 {
+                let at = now - (34 - i) * 2 * 3600 - (roll() * 1800.0) as i64;
+                let wizard = store::pick_wizard(&conn, roll(), roll()).unwrap();
+                let riddle = store::pick_riddle(&conn, wizard.rarity.difficulty(), roll()).unwrap();
+                let channel = channels[(roll() * channels.len() as f64) as usize % channels.len()];
+                let by = (i % 11 == 5).then_some(ADMIN);
+                let d = store::start_drop(&conn, channel, &wizard, &riddle, at, by).unwrap();
+                store::mark_open(&conn, d.id, 1_290_000_000_000_000_000 + d.id as u64, at, 300).unwrap();
+                if roll() < 0.8 {
+                    let who = if i % 4 == 0 { 2012 } else { 2000 + (roll() * 30.0) as u64 };
+                    let name = ROSTER[(who - 2000) as usize];
+                    if roll() < 0.5 {
+                        let _ = store::submit(&mut conn, d.id, who + 1, "x", "definitely not it", at + 20);
+                    }
+                    let typed = riddle.answers[(roll() * riddle.answers.len() as f64) as usize % riddle.answers.len()].clone();
+                    let res = store::submit(&mut conn, d.id, who, name, &typed, at + 12 + (roll() * 200.0) as i64).unwrap();
+                    assert!(matches!(res, Submit::Won(_)), "{res:?}");
+                } else {
+                    store::escape(&conn, d.id).unwrap();
+                }
+                store::mark_finished(&conn, d.id).unwrap();
+            }
+            // One frog in chat right now.
+            let wizard = store::wizard(&conn, 10).unwrap();
+            let riddle = store::pick_riddle(&conn, "hard", 0.3).unwrap();
+            let d = store::start_drop(&conn, 23, &wizard, &riddle, now - 70, None).unwrap();
+            store::mark_open(&conn, d.id, 1_290_000_000_000_009_999, now - 70, 300).unwrap();
+            store::set_retired(&conn, "wordplay-017", true).unwrap();
+            store::meta_set(&conn, "demo_seeded", "1").unwrap();
+        }
+    }
+
     let session = session_for(ADMIN);
-    let signed_in = panel().layer(axum::middleware::map_request(move |mut req: axum::extract::Request| {
+    let signed_in = demo_panel().layer(axum::middleware::map_request(move |mut req: axum::extract::Request| {
         let session = session.clone();
         async move {
             if !req.headers().contains_key("cookie") {
@@ -2779,7 +3033,7 @@ async fn demo_server() {
         }
     }));
     let signed_in = signed_in.layer(axum::middleware::from_fn(ui_from_disk));
-    let signed_out = panel().layer(axum::middleware::from_fn(ui_from_disk));
+    let signed_out = demo_panel().layer(axum::middleware::from_fn(ui_from_disk));
     let secs: u64 = std::env::var("PANEL_DEMO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
     let a = tokio::net::TcpListener::bind("127.0.0.1:8799").await.unwrap();
     let b = tokio::net::TcpListener::bind("127.0.0.1:8798").await.unwrap();

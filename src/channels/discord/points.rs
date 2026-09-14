@@ -34,6 +34,8 @@ pub enum Source {
     Mod,
     /// Discord's Wordle app: the day's results post, once per person per day.
     Wordle,
+    /// The Chocolate Frog: a riddle card, and the bonus for collecting every wizard.
+    Frog,
 }
 
 /// How much one person may earn from a source.
@@ -49,7 +51,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 13] = [
+    pub const ALL: [Source; 14] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -63,6 +65,7 @@ impl Source {
         Source::Weekly,
         Source::Mod,
         Source::Wordle,
+        Source::Frog,
     ];
 
     pub fn key(self) -> &'static str {
@@ -80,6 +83,7 @@ impl Source {
             Source::Weekly => "weekly",
             Source::Mod => "mod",
             Source::Wordle => "wordle",
+            Source::Frog => "frog",
         }
     }
 
@@ -102,6 +106,7 @@ impl Source {
             Source::Weekly => "📝 Weekly posts",
             Source::Mod => "🛡️ Mods",
             Source::Wordle => "🟩 Wordle",
+            Source::Frog => "🐸 Chocolate Frog",
         }
     }
 
@@ -119,6 +124,8 @@ impl Source {
             Source::Koto => day(super::control::number("VIZIER_CAP_KOTO", 4)),
             Source::Cat => day(super::control::number("VIZIER_CAP_CAT", 3)),
             Source::Arena => day(super::control::number("VIZIER_CAP_ARENA", 3)),
+            // No limit unless the owner sets one: a frog is a riddle won outright.
+            Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.

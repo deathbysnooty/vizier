@@ -260,6 +260,7 @@ pub fn sections() -> Vec<Section> {
                     number(0, 100, "points"),
                     "6",
                 ),
+                setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
                     "Weekly scan points",
@@ -332,6 +333,59 @@ pub fn sections() -> Vec<Section> {
                 "/snitchdrop type:",
                 "Drops a Snitch (Bronze, Silver, Golden or random) in this channel right now. It scores like any other but doesn't use up a scheduled drop.",
             )],
+        },
+        Section {
+            id: "frogs",
+            title: "Chocolate Frogs",
+            icon: "🐸",
+            about: "A few times a day a Chocolate Frog card hops into a busy chat channel. Anyone \
+                    in a house can press Catch it to see a riddle in a private pop-up and type the answer; each person \
+                    gets three tries, and close spellings count. The first right answer keeps the card, a numbered \
+                    collectable, and scores the frog's points for their house. Nobody right in time and the frog hops \
+                    away, showing the answer but never the riddle. Uncommon cards ask harder riddles and pay more, the \
+                    Legendary Eternal Phoenix hardest and most, and collecting every card pays a one-off bonus. Drops only land where someone spoke recently and keep \
+                    clear of Snitch drops. The cards, recent drops, card owners and the riddle bank are managed on \
+                    this page. A day's plan is made once, so changes to drops, hours and gap apply from the next day's \
+                    plan.",
+            settings: vec![
+                setting("VIZIER_FROGS", "Scheduled drops", "Drop Chocolate Frogs on their own through the day. Off by default; the Drop a frog now button still works when it's off.", Kind::Toggle, "off"),
+                setting(
+                    "VIZIER_FROG_CHANNELS",
+                    "Drop channels",
+                    "Channels a frog can drop into, each with a weight for how often. The first is the home channel a drop falls back to when its pick is quiet. Empty means the Snitch's drop channels. Frogs never drop in #safe-corner.",
+                    Kind::WeightedChannels,
+                    "",
+                ),
+                setting("VIZIER_FROG_DROPS_MIN", "Fewest drops a day", "The least scheduled frogs in a day; each day picks at random between this and the most.", number(0, 30, "drops"), "5"),
+                setting("VIZIER_FROG_DROPS_MAX", "Most drops a day", "The most scheduled frogs in a day.", number(0, 30, "drops"), "7"),
+                setting("VIZIER_FROG_START_HOUR", "Drops from", "India hour the drop hours start (0 is midnight).", number(0, 23, "hour"), "0"),
+                setting("VIZIER_FROG_END_HOUR", "Drops until", "India hour the drop hours end (24 is midnight). The last frog drops early enough to be over by then.", number(1, 24, "hour"), "24"),
+                setting("VIZIER_FROG_GAP_MINUTES", "Gap between drops", "The least time between two scheduled frogs.", number(1, 1440, "minutes"), "90"),
+                setting("VIZIER_FROG_SNITCH_GAP_MINUTES", "Gap from a Snitch", "A frog never drops this close to a Snitch drop, before or after. 0 switches this off.", number(0, 240, "minutes"), "20"),
+                setting("VIZIER_FROG_OPEN_MINUTES", "Time to catch", "How long a frog stays open before it hops away. A frog already in chat keeps its own time.", number(1, 60, "minutes"), "5"),
+                setting("VIZIER_FROG_QUIET_MINUTES", "Quiet after", "A channel counts as busy if someone spoke in it this recently; frogs only drop into busy channels.", number(1, 120, "minutes"), "5"),
+                setting("VIZIER_FROG_WEIGHT_COMMON", "Common: how often", "How often a drop is Common (easy riddle), weighed against the other rarities. With the defaults 58, 35 and 7 that's 58 drops in 100. 0 means never.", number(0, 1000, "weight"), "58"),
+                setting("VIZIER_FROG_WEIGHT_UNCOMMON", "Uncommon: how often", "How often a drop is Uncommon (medium riddle).", number(0, 1000, "weight"), "35"),
+                setting("VIZIER_FROG_WEIGHT_LEGENDARY", "Legendary: how often", "How often a drop is Legendary (hard riddle): the Eternal Phoenix. 7 in 100 is about three a week at six drops a day.", number(0, 1000, "weight"), "7"),
+                setting("VIZIER_POINTS_FROG_COMMON", "Common points", "Points for catching a Common frog.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_FROG_UNCOMMON", "Uncommon points", "Points for catching an Uncommon frog.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_FROG_LEGENDARY", "Legendary points", "Points for catching a Legendary frog.", number(0, 100, "points"), "10"),
+                setting("VIZIER_FROG_SET_BONUS", "Collection bonus", "One-off points for a member the first time they own at least one of every switched-on card. 0 means no bonus.", number(0, 1000, "points"), "15"),
+            ],
+            commands: vec![
+                command(
+                    "frogs",
+                    EVERYONE,
+                    "/frogs member:",
+                    "Your Chocolate Frog cards, or anyone's: which cards are collected, frog points, and every copy owned, like The Eternal Phoenix #3 · No. 0187. Only you see it.",
+                ),
+                command(
+                    "frogcard",
+                    EVERYONE,
+                    "/frogcard number:",
+                    "One card by its No.: which card and copy it is, who owns it, when it was caught and the answer that won it. Only you see it.",
+                ),
+            ],
         },
         Section {
             id: "summary",

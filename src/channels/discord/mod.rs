@@ -33,6 +33,9 @@ mod battle_bracket;
 pub(crate) mod control;
 mod battle_card;
 mod battle_theme;
+mod frog;
+mod frog_answer;
+mod frog_store;
 mod house;
 mod house_card;
 mod house_draft;
@@ -87,6 +90,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = snitch::open(&self.deps.config.workspace) {
             tracing::warn!("snitch: store not opened: {}", err);
+        }
+        if let Err(err) = frog_store::open(&self.deps.config.workspace) {
+            tracing::warn!("frog: store not opened: {}", err);
         }
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
@@ -1397,6 +1403,8 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
 
         let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), frog::card_command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
@@ -1463,6 +1471,8 @@ impl EventHandler for Handler {
         battle::spawn_daily(ctx.clone());
         // Snitch drops: restores cards left live by a restart, then schedules.
         snitch::spawn(ctx.clone());
+        // Chocolate Frogs: closes frogs a restart left open, then schedules.
+        frog::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1491,6 +1501,10 @@ impl EventHandler for Handler {
             let id = component.data.custom_id.clone();
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
+                frog::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("remindcancel:") {
@@ -1690,6 +1704,10 @@ impl EventHandler for Handler {
 
         // Reply modal submitted: send it back the way it came.
         if let Interaction::Modal(ref modal) = interaction {
+            if modal.data.custom_id.starts_with("frogans:") {
+                frog::on_modal(&ctx, modal).await;
+                return;
+            }
             if let Some(orig_id) = modal.data.custom_id.strip_prefix("lrmodal:") {
                 let body = modal
                     .data
@@ -1982,6 +2000,14 @@ impl EventHandler for Handler {
             // The four houses.
             if command.data.name == "snitchdrop" {
                 snitch::drop_command(&ctx, &command).await;
+            }
+            if command.data.name == "frogs" {
+                frog::frogs_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "frogcard" {
+                frog::frogcard_command(&ctx, &command).await;
+                return;
             }
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
