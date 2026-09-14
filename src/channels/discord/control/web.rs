@@ -629,6 +629,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/profiles/{id}/prompt", get(profiles::prompt_preview))
         .route("/members", get(members::search))
         .route("/members/notes", get(members::noted))
+        .route("/members/notes/enable", post(members::enable_notes))
         .route("/members/{id}", get(members::profile))
         .route("/members/{id}/seen", get(members::seen))
         .route("/members/{id}/memories", get(members::memories))
@@ -842,6 +843,7 @@ async fn status(State(panel): State<Panel>) -> ApiResult {
         "sections": sections,
         "reminders": { "total": all.len(), "active": all.iter().filter(|r| r.enabled).count() },
         "panel_url": super::var("VIZIER_PANEL_URL"),
+        "notes_to_review": super::members::list().iter().filter(|n| n.awaits_review()).count(),
     }))
 }
 
@@ -1263,7 +1265,10 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
             let base = json!({
                 "ts": e.ts,
                 "user_id": e.user_id,
-                "user_name": who.as_ref().map(|m| m.name.clone()),
+                "user_name": who.as_ref().map(|m| m.name.clone()).or_else(|| {
+                    (e.user_id == super::members::AUTO_FILL_BY.to_string()).then(|| "Auto-fill (analysis)".to_string())
+                }),
+                "system": e.user_id == super::members::AUTO_FILL_BY.to_string(),
                 "user_avatar": who.map(|m| m.avatar),
                 "key": e.key,
             });
@@ -1332,7 +1337,10 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                     .map(|m| m.name)
                     .or_else(|| new.as_ref().or(old.as_ref()).map(|n| n.name.clone()))
                     .unwrap_or_else(|| uid.to_string());
+                let auto = e.user_id == super::members::AUTO_FILL_BY.to_string();
                 let change = match (&old, &new) {
+                    (_, Some(_)) if auto => "Filled in from the analysis (off until reviewed)",
+                    (Some(o), Some(n)) if !o.use_in_replies && n.use_in_replies && o.notes == n.notes => "Reviewed and switched on",
                     (None, Some(_)) => "Created",
                     (Some(_), None) => "Deleted",
                     (Some(o), Some(n)) if o.use_in_replies != n.use_in_replies => {

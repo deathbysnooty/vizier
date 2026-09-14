@@ -22,12 +22,16 @@ use super::{ApiError, ApiResult, Caller, Panel, ok, parse_id};
 
 /// Pause between two members in a job, so a batch doesn't hammer the model.
 #[cfg(not(test))]
-const PAUSE: Duration = Duration::from_secs(4);
+const PAUSE: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const PAUSE: Duration = Duration::from_millis(5);
 /// A member analysed more recently than this is skipped unless forced.
 pub const FRESH_SECS: i64 = 24 * 3600;
 pub const MAX_BATCH: usize = 50;
+/// A whole tier can be analysed at once, up to this many.
+pub const MAX_TIER_BATCH: usize = 300;
+/// A rough time per member for estimates: the model call plus the pause.
+pub const SECONDS_PER_MEMBER: u64 = 20;
 /// Newest stored requests read per member before the transcript limits apply.
 pub const SCAN_ROWS: usize = 600;
 
@@ -275,6 +279,8 @@ pub struct JobItem {
     /// queued, running, done, skipped, failed, cancelled
     pub status: String,
     pub detail: Option<String>,
+    /// With fill_notes: filled, refilled, kept (mod-written), empty, or failed.
+    pub note: Option<String>,
 }
 
 #[derive(Debug)]
@@ -283,6 +289,7 @@ pub struct Job {
     pub started_ts: i64,
     pub by: u64,
     pub force: bool,
+    pub fill_notes: bool,
     pub items: Vec<JobItem>,
     pub finished_ts: Option<i64>,
     pub cancel: Arc<AtomicBool>,
@@ -306,6 +313,9 @@ fn job_json(job: &Option<Job>) -> Value {
                 "done": count("done"),
                 "skipped": count("skipped"),
                 "failed": count("failed"),
+                "fill_notes": j.fill_notes,
+                "notes_filled": j.items.iter().filter(|i| matches!(i.note.as_deref(), Some("filled" | "refilled"))).count(),
+                "notes_kept": j.items.iter().filter(|i| i.note.as_deref() == Some("kept")).count(),
                 "items": j.items,
             }})
         }
@@ -319,7 +329,27 @@ pub struct AnalyseBody {
     #[serde(default)]
     top: Option<usize>,
     #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
     force: bool,
+    #[serde(default)]
+    fill_notes: bool,
+}
+
+/// The members a tier job covers, most active first, at most `MAX_TIER_BATCH`.
+pub fn tier_members(rows: Vec<Activity>, include_fair: bool, is_bot: &dyn Fn(u64) -> bool) -> Vec<u64> {
+    let t = profiles::thresholds();
+    profiles::rank(rows, RankBy::Overall)
+        .into_iter()
+        .filter(|r| match profiles::tier(&r.activity, &t) {
+            profiles::Tier::Very => true,
+            profiles::Tier::Fair => include_fair,
+            profiles::Tier::Less => false,
+        })
+        .map(|r| r.activity.user_id)
+        .filter(|id| !is_bot(*id))
+        .take(MAX_TIER_BATCH)
+        .collect()
 }
 
 pub async fn start_job(
@@ -329,7 +359,14 @@ pub async fn start_job(
 ) -> ApiResult {
     let body: AnalyseBody = serde_json::from_slice(&body).map_err(|e| ApiError::bad(format!("Send user_ids or top: {}", e)))?;
     let now = chrono::Utc::now().timestamp();
-    let ids: Vec<u64> = if !body.user_ids.is_empty() {
+    let ids: Vec<u64> = if let Some(tier) = body.tier.as_deref() {
+        let include_fair = match tier {
+            "very" => false,
+            "fair_and_very" => true,
+            _ => return Err(ApiError::bad("Tier is very or fair_and_very.")),
+        };
+        tier_members(activity_cached(&panel, now).await, include_fair, &|id| panel.data.cached_member(id).is_some_and(|m| m.bot))
+    } else if !body.user_ids.is_empty() {
         if body.user_ids.len() > MAX_BATCH {
             return Err(ApiError::bad(format!("At most {} members at a time.", MAX_BATCH)));
         }
@@ -370,14 +407,25 @@ pub async fn start_job(
                 name: panel.data.cached_member(*u).map(|m| m.name).unwrap_or_else(|| format!("Member {}", u)),
                 status: "queued".into(),
                 detail: None,
+                note: None,
             })
             .collect();
-        *slot = Some(Job { id, started_ts: now, by: user, force: body.force, items, finished_ts: None, cancel: cancel.clone() });
+        *slot = Some(Job {
+            id,
+            started_ts: now,
+            by: user,
+            force: body.force,
+            fill_notes: body.fill_notes,
+            items,
+            finished_ts: None,
+            cancel: cancel.clone(),
+        });
         id
     };
     tracing::info!("profiles: {} started analysing {} members", user, ids.len());
     let runner = panel.clone();
-    tokio::spawn(async move { run_job(runner, job_id, ids, user, body.force, cancel).await });
+    let (force, fill) = (body.force, body.fill_notes);
+    tokio::spawn(async move { run_job(runner, job_id, ids, user, force, fill, cancel).await });
     let snapshot = job_json(&JOB.lock());
     Ok((StatusCode::ACCEPTED, axum::Json(snapshot)).into_response())
 }
@@ -392,7 +440,40 @@ fn set_item(job_id: u64, index: usize, status: &str, detail: Option<String>) {
     }
 }
 
-async fn run_job(panel: Panel, job_id: u64, ids: Vec<u64>, by: u64, force: bool, cancel: Arc<AtomicBool>) {
+fn set_note(job_id: u64, index: usize, note: &str) {
+    if let Some(job) = JOB.lock().as_mut().filter(|j| j.id == job_id) {
+        if let Some(item) = job.items.get_mut(index) {
+            item.note = Some(note.to_string());
+        }
+    }
+}
+
+/// Writes a member's note from their analysis - only when they have no note,
+/// or one the auto-fill wrote that no mod has touched since. The note is kept
+/// switched off until a mod reviews it. Returns what happened.
+pub fn fill_note(panel: &Panel, user: u64, profile: &Profile, now: i64) -> Result<&'static str, String> {
+    let existing = notes::get(user);
+    if existing.as_ref().is_some_and(|n| !n.is_untouched_auto_fill()) {
+        return Ok("kept");
+    }
+    let name = panel.data.cached_member(user).map(|m| m.name).unwrap_or_else(|| profile.name.clone());
+    let note = MemberNote {
+        tone: profile.effective_tone(),
+        notes: profiles::auto_note(profile, notes::MAX_NOTE_CHARS),
+        use_in_replies: false,
+        source: notes::NoteSource::Analysis,
+        reviewed: false,
+        filled_ts: now,
+        ..MemberNote::blank(user, &name)
+    };
+    if note.notes.trim().is_empty() && note.tone == notes::Tone::Normal {
+        return Ok("empty");
+    }
+    notes::save(&note, notes::AUTO_FILL_BY).map_err(|e| e.to_string())?;
+    Ok(if existing.is_some() { "refilled" } else { "filled" })
+}
+
+async fn run_job(panel: Panel, job_id: u64, ids: Vec<u64>, by: u64, force: bool, fill: bool, cancel: Arc<AtomicBool>) {
     for (i, user) in ids.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             for j in i..ids.len() {
@@ -405,13 +486,28 @@ async fn run_job(panel: Panel, job_id: u64, ids: Vec<u64>, by: u64, force: bool,
             if let Some(p) = profiles::get(*user) {
                 if now - p.generated_ts < FRESH_SECS {
                     set_item(job_id, i, "skipped", Some("analysed in the last 24 hours".into()));
+                    // A recent analysis can still fill a missing note, without asking the model again.
+                    if fill {
+                        match fill_note(&panel, *user, &p, now) {
+                            Ok(what) => set_note(job_id, i, what),
+                            Err(e) => set_note(job_id, i, &format!("failed: {}", e)),
+                        }
+                    }
                     continue;
                 }
             }
         }
         set_item(job_id, i, "running", None);
         match analyse_one(&panel, *user, by, now).await {
-            Ok(p) => set_item(job_id, i, "done", Some(format!("{} messages", p.messages_analysed))),
+            Ok(p) => {
+                set_item(job_id, i, "done", Some(format!("{} messages", p.messages_analysed)));
+                if fill {
+                    match fill_note(&panel, *user, &p, now) {
+                        Ok(what) => set_note(job_id, i, what),
+                        Err(e) => set_note(job_id, i, &format!("failed: {}", e)),
+                    }
+                }
+            }
             Err(e) => set_item(job_id, i, "failed", Some(e)),
         }
         if i + 1 < ids.len() {
@@ -446,6 +542,9 @@ pub struct ActiveQuery {
     by: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// very, fair or less: only that tier.
+    #[serde(default)]
+    tier: Option<String>,
 }
 
 pub async fn active(State(panel): State<Panel>, Query(q): Query<ActiveQuery>) -> ApiResult {
@@ -461,33 +560,62 @@ pub async fn active(State(panel): State<Panel>, Query(q): Query<ActiveQuery>) ->
     let rows: Vec<Activity> =
         activity_cached(&panel, now).await.into_iter().filter(|a| !panel.data.cached_member(a.user_id).is_some_and(|m| m.bot)).collect();
     let index = profiles::index();
+    let thresholds = profiles::thresholds();
+    let want = match q.tier.as_deref().filter(|t| !t.is_empty() && *t != "all") {
+        None => None,
+        Some("very") => Some(profiles::Tier::Very),
+        Some("fair") => Some(profiles::Tier::Fair),
+        Some("less") => Some(profiles::Tier::Less),
+        Some(_) => return Err(ApiError::bad("Tier is very, fair or less.")),
+    };
     let ranked = profiles::rank(rows, by);
+    let tiers: Vec<profiles::Tier> = ranked.iter().map(|r| profiles::tier(&r.activity, &thresholds)).collect();
+    let count = |t: profiles::Tier| tiers.iter().filter(|x| **x == t).count();
+    let counts = json!({ "very": count(profiles::Tier::Very), "fair": count(profiles::Tier::Fair), "less": count(profiles::Tier::Less) });
+    let ranked: Vec<(usize, profiles::Ranked, profiles::Tier)> = ranked
+        .into_iter()
+        .zip(tiers)
+        .enumerate()
+        .map(|(i, (r, t))| (i + 1, r, t))
+        .filter(|(_, _, t)| want.is_none_or(|w| w == *t))
+        .collect();
     let total = ranked.len();
+    let noted: HashMap<String, MemberNote> = notes::list().into_iter().map(|n| (n.user_id.clone(), n)).collect();
     let out: Vec<Value> = ranked
         .iter()
         .take(limit)
-        .enumerate()
-        .map(|(i, r)| {
+        .map(|(rank, r, tier)| {
             let a = &r.activity;
             let who = panel.data.cached_member(a.user_id);
             let house = a.house.as_deref().and_then(super::super::super::house::house);
+            let note = noted.get(&a.user_id.to_string());
             json!({
-                "rank": i + 1,
+                "rank": rank,
                 "id": a.user_id.to_string(),
                 "name": who.as_ref().map(|m| m.name.clone()),
                 "avatar": who.map(|m| m.avatar),
                 "house": house.map(|h| json!({ "key": h.key, "name": h.name, "crest": h.crest, "colour": format!("#{:06x}", h.colour) })),
                 "muggle": a.muggle,
+                "tier": tier,
                 "messages": a.messages,
                 "voice_min": a.voice_secs / 60,
                 "points": a.points,
                 "shares": { "chat": r.chat_share, "voice": r.voice_share, "games": r.games_share },
                 "score": r.score,
                 "profile": index.get(&a.user_id).map(|(s, ts)| json!({ "status": s, "generated_ts": ts })),
+                "note": note.map(|n| json!({ "source": n.source, "use_in_replies": n.use_in_replies, "awaits_review": n.awaits_review() })),
             })
         })
         .collect();
-    ok(json!({ "window_days": profiles::WINDOW_DAYS, "by": q.by.unwrap_or_else(|| "overall".into()), "total": total, "rows": out }))
+    ok(json!({
+        "window_days": profiles::WINDOW_DAYS,
+        "by": q.by.unwrap_or_else(|| "overall".into()),
+        "total": total,
+        "tiers": counts,
+        "thresholds": thresholds,
+        "seconds_per_member": SECONDS_PER_MEMBER,
+        "rows": out,
+    }))
 }
 
 fn profile_json(p: &Profile) -> Value {
@@ -626,15 +754,7 @@ async fn plan_apply(panel: &Panel, id: u64, body: &ApplyBody) -> Result<(Profile
         None => panel.data.member(id).await.map(|m| m.name).unwrap_or_else(|| p.name.clone()),
     };
     let existing = notes::get(id);
-    let mut note = existing.clone().unwrap_or(MemberNote {
-        user_id: id.to_string(),
-        name: name.clone(),
-        tone: Default::default(),
-        notes: String::new(),
-        use_in_replies: true,
-        updated_ts: 0,
-        updated_by: String::new(),
-    });
+    let mut note = existing.clone().unwrap_or_else(|| MemberNote::blank(id, &name)).marked_by_mod();
     note.name = name;
     let added = if body.fields.is_empty() { String::new() } else { profiles::note_block(&p, &body.fields) };
     if added.lines().count() > 1 {

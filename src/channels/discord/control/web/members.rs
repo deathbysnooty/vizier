@@ -424,6 +424,11 @@ pub async fn noted(State(panel): State<Panel>) -> ApiResult {
                 "use_in_replies": n.use_in_replies,
                 "notes": n.notes,
                 "updated_ts": n.updated_ts,
+                "updated_by": n.updated_by,
+                "source": n.source,
+                "reviewed": n.reviewed,
+                "filled_ts": n.filled_ts,
+                "awaits_review": n.awaits_review(),
             })
         })
         .collect();
@@ -621,15 +626,16 @@ pub async fn save_note(
     let id = member_id(&id)?;
     let body = note_from(&body)?;
     let name = display_name(&panel, id).await?;
+    // A mod saving the note makes it theirs: the analysis never writes over it again.
+    let base = notes::get(id).unwrap_or_else(|| MemberNote::blank(id, &name));
     let note = MemberNote {
-        user_id: id.to_string(),
         name: name.clone(),
         tone: body.tone,
         notes: body.notes.replace("\r\n", "\n"),
         use_in_replies: body.use_in_replies,
-        updated_ts: 0,
-        updated_by: String::new(),
-    };
+        ..base
+    }
+    .marked_by_mod();
     notes::validate(&note).map_err(ApiError::bad)?;
     if note.notes.trim().is_empty() && note.tone == Tone::Normal {
         return Err(ApiError::bad("Write a note or pick a tone. To remove the note, delete it."));
@@ -652,6 +658,33 @@ pub async fn delete_note(
     ok(json!({ "ok": true }))
 }
 
+#[derive(Deserialize)]
+pub struct EnableBody {
+    user_ids: Vec<String>,
+}
+
+/// Switches notes on for the bot, marking them reviewed: the review step for
+/// notes the analysis filled in. Notes that are missing are reported, not made.
+pub async fn enable_notes(axum::Extension(Caller(user)): axum::Extension<Caller>, body: axum::body::Bytes) -> ApiResult {
+    let body: EnableBody = serde_json::from_slice(&body).map_err(|_| ApiError::bad("Send {\"user_ids\": [...]}."))?;
+    if body.user_ids.is_empty() || body.user_ids.len() > 300 {
+        return Err(ApiError::bad("Pick 1 to 300 members."));
+    }
+    let (mut enabled, mut missing) = (Vec::new(), Vec::new());
+    for raw in &body.user_ids {
+        let id = member_id(raw)?;
+        match notes::get(id) {
+            Some(n) => {
+                let note = MemberNote { use_in_replies: true, reviewed: true, ..n };
+                notes::save(&note, user).map_err(ApiError::internal)?;
+                enabled.push(id.to_string());
+            }
+            None => missing.push(id.to_string()),
+        }
+    }
+    ok(json!({ "enabled": enabled, "missing": missing }))
+}
+
 /// Exactly what the AI receives for the saved note (`context_block`), or none.
 pub async fn preview_saved(State(panel): State<Panel>, Path(id): Path<String>) -> ApiResult {
     let id = member_id(&id)?;
@@ -669,13 +702,10 @@ pub async fn preview_draft(State(panel): State<Panel>, Path(id): Path<String>, b
     let body = note_from(&body)?;
     let name = display_name(&panel, id).await.unwrap_or_else(|_| format!("Member {}", id));
     let note = MemberNote {
-        user_id: id.to_string(),
-        name: name.clone(),
         tone: body.tone,
         notes: body.notes.chars().take(notes::MAX_NOTE_CHARS * 2).collect(),
         use_in_replies: body.use_in_replies,
-        updated_ts: 0,
-        updated_by: String::new(),
+        ..MemberNote::blank(id, &name)
     };
     ok(json!({
         "text": if note.use_in_replies { notes::preview(&note, &name) } else { None },

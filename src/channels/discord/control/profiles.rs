@@ -278,6 +278,53 @@ pub fn rank(rows: Vec<Activity>, by: RankBy) -> Vec<Ranked> {
     out
 }
 
+// --- tiers ----------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    Very,
+    Fair,
+    Less,
+}
+
+/// The bars for each tier, over the same 30-day numbers as the ranking.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Thresholds {
+    pub very_messages: i64,
+    pub very_voice_minutes: i64,
+    pub very_points: i64,
+    pub fair_messages: i64,
+    pub fair_voice_minutes: i64,
+    pub fair_points: i64,
+}
+
+/// Read from the panel's settings each time, so a changed bar applies at once.
+pub fn thresholds() -> Thresholds {
+    use crate::channels::discord::control;
+    let n = |v: u64| v.max(1) as i64;
+    Thresholds {
+        very_messages: n(control::number("VIZIER_ACTIVE_VERY_MESSAGES", 600)),
+        very_voice_minutes: n(control::number("VIZIER_ACTIVE_VERY_VOICE_MINUTES", 600)),
+        very_points: n(control::number("VIZIER_ACTIVE_VERY_POINTS", 60)),
+        fair_messages: n(control::number("VIZIER_ACTIVE_FAIR_MESSAGES", 150)),
+        fair_voice_minutes: n(control::number("VIZIER_ACTIVE_FAIR_VOICE_MINUTES", 180)),
+        fair_points: n(control::number("VIZIER_ACTIVE_FAIR_POINTS", 20)),
+    }
+}
+
+/// Reaching any one of a tier's three bars puts someone in it.
+pub fn tier(a: &Activity, t: &Thresholds) -> Tier {
+    let minutes = a.voice_secs / 60;
+    if a.messages >= t.very_messages || minutes >= t.very_voice_minutes || a.points >= t.very_points {
+        Tier::Very
+    } else if a.messages >= t.fair_messages || minutes >= t.fair_voice_minutes || a.points >= t.fair_points {
+        Tier::Fair
+    } else {
+        Tier::Less
+    }
+}
+
 // --- the transcript ---------------------------------------------------------------------------
 
 /// One stored message, as the data layer finds it.
@@ -535,6 +582,63 @@ pub fn note_block(profile: &Profile, fields: &[String]) -> String {
     lines.join("\n")
 }
 
+/// The note the analysis writes by itself: the summary, then short labelled
+/// lines, all within the note limit. Roast angles only when the tone allows them.
+pub fn auto_note(profile: &Profile, max: usize) -> String {
+    let text = |f: &str| scrub(profile.effective(f).as_str().unwrap_or_default(), &|_| None);
+    let list = |f: &str| {
+        profile
+            .effective(f)
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).map(|s| scrub(s, &|_| None)).filter(|s| !s.is_empty()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let roast_ok = matches!(profile.effective_tone(), Tone::Normal | Tone::LightRoast | Tone::Roast);
+    let mut lines: Vec<String> = Vec::new();
+    let tail: Vec<(String, String)> = [
+        ("Interests", list("interests").join(", ")),
+        ("Style", text("style")),
+        ("Plays", text("games")),
+        ("Roast angles", if roast_ok { list("roast_material").join("; ") } else { String::new() }),
+        ("Avoid", list("avoid").join("; ")),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.trim().is_empty())
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    // The labelled lines come first in the budget, each at most 180 characters;
+    // the summary gets what is left, cut at a sentence where it can be.
+    let clip = |s: &str, n: usize| -> String {
+        if s.chars().count() <= n {
+            return s.to_string();
+        }
+        let cut: String = s.chars().take(n.saturating_sub(1)).collect();
+        let at = cut.rfind(". ").map(|i| i + 1).filter(|i| *i > n / 2);
+        match at {
+            Some(i) => cut[..i].to_string(),
+            None => format!("{}…", cut.trim_end()),
+        }
+    };
+    let tail_lines: Vec<String> = tail.iter().map(|(k, v)| clip(&format!("{}: {}", k, v), 180)).collect();
+    let tail_len: usize = tail_lines.iter().map(|l| l.chars().count() + 1).sum();
+    let room = max.saturating_sub(tail_len);
+    let summary = text("summary");
+    if room > 40 && !summary.is_empty() {
+        lines.push(clip(&summary, room.saturating_sub(1)));
+    }
+    lines.extend(tail_lines);
+    let mut out = lines.join("\n");
+    while out.chars().count() > max {
+        match out.rfind('\n') {
+            Some(i) => out.truncate(i),
+            None => {
+                out = out.chars().take(max).collect();
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +730,57 @@ mod tests {
         assert!(parse_analysis(r#"{"summary": "", "suggested_tone": "normal"}"#).is_err());
         let gentle = parse_analysis(r#"{"summary": "x", "suggested_tone": "gentle", "roast_material": ["y"]}"#).unwrap();
         assert!(gentle.roast_material.is_empty(), "no roast material for a gentle tone");
+    }
+
+    #[test]
+    fn any_bar_puts_someone_in_a_tier() {
+        let t = Thresholds { very_messages: 600, very_voice_minutes: 600, very_points: 60, fair_messages: 150, fair_voice_minutes: 180, fair_points: 20 };
+        assert_eq!(tier(&act(1, 600, 0, 0), &t), Tier::Very);
+        assert_eq!(tier(&act(1, 0, 600 * 60, 0), &t), Tier::Very);
+        assert_eq!(tier(&act(1, 10, 10, 60), &t), Tier::Very);
+        assert_eq!(tier(&act(1, 599, 599 * 60, 59), &t), Tier::Fair);
+        assert_eq!(tier(&act(1, 0, 180 * 60, 0), &t), Tier::Fair);
+        assert_eq!(tier(&act(1, 149, 179 * 60, 19), &t), Tier::Less);
+    }
+
+    #[test]
+    fn auto_notes_fit_and_follow_the_tone() {
+        let mut p = Profile {
+            user_id: "1".into(),
+            name: "Riya".into(),
+            ai: Analysis {
+                summary: format!("{} Second sentence here.", "Chats a lot about cricket and quizzes. ".repeat(20)),
+                interests: vec!["cricket".into(), "quiz".into()],
+                style: "Short Hinglish, lots of 💀 <@55>".into(),
+                games: "Koto and quiz".into(),
+                vibe_with_bot: "asks for hints".into(),
+                suggested_tone: Tone::LightRoast,
+                tone_reason: "likes banter".into(),
+                roast_material: vec!["six tries at Koto".into()],
+                avoid: vec!["exam results".into()],
+            },
+            edits: Default::default(),
+            status: Status::Draft,
+            stats: Value::Null,
+            messages_analysed: 100,
+            chars_analysed: 1000,
+            window_days: 30,
+            generated_ts: 0,
+            generated_by: "0".into(),
+            model: String::new(),
+            edited_ts: 0,
+            edited_by: String::new(),
+        };
+        let note = auto_note(&p, 1000);
+        assert!(note.chars().count() <= 1000, "{}", note.chars().count());
+        assert!(note.starts_with("Chats a lot about cricket"));
+        for line in ["Interests: cricket, quiz", "Style: Short Hinglish, lots of 💀 someone", "Plays: Koto and quiz", "Roast angles: six tries at Koto", "Avoid: exam results"] {
+            assert!(note.contains(line), "{line} missing from {note}");
+        }
+        assert!(!note.contains("<@"));
+        p.edits.insert("suggested_tone".into(), json!("gentle"));
+        assert!(!auto_note(&p, 1000).contains("Roast angles"), "no roast angles for a gentle tone");
+        assert!(auto_note(&p, 200).chars().count() <= 200);
     }
 
     #[test]

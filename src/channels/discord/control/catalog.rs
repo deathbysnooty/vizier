@@ -687,11 +687,20 @@ pub fn sections() -> Vec<Section> {
                     its author, anyone mentioned in it and whoever it replies to are handed to the AI with an \
                     instruction never to reveal them, so the bot treats people the way the mods intend. Notes are \
                     never used on messages the bot only reads quietly.",
-            settings: vec![toggle(
-                "VIZIER_MEMBER_NOTES",
-                "Use member notes",
-                "Give the AI the mods' notes and tones when it answers. Off keeps the notes on the panel but the bot stops using them.",
-            )],
+            settings: vec![
+                toggle(
+                    "VIZIER_MEMBER_NOTES",
+                    "Use member notes",
+                    "Give the AI the mods' notes and tones when it answers. Off keeps the notes on the panel but the bot stops using them.",
+                ),
+                // Activity tiers on the Members page, over the last 30 days. Reaching any one bar is enough.
+                setting("VIZIER_ACTIVE_VERY_MESSAGES", "Very active: messages", "Messages in 30 days that make someone very active on their own. 600 is about 20 a day, a chat point every day.", number(1, 100_000, "messages"), "600"),
+                setting("VIZIER_ACTIVE_VERY_VOICE_MINUTES", "Very active: voice minutes", "Minutes in voice in 30 days that make someone very active. 600 is 10 hours.", number(1, 43_200, "minutes"), "600"),
+                setting("VIZIER_ACTIVE_VERY_POINTS", "Very active: game points", "Game and activity points in 30 days (mods' and weekly awards not counted) that make someone very active.", number(1, 10_000, "points"), "60"),
+                setting("VIZIER_ACTIVE_FAIR_MESSAGES", "Fairly active: messages", "Messages in 30 days that make someone fairly active. 150 is about 5 a day.", number(1, 100_000, "messages"), "150"),
+                setting("VIZIER_ACTIVE_FAIR_VOICE_MINUTES", "Fairly active: voice minutes", "Minutes in voice in 30 days that make someone fairly active. 180 is 3 hours.", number(1, 43_200, "minutes"), "180"),
+                setting("VIZIER_ACTIVE_FAIR_POINTS", "Fairly active: game points", "Game and activity points in 30 days that make someone fairly active.", number(1, 10_000, "points"), "20"),
+            ],
             commands: vec![],
         },
         Section {

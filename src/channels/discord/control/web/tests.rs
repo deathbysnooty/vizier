@@ -1314,9 +1314,13 @@ async fn wait_for_job(app: &Router, session: &str) -> Value {
     panic!("the job never finished");
 }
 
+/// The analysis job and the fake model are shared: tests using them take turns.
+static JOB_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn member_analyses_end_to_end() {
     use std::sync::atomic::Ordering;
+    let _turn = JOB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let app = panel();
     let session = session_for(ADMIN);
     const SAMEER: &str = "2012";
@@ -1451,6 +1455,133 @@ async fn member_analyses_end_to_end() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = call(&app, "GET", "/api/profiles/active", Some(&session_for(MEMBER)), None, false).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_tiers_and_auto_filled_notes() {
+    use super::super::members::{self as notes, MemberNote, NoteSource, Tone};
+    use super::super::profiles::{self, Tier};
+    use std::sync::atomic::Ordering;
+    let _turn = JOB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    MODEL_MODE.store(0, Ordering::SeqCst);
+    MODEL_DELAY_MS.store(0, Ordering::SeqCst);
+    let app = panel();
+    let session = session_for(ADMIN);
+    for (key, value) in [
+        ("VIZIER_ACTIVE_VERY_MESSAGES", "750"),
+        ("VIZIER_ACTIVE_VERY_VOICE_MINUTES", "950"),
+        ("VIZIER_ACTIVE_VERY_POINTS", "5000"),
+        ("VIZIER_ACTIVE_FAIR_MESSAGES", "400"),
+        ("VIZIER_ACTIVE_FAIR_VOICE_MINUTES", "700"),
+        ("VIZIER_ACTIVE_FAIR_POINTS", "5000"),
+    ] {
+        super::super::set(key, Some(value), ADMIN).unwrap();
+    }
+    let t = profiles::thresholds();
+    assert_eq!((t.very_messages, t.fair_voice_minutes), (750, 700), "tiers read the panel's settings");
+
+    // Tiers in the ranking agree with the rule, and the filter keeps one tier.
+    let rows = FakeData.activity(chrono::Utc::now().timestamp()).await;
+    let expect = |tier: Tier| rows.iter().filter(|a| (a.messages > 0 || a.voice_secs > 0 || a.points > 0) && profiles::tier(a, &t) == tier).count();
+    let (_, active, _) = call(&app, "GET", "/api/profiles/active?limit=100", Some(&session), None, false).await;
+    assert_eq!(active["tiers"]["very"], expect(Tier::Very));
+    assert_eq!(active["tiers"]["fair"], expect(Tier::Fair));
+    assert_eq!(active["tiers"]["less"], expect(Tier::Less));
+    assert_eq!(active["thresholds"]["very_messages"], 750);
+    let (_, very, _) = call(&app, "GET", "/api/profiles/active?tier=very&limit=100", Some(&session), None, false).await;
+    let very_ids: Vec<String> = very["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(very_ids.len(), expect(Tier::Very));
+    assert!(very["rows"].as_array().unwrap().iter().all(|r| r["tier"] == "very"));
+    let (status, _, _) = call(&app, "GET", "/api/profiles/active?tier=super", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "tier": "everyone" })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A mod-written note on one very active member; nothing on the others.
+    let (mod_id, auto_id, other_id) = (very_ids[0].parse::<u64>().unwrap(), very_ids[1].parse::<u64>().unwrap(), very_ids[2].parse::<u64>().unwrap());
+    for id in [mod_id, auto_id, other_id] {
+        let _ = notes::delete(id, ADMIN);
+        let _ = profiles::delete(id, ADMIN);
+    }
+    let written = MemberNote { notes: "Written by a mod.".into(), tone: Tone::Gentle, ..MemberNote::blank(mod_id, "Mod Pick") };
+    notes::save(&written, ADMIN).unwrap();
+
+    let (status, started, _) = call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "tier": "very", "force": true, "fill_notes": true })), true).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    assert_eq!(started["job"]["total"], very_ids.len());
+    let job = wait_for_job(&app, &session).await;
+    let item = |id: u64| job["job"]["items"].as_array().unwrap().iter().find(|i| i["user_id"] == id.to_string()).unwrap().clone();
+    assert_eq!(item(mod_id)["note"], "kept", "a mod's note is never overwritten");
+    assert_eq!(notes::get(mod_id).unwrap().notes, "Written by a mod.");
+    assert_eq!(item(auto_id)["note"], "filled");
+    let filled = notes::get(auto_id).unwrap();
+    assert!(!filled.use_in_replies, "off until a mod reviews it");
+    assert_eq!((filled.tone, filled.source, filled.reviewed, filled.updated_by.as_str()), (Tone::LightRoast, NoteSource::Analysis, false, "0"));
+    assert!(filled.notes.chars().count() <= notes::MAX_NOTE_CHARS && filled.notes.contains("Interests: ") && !filled.notes.contains("<@"));
+    assert!(notes::context_block(&[(auto_id, "x".into())]).is_none(), "the bot gets nothing from an unreviewed note");
+    assert!(job["job"]["notes_filled"].as_u64().unwrap() >= 2);
+    assert_eq!(job["job"]["notes_kept"], 1);
+
+    // Re-analysing refills an untouched auto note; once a mod saves it, it stays theirs.
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": [auto_id.to_string()], "force": true, "fill_notes": true })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["note"], "refilled");
+    let (status, saved, _) = call(&app, "PUT", &format!("/api/members/{auto_id}/note"), Some(&session), Some(json!({ "tone": "light_roast", "notes": "Edited by a mod.", "use_in_replies": false })), true).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!((saved["note"]["source"].as_str(), saved["note"]["reviewed"].as_bool()), (Some("edited"), Some(true)));
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": [auto_id.to_string()], "force": true, "fill_notes": true })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!(job["job"]["items"][0]["note"], "kept");
+    assert_eq!(notes::get(auto_id).unwrap().notes, "Edited by a mod.");
+    // Skipped as fresh but a missing note is still filled from the saved analysis.
+    notes::delete(other_id, ADMIN).unwrap();
+    call(&app, "POST", "/api/profiles/analyse", Some(&session), Some(json!({ "user_ids": [other_id.to_string()], "fill_notes": true })), true).await;
+    let job = wait_for_job(&app, &session).await;
+    assert_eq!((job["job"]["items"][0]["status"].as_str(), job["job"]["items"][0]["note"].as_str()), (Some("skipped"), Some("filled")));
+
+    // Review: to-review count, then switch on (one missing id is reported).
+    let (_, status_before, _) = call(&app, "GET", "/api/status", Some(&session), None, false).await;
+    let before = status_before["notes_to_review"].as_u64().unwrap();
+    assert!(before >= 1);
+    let (_, listed, _) = call(&app, "GET", "/api/members/notes", Some(&session), None, false).await;
+    assert!(listed.as_array().unwrap().iter().any(|n| n["user_id"] == other_id.to_string() && n["awaits_review"] == true));
+    let (status, enabled, _) = call(&app, "POST", "/api/members/notes/enable", Some(&session), Some(json!({ "user_ids": [other_id.to_string(), "4242"] })), true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(enabled["enabled"], json!([other_id.to_string()]));
+    assert_eq!(enabled["missing"], json!(["4242"]));
+    let on = notes::get(other_id).unwrap();
+    assert!(on.use_in_replies && on.reviewed && notes::context_block(&[(other_id, "x".into())]).is_some());
+    let (_, status_after, _) = call(&app, "GET", "/api/status", Some(&session), None, false).await;
+    assert_eq!(status_after["notes_to_review"].as_u64().unwrap(), before - 1);
+    let (status, _, _) = call(&app, "POST", "/api/members/notes/enable", Some(&session), Some(json!({ "user_ids": [] })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The log shows the auto-fill as its own actor.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == format!("member:{other_id}")).collect();
+    assert!(mine.iter().any(|e| e["user_name"] == "Auto-fill (analysis)" && e["change"] == "Filled in from the analysis (off until reviewed)"));
+    assert!(mine.iter().any(|e| e["change"] == "Reviewed and switched on" && e["user_name"] == "Kabir"));
+
+    for key in ["VIZIER_ACTIVE_VERY_MESSAGES", "VIZIER_ACTIVE_VERY_VOICE_MINUTES", "VIZIER_ACTIVE_VERY_POINTS", "VIZIER_ACTIVE_FAIR_MESSAGES", "VIZIER_ACTIVE_FAIR_VOICE_MINUTES", "VIZIER_ACTIVE_FAIR_POINTS"] {
+        super::super::set(key, None, ADMIN).unwrap();
+    }
+}
+
+#[test]
+fn tier_jobs_cap_at_three_hundred() {
+    use super::super::profiles::Activity;
+    let rows: Vec<Activity> =
+        (0..400).map(|i| Activity { user_id: 10_000 + i, messages: 100_000, voice_secs: 0, points: 0, house: None, muggle: false }).collect();
+    let picked = super::profiles::tier_members(rows, false, &|id| id == 10_001);
+    assert_eq!(picked.len(), 300);
+    assert!(!picked.contains(&10_001), "bots are left out");
+}
+
+#[test]
+fn the_notes_preview_has_its_placeholders() {
+    for text in ["Nothing yet — add notes or pick a tone, and this is what the bot will get.", "Switched off: the bot gets nothing for them right now."] {
+        assert!(APP_JS.contains(text), "{text}");
+    }
 }
 
 // --- the demo ----------------------------------------------------------------------------
@@ -1600,15 +1731,7 @@ async fn demo_server() {
 
     if super::super::members::list().is_empty() {
         use super::super::members::{MemberNote, Tone};
-        let note = |id: u64, name: &str, tone: Tone, notes: &str| MemberNote {
-            user_id: id.to_string(),
-            name: name.into(),
-            tone,
-            notes: notes.into(),
-            use_in_replies: true,
-            updated_ts: 0,
-            updated_by: String::new(),
-        };
+        let note = |id: u64, name: &str, tone: Tone, notes: &str| MemberNote { tone, notes: notes.into(), ..MemberNote::blank(id, name) };
         super::super::members::save(&note(2012, "Sameer", Tone::Roast, "Loud RCB fan, takes roasts about it well. Never calls him Sam."), ADMIN).unwrap();
         super::super::members::save(&note(2003, "Meera", Tone::Brief, "Prefers short replies without emoji."), ADMIN_TWO).unwrap();
         super::super::members::save(&note(2007, "Zoya", Tone::Gentle, "Going through exams; keep it kind and don't bring up her marks."), ADMIN).unwrap();
@@ -1663,6 +1786,26 @@ async fn demo_server() {
             avoid: vec![],
         };
         super::super::profiles::save(&profile(2003, "Meera", Status::Reviewed, meera, vec![]), ADMIN_TWO, "reviewed", &[]).unwrap();
+    }
+    if super::super::members::get(2020).is_none() {
+        use super::super::members::{MemberNote, NoteSource, Tone};
+        let auto = |id: u64, name: &str, tone: Tone, text: &str| MemberNote {
+            tone,
+            notes: text.into(),
+            use_in_replies: false,
+            source: NoteSource::Analysis,
+            reviewed: false,
+            filled_ts: chrono::Utc::now().timestamp() - 2 * 3600,
+            ..MemberNote::blank(id, name)
+        };
+        let fills = [
+            (2020, "Nikhil", Tone::LightRoast, "Late-night regular in #desi-banter and voice; lives for Battle Royale and trash-talks after every win.\nInterests: fantasy cricket, royale, memes\nStyle: Hinglish, quick one-liners, lots of 😂\nPlays: arena and royale most days\nRoast angles: always \"one more round\" at 2 AM\nAvoid: exam results"),
+            (2031, "Mehak", Tone::Gentle, "Mostly answers other people's questions in #general and quiz nights; rarely starts threads.\nInterests: books, quizzes\nStyle: full sentences, polite, no emoji\nPlays: quiz most days"),
+            (2017, "Yash", Tone::Normal, "Quiz regular who posts the day's Koto score every morning.\nInterests: Koto, quizzes, F1\nPlays: quiz, Koto, the odd Snitch"),
+        ];
+        for (id, name, tone, text) in fills {
+            super::super::members::save(&auto(id, name, tone, text), super::super::members::AUTO_FILL_BY).unwrap();
+        }
     }
     MODEL_DELAY_MS.store(2500, std::sync::atomic::Ordering::SeqCst);
 

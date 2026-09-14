@@ -547,7 +547,7 @@
     nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Manage'),
       navItem('#/reminders', icon('bell'), 'Reminders', count(active, S.reminders.length)),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
-      navItem('#/members', icon('users'), 'Members'),
+      navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
       navItem('#/commands', icon('slash'), 'Commands')));
@@ -2828,10 +2828,14 @@
     results.hidden = true;
     page.appendChild(h('div', { class: 'member-search' }, h('label', { class: 'search-box big' }, icon('search'), input), results));
 
+    const reviewHolder = h('div', null);
+    page.insertBefore(reviewHolder, page.querySelector('.active-wrap'));
     const notesCard = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading notes…'));
     page.appendChild(h('div', { class: 'section-title' }, h('h2', null, 'Members with notes'), h('span', null, 'Private to mods. Members never see these.')));
     page.appendChild(notesCard);
-    api('GET', '/members/notes').then((list) => {
+    api('GET', '/members/notes').then((all) => {
+      const list = all.filter((n) => !n.awaits_review);
+      drawReview(reviewHolder, all.filter((n) => n.awaits_review));
       clear(notesCard);
       if (!list.length) { notesCard.appendChild(h('div', { class: 'card empty' }, icon('edit'), h('h3', null, 'No notes yet'), h('p', null, 'Open a member and add a note to shape how the bot talks to them.'))); return; }
       const grid = h('div', { class: 'note-grid' });
@@ -2842,6 +2846,50 @@
         n.use_in_replies ? null : h('span', { class: 'badge paused' }, 'Not used in replies'))));
       notesCard.appendChild(grid);
     }).catch((e) => { clear(notesCard).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); });
+  }
+
+  /** Auto-filled notes still switched off: select and switch on in bulk. */
+  function drawReview(holder, items) {
+    clear(holder);
+    if (!items.length) return;
+    const chosen = new Set();
+    const btn = h('button', { class: 'btn sm primary', type: 'button', disabled: true }, icon('check'), 'Switch on for selected');
+    const all = h('input', { type: 'checkbox', 'aria-label': 'Select all notes to review' });
+    const boxes = [];
+    const sync = () => {
+      btn.disabled = !chosen.size;
+      btn.lastChild.textContent = chosen.size ? 'Switch on for selected (' + chosen.size + ')' : 'Switch on for selected';
+      all.checked = chosen.size === items.length;
+      all.indeterminate = chosen.size > 0 && chosen.size < items.length;
+    };
+    all.addEventListener('change', () => { boxes.forEach(([b, id]) => { b.checked = all.checked; if (all.checked) chosen.add(id); else chosen.delete(id); }); sync(); });
+    const list = h('ul', { class: 'review-list' }, items.map((n) => {
+      const box = h('input', { type: 'checkbox', 'aria-label': 'Select ' + n.name });
+      boxes.push([box, n.user_id]);
+      box.addEventListener('change', () => { if (box.checked) chosen.add(n.user_id); else chosen.delete(n.user_id); sync(); });
+      return h('li', { class: 'review-row' }, h('label', { class: 'active-check' }, box),
+        h('a', { class: 'review-main', href: '#/members/' + n.user_id }, avatar(n.avatar, n.name, 'lg'),
+          h('div', { class: 'grow' }, h('div', { class: 'title-row' }, h('b', null, n.name), h('span', { class: 'badge tone-' + n.tone }, (TONE_ICONS[n.tone] || '') + ' ' + toneLabel(n.tone))),
+            h('p', null, n.notes || 'Tone only, no notes.')),
+          h('small', null, 'Filled ' + ago(n.filled_ts || n.updated_ts)), icon('right')));
+    }));
+    btn.addEventListener('click', async () => {
+      const ids = [...chosen];
+      const ok = await confirmDialog({ title: 'Switch on ' + plural(ids.length, 'note') + '?', icon: 'check', confirm: 'Switch on',
+        body: 'From now on the bot uses these notes and tones when it answers these members. Make sure you’ve read them: they were written by the analysis, not a mod.' });
+      if (!ok) return;
+      try {
+        const r = await api('POST', '/members/notes/enable', { user_ids: ids });
+        toast('Switched on ' + plural(r.enabled.length, 'note'));
+        refreshAudit(); refreshStatus(); rerender();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    append(holder, [
+      h('div', { class: 'section-title' }, h('h2', null, 'Notes to review'), h('span', null, plural(items.length, 'note') + ' filled in by the analysis, switched off until you read them')),
+      h('div', { class: 'card review-card' },
+        h('div', { class: 'active-toolbar' }, h('label', { class: 'check', style: 'align-items:center' }, all, h('span', null, 'Select all')), h('span', { class: 'grow' }), btn),
+        list),
+    ]);
   }
 
   function toneLabel(t) { return ({ normal: 'Normal', gentle: 'Gentle', light_roast: 'Light roast', roast: 'Roast', respectful: 'Respectful', brief: 'Brief' })[t] || t; }
@@ -3044,12 +3092,19 @@
       ptimer = setTimeout(async () => {
         const mine = ++pseq;
         try {
-          const r = await api('POST', '/members/' + p.id + '/note/preview', d);
+          // Ask for the text as if switched on, so it can be shown dimmed when it isn't.
+          const r = await api('POST', '/members/' + p.id + '/note/preview', Object.assign({}, d, { use_in_replies: true }));
           if (mine !== pseq) return;
-          preview.textContent = r.text || (d.use_in_replies ? 'Nothing yet: pick a tone or write a note.' : 'Nothing: this note is kept on the panel only.');
+          preview.textContent = r.text || 'Nothing yet — add notes or pick a tone, and this is what the bot will get.';
           preview.classList.toggle('empty-preview', !r.text);
-          previewNote.textContent = r.switched_on ? 'Added before any message of theirs the bot answers, and messages that mention them.' : 'Member notes are switched off for the whole bot, so the AI gets none right now.';
-          previewNote.className = r.switched_on ? 'hint' : 'error-text';
+          preview.classList.toggle('off-preview', !!r.text && !d.use_in_replies);
+          if (!d.use_in_replies) {
+            previewNote.textContent = 'Switched off: the bot gets nothing for them right now.';
+            previewNote.className = 'hint off-note';
+          } else {
+            previewNote.textContent = r.switched_on ? 'Added before any message of theirs the bot answers, and messages that mention them.' : 'Member notes are switched off for the whole bot, so the AI gets none right now.';
+            previewNote.className = r.switched_on ? 'hint' : 'error-text';
+          }
         } catch (_) { /* keep the last one */ }
       }, 220);
     };
@@ -3078,6 +3133,7 @@
         const r = await api('PUT', '/members/' + p.id + '/note', d);
         p.note = r.note; base = JSON.stringify(d);
         toast('Saved notes for ' + p.name);
+        if (autoBanner && autoBanner.isConnected) { autoBanner.remove(); refreshStatus(); }
         refreshAudit(); updateState();
         if (!del.isConnected) actions.insertBefore(del, actions.firstChild);
       } catch (e) { toast(e.message, 'error'); updateState(); }
@@ -3093,8 +3149,25 @@
       } catch (e) { toast(e.message, 'error'); }
     } }, icon('trash'), 'Delete');
     const actions = h('div', { class: 'notes-actions' }, saved ? del : null, h('span', { class: 'grow' }), saveBtn);
+    const autoBanner = saved && saved.source === 'analysis' && !saved.reviewed
+      ? h('div', { class: 'auto-banner', role: 'status' }, icon('flask'),
+        h('div', { class: 'grow' }, h('p', null, 'Filled in from the bot’s analysis on ' + fmtDate((saved.filled_ts || saved.updated_ts) * 1000) + '. Read and edit it, then switch on “Use when replying”.'),
+          h('div', { class: 'auto-banner-actions' },
+            h('button', { class: 'btn sm primary', type: 'button', onclick: async () => {
+              if (dirty()) { toast('Save or undo your changes first.', 'error'); return; }
+              try {
+                await api('POST', '/members/notes/enable', { user_ids: [p.id] });
+                toast('The bot now uses the notes for ' + p.name);
+                refreshAudit(); refreshStatus();
+                p.note = Object.assign({}, p.note, { use_in_replies: true, reviewed: true });
+                el.replaceWith(notesEditor(p));
+              } catch (e) { toast(e.message, 'error'); }
+            } }, icon('check'), 'Looks good — use it'),
+            h('a', { class: 'open-link', href: '#/members/' + p.id + '/analysis' }, 'See the analysis', icon('right')))))
+      : null;
     append(el, [
       h('div', { class: 'card-head' }, h('div', { class: 'grow' }, h('h2', null, 'Mods’ notes'), h('div', { class: 'sub' }, icon('shield'), ' Private to mods. Never shown to members.'))),
+      autoBanner,
       h('div', { class: 'card-body pad notes-body' },
         h('div', null, h('span', { class: 'label' }, 'How the bot treats them'), tones),
         h('div', null, h('div', { class: 'label-row' }, h('label', { class: 'label', for: 'note-text' }, 'Notes'), counter), ta),
@@ -3114,7 +3187,8 @@
 
   // --- member analyses ----------------------------------------------------------------------
 
-  const activeState = { by: 'overall', limit: 20, selected: new Set(), data: null, job: null, poll: null };
+  const activeState = { by: 'overall', tier: 'all', limit: 20, selected: new Set(), data: null, job: null, poll: null };
+  const TIER_LABEL = { very: 'Very active', fair: 'Fairly active', less: 'Less active' };
   const STATUS_LABEL = { draft: 'Draft', reviewed: 'Reviewed' };
 
   function analysisChip(profile, id) {
@@ -3166,7 +3240,8 @@
     const title = job.running
       ? (job.cancelled ? 'Stopping after the current member…' : 'Analysing ' + (running ? running.name : 'members') + '…')
       : (job.cancelled ? 'Analysis cancelled' : 'Analysis finished');
-    const summary = [job.done + ' done', job.skipped ? job.skipped + ' skipped (analysed in the last day)' : null, job.failed ? job.failed + ' failed' : null].filter(Boolean).join(' · ');
+    const summary = [job.done + ' analysed', job.skipped ? job.skipped + ' recent, not re-analysed' : null, job.failed ? job.failed + ' failed' : null,
+      job.fill_notes ? job.notes_filled + ' notes filled' : null, job.fill_notes && job.notes_kept ? job.notes_kept + ' kept (mod-written)' : null].filter(Boolean).join(' · ');
     return h('div', { class: 'job' + (job.running ? ' running' : ''), role: 'status' },
       h('div', { class: 'job-head' }, job.running ? h('span', { class: 'spinner' }) : icon(job.failed ? 'alert' : 'check'),
         h('div', { class: 'grow' }, h('b', null, title), h('small', null, settled + ' of ' + job.total + ' · ' + summary)),
@@ -3176,7 +3251,8 @@
       h('div', { class: 'job-bar', 'aria-hidden': 'true' }, h('i', { style: 'width:' + pct + '%' })),
       h('ul', { class: 'job-items' }, job.items.map((i) => h('li', { class: 'job-item ' + i.status, title: i.detail || '' },
         h('span', { class: 'job-dot', 'aria-hidden': 'true' }), h('a', { href: '#/members/' + i.user_id + '/analysis' }, i.name),
-        h('small', null, ({ queued: 'waiting', running: 'analysing', done: 'done', skipped: 'skipped', failed: 'failed', cancelled: 'cancelled' })[i.status] || i.status)))));
+        h('small', null, [({ queued: 'waiting', running: 'analysing', done: 'analysed', skipped: 'recent', failed: 'failed', cancelled: 'cancelled' })[i.status] || i.status,
+          i.note ? ' · ' + (({ filled: 'note filled', refilled: 'note refilled', kept: 'note kept', empty: 'nothing to fill' })[i.note] || 'note failed') : ''].join(''))))));
   }
 
   function activeSection() {
@@ -3185,7 +3261,8 @@
     const jobHolder = h('div', null);
     const list = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Ranking members…'));
     const selectedBtn = h('button', { class: 'btn sm', type: 'button', disabled: true }, icon('flask'), 'Analyse selected');
-    const topBtn = h('button', { class: 'btn sm primary', type: 'button' }, icon('zap'), 'Analyse top 20');
+    const topBtn = h('button', { class: 'btn sm primary', type: 'button', disabled: true }, icon('zap'), 'Analyse all active');
+    const tierBar = h('div', { class: 'tier-bar', role: 'radiogroup', 'aria-label': 'Activity tier' });
     const updateSelected = () => {
       selectedBtn.disabled = !st.selected.size;
       selectedBtn.lastChild.textContent = st.selected.size ? 'Analyse selected (' + st.selected.size + ')' : 'Analyse selected';
@@ -3200,12 +3277,55 @@
       if (job) { st.selected.clear(); updateSelected(); watchJob(jobHolder, () => load()); drawList(); }
     };
     selectedBtn.addEventListener('click', () => confirmRun(st.selected.size, { user_ids: [...st.selected] }));
-    topBtn.addEventListener('click', () => confirmRun(20, { top: 20 }));
+    topBtn.addEventListener('click', async () => {
+      const counts = (st.data && st.data.tiers) || { very: 0, fair: 0 };
+      const per = (st.data && st.data.seconds_per_member) || 20;
+      const opts = { fair: true, force: false, fill: true };
+      const estimate = h('p', { class: 'estimate' });
+      const drawEstimate = () => {
+        const n = Math.min(300, counts.very + (opts.fair ? counts.fair : 0));
+        const minutes = Math.max(1, Math.round((n * per) / 60));
+        clear(estimate);
+        append(estimate, [icon('clock'), h('b', null, plural(n, 'member')), ' · about ' + plural(minutes, 'minute') + (opts.force ? '' : ' at most (recent ones are skipped)'),
+          counts.very + counts.fair > 300 && opts.fair ? h('small', null, ' Only the 300 most active are taken.') : null]);
+      };
+      const check = (key, label, help) => {
+        const box = h('input', { type: 'checkbox', checked: opts[key] });
+        box.addEventListener('change', () => { opts[key] = box.checked; drawEstimate(); });
+        return h('label', { class: 'check' }, box, h('span', null, label, h('small', null, help)));
+      };
+      drawEstimate();
+      const ok = await confirmDialog({ title: 'Analyse all active members?', icon: 'flask', confirm: 'Start', wide: true,
+        body: h('div', { class: 'review' },
+          h('p', null, 'The bot’s model reads each member’s last 30 days of stored messages (never #safe-corner or DMs) and their numbers, one member at a time, with a short pause in between.'),
+          check('fair', 'Include fairly active members', plural(counts.fair, 'fairly active member') + ' on top of ' + plural(counts.very, 'very active one') + '.'),
+          check('force', 'Re-analyse ones done in the last day', 'Off skips anyone analysed in the last 24 hours.'),
+          check('fill', 'Fill in their Mods’ notes', 'Writes a note for members who have none (or only an untouched auto-filled one), switched off until you review it. Notes a mod wrote are never changed.'),
+          estimate) });
+      if (!ok) return;
+      const job = await startAnalysis({ tier: opts.fair ? 'fair_and_very' : 'very', force: opts.force, fill_notes: opts.fill });
+      if (job) { watchJob(jobHolder, () => { load(); refreshStatus(); }); drawList(); }
+    });
 
     const load = async () => {
-      try { st.data = await api('GET', '/profiles/active?by=' + st.by + '&limit=50'); }
+      try { st.data = await api('GET', '/profiles/active?by=' + st.by + '&limit=100' + (st.tier === 'all' ? '' : '&tier=' + st.tier)); }
       catch (e) { clear(list).appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); return; }
+      drawTiers();
       drawList();
+    };
+    const drawTiers = () => {
+      const c = st.data.tiers;
+      const all = c.very + c.fair + c.less;
+      const active = Math.min(300, c.very + c.fair);
+      topBtn.disabled = !active;
+      topBtn.lastChild.textContent = 'Analyse all active (' + active + ')';
+      clear(tierBar);
+      [['all', 'All', all], ['very', 'Very active', c.very], ['fair', 'Fairly active', c.fair], ['less', 'Less active', c.less]].forEach(([key, label, n]) => {
+        tierBar.appendChild(h('button', { type: 'button', role: 'radio', class: 'tier-chip tier-' + key, 'aria-checked': st.tier === key ? 'true' : 'false',
+          onclick: () => { if (st.tier === key) return; st.tier = key; st.limit = 20; load(); } }, key === 'all' ? null : h('i', { 'aria-hidden': 'true' }), label, h('b', null, n)));
+      });
+      const t = st.data.thresholds;
+      tierBar.appendChild(h('a', { class: 'tier-rule', href: '#/s/members', 'data-tip': 'Very active: ' + t.very_messages + ' messages, ' + t.very_voice_minutes + ' voice minutes or ' + t.very_points + ' game points. Fairly active: ' + t.fair_messages + ', ' + t.fair_voice_minutes + ' or ' + t.fair_points + '. Any one is enough.' }, icon('sliders'), 'Tier bars'));
     };
     const drawList = () => {
       clear(list);
@@ -3226,6 +3346,7 @@
           h('div', { class: 'sr-who' }, avatar(r.avatar, r.name || '?', 'lg'),
             h('div', { style: 'min-width:0' }, h('a', { class: 'sr-name', href: '#/members/' + r.id }, r.name || 'Former member'),
               h('span', { class: 'active-tags' }, r.house ? h('span', { class: 'house-chip', style: '--house:' + r.house.colour }, r.house.crest + ' ' + r.house.name) : null,
+                h('span', { class: 'badge tier-badge tier-' + r.tier }, TIER_LABEL[r.tier]),
                 r.muggle ? h('span', { class: 'badge paused' }, 'Muggle') : null))),
           metric(r.messages, mm, numberFmt.format(r.messages) + ' msgs', 1, 'chat'),
           metric(r.voice_min, mv, duration(r.voice_min * 60), 2, 'voice'),
@@ -3236,7 +3357,7 @@
         h('span', null, h('i', { style: 'background:var(--s1)' }), 'Chat'), h('span', null, h('i', { style: 'background:var(--s2)' }), 'Voice'),
         h('span', null, h('i', { style: 'background:var(--s3)' }), 'Game points'), h('span', null, 'Analysis')));
       list.appendChild(table);
-      if (st.data.rows.length > st.limit) list.appendChild(h('div', { class: 'more-row' }, h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { st.limit = 50; drawList(); } }, 'Show top ' + Math.min(50, st.data.rows.length))));
+      if (st.data.rows.length > st.limit) list.appendChild(h('div', { class: 'more-row' }, h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { st.limit = 100; drawList(); } }, 'Show ' + (st.data.total > 100 ? 'the top 100 of ' + st.data.total : 'all ' + st.data.total))));
     };
 
     append(wrap, [
@@ -3245,7 +3366,8 @@
         h('div', { class: 'active-toolbar' },
           segmented([['overall', 'Overall'], ['chat', 'Chat'], ['voice', 'Voice'], ['games', 'Games']], st.by, 'Rank by', (v) => { st.by = v; st.data = null; clear(list).appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Ranking members…')); load(); }),
           h('span', { class: 'grow' }), selectedBtn, topBtn),
-        h('p', { class: 'active-explain' }, icon('info'), h('span', null, h('b', null, 'Overall'), ' is the average of each member’s share of all messages, all voice time and all game points on the server in the last 30 days, so being big in one counts as much as being steady in all three. Bots are left out; mods’ and weekly awards don’t count as game points.')),
+        tierBar,
+        h('p', { class: 'active-explain' }, icon('info'), h('span', null, h('b', null, 'Overall'), ' is the average of each member’s share of all messages, all voice time and all game points on the server in the last 30 days, so being big in one counts as much as being steady in all three. Tiers need any one of their bars. Bots are left out; mods’ and weekly awards don’t count as game points.')),
         jobHolder, list),
     ]);
     updateSelected();

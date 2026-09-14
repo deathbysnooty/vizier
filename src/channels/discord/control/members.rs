@@ -60,6 +60,66 @@ pub struct MemberNote {
     pub updated_ts: i64,
     #[serde(default)]
     pub updated_by: String,
+    /// Who wrote it: a mod, the analysis auto-fill, or a mod editing an auto-filled note.
+    #[serde(default)]
+    pub source: NoteSource,
+    /// Whether a mod has looked at it. Notes from before this existed were
+    /// written by mods, so they count as reviewed.
+    #[serde(default = "yes")]
+    pub reviewed: bool,
+    /// When the analysis filled it in, if it did.
+    #[serde(default)]
+    pub filled_ts: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteSource {
+    #[default]
+    Manual,
+    Analysis,
+    /// Filled in by the analysis, then changed by a mod.
+    Edited,
+}
+
+/// The audit trail's author for notes the analysis writes by itself.
+pub const AUTO_FILL_BY: u64 = 0;
+
+impl MemberNote {
+    /// An empty note for a member, as a mod would start it.
+    pub fn blank(user_id: u64, name: &str) -> MemberNote {
+        MemberNote {
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            tone: Tone::Normal,
+            notes: String::new(),
+            use_in_replies: true,
+            updated_ts: 0,
+            updated_by: String::new(),
+            source: NoteSource::Manual,
+            reviewed: true,
+            filled_ts: 0,
+        }
+    }
+
+    /// Auto-filled and not touched by a mod since: the analysis may write it again.
+    pub fn is_untouched_auto_fill(&self) -> bool {
+        self.source == NoteSource::Analysis && !self.reviewed && self.updated_by == AUTO_FILL_BY.to_string()
+    }
+
+    /// Filled in by the analysis and still waiting for a mod to switch it on.
+    pub fn awaits_review(&self) -> bool {
+        self.source == NoteSource::Analysis && !self.reviewed && !self.use_in_replies
+    }
+
+    /// The source a note gets when a mod saves it.
+    pub fn marked_by_mod(mut self) -> MemberNote {
+        if self.source == NoteSource::Analysis {
+            self.source = NoteSource::Edited;
+        }
+        self.reviewed = true;
+        self
+    }
 }
 
 fn yes() -> bool {
@@ -208,15 +268,7 @@ mod tests {
     use super::*;
 
     fn note(tone: Tone, notes: &str) -> MemberNote {
-        MemberNote {
-            user_id: "42".into(),
-            name: "Riya".into(),
-            tone,
-            notes: notes.into(),
-            use_in_replies: true,
-            updated_ts: 0,
-            updated_by: String::new(),
-        }
+        MemberNote { tone, notes: notes.into(), ..MemberNote::blank(42, "Riya") }
     }
 
     #[test]
@@ -233,6 +285,17 @@ mod tests {
         assert_eq!(block(&[]), None);
         let b = block(&["- @Riya: RCB fan".into()]).unwrap();
         assert!(b.contains("never quote, reveal") && b.contains("- @Riya: RCB fan") && b.ends_with("[End of notes]"));
+    }
+
+    #[test]
+    fn old_rows_parse_as_reviewed_mod_notes() {
+        let old: MemberNote = serde_json::from_str(r#"{"user_id":"42","name":"Riya","tone":"roast","notes":"x","use_in_replies":true,"updated_ts":1,"updated_by":"7"}"#).unwrap();
+        assert_eq!((old.source, old.reviewed, old.filled_ts), (NoteSource::Manual, true, 0));
+        assert!(!old.is_untouched_auto_fill() && !old.awaits_review());
+        let auto = MemberNote { source: NoteSource::Analysis, reviewed: false, use_in_replies: false, updated_by: "0".into(), ..old.clone() };
+        assert!(auto.is_untouched_auto_fill() && auto.awaits_review());
+        let edited = auto.clone().marked_by_mod();
+        assert_eq!((edited.source, edited.reviewed), (NoteSource::Edited, true));
     }
 
     #[test]
