@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.3] - 2026-09-14
+
+### 💼 Other
+
+- 30-day most-active ranking and editable AI analyses of members
 ## [0.11.2] - 2026-09-14
 
 ### 💼 Other
 
 - Keep the royale lobby card at the bottom while it is open
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.2
 ## [0.11.1] - 2026-09-14
 
 ### 💼 Other
