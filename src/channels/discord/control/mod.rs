@@ -12,6 +12,7 @@
 
 pub mod autoreplies;
 pub mod catalog;
+pub mod help;
 pub mod insights;
 pub mod members;
 pub mod profiles;

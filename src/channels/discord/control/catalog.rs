@@ -124,7 +124,8 @@ pub fn sections() -> Vec<Section> {
                 "",
             )],
             commands: vec![
-                command("help", EVERYONE, "/help", "Explains what the bot does and lists the chat commands. Only the asker sees it."),
+                command("help", EVERYONE, "/help topic:", "Every command you can use, by area; pick a topic for the details. Only the asker sees it."),
+                command("ping", EVERYONE, "/ping", "Replies Pong, to check the bot is alive."),
                 command("new", EVERYONE, "/new", "Starts a fresh conversation in this channel; the bot forgets the current thread."),
                 command(
                     "session",
@@ -152,7 +153,7 @@ pub fn sections() -> Vec<Section> {
                 command("stop", ADMINS, "/stop", "Pauses the bot everywhere until /resume: it reads, stores and answers nothing. The quiz holds its place."),
                 command("resume", ADMINS, "/resume", "Brings the bot back after /stop."),
                 command("adminonly", ADMINS, "/adminonly", "Turns admin-only mode on or off: the bot answers admins and quietly reads everyone else."),
-                command("ping", EVERYONE, "/ping", "Replies Pong, to check the bot is alive."),
+                command("panel", ADMINS, "/panel", "Sends you a private one-time link to the web control panel (valid 10 minutes, keeps you signed in for 7 days)."),
             ],
         },
         Section {

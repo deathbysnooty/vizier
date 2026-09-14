@@ -1229,7 +1229,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), admin_only).await;
 
         // Upstream handles /help but never registers it, so it never appears.
-        let help = CreateCommand::new("help").description("what I do and how to use me");
+        let help = control::help::builder();
         let _ = Command::create_global_command(ctx.http.clone(), help).await;
 
         let letter = CreateCommand::new("letter")
@@ -2395,40 +2395,7 @@ impl EventHandler for Handler {
             }
 
             if command.data.name == "help" {
-                if let Err(err) = command
-                    .create_response(
-                        ctx.http.clone(),
-                        serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new().ephemeral(true).content(
-                                r#"**Loduchand** — MLCI ka apna bot.
-
-Mujhe channel mein @mention karo, tabhi reply karunga. Baaki time bas padhta rehta hoon.
-DM ka jawab nahi deta — sab kuch yahin server mein.
-
-**Commands**
-• `/help` — yehi message
-• `/new` — nayi baat, purani bhool jaunga
-• `/session` — purani conversations dekho ya switch karo
-• `/abort` — bahut der laga raha hoon toh rok do
-• `/checkpoint` — ab tak ka summary save karo
-• `/lobotomy` — sab bhula ke clean start
-• `/thinking` — meri soch dikhaun ya nahi
-• `/tool_calls` — background actions dikhaun ya nahi
-
-**Sirf admins ke liye**
-• `/stop` — mujhe chup kara do
-• `/resume` — wapas online
-• `/adminonly` — sirf admins se baat karun
-
-Main galat bhi ho sakta hoon — check kar lena. Web browse nahi kar sakta, links nahi khol sakta, images nahi dekh sakta.
-Ye message sirf tumhe dikh raha hai."#,
-                            ),
-                        ),
-                    )
-                    .await
-                {
-                    tracing::error!("{}", err)
-                }
+                control::help::command(&ctx, &command).await;
             }
 
             if command.data.name == "abort" {
