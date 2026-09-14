@@ -105,6 +105,7 @@
     upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
     send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
+    door: '<path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><path d="M14.5 12.5h.01"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   };
 
@@ -362,6 +363,7 @@
     roles: [],
     reminders: [],
     rules: [],
+    welcomes: null, // special welcomes: { items, enabled, welcome_channel, ... }
     emojis: null,
     media: null, // the picture library, loaded when a page needs it
     templates: null,
@@ -397,6 +399,7 @@
       api('GET', '/discord/roles'), api('GET', '/reminders'), api('GET', '/audit?limit=300'),
     ]);
     S.rules = await api('GET', '/autoreplies').catch(() => []);
+    S.welcomes = await api('GET', '/welcomes').catch(() => null);
     S.me = me;
     S.status = status;
     S.statusAt = Date.now();
@@ -553,6 +556,7 @@
     const count = (on, all) => (all ? h('span', { class: 'nav-count', 'aria-label': on + ' of ' + all + ' on' }, on + '/' + all) : null);
     nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Manage'),
       navItem('#/reminders', icon('bell'), 'Reminders', count(active, S.reminders.length)),
+      navItem('#/welcomes', icon('door'), 'Welcomes', S.welcomes && S.welcomes.active ? h('span', { class: 'nav-count', 'aria-label': plural(S.welcomes.active, 'welcome') + ' waiting', 'data-tip': 'Waiting for their member' }, String(S.welcomes.active)) : null),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/insights', icon('spark'), 'Insights'),
@@ -593,6 +597,7 @@
     const pages = [
       ['Overview', '#/', 'overview', 'Status, switches and recent changes'],
       ['Reminders', '#/reminders', 'bell', 'Scheduled messages'],
+      ['Welcomes', '#/welcomes', 'door', 'A special message when a particular member joins'],
       ['Auto-responses', '#/autoreplies', 'reply', 'Answer or react to set words'],
       ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
@@ -610,6 +615,7 @@
       sec.commands.forEach((c) => items.push({ kind: 'Commands', title: '/' + c.name, sub: c.what, href: '#/commands?q=' + encodeURIComponent(c.name), lead: icon('slash'), hint: c.who, hay: c.name + ' ' + c.what + ' ' + c.usage + ' ' + sec.title }));
     });
     S.reminders.forEach((r) => items.push({ kind: 'Reminders', title: r.name, sub: scheduleWords(r.schedule), href: '#/reminders/' + r.id, lead: icon('bell'), hay: r.name + ' ' + r.lines.join(' ') }));
+    ((S.welcomes && S.welcomes.items) || []).forEach((w) => items.push({ kind: 'Welcomes', title: 'Welcome for ' + welcomeName(w), sub: w.lines[0] || '', href: '#/welcomes/' + w.id, lead: icon('door'), hay: welcomeName(w) + ' ' + w.user_id + ' ' + w.lines.join(' ') + ' ' + (w.note || '') }));
     S.rules.forEach((r) => items.push({ kind: 'Auto-responses', title: r.name, sub: r.triggers.join(', '), href: '#/autoreplies/' + r.id, lead: icon('reply'), hay: r.name + ' ' + r.triggers.join(' ') + ' ' + r.replies.join(' ') }));
     return items;
   }
@@ -640,7 +646,7 @@
     input.addEventListener('input', () => {
       const q = input.value.trim().toLowerCase();
       const words = q.split(/\s+/).filter(Boolean);
-      const order = ['Pages', 'Features', 'Settings', 'Commands', 'Reminders', 'Auto-responses'];
+      const order = ['Pages', 'Features', 'Settings', 'Commands', 'Reminders', 'Welcomes', 'Auto-responses'];
       found = searchIndex().map((it) => {
         const hay = it.hay.toLowerCase(), title = it.title.toLowerCase();
         if (!words.every((w) => hay.includes(w))) return null;
@@ -725,6 +731,7 @@
     switch (r.name) {
       case 'section': renderSection(page, r.parts[1], r.q.get('k')); break;
       case 'reminders': if (r.parts[1] === 'members') renderMemos(page); else { renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1], r.q); } break;
+      case 'welcomes': renderWelcomes(page); if (r.parts[1]) openWelcomeEditor(r.parts[1]); break;
       case 'autoreplies': renderRules(page); if (r.parts[1]) openRuleEditor(r.parts[1]); break;
       case 'houses': if (r.parts[1] === 'scorers') renderScorers(page); else renderHouses(page); break;
       case 'members': if (r.parts[1]) renderProfile(page, r.parts[1], r.parts[2]); else renderMembers(page); break;
@@ -1383,6 +1390,7 @@
       secSel.appendChild(h('option', { value: '' }, 'All features'));
       S.sections.forEach((s) => secSel.appendChild(h('option', { value: s.id, selected: s.id === section }, s.icon + '  ' + s.title)));
       secSel.appendChild(h('option', { value: 'reminders', selected: section === 'reminders' }, '⏰  Reminders'));
+      secSel.appendChild(h('option', { value: 'welcomes', selected: section === 'welcomes' }, '👋  Welcomes'));
       if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
       secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
       if (!sectionById('members')) secSel.appendChild(h('option', { value: 'members', selected: section === 'members' }, '👤  Members'));
@@ -2388,6 +2396,434 @@
     Promise.all([loadPlaceholders(), loadMedia(), d.reactions.length ? loadEmojis() : null]).then(() => { if (body.isConnected) draw(); });
   }
 
+  // --- special welcomes ------------------------------------------------------------------
+
+  const WELCOME_PLACEHOLDERS = [
+    ['{mention}', 'Mentions them (pings them when “Ping them” is on)'], ['{name}', 'Their name'], ['{n}', 'Which join this is, like 3rd'],
+    ['{away}', 'How long they were gone, like 7 days'], ['{days}', 'Days since they left'], ['{hours}', 'Hours since they left'],
+  ];
+  const WELCOME_FIELDS = ['user_id', 'user_name', 'channel_id', 'lines', 'also_ping', 'ping_member', 'mode', 'replace_normal', 'enabled', 'note'];
+  /** "12 Sep", built by hand: browsers disagree on "Sep" and "Sept". */
+  const dayMonth = (ts) => istParts(ts * 1000, { day: 'numeric' }) + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+istParts(ts * 1000, { month: 'numeric' }) - 1];
+
+  async function loadWelcomes() {
+    try { S.welcomes = await api('GET', '/welcomes'); } catch (e) { if (!S.welcomes) throw e; }
+    return S.welcomes;
+  }
+
+  function welcomeName(w) { return (w.member && w.member.name) || w.user_name || 'Member ' + w.user_id; }
+
+  /** [text, badge class, live dot]. */
+  function welcomeStatus(w) {
+    const last = w.last_fired_ts ? dayMonth(w.last_fired_ts) : '';
+    if (w.enabled && w.fired_count) return ['Welcomed ' + last, 'on', true];
+    if (w.enabled) return ['Waiting for them', 'waiting', true];
+    if (w.fired_count) return ['Welcomed ' + last, 'on', false];
+    return ['Off', 'paused', false];
+  }
+
+  /** Names for the `<@id>` in a welcome: the member and whoever it also pings. */
+  function welcomeNames(w) {
+    const names = {};
+    (w.also || []).forEach((p) => { if (p.name) names[p.id] = p.name; });
+    names[w.user_id] = welcomeName(w);
+    return names;
+  }
+
+  /** A line as written: placeholders marked, `<@id>` as the person's name. */
+  function welcomeTemplated(line, names) {
+    return String(line).replace(/\*\*/g, '').split(/(\{(?:mention|name|n|away|days|hours)\}|<@!?\d+>)/g).map((part, i) => {
+      if (!(i % 2)) return part;
+      const m = /^<@!?(\d+)>$/.exec(part);
+      return m ? h('span', { class: 'quote-mention' }, '@' + (names[m[1]] || 'someone')) : h('span', { class: 'ph-inline' }, part);
+    });
+  }
+
+  /** Posted text as Discord shows it: mentions by name, **bold**. */
+  function mentionParts(text, names) {
+    return discordMarkup(String(text).split(/(<@!?\d+>)/g).map((part, i) => {
+      if (!(i % 2)) return part;
+      const id = /\d+/.exec(part)[0];
+      return h('span', { class: 'mention' }, '@' + (names[id] || 'unknown-user'));
+    }));
+  }
+
+  function renderWelcomes(page) {
+    document.title = 'Welcomes · Loduchand';
+    page.appendChild(pageHead('Welcomes', 'A message of your own that Loduchand posts the moment a particular member joins the server. Use it for someone you’re waiting on to come back.',
+      h('button', { class: 'btn primary', type: 'button', onclick: () => navigate('#/welcomes/new') }, icon('plus'), 'New welcome')));
+    const banner = h('div');
+    const grid = h('div', { class: 'reminders welcomes' });
+    page.appendChild(banner);
+    page.appendChild(grid);
+    const draw = () => {
+      clear(banner);
+      clear(grid);
+      const data = S.welcomes;
+      if (!data) { grid.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading welcomes…')); return; }
+      const link = h('a', { href: '#/s/welcome?k=VIZIER_SPECIAL_WELCOMES' }, 'Special welcomes');
+      if (!data.enabled) banner.appendChild(h('div', { class: 'memo-note is-off' }, icon('pause'), h('p', null, h('b', null, 'Special welcomes are switched off, so none of these post. '), 'Switch ', link, ' back on under Welcome & join history.')));
+      else if (!data.welcome_channel) banner.appendChild(h('div', { class: 'memo-note is-off' }, icon('alert'), h('p', null, h('b', null, 'No welcome channel is set. '), 'Each welcome needs its own channel until one is.')));
+      if (!data.items.length) {
+        grid.appendChild(h('div', { class: 'welcome-empty' },
+          h('span', { class: 'welcome-empty-icon', 'aria-hidden': 'true' }, '👋'),
+          h('h3', null, 'No special welcomes yet'),
+          h('p', null, 'Waiting on someone to come back? Write them a welcome here. Loduchand posts it the moment they join, pings the people who missed them, and switches it off once it’s gone out. It works for first-timers too.'),
+          h('button', { class: 'btn primary', type: 'button', onclick: () => navigate('#/welcomes/new') }, icon('plus'), 'New welcome')));
+        return;
+      }
+      data.items.forEach((w) => grid.appendChild(welcomeCard(w, data)));
+      if (data.items.length < data.max) grid.appendChild(h('button', { class: 'new-card', type: 'button', onclick: () => navigate('#/welcomes/new') }, icon('plus'), 'New welcome', h('small', null, 'For someone you’re waiting on')));
+    };
+    draw();
+    loadWelcomes().then(() => { if (grid.isConnected) { draw(); renderSidebar(); } }).catch((e) => { if (grid.isConnected) { clear(grid); grid.appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); } });
+  }
+
+  function welcomeCard(w, data) {
+    const name = welcomeName(w);
+    const m = w.member || {};
+    const [statusText, statusCls, live] = welcomeStatus(w);
+    const names = welcomeNames(w);
+    const el = h('article', { class: 'reminder welcome-card' + (w.enabled ? '' : ' is-off'), 'aria-label': 'Welcome for ' + name });
+    el.appendChild(h('div', { class: 'reminder-head' },
+      h('a', { class: 'welcome-avatar', href: m.in_server ? '#/members/' + w.user_id : '#/welcomes/' + w.id, tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.avatar, name, 'lg')),
+      h('div', { class: 'grow' }, h('h3', null, name, h('span', { class: 'welcome-id mono', title: 'Discord ID' }, w.user_id)),
+        h('div', { class: 'sub' },
+          h('span', { class: 'badge ' + statusCls }, live ? h('span', { class: 'dot' }) : null, statusText),
+          h('span', { class: 'badge kind' }, icon(w.mode === 'every' ? 'repeat' : 'check'), w.mode === 'every' ? 'Every time' : 'Once')))));
+    const facts = h('ul', { class: 'reminder-facts' });
+    const ch = w.channel;
+    facts.appendChild(h('li', null, icon('hash'), ch ? h('span', null, channelRef(ch.id, { bare: true }), ch.default ? h('span', { style: 'color:var(--faint)' }, ' · welcome channel') : null)
+      : h('span', { class: 'warn-text' }, 'No channel: set a welcome channel')));
+    const also = w.also || [];
+    facts.appendChild(h('li', null, icon('bell'), h('span', null,
+      also.length ? h('span', { class: 'avatar-stack' }, also.slice(0, 4).map((p) => avatar(p.avatar, p.name || p.id, 'xs'))) : null,
+      w.ping_member ? 'Pings ' + (also.length ? 'them' : 'only them') : 'Doesn’t ping them',
+      also.length ? (w.ping_member ? ' and ' : ' · pings ') + also.slice(0, 2).map((p) => p.name || 'someone').join(', ') + (also.length > 2 ? ' +' + (also.length - 2) : '') : '')));
+    facts.appendChild(h('li', null, icon('message'), h('span', null, w.replace_normal ? 'Instead of the usual welcome' : 'Under the usual welcome')));
+    if (w.fired_count) facts.appendChild(h('li', null, icon('clock'), h('span', { title: fmtFull.format(new Date(w.last_fired_ts * 1000)) + ' IST' }, 'Welcomed ' + plural(w.fired_count, 'time') + ' · last ' + ago(w.last_fired_ts))));
+    else if (w.enabled && m.in_server) facts.appendChild(h('li', null, icon('user'), h('span', null, 'In the server now · posts when they next join')));
+    el.appendChild(facts);
+    if (w.lines[0]) el.appendChild(h('p', { class: 'reminder-quote', title: w.lines[0] }, welcomeTemplated(w.lines[0].split('\n')[0], names)));
+    if (w.note) el.appendChild(h('p', { class: 'welcome-note', title: w.note }, w.note));
+    el.appendChild(h('div', { class: 'reminder-foot' },
+      h('span', { class: 'grow' }, plural(w.lines.length, 'version') + ' · added ' + ago(w.created_ts)),
+      h('a', { class: 'btn sm', href: '#/welcomes/' + w.id }, icon('edit'), 'Edit')));
+    return el;
+  }
+
+  async function openWelcomeEditor(which) {
+    if (!S.welcomes) { try { await loadWelcomes(); } catch (e) { toast(e.message, 'error'); return; } }
+    if (!location.hash.startsWith('#/welcomes/')) return;
+    const data = S.welcomes;
+    const existing = which === 'new' ? null : data.items.find((w) => String(w.id) === String(which));
+    if (which !== 'new' && !existing) { toast('That welcome no longer exists', 'error'); history.replaceState(null, '', '#/welcomes'); currentHash = '#/welcomes'; return; }
+    const d = { user_id: '', user_name: '', channel_id: '', lines: [''], also_ping: [], ping_member: true, mode: 'once', replace_normal: true, enabled: true, note: '' };
+    if (existing) WELCOME_FIELDS.forEach((k) => { d[k] = JSON.parse(JSON.stringify(existing[k])); });
+    if (!d.lines.length) d.lines = [''];
+    const original = JSON.stringify(d);
+    // Who it's for: { id, name, username, avatar, in_server, found }, or a lookup in flight.
+    let person = existing ? Object.assign({ found: !!existing.member.known }, existing.member) : null;
+    let looking = false;
+    let lookupError = '';
+    let idDraft = '';
+    const people = new Map();
+    if (existing) (existing.also || []).forEach((p) => people.set(p.id, p));
+    let result = null;
+    let previewIndex = 0;
+    let testing = false;
+    let lastFocused = null;
+    let seq = 0;
+
+    const dirty = () => JSON.stringify(d) !== original;
+    const sub = existing
+      ? (existing.fired_count ? 'Welcomed ' + plural(existing.fired_count, 'time') + ', last ' + ago(existing.last_fired_ts) + (existing.enabled ? '' : ' · switch it on to welcome them again') : existing.enabled ? 'Waiting for ' + welcomeName(existing) + ' to join' : 'Switched off')
+      : 'Posts the moment this member joins the server';
+    const testBtn = existing ? h('button', { class: 'btn', type: 'button', onclick: () => sendTest() }, icon('send'), h('span', { class: 'hide-sm' }, 'Send a test now'), h('span', { class: 'show-sm' }, 'Test')) : null;
+    const dr = openDrawer({
+      title: existing ? 'Welcome for ' + welcomeName(existing) : 'New welcome', sub, returnHash: '#/welcomes',
+      saveLabel: existing ? 'Save changes' : 'Create welcome', isDirty: dirty, footExtra: testBtn,
+      onDelete: existing ? () => remove() : null,
+      onSave: async (btn) => {
+        const problem = localCheck();
+        if (problem) { toast(problem, 'error'); return; }
+        btn.disabled = true;
+        const payload = Object.assign({}, d, { lines: d.lines.filter((l) => l.trim()) });
+        try {
+          const saved = existing ? await api('PUT', '/welcomes/' + existing.id, payload) : await api('POST', '/welcomes', payload);
+          dr.finish();
+          await loadWelcomes().catch(() => null);
+          rerender();
+          toast(existing ? 'Saved the welcome for ' + welcomeName(saved) : 'Welcome for ' + welcomeName(saved) + ' is ' + (saved.enabled ? 'waiting for them' : 'saved, switched off'));
+          refreshAudit();
+        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      },
+    });
+    const body = dr.body;
+    body.classList.add('welcome-editor');
+
+    function localCheck() {
+      if (!d.user_id) return 'Pick the member to welcome, or paste their Discord ID.';
+      if (person && !person.found && !d.user_name.trim()) return 'Type a name for them: Discord doesn’t know this ID.';
+      if (!d.lines.some((l) => l.trim())) return 'Write the message to post when they join.';
+      if (d.lines.some((l) => l.length > 1500)) return 'A message is longer than 1500 characters.';
+      if (!d.channel_id && !data.welcome_channel) return 'Pick a channel: no welcome channel is set.';
+      return null;
+    }
+
+    async function remove() {
+      const ok = await confirmDialog({ title: 'Delete the welcome for ' + welcomeName(existing) + '?', icon: 'trash', danger: true, body: 'Nothing will be posted when they join, apart from the usual welcome. To keep it for later, switch it off instead.', confirm: 'Delete welcome' });
+      if (!ok) return;
+      try {
+        await api('DELETE', '/welcomes/' + existing.id);
+        dr.finish();
+        await loadWelcomes().catch(() => null);
+        rerender();
+        toast('Deleted the welcome for ' + welcomeName(existing));
+        refreshAudit();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+
+    async function sendTest() {
+      if (testing) return;
+      const c = existing.channel ? chan(existing.channel.id) : null;
+      const ok = await confirmDialog({ title: 'Send a test now?', icon: 'send', confirm: 'Send test',
+        body: h('div', null,
+          h('p', null, 'Loduchand posts one of the versions in ', h('b', null, c ? '#' + c.name : 'its channel'), ', starting with “(test)”. ', h('b', null, 'Nobody is pinged'), ', not even the people it mentions.'),
+          h('p', null, 'It doesn’t count as their welcome: it still waits for them to join.'),
+          dirty() ? h('p', { class: 'error-text' }, icon('alert'), 'Your unsaved changes aren’t in it. Save first to test them.') : null) });
+      if (!ok) return;
+      testing = true;
+      try { await api('POST', '/welcomes/' + existing.id + '/test'); toast('Test posted in ' + (c ? '#' + c.name : 'the channel')); }
+      catch (e) { toast(e.message, 'error'); }
+      testing = false;
+    }
+
+    // --- preview ---
+    const preview = h('div', { class: 'welcome-preview' });
+    const refresh = async () => {
+      const mine = ++seq;
+      const lines = d.lines.map((l) => l);
+      try {
+        const res = await api('POST', '/welcomes/preview', { user_id: d.user_id, user_name: d.user_name, lines, ping_member: d.ping_member, also_ping: d.also_ping });
+        if (mine !== seq) return;
+        result = res;
+      } catch (_) { if (mine !== seq) return; result = null; }
+      drawPreview();
+    };
+    let timer = null;
+    const soon = () => { clearTimeout(timer); timer = setTimeout(refresh, 220); };
+    const drawPreview = () => {
+      clear(preview);
+      const filled = d.lines.map((l, i) => ({ l, i })).filter((x) => x.l.trim());
+      const at = filled.findIndex((x) => x.i === previewIndex);
+      const idx = at >= 0 ? at : 0;
+      const shown = filled[idx];
+      const names = Object.assign({}, (result && result.names) || {});
+      people.forEach((p, id) => { if (!names[id] && p.name) names[id] = p.name; });
+      const who = (result && result.name) || d.user_name || (person && person.name) || 'them';
+      if (d.user_id) names[d.user_id] = who;
+      const c = d.channel_id ? chan(d.channel_id) : data.welcome_channel ? chan(data.welcome_channel.id) : null;
+      const text = shown && result && typeof result.items[shown.i] === 'string' ? result.items[shown.i] : null;
+      append(preview, [
+        h('div', { class: 'preview-tools' }, h('span', null, c ? '#' + c.name : 'No channel yet'), h('span', { class: 'grow' }),
+          filled.length > 1 ? [
+            h('span', null, 'Version ' + (idx + 1) + ' of ' + filled.length),
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Previous version', onclick: () => { previewIndex = filled[(idx - 1 + filled.length) % filled.length].i; drawPreview(); } }, icon('up')),
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Next version', onclick: () => { previewIndex = filled[(idx + 1) % filled.length].i; drawPreview(); } }, icon('down')),
+          ] : null),
+        h('div', { class: 'preview' },
+          !d.replace_normal ? h('div', { class: 'msg-usual' }, postMessage({ text: ['Loduchand’s usual welcome line for ', h('span', { class: 'mention' }, '@' + who), ' goes here.'], time: 'When they join' })) : null,
+          text !== null ? postMessage({ text: mentionParts(text, names), time: 'When they join' })
+            : h('p', { style: 'color:#949ba4;margin:0' }, shown ? 'Filling it in…' : 'Write the message to see it here.')),
+      ]);
+      if (result) {
+        const f = result.facts;
+        preview.appendChild(h('p', { class: 'next-note' }, icon('info'), h('span', null, f.from_log
+          ? ['If they joined now: ', h('code', null, '{n}'), ' is ' + f.n + ' and ', h('code', null, '{away}'), ' is ' + f.away + ', from their join history.']
+          : ['No join history for them yet, so ', h('code', null, '{n}'), ' reads ' + f.n + ' and ', h('code', null, '{away}'), ' reads “' + f.away + '”.'])));
+        const missing = (result.unpinged || []).filter((id) => id !== d.user_id);
+        if (missing.length) {
+          preview.appendChild(h('div', { class: 'welcome-warn' }, icon('alert'),
+            h('span', null, missing.map((id) => '@' + (names[id] || id)).join(', ') + (missing.length === 1 ? ' is' : ' are') + ' mentioned but won’t be pinged.'),
+            d.also_ping.length + missing.length <= 10 ? h('button', { class: 'btn sm', type: 'button', onclick: () => { missing.forEach((id) => { if (!d.also_ping.includes(id)) d.also_ping.push(id); }); draw(); } }, icon('plus'), 'Ping them too') : null));
+        }
+        if (d.user_id && !d.ping_member && (result.items || []).some((t) => t.includes('<@' + d.user_id + '>'))) {
+          preview.appendChild(h('p', { class: 'hint', style: 'margin:0' }, 'Their mention shows their name without pinging them.'));
+        }
+      }
+    };
+
+    // --- who it's for ---
+    const lookup = async (raw) => {
+      const id = raw.trim();
+      lookupError = '';
+      if (!id) { draw(); return; }
+      if (!/^\d{17,20}$/.test(id)) { lookupError = 'Discord IDs are 17 to 20 digits.'; draw(); return; }
+      looking = true;
+      d.user_id = id;
+      person = null;
+      draw();
+      try {
+        const found = await api('GET', '/welcomes/lookup?id=' + encodeURIComponent(id));
+        if (d.user_id !== id) return;
+        person = Object.assign({ found: true }, found);
+        d.user_name = found.name;
+      } catch (e) {
+        if (d.user_id !== id) return;
+        if (e.status === 404) { person = { found: false, id, name: null }; d.user_name = ''; }
+        else { d.user_id = ''; lookupError = e.message; }
+      }
+      looking = false;
+      draw();
+      if (person && !person.found) { const n = body.querySelector('#w-name'); if (n) n.focus(); }
+    };
+
+    const field = (label, control, hint, id) => h('div', null, h('label', { class: 'label', for: id || null }, label), control, hint ? h('div', { class: 'hint' }, hint) : null);
+
+    const draw = () => {
+      const scroll = body.scrollTop;
+      clear(body);
+
+      // member
+      const enabled = switchEl(d.enabled, 'Welcome on', (on, btn) => { d.enabled = on; btn.set(on); });
+      const memberCard = h('section', { class: 'form-card' }, h('h3', null, icon('user'), 'Member', h('span', { class: 'right' }, enabled)));
+      const clash = person && person.welcome_id && (!existing || person.welcome_id !== existing.id) ? data.items.find((w) => w.id === person.welcome_id) : null;
+      if (d.user_id) {
+        const p = person || { id: d.user_id };
+        const tag = looking ? h('span', { class: 'badge' }, h('span', { class: 'spinner' }), 'Looking up…')
+          : !p.found ? h('span', { class: 'badge failed' }, 'Unknown to Discord')
+            : p.in_server === true ? h('span', { class: 'badge on' }, 'In the server') : p.in_server === false ? h('span', { class: 'badge waiting' }, 'Not in the server') : null;
+        memberCard.appendChild(h('div', { class: 'person-row' },
+          looking ? h('span', { class: 'avatar lg' }, h('span', { class: 'spinner' })) : avatar(p.avatar, p.name || d.user_name || '?', 'lg'),
+          h('div', { class: 'grow' }, h('b', null, looking ? 'Looking them up…' : p.name || d.user_name || 'Someone Discord doesn’t know'),
+            h('small', null, p.username && p.username !== p.name ? '@' + p.username + ' · ' : '', h('span', { class: 'mono' }, d.user_id))),
+          tag,
+          h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { d.user_id = ''; d.user_name = ''; person = null; idDraft = ''; draw(); soon(); const b = body.querySelector('#w-member'); if (b) b.focus(); } }, 'Change')));
+        if (clash) memberCard.appendChild(h('p', { class: 'welcome-warn' }, icon('alert'), h('span', null, 'There’s already a welcome for them. '), h('a', { href: '#/welcomes/' + clash.id, onclick: (e) => { e.preventDefault(); dr.finish(true); navigate('#/welcomes/' + clash.id); } }, 'Edit that one')));
+        if (person && !person.found && !looking) {
+          const nameIn = h('input', { class: 'input', id: 'w-name', value: d.user_name, maxlength: '100', placeholder: 'e.g. Lucky', autocomplete: 'off' });
+          nameIn.addEventListener('input', () => { d.user_name = nameIn.value; soon(); });
+          memberCard.appendChild(field('Name', nameIn, 'Discord doesn’t know this ID, so the panel can’t name them. This is used for {name}. Check the ID if they should exist.', 'w-name'));
+        }
+      } else {
+        const mBtn = h('button', { class: 'picker-btn', type: 'button', id: 'w-member', 'aria-haspopup': 'listbox' }, icon('search'), h('span', { class: 'value placeholder' }, 'Search current members'), icon('chevron'));
+        mBtn.addEventListener('click', () => openPicker(mBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180, load: memberItems,
+          onPick: async (it) => {
+            d.user_id = it.id; d.user_name = it.member.name;
+            person = { found: true, id: it.id, name: it.member.name, username: it.member.username, avatar: it.member.avatar, in_server: true };
+            const already = data.items.find((w) => w.user_id === it.id && (!existing || w.id !== existing.id));
+            if (already) person.welcome_id = already.id;
+            draw(); soon();
+          } }));
+        const idIn = h('input', { class: 'input mono', id: 'w-id', value: idDraft, placeholder: 'Paste a Discord ID, like 459076776266694670', inputmode: 'numeric', autocomplete: 'off', spellcheck: 'false', maxlength: '24' });
+        let idTimer = null;
+        idIn.addEventListener('input', () => { idDraft = idIn.value.replace(/[^\d]/g, ''); if (idIn.value !== idDraft) idIn.value = idDraft; clearTimeout(idTimer); lookupError = ''; if (idDraft.length >= 17) idTimer = setTimeout(() => lookup(idDraft), 250); });
+        idIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); lookup(idIn.value); } });
+        append(memberCard, [
+          mBtn,
+          h('div', { class: 'or-row', 'aria-hidden': 'true' }, 'or, for someone who isn’t in the server'),
+          h('div', null, idIn, lookupError ? h('div', { class: 'error-text' }, icon('alert'), lookupError)
+            : h('div', { class: 'hint' }, 'In Discord, turn on Developer Mode (Settings › Advanced), then right-click them and Copy User ID.')),
+        ]);
+      }
+      body.appendChild(memberCard);
+
+      // message
+      const lines = h('div', { class: 'lines' });
+      d.lines.forEach((line, i) => {
+        const ta = h('textarea', { class: 'textarea', rows: '2', 'aria-label': 'Version ' + (i + 1), placeholder: i === 0 ? 'e.g. 🎉 {mention} wapas aa gaya! {away} ho gaye the. Welcome home ❤️' : 'Another version', maxlength: '1600' });
+        ta.value = line;
+        const counter = h('div', { class: 'line-count' + (line.length > 1500 ? ' over' : ''), 'aria-live': 'polite' }, line.length > 1200 ? line.length + ' / 1500' : '');
+        const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(240, ta.scrollHeight + 2) + 'px'; };
+        ta.addEventListener('input', () => { d.lines[i] = ta.value; grow(); counter.textContent = ta.value.length > 1200 ? ta.value.length + ' / 1500' : ''; counter.classList.toggle('over', ta.value.length > 1500); previewIndex = i; drawPreview(); soon(); });
+        ta.addEventListener('focus', () => { lastFocused = ta; if (previewIndex !== i) { previewIndex = i; drawPreview(); } });
+        requestAnimationFrame(grow);
+        lines.appendChild(h('div', { class: 'line-row' }, h('span', { class: 'line-n', 'aria-hidden': 'true' }, i + 1),
+          h('div', null, ta, counter),
+          h('div', { class: 'line-tools' },
+            h('button', { class: 'btn sm ghost icon-only', type: 'button', 'aria-label': 'Remove version ' + (i + 1), disabled: d.lines.length === 1, onclick: () => { d.lines.splice(i, 1); previewIndex = 0; draw(); soon(); } }, icon('trash')))));
+      });
+      const insert = (text) => {
+        const ta = lastFocused && lastFocused.isConnected ? lastFocused : body.querySelector('.line-row textarea');
+        if (!ta) return;
+        const at = ta.selectionStart === undefined ? ta.value.length : ta.selectionStart;
+        ta.value = ta.value.slice(0, at) + text + ta.value.slice(ta.selectionEnd || at);
+        ta.dispatchEvent(new Event('input'));
+        ta.focus();
+        ta.selectionStart = ta.selectionEnd = at + text.length;
+      };
+      const someone = h('button', { class: 'ph', type: 'button', onmousedown: (e) => e.preventDefault(), 'data-tip': 'Mention another member, and ping them too' }, '@someone');
+      someone.addEventListener('click', () => openPicker(someone, { title: 'Mention', placeholder: 'Search members by name', debounce: 180, load: memberItems,
+        onPick: (it) => {
+          people.set(it.id, it.member);
+          if (it.id !== d.user_id && !d.also_ping.includes(it.id) && d.also_ping.length < 10) d.also_ping.push(it.id);
+          draw();
+          insert('<@' + it.id + '>');
+        } }));
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('message'), 'Message', h('span', { class: 'right', style: 'color:var(--faint);font-size:12.5px' }, d.lines.length > 1 ? 'one picked at random' : '')),
+        lines,
+        h('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' },
+          h('button', { class: 'btn sm', type: 'button', disabled: d.lines.length >= 10, onclick: () => { d.lines.push(''); draw(); const all = body.querySelectorAll('.line-row textarea'); all[all.length - 1].focus(); } }, icon('plus'), 'Add a version'),
+          h('div', { class: 'placeholders' }, 'Insert:', WELCOME_PLACEHOLDERS.map(([ph, tip]) => h('button', { class: 'ph', type: 'button', onmousedown: (e) => e.preventDefault(), onclick: () => insert(ph), 'data-tip': tip }, ph)), someone)),
+        h('p', { class: 'hint', style: 'margin:0' }, 'Up to 10 versions; one goes out at random. **Bold** works as in Discord.')));
+
+      // preview
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'Preview'), preview));
+
+      // pings
+      const pingSw = switchEl(d.ping_member, 'Ping them', (on, btn) => { d.ping_member = on; btn.set(on); soon(); }, { small: true });
+      const chips = h('div', { class: 'chips' });
+      d.also_ping.forEach((id, i) => {
+        const p = people.get(id);
+        const chip = p ? h('span', { class: 'chip' }, avatar(p.avatar, p.name || id, 'xs'), h('span', { class: 'chip-text' }, p.name || 'Member ' + id),
+          h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Don’t ping ' + (p.name || id), onclick: () => { d.also_ping.splice(i, 1); draw(); soon(); } }, icon('x')))
+          : memberChip(id, () => { d.also_ping.splice(i, 1); draw(); soon(); });
+        chips.appendChild(chip);
+      });
+      const addBtn = h('button', { class: 'btn sm', type: 'button', disabled: d.also_ping.length >= 10 }, icon('plus'), d.also_ping.length ? 'Add someone' : 'Choose people');
+      addBtn.addEventListener('click', () => openPicker(addBtn, { title: 'Also ping', placeholder: 'Search members by name', debounce: 180, load: async (q) => (await memberItems(q)).map((it) => Object.assign(it, { trail: d.also_ping.includes(it.id) ? icon('check', 'check-mark') : null })),
+        onPick: (it) => { if (it.id === d.user_id) { toast('They’re the one being welcomed: use “Ping them”.', 'info'); return; } people.set(it.id, it.member); const at = d.also_ping.indexOf(it.id); if (at >= 0) d.also_ping.splice(at, 1); else if (d.also_ping.length < 10) d.also_ping.push(it.id); draw(); soon(); } }));
+      chips.appendChild(addBtn);
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('bell'), 'Who gets pinged'),
+        h('div', { class: 'toggle-row' }, h('div', { class: 'grow' }, h('b', null, 'Ping them'), h('small', null, d.ping_member ? '{mention} notifies them.' : '{mention} shows their name without a notification.')), pingSw),
+        h('div', null, h('label', { class: 'label' }, 'Also ping'), chips, h('div', { class: 'hint' }, 'Mention them in the message with ', h('code', null, '<@ID>'), ' or the @someone button. Only the people here can be pinged: never @everyone or a role.'))));
+
+      // where and how
+      const wc = data.welcome_channel ? chan(data.welcome_channel.id) : null;
+      const c = d.channel_id ? chan(d.channel_id) : null;
+      const chBtn = h('button', { class: 'picker-btn', type: 'button', id: 'w-channel', 'aria-haspopup': 'listbox' }, h('span', { class: 'glyph' }, '#'),
+        h('span', { class: 'value' }, d.channel_id ? (c ? c.name : 'unknown-channel') : 'Welcome channel'),
+        d.channel_id ? (c && c.category ? h('small', { style: 'color:var(--faint)' }, c.category) : null) : h('small', { style: 'color:var(--faint)' }, wc ? '#' + wc.name : 'not set'), icon('chevron'));
+      chBtn.addEventListener('click', () => openPicker(chBtn, { title: 'Channel', placeholder: 'Search channels',
+        load: (q) => [{ id: '', label: 'Welcome channel', sub: wc ? '#' + wc.name : 'not set', lead: icon('door'), trail: !d.channel_id ? icon('check', 'check-mark') : null }].filter(() => !q || 'welcome channel'.includes(q.toLowerCase())).concat(channelItems('text', [d.channel_id])(q)),
+        onPick: (it) => { d.channel_id = it.id; draw(); } }));
+      const replace = h('input', { type: 'checkbox', checked: d.replace_normal });
+      replace.addEventListener('change', () => { d.replace_normal = replace.checked; draw(); });
+      body.appendChild(h('section', { class: 'form-card' },
+        h('h3', null, icon('door'), 'When they join'),
+        field('Posts in', chBtn, d.channel_id ? null : 'Wherever the usual welcome goes.', 'w-channel'),
+        h('div', null, h('span', { class: 'label' }, 'How often'),
+          segmented([['once', 'Once', 'check'], ['every', 'Every time they join', 'repeat']], d.mode, 'How often', (v) => { d.mode = v; draw(); }),
+          h('div', { class: 'hint' }, d.mode === 'once' ? 'Switches itself off after it has gone out. Switch it back on to welcome them again.' : 'Stays on: posts each time they join.')),
+        h('label', { class: 'check' }, replace, h('span', null, 'Replace the normal welcome', h('small', null, d.replace_normal ? 'Posts instead of Loduchand’s usual welcome line.' : 'Posts right under the usual welcome line.'), h('small', null, 'The house sorting card follows either way.')))));
+
+      // note
+      const note = h('textarea', { class: 'textarea', id: 'w-note', rows: '2', maxlength: '500', placeholder: 'e.g. Asked for by Kohli on 12 Sep' });
+      note.value = d.note;
+      note.addEventListener('input', () => { d.note = note.value; });
+      body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('edit'), 'Note', h('span', { class: 'right', style: 'color:var(--faint);font-size:12.5px' }, 'only admins see this')), note));
+
+      drawPreview();
+      body.scrollTop = scroll;
+    };
+    draw();
+    refresh();
+    requestAnimationFrame(() => { const first = body.querySelector(existing ? '.line-row textarea' : '#w-member'); if (first) first.focus({ preventScroll: true }); });
+  }
+
   // --- drawers ------------------------------------------------------------------------
 
   /** A side panel editor. `isDirty()` guards closing; returns { body, finish, saveBtn }. */
@@ -2401,9 +2837,10 @@
         h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Close', onclick: () => attempt() }, icon('x'))),
       body,
       h('div', { class: 'drawer-foot' },
-        opts.onDelete ? h('button', { class: 'btn danger', type: 'button', onclick: opts.onDelete }, icon('trash'), 'Delete') : null,
+        opts.onDelete ? h('button', { class: 'btn danger', type: 'button', onclick: opts.onDelete, 'aria-label': 'Delete' }, icon('trash'), h('span', { class: 'hide-sm' }, 'Delete')) : null,
+        opts.footExtra || null,
         h('span', { class: 'grow' }),
-        h('button', { class: 'btn ghost', type: 'button', onclick: () => attempt() }, 'Cancel'),
+        h('button', { class: 'btn ghost' + (opts.footExtra ? ' hide-sm' : ''), type: 'button', onclick: () => attempt() }, 'Cancel'),
         saveBtn));
     const scrim = h('div', { class: 'scrim', onclick: () => attempt() });
     const finish = (silent) => {

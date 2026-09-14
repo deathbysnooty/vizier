@@ -199,6 +199,19 @@ pub trait PanelData: Send + Sync + 'static {
     async fn send_test_post(&self, _reminder: &Reminder) -> Result<(), String> {
         Err("Discord isn't connected right now.".into())
     }
+    // Special welcomes.
+    /// A member's joins and leaves from the join log.
+    async fn join_summary(&self, _id: u64) -> Option<members::JoinSummary> {
+        None
+    }
+    /// Any Discord user by id, whether or not they are in the server.
+    async fn user(&self, _id: u64) -> Option<MemberInfo> {
+        None
+    }
+    /// Posts text in a channel with no pings at all: a special welcome's test.
+    async fn send_unpinged(&self, _channel: u64, _text: String) -> Result<(), String> {
+        Err("Discord isn't connected right now.".into())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -219,6 +232,7 @@ mod posts;
 mod profiles;
 mod rules;
 mod scorers;
+mod welcomes;
 
 // --- the live implementation ------------------------------------------------------
 
@@ -498,6 +512,35 @@ impl PanelData for LiveData {
         super::scheduler::send_test(ctx, reminder).await
     }
 
+    async fn join_summary(&self, id: u64) -> Option<members::JoinSummary> {
+        let (deps, _) = AGENT.get()?;
+        let log = super::super::joinlog_get(&deps.storage, id).await;
+        (log.joins > 0 || log.leaves > 0).then(|| members::JoinSummary {
+            joins: log.joins,
+            leaves: log.leaves,
+            first_join: log.first_join,
+            last_join: log.last_join,
+            last_leave: log.last_leave,
+        })
+    }
+
+    async fn user(&self, id: u64) -> Option<MemberInfo> {
+        let ctx = CTX.get()?;
+        let user = tokio::time::timeout(Duration::from_secs(10), UserId::new(id).to_user(ctx)).await.ok()?.ok()?;
+        Some(MemberInfo {
+            id: user.id.get().to_string(),
+            name: user.display_name().to_string(),
+            username: user.name.clone(),
+            avatar: user.face(),
+            bot: user.bot,
+        })
+    }
+
+    async fn send_unpinged(&self, channel: u64, text: String) -> Result<(), String> {
+        let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
+        super::welcomes::post_unpinged(ctx, channel, text).await
+    }
+
     async fn save_agent_settings(&self, s: &agent::AgentSettings) -> anyhow::Result<()> {
         use crate::storage::agent::AgentStorage;
         let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
@@ -703,6 +746,11 @@ pub fn router(panel: Panel) -> Router {
         .route("/reminders/placeholders", get(posts::placeholders))
         .route("/reminders/ai-preview", post(posts::ai_preview))
         .route("/reminders/{id}/test", post(posts::send_test))
+        .route("/welcomes", get(welcomes::list).post(welcomes::create))
+        .route("/welcomes/preview", post(welcomes::preview))
+        .route("/welcomes/lookup", get(welcomes::lookup))
+        .route("/welcomes/{id}", put(welcomes::update).delete(welcomes::delete))
+        .route("/welcomes/{id}/test", post(welcomes::send_test))
         .route("/memos", get(memos::list).post(memos::create))
         .route("/memos/when", get(memos::when))
         .route("/memos/{id}/cancel", post(memos::cancel))
@@ -1425,6 +1473,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);
+            } else if e.key.starts_with("welcome:") {
+                obj.extend(welcomes::audit_entry(&panel, e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {
                 let entry = posts::audit_entry(&panel, e);
                 obj.extend(entry);

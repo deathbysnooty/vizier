@@ -445,6 +445,26 @@ impl PanelData for FakeData {
         Ok(())
     }
 
+    async fn join_summary(&self, id: u64) -> Option<super::members::JoinSummary> {
+        use super::members::JoinSummary;
+        let at = |t: &str| Some(t.to_string());
+        match id {
+            LUCKY => Some(JoinSummary { joins: 2, leaves: 2, first_join: at("2024-03-02T10:00:00+00:00"), last_join: at("2025-11-20T18:30:00+00:00"), last_leave: at("2026-09-07T09:54:54+00:00") }),
+            1007 => Some(JoinSummary { joins: 6, leaves: 6, first_join: at("2023-01-05T12:00:00+00:00"), last_join: at("2026-09-11T20:10:00+00:00"), last_leave: at("2026-09-12T08:00:00+00:00") }),
+            _ if self.cached_member(id).is_some() => Some(JoinSummary { joins: 3, leaves: 2, first_join: at("2023-02-11T18:04:00+00:00"), last_join: at("2026-06-02T15:40:00+00:00"), last_leave: at("2026-05-28T09:12:00+00:00") }),
+            _ => None,
+        }
+    }
+
+    async fn user(&self, id: u64) -> Option<MemberInfo> {
+        OUTSIDERS.iter().find(|p| p.0 == id).map(person).or_else(|| self.cached_member(id))
+    }
+
+    async fn send_unpinged(&self, channel: u64, text: String) -> Result<(), String> {
+        UNPINGED_POSTS.lock().push((channel, text));
+        Ok(())
+    }
+
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
         let (start, end) = super::scorers::day_bounds(now, days_back);
         let conn = fake_ledger(now).lock();
@@ -459,6 +479,16 @@ impl PanelData for FakeData {
 }
 
 const SAFE: u64 = 1543162777642868736;
+
+/// Lucky, whose special welcome is seeded, and the two who missed him: Discord
+/// knows them, the fake server's member list doesn't.
+const LUCKY: u64 = 459076776266694670;
+const OUTSIDERS: &[(u64, &str, &str, u32)] = &[
+    (LUCKY, "Lucky", "lucky.exe", 40),
+    (302861753409208322, "Def Not Kohli", "defnotkohli", 205),
+    (1453059765692272765, "MahoganyDesk", "mahoganydesk", 20),
+];
+static UNPINGED_POSTS: std::sync::LazyLock<parking_lot::Mutex<Vec<(u64, String)>>> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
 /// How the fake model answers: 0 well, 1 badly once then well, 2 always badly.
 static MODEL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -2085,6 +2115,199 @@ async fn templates_placeholders_and_the_ai_preview() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
 }
 
+// --- special welcomes ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn special_welcomes_round_trip() {
+    use super::super::welcomes::{self, Mode};
+    let app = panel();
+    let session = session_for(ADMIN);
+    super::super::set("VIZIER_WELCOME_CHANNEL", Some("11"), ADMIN).unwrap();
+    const RIYA: &str = "712345678901234567";
+
+    // Signed in, and changes from the panel's own page only.
+    for (method, path) in [
+        ("GET", "/api/welcomes"),
+        ("POST", "/api/welcomes"),
+        ("PUT", "/api/welcomes/1"),
+        ("DELETE", "/api/welcomes/1"),
+        ("POST", "/api/welcomes/preview"),
+        ("POST", "/api/welcomes/1/test"),
+        ("GET", "/api/welcomes/lookup?id=459076776266694670"),
+    ] {
+        let (status, _, _) = call(&app, method, path, None, Some(json!({ "lines": ["x"] })), true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        if method != "GET" {
+            let (status, _, _) = call(&app, method, path, Some(&session), Some(json!({ "lines": ["x"] })), false).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} without the panel header");
+        }
+    }
+    let member_session = session_for(MEMBER);
+    let (status, _, _) = call(&app, "GET", "/api/welcomes", Some(&member_session), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Lucky's welcome was seeded, waiting, with who missed him named.
+    let (status, list, _) = call(&app, "GET", "/api/welcomes", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["enabled"], true);
+    assert_eq!(list["welcome_channel"]["name"], "welcome");
+    let lucky = list["items"].as_array().unwrap().iter().find(|w| w["user_id"] == LUCKY.to_string()).cloned().expect("seeded");
+    let lucky_id = lucky["id"].as_i64().unwrap();
+    assert_eq!((lucky["enabled"].as_bool(), lucky["mode"].as_str(), lucky["replace_normal"].as_bool()), (Some(true), Some("once"), Some(true)));
+    assert_eq!((lucky["member"]["name"].as_str(), lucky["member"]["in_server"].as_bool()), (Some("Lucky"), Some(false)));
+    assert_eq!(lucky["also"][0]["name"], "Def Not Kohli");
+    assert_eq!(lucky["also"][1]["name"], "MahoganyDesk");
+    assert_eq!((lucky["channel"]["id"].as_str(), lucky["channel"]["default"].as_bool()), (Some("1516492867642593443"), Some(false)));
+
+    // Problems read as something to fix.
+    let good = json!({
+        "user_id": RIYA, "user_name": "Riya", "lines": ["{mention} is back after {away}!", "  "],
+        "also_ping": ["1004"], "mode": "every", "replace_normal": false, "note": "keeps rejoining",
+    });
+    let make = |body: Value| {
+        let app = app.clone();
+        let session = session.clone();
+        async move { call(&app, "POST", "/api/welcomes", Some(&session), Some(body), true).await }
+    };
+    for (field, value, says) in [
+        ("user_id", json!("45907677626669467x"), "isn't a Discord ID"),
+        ("user_id", json!("4242"), "isn't a Discord ID"),
+        ("user_id", json!(""), "Pick the member"),
+        ("lines", json!([]), "Write the message"),
+        ("lines", json!(vec!["x"; 11]), "at most 10"),
+        ("lines", json!(["y".repeat(1501)]), "longer than 1500"),
+        ("also_ping", json!((0..11).map(|i| format!("30286175340920{:04}", i)).collect::<Vec<_>>()), "at most 10 other"),
+        ("also_ping", json!(["99"]), "in Also ping isn't a Discord ID"),
+        ("channel_id", json!("41"), "not a text channel"),
+        ("channel_id", json!("777"), "no channel 777"),
+        ("mode", json!("sometimes"), "missing something"),
+        ("user_name", json!(""), "Type a name for them"),
+    ] {
+        let mut body = good.clone();
+        body[field] = value.clone();
+        let (status, res, _) = make(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={value} gave {res}");
+        assert!(res["error"].as_str().unwrap().contains(says), "{field}={value}: {res}");
+    }
+
+    // Made for someone who isn't in the server, going to the welcome channel.
+    let mut sneaky = good.clone();
+    sneaky["fired_count"] = json!(9);
+    sneaky["created_by"] = json!("1");
+    let (status, created, _) = make(sneaky).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_i64().unwrap();
+    assert_eq!((created["member"]["name"].as_str(), created["member"]["known"].as_bool()), (Some("Riya"), Some(false)));
+    assert_eq!(created["also"][0]["name"], "Zoya");
+    assert_eq!((created["channel"]["id"].as_str(), created["channel"]["default"].as_bool()), (Some("11"), Some(true)));
+    let stored = welcomes::get(id).unwrap();
+    assert_eq!(stored.lines, vec!["{mention} is back after {away}!".to_string()]);
+    assert_eq!((stored.fired_count, stored.created_by.as_str(), stored.mode, stored.enabled), (0, "1001", Mode::Every, true));
+    let (status, dup, _) = make(good.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{dup}");
+    assert!(dup["error"].as_str().unwrap().contains("already a welcome for Riya"));
+
+    // Someone picked from the member list is named from it.
+    let (status, rohan, _) = make(json!({ "user_id": MEMBER.to_string(), "lines": ["hi {name}"], "channel_id": "21" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{rohan}");
+    assert_eq!((rohan["user_name"].as_str(), rohan["member"]["in_server"].as_bool()), (Some("Rohan"), Some(true)));
+    assert_eq!((rohan["ping_member"].as_bool(), rohan["mode"].as_str(), rohan["replace_normal"].as_bool()), (Some(true), Some("once"), Some(true)));
+
+    // Editing keeps what the bot counted.
+    let now = chrono::Utc::now().timestamp();
+    let fired = welcomes::record_fired(id, now, 555).unwrap();
+    assert!(fired.enabled, "every time stays on");
+    let mut edit = good.clone();
+    edit["lines"] = json!(["Welcome back {name}, {n} time"]);
+    edit["enabled"] = json!(false);
+    edit["fired_count"] = json!(0);
+    let (status, edited, _) = call(&app, "PUT", &format!("/api/welcomes/{id}"), Some(&session), Some(edit.clone()), true).await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!((edited["fired_count"].as_i64(), edited["last_fired_message_id"].as_str(), edited["enabled"].as_bool()), (Some(1), Some("555"), Some(false)));
+    assert_eq!(welcomes::get(id).unwrap().created_by, "1001");
+    let (status, _, _) = call(&app, "PUT", "/api/welcomes/999999", Some(&session), Some(edit.clone()), true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "PUT", "/api/welcomes/abc", Some(&session), Some(edit.clone()), true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let mut steal = edit.clone();
+    steal["user_id"] = json!(LUCKY.to_string());
+    let (status, _, _) = call(&app, "PUT", &format!("/api/welcomes/{id}"), Some(&session), Some(steal), true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "one welcome per member");
+
+    // The preview fills the words in from the join log and sends nothing.
+    let posts_before = UNPINGED_POSTS.lock().len();
+    let body = json!({
+        "user_id": LUCKY.to_string(), "lines": ["{mention} {n} after {away}! <@302861753409208322> <@1004>", ""],
+        "also_ping": ["302861753409208322"],
+    });
+    let (status, preview, _) = call(&app, "POST", "/api/welcomes/preview", Some(&session), Some(body), true).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    let text = preview["items"][0].as_str().unwrap();
+    assert!(text.starts_with("<@459076776266694670> 3rd after ") && text.ends_with("! <@302861753409208322> <@1004>"), "{text}");
+    assert!(!text.contains("a while"), "{text}");
+    assert_eq!(preview["items"][1], "");
+    assert_eq!(preview["facts"]["from_log"], true);
+    assert_eq!(preview["names"]["302861753409208322"], "Def Not Kohli");
+    assert_eq!(preview["names"]["1004"], "Zoya");
+    assert_eq!(preview["unpinged"], json!(["1004"]));
+    let (_, quiet, _) = call(&app, "POST", "/api/welcomes/preview", Some(&session), Some(json!({ "user_name": "Someone", "lines": ["{mention} {n} {away}"], "ping_member": false })), true).await;
+    assert_eq!(quiet["items"][0], "Someone 1st a while");
+    assert_eq!(UNPINGED_POSTS.lock().len(), posts_before, "a preview posts nothing");
+    assert_eq!(welcomes::get(lucky_id).unwrap().fired_count, 0);
+    let (status, _, _) = call(&app, "POST", "/api/welcomes/preview", Some(&session), Some(json!({ "user_id": "abc", "lines": ["x"] })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Looking a pasted ID up.
+    let (status, found, _) = call(&app, "GET", &format!("/api/welcomes/lookup?id={LUCKY}"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!((found["name"].as_str(), found["in_server"].as_bool(), found["welcome_id"].as_i64()), (Some("Lucky"), Some(false), Some(lucky_id)));
+    let (_, rohan_found, _) = call(&app, "GET", &format!("/api/welcomes/lookup?id={MEMBER}"), Some(&session), None, false).await;
+    assert_eq!((rohan_found["name"].as_str(), rohan_found["in_server"].as_bool()), (Some("Rohan"), Some(true)));
+    let (status, _, _) = call(&app, "GET", "/api/welcomes/lookup?id=712345678901234568", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for bad in ["12x", "4242", ""] {
+        let (status, _, _) = call(&app, "GET", &format!("/api/welcomes/lookup?id={bad}"), Some(&session), None, false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // A test goes out marked, with no pings, and isn't counted.
+    let (status, sent, _) = call(&app, "POST", &format!("/api/welcomes/{id}/test"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(UNPINGED_POSTS.lock().last().cloned(), Some((11, format!("(test) Welcome back Riya, 1st time"))));
+    let (status, _, _) = call(&app, "POST", &format!("/api/welcomes/{id}/test"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(welcomes::get(id).unwrap().fired_count, 1);
+
+    // At most fifty.
+    let mut extra = Vec::new();
+    while welcomes::list().len() < welcomes::MAX_RULES {
+        let (status, res, _) = make(json!({ "user_id": format!("71234567890123{:04}", 5000 + extra.len()), "user_name": "x", "lines": ["hi"] })).await;
+        assert_eq!(status, StatusCode::CREATED, "{res}");
+        extra.push(res["id"].as_i64().unwrap());
+    }
+    let (status, full, _) = make(json!({ "user_id": "712345678901239999", "user_name": "x", "lines": ["hi"] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(full["error"].as_str().unwrap().contains("already 50"), "{full}");
+    for e in extra {
+        let (status, _, _) = call(&app, "DELETE", &format!("/api/welcomes/{e}"), Some(&session), None, true).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Deleting, and the log.
+    let (status, _, _) = call(&app, "DELETE", &format!("/api/welcomes/{id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(welcomes::get(id).is_none());
+    let (status, _, _) = call(&app, "DELETE", &format!("/api/welcomes/{id}"), Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let entries: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == format!("welcome:{id}")).collect();
+    let changes: Vec<&str> = entries.iter().map(|e| e["change"].as_str().unwrap()).collect();
+    assert_eq!(changes, vec!["Deleted", "Switched off", "Created"]);
+    assert_eq!(entries[0]["label"], "Special welcome for @Riya");
+    assert_eq!(entries[0]["section"]["id"], "welcomes");
+    assert_eq!(entries[0]["user_name"], "Kabir");
+}
+
 // --- the demo ----------------------------------------------------------------------------
 
 /// In the demo, the page and its assets come straight from disk, so a change to
@@ -2123,6 +2346,7 @@ async fn demo_server() {
         std::env::set_var("PANEL_TEST_QUIZ_FEEDS", "https://feeds.bbci.co.uk/news/rss.xml");
         std::env::set_var("PANEL_TEST_HOUSE_CHANNEL", "33");
         std::env::set_var("PANEL_TEST_SNITCH_CHANNELS", "21:1,22:1");
+        std::env::set_var("VIZIER_WELCOME_CHANNEL", "11");
     }
     let now = chrono::Utc::now().timestamp();
     {
@@ -2345,6 +2569,51 @@ async fn demo_server() {
         super::super::members::save(&note(2012, "Sameer", Tone::Roast, "Loud RCB fan, takes roasts about it well. Never calls him Sam."), ADMIN).unwrap();
         super::super::members::save(&note(2003, "Meera", Tone::Brief, "Prefers short replies without emoji."), ADMIN_TWO).unwrap();
         super::super::members::save(&note(2007, "Zoya", Tone::Gentle, "Going through exams; keep it kind and don't bring up her marks."), ADMIN).unwrap();
+    }
+
+    // Special welcomes: Lucky's is seeded by the store (posting in a channel the
+    // fake server has); one that has gone out on every join, and one switched off.
+    {
+        use super::super::welcomes::{self, Mode, Welcome};
+        if let Some(mut lucky) = welcomes::list().into_iter().find(|w| w.user_id == LUCKY.to_string() && w.channel_id == "1516492867642593443") {
+            lucky.channel_id = "23".into();
+            lucky.created_ts = now - 2 * 86_400;
+            welcomes::save(&lucky, 0).unwrap();
+        }
+        if welcomes::list().len() < 3 {
+            let dev = Welcome {
+                user_id: "1007".into(),
+                user_name: "Dev".into(),
+                lines: vec![
+                    "{mention} is back. **{n}** time. Ek fight haar ke gaya tha, {hours} ghante mein wapas 😂".into(),
+                    "Dekho kaun aaya! {mention}, entry number **{n}**. <@1005> ready rehna, rematch hoga.".into(),
+                ],
+                also_ping: vec!["1005".into()],
+                mode: Mode::Every,
+                replace_normal: false,
+                fired_count: 4,
+                last_fired_ts: now - 2 * 86_400 - 3 * 3600,
+                last_fired_message_id: "1290000000000000555".into(),
+                created_by: ADMIN.to_string(),
+                created_ts: now - 40 * 86_400,
+                note: "Leaves after every lost fight and is back the next day.".into(),
+                ..Default::default()
+            };
+            let tanvi = Welcome {
+                user_id: "1008".into(),
+                user_name: "Tanvi".into(),
+                channel_id: "21".into(),
+                lines: vec!["Tanvi is back from exam jail! 📚➡️🎉 {mention}, <@1004> aur <@1006> ne tera spot sambhal ke rakha tha.".into()],
+                also_ping: vec!["1004".into(), "1006".into()],
+                enabled: false,
+                created_by: ADMIN_TWO.to_string(),
+                created_ts: now - 6 * 86_400,
+                note: "Paused until her exams are over - she said she'd be back in October.".into(),
+                ..Default::default()
+            };
+            welcomes::save(&dev, ADMIN).unwrap();
+            welcomes::save(&tanvi, ADMIN_TWO).unwrap();
+        }
     }
 
     if super::super::profiles::get(2012).is_none() {

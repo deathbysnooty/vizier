@@ -695,9 +695,16 @@ pub fn sections() -> Vec<Section> {
             about: "When someone joins, the bot greets them in the welcome channel - with a ribbing count for anyone \
                     who keeps leaving and coming back - and the house sorting card follows underneath. Every join \
                     and leave is recorded quietly (leaving is never announced), and accounts that belong to one person \
-                    can be merged so their history adds up.",
+                    can be merged so their history adds up. Admins can also set a special welcome for one member on the \
+                    panel's Welcomes page: a message of their own that posts the moment that member joins, for someone \
+                    the server is waiting on to come back.",
             settings: vec![
                 toggle("VIZIER_WELCOME", "Welcome messages", "Greet people who join. Off posts no greeting; newcomers are still sorted into a house there."),
+                toggle(
+                    "VIZIER_SPECIAL_WELCOMES",
+                    "Special welcomes",
+                    "Post the special welcomes set for particular members on the Welcomes page when they join. These go out even with the usual welcome messages off. Off keeps them saved but posts none.",
+                ),
                 setting(
                     "VIZIER_WELCOME_CHANNEL",
                     "Welcome channel",

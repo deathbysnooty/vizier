@@ -23,6 +23,8 @@ pub mod remind;
 pub mod profiles;
 pub mod reminders;
 pub mod scheduler;
+// Special welcomes: a message for one member the moment they join.
+pub mod welcomes;
 pub mod web;
 
 use std::collections::HashMap;
@@ -68,6 +70,7 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     memos::migrate(&conn)?;
     media::migrate(&conn)?;
     profiles::migrate(&conn)?;
+    welcomes::migrate(&conn)?;
     // Reply and mention counts keep their own file; losing it must not stop the panel.
     if let Err(err) = insights::open(workspace) {
         tracing::warn!("insights: store not opened: {}", err);

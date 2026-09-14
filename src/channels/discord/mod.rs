@@ -1088,6 +1088,28 @@ fn ordinal(n: u32) -> String {
     }
 }
 
+/// The usual greeting in the welcome channel. `joins` counts this arrival, so
+/// more than one means a returner.
+async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
+    let text = if joins > 1 {
+        let pool = WELCOME_BACK;
+        let idx = (uid as usize).wrapping_add(joins as usize) % pool.len();
+        pool[idx]
+            .replace("{u}", &format!("<@{}>", uid))
+            .replace("{n}", &ordinal(joins))
+    } else {
+        let pool = WELCOME_FIRST;
+        let idx = (uid as usize) % pool.len();
+        pool[idx].replace("{u}", &format!("<@{}>", uid))
+    };
+    if let Err(err) = ChannelId::new(channel)
+        .send_message(&ctx.http, CreateMessage::new().content(text))
+        .await
+    {
+        tracing::error!("failed to post welcome: {:?}", err);
+    }
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn guild_member_addition(&self, ctx: Context, member: serenity::all::Member) {
@@ -1098,36 +1120,37 @@ impl EventHandler for Handler {
         let name = member.user.name.clone();
         let log = joinlog_bump(&self.1.storage, uid, &name, true).await;
 
-        let Some(channel) = welcome_channel() else {
-            return;
-        };
-        // With the welcome switched off the channel still takes the sorting card.
-        if !control::on("VIZIER_WELCOME", true) {
-            house::on_join(&ctx, &member, ChannelId::new(channel)).await;
-            return;
+        let welcome = welcome_channel();
+        // A special welcome set on the panel for this member, if one is waiting,
+        // with where it posts.
+        let special = if control::on("VIZIER_SPECIAL_WELCOMES", true) { control::welcomes::waiting_for(uid) } else { None };
+        let special = special.and_then(|w| match control::welcomes::channel_for(&w, welcome) {
+            Some(channel) => Some((w, channel)),
+            None => {
+                tracing::warn!("welcomes: special welcome for {} skipped: it has no channel and no welcome channel is set", w.user_name);
+                None
+            }
+        });
+        let replaced = special.as_ref().is_some_and(|(w, _)| w.replace_normal);
+
+        // The usual line, unless switched off or the special welcome replaces it.
+        if let Some(channel) = welcome.filter(|_| control::on("VIZIER_WELCOME", true) && !replaced) {
+            post_welcome_line(&ctx, channel, uid, log.joins).await;
         }
-        // joins is now the count including this arrival, so >1 means a returner.
-        let text = if log.joins > 1 {
-            let pool = WELCOME_BACK;
-            let idx = (uid as usize).wrapping_add(log.joins as usize) % pool.len();
-            pool[idx]
-                .replace("{u}", &format!("<@{}>", uid))
-                .replace("{n}", &ordinal(log.joins))
-        } else {
-            let pool = WELCOME_FIRST;
-            let idx = (uid as usize) % pool.len();
-            pool[idx].replace("{u}", &format!("<@{}>", uid))
-        };
-        if let Err(err) = ChannelId::new(channel)
-            .send_message(&ctx.http, CreateMessage::new().content(text))
-            .await
-        {
-            tracing::error!("failed to post welcome: {:?}", err);
+        if let Some((w, channel)) = special {
+            let facts = control::welcomes::Facts {
+                joins: log.joins,
+                last_leave: log.last_leave.as_deref().and_then(control::welcomes::moment),
+            };
+            control::welcomes::greet(&ctx, &w, channel, member.display_name(), &facts).await;
         }
 
         // Then the hat, right under the welcome. A returner keeps the house
-        // they were sorted into before.
-        house::on_join(&ctx, &member, ChannelId::new(channel)).await;
+        // they were sorted into before. With the welcome switched off the
+        // channel still takes the sorting card.
+        if let Some(channel) = welcome {
+            house::on_join(&ctx, &member, ChannelId::new(channel)).await;
+        }
     }
 
     async fn guild_member_removal(
