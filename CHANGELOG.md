@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.16] - 2026-09-14
+
+### 💼 Other
+
+- Special welcomes for particular members, posted the moment they join, managed on the panel
+## [0.11.15] - 2026-09-14
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.15
 ## [0.11.14] - 2026-09-14
 
 ### 💼 Other
