@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.6] - 2026-09-14
+
+### 💼 Other
+
+- /today shows the day's points and maxed limits, for yourself or a housemate
 ## [0.11.5] - 2026-09-14
 
 ### 💼 Other
 
 - Daily battle royale at a set time, tagging the houses
 - Insights - reply and mention tallies, back-and-forths, one-sided pairs, rivalries, connections
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.5
 ## [0.11.4] - 2026-09-14
 
 ### 💼 Other
