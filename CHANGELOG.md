@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Richer scheduled posts (pictures, cards, reactions, tidy-up, AI text, placeholders, templates, test send) and members' reminders on the panel
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.14
 ## [0.11.13] - 2026-09-14
 
 ### 💼 Other
