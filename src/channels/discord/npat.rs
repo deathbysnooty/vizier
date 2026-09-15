@@ -555,7 +555,14 @@ pub fn break_text(next: i64, letters: i64, until: i64) -> String {
 /// The answers pop-up, as the raw interaction response: four short boxes,
 /// each optional, filled with what was sent before.
 pub fn modal_json(round_id: i64, letter: char, previous: Option<&[String; 4]>) -> Value {
-    let rows: Vec<Value> = (0..4)
+    modal_json_timed(round_id, letter, previous, None)
+}
+
+/// The pop-up with its countdown: a live timer line on top (Discord counts
+/// it down by itself) and the seconds left when it opened in the title, which
+/// still shows if the timer line isn't. `timer` is (ends_at, now).
+pub fn modal_json_timed(round_id: i64, letter: char, previous: Option<&[String; 4]>, timer: Option<(i64, i64)>) -> Value {
+    let mut rows: Vec<Value> = (0..4)
         .map(|i| {
             let mut input = json!({
                 "type": 4, "custom_id": KEYS[i], "label": CATEGORIES[i], "style": 1,
@@ -568,8 +575,18 @@ pub fn modal_json(round_id: i64, letter: char, previous: Option<&[String; 4]>) -
             json!({ "type": 1, "components": [input] })
         })
         .collect();
-    json!({ "type": 9, "data": { "custom_id": format!("npatans:{}", round_id), "title": format!("Letter {}", letter), "components": rows } })
+    let title = match timer {
+        Some((ends_at, now)) => format!("Letter {} · {}s left", letter, (ends_at - now).max(0)),
+        None => format!("Letter {}", letter),
+    };
+    if let Some((ends_at, _)) = timer.filter(|_| !PLAIN_MODAL.load(std::sync::atomic::Ordering::Relaxed)) {
+        rows.insert(0, json!({ "type": 10, "content": format!("⏱️ **Time's up <t:{}:R>** · everything starting with **{}**", ends_at, letter) }));
+    }
+    json!({ "type": 9, "data": { "custom_id": format!("npatans:{}", round_id), "title": title, "components": rows } })
 }
+
+/// Set when Discord refuses the pop-up with a timer line, so later pop-ups skip it.
+static PLAIN_MODAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The four answers from a submitted pop-up's `data`, whether the boxes came
 /// back inside action rows (`components`) or labels (`component`). A box that
@@ -1619,9 +1636,20 @@ async fn submit_pressed(ctx: &Context, component: &ComponentInteraction, round_i
     if player_house(user).is_none() {
         return whisper(ctx, component, HOUSE_ONLY).await;
     }
-    let modal = modal_json(round_id, round.letter, previous.as_ref());
-    if let Err(err) = ctx.http.create_interaction_response(component.id, &component.token, &modal, Vec::new()).await {
-        tracing::warn!("npat: answers pop-up for round {} not shown to {}: {}", round_id, user, err);
+    let modal = modal_json_timed(round_id, round.letter, previous.as_ref(), Some((round.ends_at, now)));
+    match ctx.http.create_interaction_response(component.id, &component.token, &modal, Vec::new()).await {
+        Ok(()) => {}
+        Err(serenity::Error::Http(err))
+            if err.status_code().is_some_and(|s| s.as_u16() == 400) && !PLAIN_MODAL.load(std::sync::atomic::Ordering::Relaxed) =>
+        {
+            tracing::warn!("npat: Discord refused the pop-up with a timer line ({}), leaving the line out from now on", err);
+            PLAIN_MODAL.store(true, std::sync::atomic::Ordering::Relaxed);
+            let plain = modal_json_timed(round_id, round.letter, previous.as_ref(), Some((round.ends_at, now)));
+            if let Err(err) = ctx.http.create_interaction_response(component.id, &component.token, &plain, Vec::new()).await {
+                tracing::warn!("npat: answers pop-up for round {} not shown to {}: {}", round_id, user, err);
+            }
+        }
+        Err(err) => tracing::warn!("npat: answers pop-up for round {} not shown to {}: {}", round_id, user, err),
     }
 }
 
@@ -2094,6 +2122,17 @@ mod tests {
         let open = serde_json::to_value(round_row(12, true)).unwrap();
         assert_eq!((open["components"][0]["custom_id"].as_str(), open["components"][0]["disabled"].as_bool()), (Some("npatsubmit:12"), Some(false)));
         assert_eq!(serde_json::to_value(round_row(12, false)).unwrap()["components"][0]["disabled"], true);
+    }
+
+    #[test]
+    fn the_pop_up_shows_a_countdown() {
+        let timed = modal_json_timed(12, 'P', None, Some((1_000_045, 1_000_007)));
+        assert_eq!(timed["data"]["title"], "Letter P · 38s left");
+        let rows = timed["data"]["components"].as_array().unwrap();
+        assert_eq!(rows.len(), 5, "a timer line and four boxes");
+        assert_eq!(rows[0]["type"], 10);
+        assert!(rows[0]["content"].as_str().unwrap().contains("<t:1000045:R>"));
+        assert_eq!(modal_json_timed(12, 'P', None, Some((100, 200)))["data"]["title"], "Letter P · 0s left");
     }
 
     #[test]
