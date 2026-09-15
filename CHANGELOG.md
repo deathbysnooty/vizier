@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.28] - 2026-09-15
+
+### 💼 Other
+
+- Most active list can show the last 24 hours, 48 hours, 7 days or 30 days, with tier bars scaled to the period
 ## [0.11.27] - 2026-09-15
 
 ### 💼 Other
 
 - Countdowns on the cards tick - the bot edits the time left every few seconds instead of relying on Discord's relative times
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.27
 ## [0.11.26] - 2026-09-15
 
 ### 💼 Other
