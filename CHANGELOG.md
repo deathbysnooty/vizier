@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.26] - 2026-09-15
+
+### 💼 Other
+
+- Deafened time no longer counts for voice points
 ## [0.11.25] - 2026-09-15
 
 ### 💼 Other
 
 - Plain riddle pop-up by default - the text-block pop-up crashes the Discord iPhone app
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.25
 ## [0.11.24] - 2026-09-15
 
 ### 💼 Other
