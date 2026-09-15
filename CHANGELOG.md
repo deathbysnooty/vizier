@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.27] - 2026-09-15
+
+### 💼 Other
+
+- Countdowns on the cards tick - the bot edits the time left every few seconds instead of relying on Discord's relative times
 ## [0.11.26] - 2026-09-15
 
 ### 💼 Other
 
 - Deafened time no longer counts for voice points
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.26
 ## [0.11.25] - 2026-09-15
 
 ### 💼 Other
