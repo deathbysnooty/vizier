@@ -350,6 +350,19 @@ impl PanelData for FakeData {
         Ok(super::search::read_window(&conn, "lodu", &filter)?)
     }
 
+    async fn msglog_deleted(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::DeletedRow>> {
+        Ok(super::super::super::msglog::list_deleted(fake_log().store.lock().conn(), &filter)?)
+    }
+
+    async fn msglog_edited(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::EditedRow>> {
+        Ok(super::super::super::msglog::list_edited(fake_log().store.lock().conn(), &filter)?)
+    }
+
+    async fn msglog_file(&self, message: u64, n: usize) -> Option<(Vec<u8>, &'static str)> {
+        let store = fake_log().store.lock();
+        super::super::super::msglog::deleted_file(store.conn(), store.root(), message, n)
+    }
+
     fn member_house(&self, id: u64) -> Option<&'static super::super::super::house::House> {
         self.cached_member(id)?;
         let key = if id >= 2000 { HOUSES_KEYS[((id - 2000) % 4) as usize] } else { HOUSES_KEYS[(id % 4) as usize] };
@@ -720,6 +733,195 @@ fn fake_history() -> &'static parking_lot::Mutex<rusqlite::Connection> {
     })
 }
 
+// --- the fake message log ----------------------------------------------------------------
+
+/// A message id sent at `ms`.
+fn snowflake(ms: i64, seq: u64) -> u64 {
+    (((ms - 1_420_070_400_000) as u64) << 22) | (seq & 0x3f_ffff)
+}
+
+/// A made-up picture: a gradient with a few shapes, as PNG bytes.
+fn fake_png(w: u32, h: u32, hue: f32) -> Vec<u8> {
+    use tiny_skia::{Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point, Rect, SpreadMode, Transform};
+    let rgb = |hue: f32, s: f32, l: f32| {
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let hp = (hue.rem_euclid(360.0)) / 60.0;
+        let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+        let (r, g, b) = match hp as u32 { 0 => (c, x, 0.0), 1 => (x, c, 0.0), 2 => (0.0, c, x), 3 => (0.0, x, c), 4 => (x, 0.0, c), _ => (c, 0.0, x) };
+        let m = l - c / 2.0;
+        Color::from_rgba(r + m, g + m, b + m, 1.0).unwrap()
+    };
+    let mut px = Pixmap::new(w, h).unwrap();
+    let (wf, hf) = (w as f32, h as f32);
+    let mut paint = Paint::default();
+    paint.shader = LinearGradient::new(
+        Point::from_xy(0.0, 0.0),
+        Point::from_xy(wf, hf),
+        vec![GradientStop::new(0.0, rgb(hue, 0.65, 0.58)), GradientStop::new(1.0, rgb(hue + 70.0, 0.6, 0.32))],
+        SpreadMode::Pad,
+        Transform::identity(),
+    )
+    .unwrap();
+    px.fill_rect(Rect::from_xywh(0.0, 0.0, wf, hf).unwrap(), &paint, Transform::identity(), None);
+    let mut dot = Paint::default();
+    dot.anti_alias = true;
+    for (i, (cx, cy, r)) in [(0.72, 0.38, 0.22), (0.28, 0.62, 0.14), (0.52, 0.8, 0.09), (0.15, 0.22, 0.06)].iter().enumerate() {
+        let c = rgb(hue + 180.0 + i as f32 * 25.0, 0.7, 0.7);
+        dot.set_color_rgba8((c.red() * 255.0) as u8, (c.green() * 255.0) as u8, (c.blue() * 255.0) as u8, 200);
+        if let Some(path) = PathBuilder::from_circle(cx * wf, cy * hf, r * hf) {
+            px.fill_path(&path, &dot, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    let mut bar = Paint::default();
+    bar.set_color_rgba8(255, 255, 255, 230);
+    for (y, width) in [(0.07, 0.62), (0.86, 0.44)] {
+        px.fill_rect(Rect::from_xywh(wf * 0.06, hf * y, wf * width, hf * 0.06).unwrap(), &bar, Transform::identity(), None);
+    }
+    px.encode_png().unwrap()
+}
+
+pub struct FakeLog {
+    _dir: tempfile::TempDir,
+    pub store: parking_lot::Mutex<super::super::super::msglog::Store>,
+    /// A message nobody deleted, with a saved picture.
+    pub kept: u64,
+    /// A deleted message whose stored picture paths try to leave the folder.
+    pub evil: u64,
+    /// Zoya's deleted meme, with one picture.
+    pub meme: u64,
+}
+
+/// The message log with a month of deletions and edits, pictures included.
+fn fake_log() -> &'static FakeLog {
+    static LOG: OnceLock<FakeLog> = OnceLock::new();
+    LOG.get_or_init(|| {
+        use super::super::super::msglog::{Attachment, Deletion, NewMessage, Place, Store, StoredFile, day_folder};
+        let dir = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let (min, hour, day) = (60_000i64, 3_600_000i64, 86_400_000i64);
+        let mut store = Store::open(&dir.path().join("msglog.db"), dir.path().join("msglog"), now - 20 * day).unwrap();
+        let mut seq = 0u64;
+        let mut next_id = |ms: i64| {
+            seq += 1;
+            snowflake(ms, seq)
+        };
+        let at = |c: u64, name: &str, parent: Option<u64>| Place { channel_id: c, parent_id: parent, channel_name: name.into() };
+        let name_of = |uid: u64| if uid == MEMBER { "Rohan".to_string() } else { ROSTER[(uid - 2000) as usize].to_string() };
+        let att = |id: u64, name: &str, kind: Option<&str>, size: u64| Attachment { id, filename: name.into(), content_type: kind.map(String::from), size, url: String::new() };
+        fn keep(store: &mut Store, m: &NewMessage, pics: &[Vec<u8>]) {
+            store.insert_new(m).unwrap();
+            for (n, bytes) in pics.iter().enumerate() {
+                let rel = format!("{}/{}_{}.png", day_folder(m.created_ms), m.message_id, n);
+                let path = store.root().join(&rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+                store.saved(m.message_id, StoredFile { n, path: rel, bytes: bytes.len() as u64, name: m.attachments[n].filename.clone() }).unwrap();
+            }
+        }
+        let mut msg = |sent: i64, uid: u64, place: Place, text: &str, attachments: Vec<Attachment>| NewMessage {
+            message_id: next_id(sent),
+            place,
+            guild_id: 900,
+            author_id: uid,
+            author_name: name_of(uid),
+            avatar: String::new(),
+            content: text.into(),
+            created_ms: sent,
+            reply_to: None,
+            reply_author: None,
+            reply_text: None,
+            attachments,
+        };
+        let gone = |store: &mut Store, ids: Vec<u64>, place: Place, when: i64, bulk: bool| {
+            store.delete(&Deletion { ids, place, ts_ms: when, bulk }, 7).unwrap();
+        };
+
+        // Older than the longest period: never listed, but its pictures are asked for.
+        let evil = msg(now - 40 * day, 2036, at(24, "music", None), "old", vec![]);
+        keep(&mut store, &evil, &[]);
+        gone(&mut store, vec![evil.message_id], at(24, "music", None), now - 40 * day + min, false);
+        let paths = json!([{ "n": 0, "path": "../msglog.db", "bytes": 1, "name": "a.png" }, { "n": 1, "path": "deleted/../../msglog.db", "bytes": 1, "name": "b.png" }, { "n": 2, "path": "/etc/hosts", "bytes": 1, "name": "c.png" }]);
+        store.conn().execute("UPDATE deleted SET stored_files_json = ?1 WHERE message_id = ?2", rusqlite::params![paths.to_string(), evil.message_id as i64]).unwrap();
+
+        // Edits and deletions, oldest first.
+        let tanvi = msg(now - 26 * day, 2011, at(23, "desi-banter", None), "unpopular opinion: filter coffee > chai", vec![]);
+        keep(&mut store, &tanvi, &[]);
+        gone(&mut store, vec![tanvi.message_id], at(23, "desi-banter", None), now - 26 * day + 3 * min, false);
+        let tanvi2 = msg(now - 25 * day - hour, 2011, at(23, "desi-banter", None), "chai is overated", vec![]);
+        keep(&mut store, &tanvi2, &[]);
+        store.edit(tanvi2.message_id, "chai is overrated, fight me", now - 25 * day).unwrap();
+        gone(&mut store, vec![snowflake(now - 25 * day, 7)], at(21, "general", None), now - 12 * day, false);
+        let arjun = msg(now - 6 * day - 10 * min, 2008, at(32, "quiz", None), "koto was ez today", vec![]);
+        keep(&mut store, &arjun, &[]);
+        store.edit(arjun.message_id, "koto was hard ngl, took 7 tries", now - 6 * day).unwrap();
+        let spam: Vec<NewMessage> = (0..3)
+            .map(|i| msg(now - 5 * day + i * 2_000, 2042, at(22, "memes", None), &format!("FREE NITRO 🎁 claim yours before it's gone → discord-gift.example/{}", ["claim", "nitro", "free"][i as usize]), vec![]))
+            .collect();
+        for m in &spam {
+            keep(&mut store, m, &[]);
+        }
+        gone(&mut store, spam.iter().map(|m| m.message_id).collect(), at(22, "memes", None), now - 5 * day + 2 * min, true);
+        let dev = msg(now - 2 * day - 5 * hour, 2010, at(21, "general", None), "RCB will win it this year, screenshot this", vec![]);
+        keep(&mut store, &dev, &[]);
+        store.edit(dev.message_id, "RCB will win it this year (probably), screenshot this", now - 2 * day - 5 * hour + min).unwrap();
+        let mut meme = msg(now - 2 * day, 2007, at(22, "memes", None), "ok this one is too good 💀", vec![att(1, "rcb-every-april.png", Some("image/png"), 40_000)]);
+        meme.reply_to = Some(dev.message_id);
+        keep(&mut store, &meme, &[fake_png(640, 420, 210.0)]);
+        gone(&mut store, vec![meme.message_id], at(22, "memes", None), now - 2 * day + 40 * min, false);
+        let meera = msg(now - 26 * hour - 5 * min, 2003, at(21, "general", None), "quiz at 9 tonight", vec![]);
+        keep(&mut store, &meera, &[]);
+        store.edit(meera.message_id, "quiz at 9:30 tonight, not 9 - sorry!", now - 26 * hour).unwrap();
+        let kavya = msg(now - 20 * hour, 2023, at(78, "koto-spoilers", Some(21)), "koto spoiler: today's word is PLANET", vec![]);
+        keep(&mut store, &kavya, &[]);
+        gone(&mut store, vec![kavya.message_id], at(78, "koto-spoilers", Some(21)), now - 20 * hour + min, false);
+        let nikhil = msg(now - 7 * hour - 2 * min, 2020, at(23, "desi-banter", None), "that zebra meme was mine", vec![]);
+        keep(&mut store, &nikhil, &[]);
+        store.edit(nikhil.message_id, "that zebrafish meme was mine", now - 7 * hour).unwrap();
+        let nikhil2 = msg(now - 6 * hour, 2020, at(23, "desi-banter", None), "the ZEBRAFISH meme was mine actually, ask Dev", vec![]);
+        keep(&mut store, &nikhil2, &[]);
+        gone(&mut store, vec![nikhil2.message_id], at(23, "desi-banter", None), now - 6 * hour + 5 * min, false);
+        let zoya = msg(now - 5 * hour - 3 * min, 2007, at(78, "koto-spoilers", Some(21)), "see you in lounge at 10", vec![]);
+        keep(&mut store, &zoya, &[]);
+        store.edit(zoya.message_id, "see you in lounge at 10:30", now - 5 * hour).unwrap();
+        let rohan = msg(now - 3 * hour, MEMBER, at(41, "Lounge", None), "who took my seat in lounge 😤", vec![att(2, "seating-plan.pdf", Some("application/pdf"), 182_000), att(3, "screen-recording.png", Some("image/png"), 12 * 1024 * 1024)]);
+        keep(&mut store, &rohan, &[]);
+        gone(&mut store, vec![rohan.message_id], at(41, "Lounge", None), now - 3 * hour + 2 * min, false);
+        let riya = msg(now - hour, 2013, at(21, "general", None), "look at this sunset", vec![att(4, "sunset.png", Some("image/png"), 9_000)]);
+        keep(&mut store, &riya, &[fake_png(320, 200, 20.0)]);
+        let arjun2 = msg(now - 90 * min, 2008, at(4400, "Kutiya ke dost 🎮", None), "brb, pizza", vec![]);
+        keep(&mut store, &arjun2, &[]);
+        gone(&mut store, vec![arjun2.message_id], at(4400, "Kutiya ke dost 🎮", None), now - 90 * min + 30_000, false);
+        let sameer = msg(now - 55 * min, 2012, at(22, "memes", None), "Okay so here's the thing about the snitch drop, it landed in memes while everyone was in voice and nobody saw it for twenty minutes", vec![]);
+        keep(&mut store, &sameer, &[]);
+        store.edit(sameer.message_id, "Okay so here's the thing about the snitch drop, it landed in memes while everyone was in voice and nobody saw it for twenty-five minutes, and then Dev caught it anyway 🙄", now - 50 * min).unwrap();
+        let pics = msg(now - 40 * min, 2012, at(21, "general", None), "", vec![att(5, "IMG_2041.png", Some("image/png"), 30_000), att(6, "IMG_2042.png", None, 31_000)]);
+        keep(&mut store, &pics, &[fake_png(480, 360, 140.0), fake_png(480, 360, 290.0)]);
+        gone(&mut store, vec![pics.message_id], at(21, "general", None), now - 31 * min, false);
+        gone(&mut store, vec![snowflake(now - 30 * min, 9)], at(22, "memes", None), now - 10 * min, false);
+
+        // Never captured, but written straight in: the page must still leave them out.
+        for (channel, parent, name) in [(SAFE, None, "safe-corner"), (77, Some(SAFE), "vent")] {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO deleted (message_id, channel_id, parent_id, channel_name, author_id, author_name, content, created_ts, deleted_ts)
+                     VALUES (?1, ?2, ?3, ?4, 2012, 'Sameer', 'SECRET-SAFE deleted words', ?5, ?5)",
+                    rusqlite::params![snowflake(now - 5 * min, channel % 1000) as i64, channel as i64, parent.map(|p: u64| p as i64), name, now - 5 * min],
+                )
+                .unwrap();
+        }
+        store
+            .conn()
+            .execute(
+                "INSERT INTO edited (message_id, channel_id, parent_id, channel_name, author_id, author_name, before, after, created_ts, edited_ts)
+                 VALUES (1, ?1, NULL, 'safe-corner', 2012, 'Sameer', 'SECRET-SAFE before', 'SECRET-SAFE after', ?2, ?2)",
+                rusqlite::params![SAFE as i64, now - 4 * min],
+            )
+            .unwrap();
+        FakeLog { kept: riya.message_id, evil: evil.message_id, meme: meme.message_id, store: parking_lot::Mutex::new(store), _dir: dir }
+    })
+}
+
 pub fn fake_catalog() -> Vec<Section> {
     let s = |key, label, help, kind, default, live| Setting { key, label, help, kind, default, live };
     let c = |name, who, usage, what| Command { name, who, usage, what };
@@ -815,7 +1017,7 @@ pub fn fake_catalog() -> Vec<Section> {
 /// The demo's catalog: the fake sections plus the real Chocolate Frogs one.
 fn demo_catalog() -> Vec<Section> {
     let mut sections = fake_catalog();
-    sections.extend(super::super::catalog::sections().into_iter().filter(|s| s.id == "frogs"));
+    sections.extend(super::super::catalog::sections().into_iter().filter(|s| s.id == "frogs" || s.id == "msglog"));
     sections
 }
 
@@ -2904,6 +3106,202 @@ async fn message_searches_are_in_the_activity_log_once() {
     assert_eq!(entries[0]["label"], "Searched messages");
     assert_eq!(entries[0]["user_id"], ADMIN_TWO.to_string());
     assert_eq!(entries[0]["section"]["id"], "search");
+}
+
+// --- deleted and edited messages ------------------------------------------------------------
+
+async fn log_api(app: &Router, session: &str, which: &str, query: &str) -> (StatusCode, Value) {
+    let (status, body, _) = call(app, "GET", &format!("/api/msglog/{which}?{query}"), Some(session), None, false).await;
+    (status, body)
+}
+
+fn log_texts(body: &Value, field: &str) -> Vec<Option<String>> {
+    body["results"].as_array().unwrap().iter().map(|r| r[field].as_str().map(String::from)).collect()
+}
+
+#[tokio::test]
+async fn deleted_messages_list_newest_first_with_pictures_and_never_safe_corner() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = log_api(&app, &session, "deleted", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((body["days"].as_str(), body["keep_days"].as_i64(), body["log_days"].as_i64()), (Some("30"), Some(7), Some(30)));
+    let texts = log_texts(&body, "text");
+    assert!(!body.to_string().contains("SECRET"), "safe corner rows never leave the server: {texts:?}");
+    assert_eq!(body["count"], 12, "{texts:?}");
+    assert!(body["next_before"].is_null());
+    let r = body["results"].as_array().unwrap();
+    let by_text = |t: &str| r.iter().find(|x| x["text"] == t).unwrap_or_else(|| panic!("missing {t}"));
+
+    // Newest deletion first: a message never seen, then two pictures without text.
+    assert_eq!((r[0]["text"].is_null(), r[0]["reason"].as_str(), r[0]["member"].is_null()), (true, Some("missed"), true));
+    assert_eq!(r[0]["url"], "https://discord.com/channels/900/22");
+    let pics = &r[1];
+    assert_eq!(pics["text"], "");
+    assert_eq!(pics["member"]["name"], "Sameer");
+    assert_eq!(pics["house"]["key"], "gryffindor");
+    let id = pics["message_id"].as_str().unwrap();
+    assert_eq!(pics["images"], json!([{ "n": 0, "name": "IMG_2041.png", "url": format!("/api/msglog/file/{id}/0") }, { "n": 1, "name": "IMG_2042.png", "url": format!("/api/msglog/file/{id}/1") }]));
+    assert_eq!(pics["files"], json!([]));
+    assert!(pics["deleted_ts"].as_i64().unwrap() - pics["sent_ts"].as_i64().unwrap() == 9 * 60);
+
+    let temp_room = by_text("brb, pizza");
+    assert_eq!(temp_room["channel"]["name"], "Kutiya ke dost 🎮", "a temporary room that's gone keeps its stored name");
+    assert_eq!(temp_room["channel"]["gone"], true);
+    let voice = by_text("who took my seat in lounge 😤");
+    assert_eq!((voice["channel"]["name"].as_str(), voice["channel"]["voice"].as_bool()), (Some("Lounge"), Some(true)));
+    assert_eq!(voice["member"]["id"], MEMBER.to_string());
+    assert_eq!(voice["files"], json!([{ "name": "seating-plan.pdf", "size": 182000, "image": false }, { "name": "screen-recording.png", "size": 12 * 1024 * 1024, "image": true }]), "not downloaded");
+    let thread = by_text("koto spoiler: today's word is PLANET");
+    assert_eq!(thread["channel"], json!({ "id": "78", "name": "koto-spoilers", "thread": true, "voice": false, "gone": false, "parent": { "id": "21", "name": "general" } }));
+    assert_eq!(thread["url"], "https://discord.com/channels/900/78");
+    let meme = by_text("ok this one is too good 💀");
+    assert_eq!(meme["reply_to"]["author"], "Dev");
+    assert_eq!(meme["reply_to"]["text"], "RCB will win it this year (probably), screenshot this", "the text as it was when she replied");
+    assert_eq!(meme["images"].as_array().unwrap().len(), 1);
+    assert_eq!(meme["bulk"], false);
+    let bulk: Vec<&Value> = r.iter().filter(|x| x["bulk"] == true).collect();
+    assert_eq!(bulk.len(), 3);
+    assert!(bulk.iter().all(|x| x["text"].as_str().unwrap().contains("FREE NITRO")));
+    let before: Vec<&Value> = r.iter().filter(|x| x["reason"] == "before_logging").collect();
+    assert_eq!(before.len(), 1);
+    assert_eq!(r.last().unwrap()["text"], "unpopular opinion: filter coffee > chai");
+    let deleted: Vec<i64> = r.iter().map(|x| x["deleted_ts"].as_i64().unwrap()).collect();
+    assert!(deleted.windows(2).all(|w| w[0] >= w[1]), "newest deletion first: {deleted:?}");
+}
+
+#[tokio::test]
+async fn deleted_messages_filter_page_and_check_their_input() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (_, body) = log_api(&app, &session, "deleted", "member=2007").await;
+    assert_eq!(log_texts(&body, "text"), vec![Some("ok this one is too good 💀".to_string())]);
+    assert_eq!(body["member"], json!({ "id": "2007", "name": "Zoya" }));
+    let (_, body) = log_api(&app, &session, "deleted", "channel=21").await;
+    let texts = log_texts(&body, "text");
+    assert_eq!(texts.len(), 3, "the channel, its thread and a message without a copy: {texts:?}");
+    assert!(texts.contains(&Some("koto spoiler: today's word is PLANET".into())));
+    let (_, body) = log_api(&app, &session, "deleted", "days=1").await;
+    assert_eq!(body["count"], 6);
+    let (_, body) = log_api(&app, &session, "deleted", "q=zebraFISH").await;
+    assert_eq!(log_texts(&body, "text"), vec![Some("the ZEBRAFISH meme was mine actually, ask Dev".to_string())]);
+    let (_, body) = log_api(&app, &session, "deleted", "q=nitro&days=7").await;
+    assert_eq!(body["count"], 3);
+
+    // Paging walks every row once.
+    let mut seen = Vec::new();
+    let mut before = String::new();
+    let mut pages = Vec::new();
+    loop {
+        let (status, body) = log_api(&app, &session, "deleted", &format!("limit=5{before}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        pages.push(body["count"].as_u64().unwrap());
+        seen.extend(body["results"].as_array().unwrap().iter().map(|x| x["message_id"].as_str().unwrap().to_string()));
+        match body["next_before"].as_i64() {
+            Some(b) => before = format!("&before={b}"),
+            None => break,
+        }
+        assert!(pages.len() < 10);
+    }
+    assert_eq!(pages, vec![5, 5, 2]);
+    assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 12);
+
+    for bad in ["days=90", "days=all", "member=abc", &format!("channel={SAFE}"), "channel=x", "before=0", "before=-3", "limit=lots", &format!("q={}", "x".repeat(101))] {
+        for which in ["deleted", "edited"] {
+            let (status, body) = log_api(&app, &session, which, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{which} {bad}: {body}");
+        }
+    }
+    let (_, body) = log_api(&app, &session, "deleted", "limit=1000").await;
+    assert_eq!(body["limit"], 100);
+    for which in ["deleted", "edited"] {
+        let (status, _, _) = call(&app, "GET", &format!("/api/msglog/{which}"), None, None, false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, _) = call(&app, "GET", &format!("/api/msglog/{which}"), Some(&session_for(MEMBER)), None, false).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn edited_messages_show_before_and_after_with_a_link() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = log_api(&app, &session, "edited", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("SECRET"));
+    assert_eq!(body["count"], 7);
+    let first = &body["results"][0];
+    assert_eq!(first["member"]["name"], "Sameer");
+    assert!(first["before"].as_str().unwrap().ends_with("twenty minutes"));
+    assert!(first["after"].as_str().unwrap().ends_with("caught it anyway 🙄"));
+    assert_eq!(first["url"], format!("https://discord.com/channels/900/22/{}", first["message_id"].as_str().unwrap()));
+    assert!(first["edited_ts"].as_i64().unwrap() > first["sent_ts"].as_i64().unwrap());
+    assert_eq!(body["results"][1]["channel"]["thread"], true);
+    let (_, body) = log_api(&app, &session, "edited", "q=ZEBRAFISH").await;
+    assert_eq!(log_texts(&body, "before"), vec![Some("that zebra meme was mine".to_string())]);
+    let (_, body) = log_api(&app, &session, "edited", "member=2010&days=7").await;
+    assert_eq!(log_texts(&body, "after"), vec![Some("RCB will win it this year (probably), screenshot this".to_string())]);
+    let (_, body) = log_api(&app, &session, "edited", "days=1").await;
+    assert_eq!(body["count"], 3);
+}
+
+#[tokio::test]
+async fn looks_at_the_log_are_in_the_activity_log_once() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    for _ in 0..2 {
+        let (status, _) = log_api(&app, &session, "deleted", "q=pizza&member=2008&channel=23&days=7").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (_, _) = log_api(&app, &session, "edited", "q=pizza&member=2008&channel=23&days=7").await;
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let found = |key: &str| -> Vec<Value> {
+        audit.as_array().unwrap().iter().filter(|e| e["key"] == key && e["change"] == "“pizza” · @Arjun · #desi-banter · last 7 days").cloned().collect()
+    };
+    let deleted = found("msglog:deleted");
+    assert_eq!(deleted.len(), 1, "a repeat isn't logged again: {audit}");
+    assert_eq!((deleted[0]["label"].as_str(), deleted[0]["section"]["id"].as_str()), (Some("Looked at deleted messages"), Some("msglog")));
+    assert_eq!(deleted[0]["user_id"], ADMIN_TWO.to_string());
+    assert_eq!(found("msglog:edited").len(), 1, "the other tab is its own entry");
+}
+
+#[tokio::test]
+async fn pictures_are_served_only_for_deleted_messages_and_only_from_the_folder() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let log = fake_log();
+    let (status, body, headers) = call(&app, "GET", &format!("/api/msglog/file/{}/0", log.meme), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(headers["cache-control"], "private, max-age=3600");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    let raw = app.clone().oneshot(Request::builder().uri(format!("/api/msglog/file/{}/0", log.meme)).header("cookie", format!("mlci_panel={session}")).body(Body::empty()).unwrap()).await.unwrap();
+    let bytes = axum::body::to_bytes(raw.into_body(), 10 << 20).await.unwrap();
+    assert!(bytes.starts_with(b"\x89PNG"), "a real picture");
+
+    let expect = |path: String, want: StatusCode| (path, want);
+    for (path, want) in [
+        expect(format!("/api/msglog/file/{}/1", log.meme), StatusCode::NOT_FOUND),
+        expect(format!("/api/msglog/file/{}/0", log.kept), StatusCode::NOT_FOUND),
+        expect(format!("/api/msglog/file/{}/0", log.evil), StatusCode::NOT_FOUND),
+        expect(format!("/api/msglog/file/{}/1", log.evil), StatusCode::NOT_FOUND),
+        expect(format!("/api/msglog/file/{}/2", log.evil), StatusCode::NOT_FOUND),
+        expect(format!("/api/msglog/file/{}/4", log.meme), StatusCode::BAD_REQUEST),
+        expect(format!("/api/msglog/file/{}/00", log.meme), StatusCode::BAD_REQUEST),
+        expect(format!("/api/msglog/file/{}/x", log.meme), StatusCode::BAD_REQUEST),
+        expect("/api/msglog/file/..%2F..%2Fmsglog.db/0".into(), StatusCode::BAD_REQUEST),
+        expect(format!("/api/msglog/file/{}/..%2F0", log.meme), StatusCode::BAD_REQUEST),
+        expect("/api/msglog/file/-1/0".into(), StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body, _) = call(&app, "GET", &path, Some(&session), None, false).await;
+        assert_eq!(status, want, "{path}: {body}");
+    }
+    let (status, _, _) = call(&app, "GET", &format!("/api/msglog/file/{}/0/../../../msglog.db", log.meme), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = call(&app, "GET", &format!("/api/msglog/file/{}/0", log.meme), None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "GET", &format!("/api/msglog/file/{}/0", log.meme), Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 // --- the demo ----------------------------------------------------------------------------

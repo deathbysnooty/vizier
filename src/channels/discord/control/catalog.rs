@@ -931,6 +931,57 @@ pub fn sections() -> Vec<Section> {
             commands: vec![],
         },
         Section {
+            id: "msglog",
+            title: "Deleted messages",
+            icon: "🗑️",
+            about: "A log of deleted and edited messages, shown only on the panel's Deleted messages page (nothing is \
+                    posted in Discord). The bot keeps a short-lived copy of every member message it sees in the server - \
+                    text channels, threads and voice channel chats, temporary rooms included - with its pictures, so \
+                    that when a message is deleted its text and pictures can still be shown, and when one is edited the \
+                    text before and after. Never #safe-corner or its threads, never DMs, never bots. Discord doesn't \
+                    tell bots who deleted a message, so the log can't say. Every look at the log is in the activity log.",
+            settings: vec![
+                toggle(
+                    "VIZIER_MSGLOG",
+                    "Log deleted and edited messages",
+                    "Keep copies of new messages and log deletions and edits. Off stops copying new messages and logging; \
+                     what's already logged stays until it's cleared.",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_KEEP_DAYS",
+                    "Keep copies for",
+                    "How long the copy of a message nobody deleted (its text and pictures) is kept before it's cleared. \
+                     A message deleted after this shows in the log without its text.",
+                    number(1, 90, "days"),
+                    "7",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_LOG_DAYS",
+                    "Keep the log for",
+                    "How long deleted and edited messages stay in the log, pictures included, before they're cleared.",
+                    number(1, 365, "days"),
+                    "30",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_MAX_IMAGE_MB",
+                    "Largest picture saved",
+                    "Pictures bigger than this aren't downloaded; the log shows just their name. At most four pictures \
+                     are saved from one message, and other files are never downloaded.",
+                    number(1, 25, "MB"),
+                    "8",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_MAX_GB",
+                    "Picture storage limit",
+                    "When saved pictures take up more than this on the server, new pictures stop being downloaded (text \
+                     is still kept) until old ones are cleared.",
+                    number(1, 500, "GB"),
+                    "5",
+                ),
+            ],
+            commands: vec![],
+        },
+        Section {
             id: "autoreplies",
             title: "Auto-responses",
             icon: "💬",

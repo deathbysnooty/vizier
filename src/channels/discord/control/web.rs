@@ -232,6 +232,18 @@ pub trait PanelData: Send + Sync + 'static {
     async fn cancel_trade(&self, _id: i64, _by: u64) -> Result<super::super::frog_trade::Trade, String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// Deleted messages from the message log, a page at a time.
+    async fn msglog_deleted(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// Edited messages from the message log, a page at a time.
+    async fn msglog_edited(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::EditedRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// A saved picture of a deleted message: its bytes and type.
+    async fn msglog_file(&self, _message: u64, _n: usize) -> Option<(Vec<u8>, &'static str)> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -249,6 +261,7 @@ mod insights;
 mod media;
 mod members;
 mod memos;
+mod msglog;
 mod posts;
 mod profiles;
 mod rules;
@@ -495,6 +508,25 @@ impl PanelData for LiveData {
 
     fn member_house(&self, id: u64) -> Option<&'static super::super::house::House> {
         super::super::house::house_of(id)
+    }
+
+    async fn msglog_deleted(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        tokio::task::spawn_blocking(move || super::super::msglog::list_deleted(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn msglog_edited(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::EditedRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        tokio::task::spawn_blocking(move || super::super::msglog::list_edited(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn msglog_file(&self, message: u64, n: usize) -> Option<(Vec<u8>, &'static str)> {
+        let reader = super::super::msglog::reader()?;
+        tokio::task::spawn_blocking(move || super::super::msglog::deleted_file(&reader.conn.lock(), &reader.root, message, n)).await.ok().flatten()
     }
 
     fn thread_parent(&self, channel: u64) -> Option<u64> {
@@ -844,6 +876,9 @@ pub fn router(panel: Panel) -> Router {
         .route("/profiles/{id}/apply/preview", post(profiles::apply_preview))
         .route("/profiles/{id}/prompt", get(profiles::prompt_preview))
         .route("/messages/search", get(search::search))
+        .route("/msglog/deleted", get(msglog::deleted))
+        .route("/msglog/edited", get(msglog::edited))
+        .route("/msglog/file/{id}/{n}", get(msglog::file))
         .route("/members", get(members::search))
         .route("/members/notes", get(members::noted))
         .route("/members/notes/enable", post(members::enable_notes))
@@ -1544,6 +1579,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(welcomes::audit_entry(&panel, e));
             } else if e.key == "messages:search" {
                 obj.extend(search::audit_entry(e));
+            } else if e.key == "msglog:deleted" || e.key == "msglog:edited" {
+                obj.extend(msglog::audit_entry(e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {

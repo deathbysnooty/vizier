@@ -40,6 +40,7 @@ mod frog_sell;
 mod frog_store;
 mod frog_trade;
 mod house;
+mod msglog;
 mod npat;
 mod npat_judge;
 mod npat_store;
@@ -110,6 +111,10 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
+        }
+        // Deleted and edited messages for the panel. Not opening only means no log.
+        if let Err(err) = msglog::start(&self.deps.config.workspace) {
+            tracing::warn!("msglog: store not opened: {}", err);
         }
 
         let intents = GatewayIntents::all();
@@ -1214,6 +1219,8 @@ impl EventHandler for Handler {
     ) {
         // Koto edits one card per game; the solved edit names the winner.
         games::on_message_update(&ctx, &event);
+        // A member's changed text goes to the panel's edited-message log.
+        msglog::on_edit(&ctx, &event);
     }
 
     async fn message_delete(
@@ -1226,6 +1233,18 @@ impl EventHandler for Handler {
         // A deleted House Cup post goes back up, in order.
         scoreboard::on_delete(&ctx, channel_id, deleted_message_id);
         npat::on_delete(channel_id, deleted_message_id);
+        // The panel's deleted-message log.
+        msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
+    }
+
+    async fn message_delete_bulk(
+        &self,
+        ctx: Context,
+        channel_id: serenity::all::ChannelId,
+        multiple_deleted_messages_ids: Vec<serenity::all::MessageId>,
+        guild_id: Option<serenity::all::GuildId>,
+    ) {
+        msglog::on_delete(&ctx, channel_id, &multiple_deleted_messages_ids, guild_id, true);
     }
 
     async fn voice_state_update(&self, ctx: Context, _old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
@@ -2847,6 +2866,11 @@ impl EventHandler for Handler {
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
+        // The panel's deleted and edited message log keeps a short-lived copy of
+        // every member message in any server channel (never DMs or #safe-corner),
+        // and notes bots' message ids so their deletions aren't logged. First,
+        // before anything can return, and before the allowlist. Queued, never blocks.
+        msglog::on_message(&ctx, &msg);
         // Koto, Anagram and Cat Bot results pay house points; these come from bots.
         games::on_message(&ctx, &msg);
         // Anything new in the scoreboard channel - bots and announcements

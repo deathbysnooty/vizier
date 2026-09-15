@@ -560,6 +560,7 @@
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/search', icon('search'), 'Search messages'),
+      navItem('#/deleted', icon('trash'), 'Deleted messages'),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -604,6 +605,8 @@
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
       ['Members', '#/members', 'users', 'Profiles, what the bot sees, mods’ notes'],
       ['Search messages', '#/search', 'search', 'Find who said something and when'],
+      ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
+      ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
       ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
@@ -742,6 +745,7 @@
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
       case 'search': renderSearch(page, r.q); break;
+      case 'deleted': renderDeleted(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
     }
@@ -1642,6 +1646,297 @@
       h('div', { class: 'msg-hit-actions' }, r.url
         ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + name + '’s message in Discord' }, 'Open in Discord', icon('external'))
         : h('span', { class: 'hint', title: 'The bot didn’t keep this message’s id, so there’s no link.' }, 'No link')));
+  }
+
+  // --- deleted & edited messages ------------------------------------------------------
+
+  const LOG_PERIODS = [['1', '1 day'], ['7', '7 days'], ['30', '30 days']];
+
+  /** "9:43 pm", India time. */
+  function msgClock(ts) {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: IST, hour: 'numeric', minute: '2-digit', hour12: true }).formatToParts(new Date(ts * 1000));
+    const get = (t) => (parts.find((x) => x.type === t) || {}).value || '';
+    return get('hour') + ':' + get('minute') + ' ' + get('dayPeriod').toLowerCase();
+  }
+  function sameIstDay(a, b) { const f = (ts) => istParts(ts * 1000, { year: 'numeric', month: 'numeric', day: 'numeric' }); return f(a) === f(b); }
+  function laterWords(secs) {
+    if (secs < 60) return 'under a minute later';
+    if (secs < 3600) return Math.round(secs / 60) + ' min later';
+    if (secs < 86400) { const n = Math.round(secs / 3600); return n + (n === 1 ? ' hour later' : ' hours later'); }
+    const d = Math.round(secs / 86400);
+    return d + (d === 1 ? ' day later' : ' days later');
+  }
+  function sizeWords(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1) + ' MB';
+    return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+  }
+
+  /** A picture over the page, with the others from the same message a key away. */
+  function openLightbox(images, start) {
+    const before = document.activeElement;
+    let i = start, layer = null;
+    const img = h('img', { class: 'lightbox-img', alt: '' });
+    const name = h('span', { class: 'lightbox-name' });
+    const count = h('span', { class: 'lightbox-count' });
+    const full = h('a', { class: 'btn sm', target: '_blank', rel: 'noopener' }, 'Open in a new tab', icon('external'));
+    const show = () => {
+      img.src = images[i].url; img.alt = images[i].name || 'Picture';
+      name.textContent = images[i].name || 'Picture';
+      count.textContent = images.length > 1 ? (i + 1) + ' of ' + images.length : '';
+      full.href = images[i].url;
+    };
+    const step = (d) => { i = (i + d + images.length) % images.length; show(); };
+    const close = () => { wrap.remove(); document.removeEventListener('keydown', keys); popLayer(layer); if (before && before.focus) before.focus(); };
+    const keys = (e) => { if (images.length > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { step(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); } };
+    const closeBtn = h('button', { class: 'btn sm ghost icon-only lightbox-close', type: 'button', 'aria-label': 'Close', onclick: close }, icon('x'));
+    const nav = images.length > 1 ? [
+      h('button', { class: 'lightbox-nav prev', type: 'button', 'aria-label': 'Previous picture', onclick: () => step(-1) }, icon('left')),
+      h('button', { class: 'lightbox-nav next', type: 'button', 'aria-label': 'Next picture', onclick: () => step(1) }, icon('right')),
+    ] : null;
+    const wrap = h('div', { class: 'lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Picture from a deleted message' },
+      h('div', { class: 'scrim', onclick: close }),
+      h('figure', { class: 'lightbox-frame' }, img, nav,
+        h('figcaption', { class: 'lightbox-foot' }, h('span', { class: 'grow lightbox-title' }, name, count), full, closeBtn)));
+    wrap.addEventListener('keydown', (e) => { if (e.key === 'Tab') trapFocus(wrap, e); });
+    document.addEventListener('keydown', keys);
+    layer = pushLayer({ close });
+    show();
+    $('#layers').appendChild(wrap);
+    closeBtn.focus();
+  }
+
+  function renderDeleted(page, rq) {
+    const tab = rq.get('tab') === 'edited' ? 'edited' : 'deleted';
+    document.title = (tab === 'edited' ? 'Edited' : 'Deleted') + ' messages · Loduchand';
+    const days = rq.get('days');
+    const st = {
+      tab,
+      q: (rq.get('q') || '').trim().slice(0, 100),
+      member: /^\d{1,20}$/.test(rq.get('member') || '') ? rq.get('member') : '',
+      channel: /^\d{1,20}$/.test(rq.get('channel') || '') ? rq.get('channel') : '',
+      days: LOG_PERIODS.some((x) => x[0] === days) ? days : '30',
+    };
+    const hashFor = (over) => {
+      const s = Object.assign({}, st, over || {});
+      const p = new URLSearchParams();
+      if (s.tab === 'edited') p.set('tab', 'edited');
+      if (s.member) p.set('member', s.member);
+      if (s.channel) p.set('channel', s.channel);
+      if (s.days !== '30') p.set('days', s.days);
+      if (s.q) p.set('q', s.q);
+      const qs = p.toString();
+      return '#/deleted' + (qs ? '?' + qs : '');
+    };
+    const setting = (key, fallback) => {
+      const sec = sectionById('msglog');
+      const found = sec && sec.settings.find((x) => x.key === key);
+      const v = found && (found.value || found.default);
+      return v && /^\d+$/.test(v) ? +v : fallback;
+    };
+    const logDays = setting('VIZIER_MSGLOG_LOG_DAYS', 30);
+
+    page.appendChild(pageHead('Deleted messages', 'What members deleted or changed, and when. Shown only here, never posted in Discord.',
+      sectionById('msglog') ? h('a', { class: 'btn', href: '#/s/msglog', 'aria-label': 'Deleted messages settings' }, icon('sliders'), h('span', { class: 'hide-sm' }, 'Settings')) : null));
+    page.appendChild(h('nav', { class: 'page-tabs', 'aria-label': 'Message log views' },
+      h('a', { href: hashFor({ tab: 'deleted' }), 'aria-current': tab === 'deleted' ? 'page' : null }, icon('trash'), 'Deleted'),
+      h('a', { href: hashFor({ tab: 'edited' }), 'aria-current': tab === 'edited' ? 'page' : null }, icon('edit'), 'Edited')));
+    const note = h('div', { class: 'banner info inline msglog-note', role: 'note' }, icon('info'),
+      h('p', null, 'Kept ' + plural(logDays, 'day') + '. ', h('span', null, 'Discord doesn’t tell bots who deleted a message. Never includes #safe-corner or DMs.')));
+    page.appendChild(note);
+
+    // Filters: each applies at once and lives in the address.
+    const input = h('input', { type: 'search', value: st.q, placeholder: tab === 'edited' ? 'Words in the old or new text' : 'Words in the deleted text', 'aria-label': 'Filter by text', maxlength: '100', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
+    const apply = (over) => navigate(hashFor(over));
+    input.addEventListener('search', () => { if (!input.value.trim() && st.q) apply({ q: '' }); });
+
+    const memberBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Member' });
+    const drawMember = (m) => {
+      clear(memberBtn);
+      append(memberBtn, [st.member && m ? avatar(m.avatar, m.name, 'xs') : icon(st.member ? 'user' : 'users'),
+        h('span', { class: 'value' + (st.member ? '' : ' placeholder') }, st.member ? (m ? m.name : 'Member ' + st.member) : 'Any member'), icon('chevron')]);
+    };
+    drawMember(null);
+    if (st.member) memberById(st.member).then((m) => { if (memberBtn.isConnected) drawMember(m); });
+    memberBtn.addEventListener('click', () => openPicker(memberBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180,
+      load: async (q) => (q ? [] : [{ id: '', label: 'Any member', lead: icon('users'), trail: !st.member ? icon('check', 'check-mark') : null }]).concat(await memberItems(q)),
+      onPick: (it) => apply({ member: it.id }) }));
+
+    const channelBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Channel' });
+    const c0 = st.channel ? chan(st.channel) : null;
+    append(channelBtn, [c0 && c0.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
+      h('span', { class: 'value' + (st.channel ? '' : ' placeholder') }, st.channel ? (c0 ? c0.name : 'channel ' + st.channel) : 'All channels'), icon('chevron')]);
+    channelBtn.addEventListener('click', () => openPicker(channelBtn, { title: 'Channel', placeholder: 'Search channels', load: searchChannelItems(st.channel), onPick: (it) => apply({ channel: it.id }) }));
+
+    const period = segmented(LOG_PERIODS, st.days, 'Period', (v) => apply({ days: v }));
+    const filters = h('form', { class: 'card msg-search msglog-filters', role: 'search', onsubmit: (e) => { e.preventDefault(); apply({ q: input.value.trim() }); } },
+      h('div', { class: 'msg-search-row' }, h('label', { class: 'search-box' }, icon('search'), input)),
+      h('div', { class: 'msg-search-filters' }, memberBtn, channelBtn, period));
+    page.appendChild(filters);
+
+    const summary = h('div', { class: 'msg-summary', 'aria-live': 'polite' });
+    const list = h('div', { class: 'msg-list' });
+    const foot = h('div', { class: 'msg-foot' });
+    const box = h('div', { class: 'card msg-results msglog-results' }, list, foot);
+    page.appendChild(summary);
+    page.appendChild(box);
+
+    let items = [], next = null, last = null, busy = false, failed = null, failedStatus = 0;
+    const periodWords = () => st.days === '1' ? 'the last day' : 'the last ' + st.days + ' days';
+    const filterWords = () => {
+      const bits = [];
+      if (st.member) { const m = S.members.get(st.member); bits.push('from ' + (m ? m.name : 'that member')); }
+      if (st.channel) { const c = chan(st.channel); bits.push('in #' + (c ? c.name : 'that channel')); }
+      if (st.q) bits.push('with “' + st.q + '”');
+      return bits.length ? ' ' + bits.join(' ') : '';
+    };
+    const noun = tab === 'edited' ? ['edit', 'edits'] : ['deleted message', 'deleted messages'];
+    const draw = () => {
+      clear(summary); clear(list); clear(foot);
+      box.classList.toggle('is-empty', !items.length);
+      if (!items.length && busy) { list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); foot.hidden = true; return; }
+      if (failed && !items.length) {
+        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the log'), h('p', null, failed),
+          failedStatus === 0 || failedStatus >= 500 ? h('p', { style: 'margin-top:12px' }, h('button', { class: 'btn', type: 'button', onclick: () => load() }, icon('restart'), 'Try again')) : null));
+        foot.hidden = true;
+        return;
+      }
+      if (last && last.enabled === false) {
+        list.appendChild(h('div', { class: 'banner inline msglog-off', role: 'status' }, icon('pause'),
+          h('p', null, h('b', null, 'Logging is switched off. '), h('span', null, 'New deletions and edits aren’t being recorded.')),
+          sectionById('msglog') ? h('a', { class: 'btn sm', href: '#/s/msglog' }, 'Settings') : null));
+      }
+      summary.appendChild(h('span', null, h('b', null, numberFmt.format(items.length) + ' ' + (items.length === 1 ? noun[0] : noun[1])), next ? ' so far' : '', ' in ' + periodWords() + filterWords()));
+      if (!items.length) {
+        const filtered = st.member || st.channel || st.q;
+        list.appendChild(h('div', { class: 'empty' }, icon(tab === 'edited' ? 'edit' : 'trash'),
+          h('h3', null, tab === 'edited' ? 'No edits' : 'No deleted messages'),
+          h('p', null, 'Nothing in ' + periodWords() + filterWords() + '.'),
+          filtered ? h('p', { class: 'hint' }, h('a', { href: hashFor({ member: '', channel: '', q: '' }) }, 'Clear the filters')) : null));
+      }
+      items.forEach((r) => list.appendChild(tab === 'edited' ? editedRow(r) : deletedRow(r)));
+      foot.hidden = !items.length;
+      if (failed) foot.appendChild(h('span', { class: 'msg-foot-error' }, icon('alert'), failed));
+      if (next) foot.appendChild(h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() }, busy ? h('span', { class: 'spinner' }) : icon('down'), 'Load more'));
+      else if (items.length) foot.appendChild(h('span', null, 'That’s everything in ' + periodWords()));
+    };
+    const load = async () => {
+      if (busy) return;
+      busy = true; failed = null;
+      if (items.length) { const b = foot.querySelector('.btn'); if (b) { b.disabled = true; b.replaceChild(h('span', { class: 'spinner' }), b.firstChild); } } else draw();
+      const p = new URLSearchParams({ days: st.days });
+      if (st.member) p.set('member', st.member);
+      if (st.channel) p.set('channel', st.channel);
+      if (st.q) p.set('q', st.q);
+      if (next) p.set('before', String(next));
+      try {
+        const data = await api('GET', '/msglog/' + tab + '?' + p.toString());
+        if (!box.isConnected) return;
+        if (data.member && data.member.name && !S.members.has(data.member.id)) S.members.set(data.member.id, { id: data.member.id, name: data.member.name });
+        items = items.concat(data.results);
+        next = data.next_before;
+        last = data;
+        const kept = note.querySelector('p');
+        if (kept && data.log_days) kept.firstChild.textContent = 'Kept ' + plural(data.log_days, 'day') + '. ';
+      } catch (e) {
+        if (!box.isConnected) return;
+        failed = e.message;
+        failedStatus = e.status || 0;
+      }
+      busy = false;
+      draw();
+      refreshAudit();
+    };
+    load();
+  }
+
+  function logHead(r, extra) {
+    const m = r.member;
+    const ch = r.channel || {};
+    const chanEl = h('span', { class: 'msg-hit-chan', title: ch.thread && ch.parent ? 'A thread in #' + ch.parent.name : ch.gone ? 'This channel no longer exists' : null },
+      ch.voice ? icon('voice') : h('span', { class: 'glyph' }, '#'), ch.name,
+      ch.thread && ch.parent && ch.parent.name ? h('small', null, 'thread in #' + ch.parent.name) : null,
+      ch.gone ? h('small', null, 'gone') : null);
+    return h('div', { class: 'msg-hit-head' },
+      m ? h('a', { class: 'msg-hit-name', href: '#/members/' + m.id }, m.name) : h('span', { class: 'msg-hit-name unknown' }, 'Unknown member'),
+      r.house ? h('span', { class: 'house-chip', style: '--house:' + r.house.colour }, r.house.crest + ' ' + r.house.name) : null,
+      chanEl, extra || null);
+  }
+
+  function logAvatar(r) {
+    const m = r.member;
+    if (!m) return h('span', { class: 'msg-hit-avatar' }, h('span', { class: 'avatar lg msglog-ghost', 'aria-hidden': 'true' }, icon('user')));
+    return h('a', { class: 'msg-hit-avatar', href: '#/members/' + m.id, tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.avatar, m.name, 'lg'));
+  }
+
+  function logTimes(sent, verb, at) {
+    const d = new Date(at * 1000);
+    const whenAt = sameIstDay(sent, at) ? msgClock(at) : msgWhen(at);
+    return h('p', { class: 'msglog-times' },
+      h('time', { datetime: new Date(sent * 1000).toISOString(), title: fmtFull.format(new Date(sent * 1000)) + ' IST' }, 'sent ' + msgWhen(sent)),
+      h('span', { class: 'sep', 'aria-hidden': 'true' }, ' · '),
+      h('time', { datetime: d.toISOString(), title: fmtFull.format(d) + ' IST' }, h('b', null, verb + ' ' + whenAt)),
+      h('span', { class: 'later' }, ' (' + laterWords(Math.max(0, at - sent)) + ')'));
+  }
+
+  function longText(text, cls) {
+    const el = h('p', { class: cls });
+    const long = Array.from(text).length > 480;
+    if (!long) { el.textContent = text; return [el]; }
+    const cut = Array.from(text).slice(0, 420).join('') + '…';
+    el.textContent = cut;
+    const more = h('button', { class: 'btn sm ghost msg-hit-more', type: 'button', 'aria-expanded': 'false', onclick: () => {
+      const open = more.getAttribute('aria-expanded') !== 'true';
+      el.textContent = open ? text : cut;
+      more.setAttribute('aria-expanded', String(open));
+      more.lastChild.textContent = open ? 'Show less' : 'Show all of it';
+    } }, icon('eye'), 'Show all of it');
+    return [el, more];
+  }
+
+  const LOG_REASONS = {
+    before_logging: 'Sent before logging started, so there’s no copy of what it said.',
+    expired: 'Sent too long before it was deleted: its copy had already been cleared.',
+    missed: 'The bot didn’t catch this message when it was sent, so there’s no copy.',
+  };
+
+  function deletedRow(r) {
+    const images = r.images || [];
+    const files = r.files || [];
+    let body;
+    if (r.text === null || r.text === undefined) body = h('p', { class: 'msglog-missing' }, icon('info'), LOG_REASONS[r.reason] || 'Sent before logging started.');
+    else if (!r.text.trim()) body = images.length || files.length ? null : h('p', { class: 'msglog-missing' }, '(no text)');
+    else body = longText(r.text, 'msg-hit-text');
+    const thumbs = images.length ? h('div', { class: 'msglog-thumbs' + (images.length === 1 ? ' one' : '') }, images.map((im, i) =>
+      h('button', { class: 'msglog-thumb', type: 'button', 'aria-label': 'Open picture ' + (im.name || i + 1), onclick: () => openLightbox(images, i) },
+        h('img', { src: im.url, alt: im.name || '', loading: 'lazy' })))) : null;
+    const chips = files.length ? h('div', { class: 'msglog-files' }, files.map((f) =>
+      h('span', { class: 'msglog-file', title: f.image ? 'This picture wasn’t saved (too big, or the download failed)' : 'Only the name is kept' },
+        icon(f.image ? 'image' : 'tag'), h('span', { class: 'name' }, f.name), h('small', null, sizeWords(f.size) + (f.image ? ' · not saved' : ''))))) : null;
+    return h('article', { class: 'msg-hit msglog-row' },
+      logAvatar(r),
+      h('div', { class: 'msg-hit-main' },
+        logHead(r, r.bulk ? h('span', { class: 'badge msglog-bulk', title: 'Deleted along with other messages at once, usually by a mod or a bot' }, 'bulk delete') : null),
+        logTimes(r.sent_ts, 'deleted', r.deleted_ts),
+        r.reply_to ? h('p', { class: 'msg-hit-reply' }, icon('reply'), h('span', null, 'replying to ', h('b', null, '@' + (r.reply_to.author || 'someone')), r.reply_to.text ? ': “' + r.reply_to.text + '”' : '')) : null,
+        body, thumbs, chips),
+      h('div', { class: 'msg-hit-actions' }, r.url && !(r.channel && r.channel.gone)
+        ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open #' + ((r.channel && r.channel.name) || 'the channel') + ' in Discord', title: 'The message is gone, so this opens the channel' }, h('span', { class: 'hide-sm' }, 'Open channel'), h('span', { class: 'show-sm' }, 'Channel'), icon('external'))
+        : null));
+  }
+
+  function editedRow(r) {
+    return h('article', { class: 'msg-hit msglog-row' },
+      logAvatar(r),
+      h('div', { class: 'msg-hit-main' },
+        logHead(r),
+        logTimes(r.sent_ts, 'edited', r.edited_ts),
+        h('div', { class: 'msglog-diff' },
+          h('div', { class: 'msglog-before' }, h('span', { class: 'msglog-label' }, 'Before'), h('del', null, longText(r.before || '', 'msglog-diff-text'))),
+          h('div', { class: 'msglog-arrow', 'aria-hidden': 'true' }, icon('down')),
+          h('div', { class: 'msglog-after' }, h('span', { class: 'msglog-label' }, 'After'), longText(r.after || '', 'msglog-diff-text')))),
+      h('div', { class: 'msg-hit-actions' }, r.url
+        ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + ((r.member && r.member.name) || 'the') + '’s message in Discord' }, h('span', { class: 'hide-sm' }, 'Open in Discord'), h('span', { class: 'show-sm' }, 'Open'), icon('external'))
+        : null));
   }
 
   // --- panel settings ---------------------------------------------------------------
@@ -4584,7 +4879,8 @@
           p.joined_at ? h('span', null, icon('calendar'), 'Joined ' + fmtDate(p.joined_at * 1000)) : null,
           p.created_at ? h('span', null, icon('user'), 'Account from ' + fmtDate(p.created_at * 1000)) : null,
           p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null,
-          h('a', { class: 'open-link', href: '#/search?member=' + encodeURIComponent(p.id) }, icon('search'), 'Search their messages')),
+          h('a', { class: 'open-link', href: '#/search?member=' + encodeURIComponent(p.id) }, icon('search'), 'Search their messages'),
+          h('a', { class: 'open-link', href: '#/deleted?member=' + encodeURIComponent(p.id) }, icon('trash'), 'Deleted messages')),
         p.roles.length ? h('div', { class: 'chips role-chips' }, p.roles.map((r) => h('span', { class: 'chip role-chip' }, h('span', { class: 'role-dot', style: r.color ? 'background:' + r.color : '' }), h('span', { class: 'chip-text' }, r.name)))) : null)));
 
     const grid = h('div', { class: 'profile-grid' });

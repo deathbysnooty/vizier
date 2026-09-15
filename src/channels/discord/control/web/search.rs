@@ -324,7 +324,13 @@ static LOGGED: LazyLock<Mutex<HashMap<(u64, String), Instant>>> = LazyLock::new(
 /// Writes the search to the activity log, unless this admin ran the very same
 /// search a few minutes ago (loading its next page, say).
 fn log_search(user: u64, value: &str) {
-    let key = (user, value.to_string());
+    log_quietly("messages:search", user, value);
+}
+
+/// Writes a look at stored messages to the activity log under `audit_key`,
+/// unless this admin made the very same one within [`AUDIT_QUIET`].
+pub fn log_quietly(audit_key: &str, user: u64, value: &str) {
+    let key = (user, format!("{}\u{1f}{}", audit_key, value));
     {
         let mut logged = LOGGED.lock();
         logged.retain(|_, at| at.elapsed() < AUDIT_QUIET);
@@ -333,8 +339,8 @@ fn log_search(user: u64, value: &str) {
         }
         logged.insert(key, Instant::now());
     }
-    if let Err(err) = super::super::log_change("messages:search", None, Some(value), user) {
-        tracing::warn!("panel: couldn't log a message search: {}", err);
+    if let Err(err) = super::super::log_change(audit_key, None, Some(value), user) {
+        tracing::warn!("panel: couldn't log a look at messages ({}): {}", audit_key, err);
     }
 }
 
