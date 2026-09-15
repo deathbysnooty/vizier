@@ -46,6 +46,7 @@ mod points;
 mod snitch;
 mod standings;
 mod scoreboard;
+mod rules_text;
 mod activity;
 mod games;
 mod weekly;
@@ -1189,6 +1190,17 @@ impl EventHandler for Handler {
         games::on_message_update(&ctx, &event);
     }
 
+    async fn message_delete(
+        &self,
+        ctx: Context,
+        channel_id: serenity::all::ChannelId,
+        deleted_message_id: serenity::all::MessageId,
+        _guild_id: Option<serenity::all::GuildId>,
+    ) {
+        // A deleted House Cup post goes back up, in order.
+        scoreboard::on_delete(&ctx, channel_id, deleted_message_id);
+    }
+
     async fn ready(&self, ctx: Context, _ready: Ready) {
         // A running quiz comes back first: registering the slash commands below
         // takes the better part of a minute, and players notice the silence.
@@ -1420,6 +1432,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), scoreboard::refresh_builder()).await;
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -1473,6 +1486,7 @@ impl EventHandler for Handler {
         }
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
+        // The House Cup channel: welcome, rules, and the scoreboard card kept last.
         scoreboard::spawn(ctx.clone());
         // A card in the houses channel when a different house takes the lead.
         standings::spawn_lead_watch(ctx.clone());
@@ -2063,6 +2077,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "housedraw" {
                 standings::draw_command(&ctx, &command).await;
+            }
+            if command.data.name == "guiderefresh" {
+                scoreboard::refresh_command(&ctx, &command).await;
             }
             if command.data.name == "houseopt" {
                 house::opt_command(&ctx, &command).await;
@@ -2781,6 +2798,9 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         // Koto, Anagram and Cat Bot results pay house points; these come from bots.
         games::on_message(&ctx, &msg);
+        // Anything new in the scoreboard channel - bots and announcements
+        // included - moves the House Cup card back to the bottom.
+        scoreboard::on_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {

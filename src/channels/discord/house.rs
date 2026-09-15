@@ -751,6 +751,16 @@ const COMMON_ROOMS: [(&str, &str, &str); 4] = [
     ("hufflepuff", "🦡│hufflepuff-kitchens", "Hufflepuff only. Tap the barrel in rhythm, by the kitchens."),
 ];
 
+/// The category the common rooms sit under, for the welcome post.
+pub(crate) fn common_room_category_name() -> &'static str {
+    COMMON_ROOM_CATEGORY
+}
+
+/// Each house's room as (house key, channel name without its crest prefix).
+pub(crate) fn common_room_names() -> Vec<(&'static str, &'static str)> {
+    COMMON_ROOMS.iter().map(|(key, name, _)| (*key, name.split_once('│').map_or(*name, |(_, room)| room))).collect()
+}
+
 /// What a member of the house may do in their own room.
 fn room_rights() -> Permissions {
     Permissions::VIEW_CHANNEL

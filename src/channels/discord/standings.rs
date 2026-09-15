@@ -471,16 +471,28 @@ pub async fn today_command(ctx: &Context, command: &CommandInteraction) {
     } else {
         None
     };
-    // All of these read the house database, before it is locked below.
-    let stepped_out = house::opted_out(user);
-    let home = house::house_of(user);
     let asker_home = house::house_of(asker);
+    let home = if someone_else { house::house_of(user) } else { asker_home };
     let is_admin = super::admin_ids().contains(&asker);
     let text = if someone_else && !is_admin && (asker_home.is_none() || asker_home.map(|h| h.key) != home.map(|h| h.key)) {
         "You can only check members of your own house.".to_string()
-    } else if stepped_out {
+    } else {
+        today_for(user, name.as_deref())
+    };
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
+}
+
+/// What `/today` says about `user` - `name` is set when someone else is asking
+/// about them. Also behind the scoreboard's "My points" button. Takes the house
+/// and stats locks one after the other, so call it holding neither.
+pub(super) fn today_for(user: u64, name: Option<&str>) -> String {
+    let someone_else = name.is_some();
+    // Both read the house database, before it is locked below.
+    let stepped_out = house::opted_out(user);
+    let home = house::house_of(user);
+    if stepped_out {
         if someone_else {
-            format!("{} has stepped out of the houses, so they're not earning points.", name.as_deref().unwrap_or("They"))
+            format!("{} has stepped out of the houses, so they're not earning points.", name.unwrap_or("They"))
         } else {
             "You've stepped out of the houses, so you're not earning points. Run `/houseopt` to step back in.".to_string()
         }
@@ -513,13 +525,12 @@ pub async fn today_command(ctx: &Context, command: &CommandInteraction) {
                 (messages, voice)
             })
             .unwrap_or((0, 0));
-        today_text(h, name.as_deref(), &sources, messages, voice_secs)
+        today_text(h, name, &sources, messages, voice_secs)
     } else if someone_else {
-        format!("{} isn't in a house, so there are no points to show.", name.as_deref().unwrap_or("They"))
+        format!("{} isn't in a house, so there are no points to show.", name.unwrap_or("They"))
     } else {
         "You're not in a house yet, so there are no points to show.".to_string()
-    };
-    let _ = command.create_response(&ctx.http, whisper(text)).await;
+    }
 }
 
 /// `/mypoints` - private to whoever asks.

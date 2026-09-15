@@ -422,8 +422,11 @@ pub fn sections() -> Vec<Section> {
                     (set under Houses), only when points actually moved, and only for the hours below.",
             settings: vec![
                 toggle("VIZIER_HOUSE_SUMMARY", "Hourly summary", "Post the hourly points summary."),
-                toggle("VIZIER_SCOREBOARD", "Scoreboard card", "Post the House Cup scoreboard card (each house's points this month, what it gained in the last hour, and a Top scorers button) in the scoreboard channel."),
-                setting("VIZIER_SCOREBOARD_CHANNEL", "Scoreboard channel", "Where the scoreboard card goes, e.g. a gaming updates channel. Empty turns it off.", Kind::Channel, ""),
+                toggle("VIZIER_SCOREBOARD", "Scoreboard card", "Post the House Cup scoreboard card (each house's points this month with bars, the last hour's gains, today's totals, and buttons for top scorers, your house, your points and how to earn) in the scoreboard channel. It is always kept as the last message there: anything posted in the channel moves it back to the bottom a few seconds later."),
+                setting("VIZIER_SCOREBOARD_CHANNEL", "Scoreboard channel", "Where the scoreboard card and the welcome, Snitch & cards and guide posts above it go, e.g. a gaming updates channel. The bot needs Send Messages, Attach Files, Embed Links, Read Message History and Manage Messages there. Empty turns them all off.", Kind::Channel, ""),
+                toggle("VIZIER_SCOREBOARD_WELCOME", "Welcome post", "Keep a welcome message first in the scoreboard channel: the houses, the common rooms and where the action is, with live channel links. Edited by itself when a setting it mentions changes."),
+                toggle("VIZIER_SCOREBOARD_SNITCH_CARDS", "Snitch & cards post", "Keep a post on the Golden Snitch and Chocolate Frog cards, with two how-to pictures, under the welcome. Written from the live drop, points and card settings and edited by itself when they change; the frog and card parts are left out while frog drops are off."),
+                toggle("VIZIER_SCOREBOARD_GUIDE", "Beginner's guide", "Keep the How to play guide above the scoreboard card: chat and voice points, the games and their limits, and the commands to check progress, all written from the live settings and edited by itself when they change."),
                 setting("VIZIER_SCOREBOARD_EVERY_HOURS", "Scoreboard every", "How often the scoreboard card is posted, counted from the first hour below.", number(1, 24, "hours"), "1"),
                 setting("VIZIER_SCOREBOARD_FIRST_HOUR", "Scoreboard first hour", "The first India hour the scoreboard covers: 10 covers 10:00-11:00 and posts at 11:00.", number(0, 23, "hour"), "10"),
                 setting("VIZIER_SCOREBOARD_LAST_HOUR", "Scoreboard last hour", "The last India hour the scoreboard covers: 23 posts at midnight.", number(0, 23, "hour"), "23"),
@@ -447,7 +450,12 @@ pub fn sections() -> Vec<Section> {
                     "23",
                 ),
             ],
-            commands: vec![],
+            commands: vec![command(
+                "guiderefresh",
+                ADMINS,
+                "/guiderefresh",
+                "Posts the scoreboard channel's welcome, Snitch & cards post, guide and scoreboard card again, in that order, removing the old copies. Only you see the reply.",
+            )],
         },
         Section {
             id: "weekly",
