@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.29] - 2026-09-15
+
+### 💼 Other
+
+- Messages in any voice channel's text chat (temporary rooms too) count towards chat stats and points
 ## [0.11.28] - 2026-09-15
 
 ### 💼 Other
 
 - Most active list can show the last 24 hours, 48 hours, 7 days or 30 days, with tier bars scaled to the period
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.28
 ## [0.11.27] - 2026-09-15
 
 ### 💼 Other
