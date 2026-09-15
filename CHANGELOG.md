@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.21] - 2026-09-15
+
+### 💼 Other
+
+- Name Place Animal Thing in its own channel - lobby, letter rounds with a private 4-box pop-up, one AI judging call with a verdict cache, game scores and house points for the best two house members, challenges and mod reviews
 ## [0.11.20] - 2026-09-15
 
 ### 💼 Other
@@ -10,6 +15,10 @@ All notable changes to this project will be documented in this file.
 - Hourly House Cup card (month points with bars, last hour's gains) with a private Top scorers this hour button
 - House Cup channel kept in order - live welcome, Snitch & cards post, beginner's guide, and the card always last
 - 596 checked Freaky (18+) questions; commands: retire 11 unused commands and hide admin commands from members
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.20
 ## [0.11.19] - 2026-09-14
 
 ### 💼 Other
