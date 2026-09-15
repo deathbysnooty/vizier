@@ -604,6 +604,7 @@ pub fn sections() -> Vec<Section> {
                     Kind::VoiceChannel,
                     "",
                 ),
+                setting("VIZIER_STATS_VOICE_CHATS", "Count voice channel chats", "Count messages typed in any voice channel's text chat, temporary rooms included, towards chat stats and chat points, even though those channels aren't on the bot's channel list. The bot never replies or stores the text there. Excluded channels still don't count.", Kind::Toggle, "on"),
                 setting(
                     "VIZIER_STATS_EXCLUDE_CHANNELS",
                     "Excluded channels",

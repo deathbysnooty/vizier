@@ -187,6 +187,15 @@ async fn is_paused(storage: &Arc<crate::storage::VizierStorage>, agent_id: &str)
 /// Channels the bot is allowed to see, from `VIZIER_DISCORD_CHANNELS`
 /// (comma-separated ids). Empty or unset means every channel it can view,
 /// which is the upstream behaviour.
+/// Whether a channel is a voice or stage channel (its built-in text chat).
+fn is_voice_chat(ctx: &Context, channel: ChannelId) -> bool {
+    ctx.cache.guilds().iter().any(|g| {
+        ctx.cache.guild(*g).is_some_and(|guild| {
+            guild.channels.get(&channel).is_some_and(|c| matches!(c.kind, serenity::all::ChannelType::Voice | serenity::all::ChannelType::Stage))
+        })
+    })
+}
+
 fn allowed_channels() -> Vec<u64> {
     control::ids("VIZIER_DISCORD_CHANNELS")
 }
@@ -2934,6 +2943,12 @@ impl EventHandler for Handler {
         if !is_dm {
             let allowed = allowed_channels();
             if !allowed.is_empty() && !allowed.contains(&msg.channel_id.get()) {
+                // A voice channel's own text chat (temporary rooms included) isn't on
+                // the list, but its messages still count towards chat stats and
+                // points. Nothing else happens there: no replies, no stored text.
+                if control::on("VIZIER_STATS_VOICE_CHATS", true) && is_voice_chat(&ctx, msg.channel_id) {
+                    stats::count_live(&msg);
+                }
                 return;
             }
         }
