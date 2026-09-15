@@ -595,6 +595,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_POINTS_QUIZ_1ST", "Round winner", "House points for the top scorer of a round.", number(0, 100, "points"), "2"),
                 setting("VIZIER_POINTS_QUIZ_2ND", "Round second", "House points for second place in a round.", number(0, 100, "points"), "1"),
                 setting("VIZIER_POINTS_QUIZ_3RD", "Round third", "House points for third place in a round.", number(0, 100, "points"), "1"),
+                toggle("VIZIER_QUIZ_FREAKY", "Freaky (18+) genre", "Offer the 🌶️ Freaky (18+) genre in the vote: sex ed, kinks, dating and weird sex facts. Only ever offered when Discord has the quiz channel marked age-restricted, and its questions never appear in the mix."),
                 toggle("VIZIER_QUIZ_NEWS", "Weekly news questions", "Make questions from the week's entertainment news every Monday. Off stops it; /quiznews still works."),
                 setting("VIZIER_QUIZ_NEWS_HOUR", "News questions at", "The India hour on Monday the news questions are made.", number(0, 23, "hour"), "11"),
                 setting(

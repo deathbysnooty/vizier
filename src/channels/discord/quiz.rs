@@ -574,7 +574,38 @@ const GENRES: &[Genre] = &[
         about: "riddles, logic puzzles and brain teasers",
         themes: &["riddles", "logical_reasoning", "brain_teasers"],
     },
+    Genre {
+        key: FREAKY,
+        label: "🌶️ Freaky (18+)",
+        about: "about sex, kinks, dating and all things freaky (18+)",
+        themes: ADULT_THEMES,
+    },
 ];
+
+/// The 18+ genre's key.
+const FREAKY: &str = "freaky";
+
+/// Themes only ever asked when the 18+ genre wins a vote: never in the mix, and
+/// the genre is only offered in an age-restricted channel with it switched on.
+const ADULT_THEMES: &[&str] = &["nsfw_sexed", "nsfw_history", "nsfw_kink", "nsfw_popculture", "nsfw_weird", "nsfw_desire"];
+
+/// `ADULT_THEMES` as an SQL list, for keeping them out of the mix.
+fn adult_sql() -> String {
+    ADULT_THEMES.iter().map(|t| format!("'{}'", t)).collect::<Vec<_>>().join(",")
+}
+
+/// Whether the 18+ genre may be offered in `channel`: switched on, and Discord
+/// has the channel marked age-restricted.
+fn freaky_allowed(ctx: &Context, channel: ChannelId) -> bool {
+    if !super::control::on("VIZIER_QUIZ_FREAKY", true) {
+        return false;
+    }
+    ctx.cache
+        .guilds()
+        .iter()
+        .find_map(|g| ctx.cache.guild(*g).and_then(|guild| guild.channels.get(&channel).map(|c| c.nsfw)))
+        .unwrap_or(false)
+}
 
 fn genre(key: &str) -> Option<&'static Genre> {
     GENRES.iter().find(|g| g.key == key)
@@ -958,9 +989,12 @@ fn pick_one(
     avoid_themes: Option<&[String]>,
 ) -> Option<Question> {
     let stale_news = Utc::now().timestamp() - NEWS_SHELF_LIFE;
-    let playable = "active = 1 AND retired = 0 AND (?1 = '' OR theme_region = ?1)
-                    AND (?4 = '[]' OR theme IN (SELECT value FROM json_each(?4)))
-                    AND kind != ?2 AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)";
+    let playable = format!(
+        "active = 1 AND retired = 0 AND (?1 = '' OR theme_region = ?1)
+         AND ((?4 = '[]' AND theme NOT IN ({adult})) OR theme IN (SELECT value FROM json_each(?4)))
+         AND kind != ?2 AND NOT (src = 'news' AND COALESCE(added_ts, 0) < ?3)",
+        adult = adult_sql()
+    );
     let themes: Vec<(String, i64)> = conn
         .prepare(&format!("SELECT theme, COUNT(*) FROM questions WHERE {} GROUP BY theme", playable))
         .and_then(|mut s| {
@@ -1040,8 +1074,10 @@ async fn run_vote(ctx: &Context, channel: ChannelId) -> Option<&'static Genre> {
     let keys: Vec<&'static str> = {
         let db = DB.get()?;
         let conn = db.lock();
+        let freaky = freaky_allowed(ctx, channel);
         GENRES
             .iter()
+            .filter(|g| g.key != FREAKY || freaky)
             .filter(|g| theme_count(&conn, g.themes) > 0)
             .map(|g| g.key)
             .chain(std::iter::once(MIX))
@@ -3130,6 +3166,8 @@ mod tests {
         add(20, "mcq", "india", &["films", "geography", "music", "tv"]);
         add(40, "mcq", "world", &["games", "science", "music", "sport"]);
         add(20, "text", "world", &["science", "capitals", "elements", "art"]);
+        // 18+ questions sit in the bank but must never come up in the mix.
+        add(40, "mcq", "world", &["nsfw_sexed", "nsfw_kink"]);
         std::fs::write(bank.join("mix.jsonl"), lines.join("\n")).unwrap();
         let conn = open_conn(workspace.to_str().unwrap()).unwrap();
 
@@ -3146,9 +3184,17 @@ mod tests {
             assert!(!run.iter().all(|q| q.region == "world"), "three world questions in a row");
             assert!(!(run[0].cat == run[1].cat || run[1].cat == run[2].cat || run[0].cat == run[2].cat));
         }
+        assert!(picked.iter().all(|q| !ADULT_THEMES.contains(&q.theme.as_str())), "an 18+ question came up in the mix");
         let india = picked.iter().filter(|q| q.region == "india").count() as f64 / picked.len() as f64;
         assert!((0.55..=0.95).contains(&india), "india share {}", india);
 
+        // The 18+ genre, once voted, serves only its themes.
+        let mut recent_adult = Recent::default();
+        for _ in 0..10 {
+            let q = pick_from(&conn, &recent_adult, Some(ADULT_THEMES)).expect("an 18+ question");
+            assert!(ADULT_THEMES.contains(&q.theme.as_str()));
+            recent_adult.push(&q);
+        }
         // A voted genre only ever serves its own themes, from either side.
         let genre: &[&str] = &["films", "science"];
         let mut recent = Recent::default();
