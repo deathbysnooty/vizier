@@ -599,7 +599,7 @@ pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agen
     let _ = AGENT.set((deps.clone(), agent_id.to_string()));
     let http = ctx.http.clone();
     tokio::spawn(async move {
-        let _ = serenity::all::Command::create_global_command(http, command()).await;
+        let _ = serenity::all::Command::create_global_command(http, command().default_member_permissions(serenity::all::Permissions::MANAGE_GUILD)).await;
     });
     if CTX.set(ctx.clone()).is_err() {
         return;

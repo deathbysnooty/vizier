@@ -127,19 +127,6 @@ pub fn sections() -> Vec<Section> {
             )],
             commands: vec![
                 command("help", EVERYONE, "/help topic:", "Every command you can use, by area; pick a topic for the details. Only the asker sees it."),
-                command("ping", EVERYONE, "/ping", "Replies Pong, to check the bot is alive."),
-                command("new", EVERYONE, "/new", "Starts a fresh conversation in this channel; the bot forgets the current thread."),
-                command(
-                    "session",
-                    EVERYONE,
-                    "/session topic_id:",
-                    "Lists this channel's past conversations, or switches to one when a topic id is given (DEFAULT for the main one).",
-                ),
-                command("abort", EVERYONE, "/abort", "Stops the bot mid-answer when it is taking too long."),
-                command("checkpoint", EVERYONE, "/checkpoint", "Saves a summary of the conversation so far and carries it into a clean context."),
-                command("lobotomy", EVERYONE, "/lobotomy", "Clears the conversation without keeping a summary: a clean break."),
-                command("thinking", EVERYONE, "/thinking", "Turns showing the bot's thinking in this channel on or off."),
-                command("tool_calls", EVERYONE, "/tool_calls", "Turns showing the bot's background actions in this channel on or off."),
             ],
         },
         Section {
@@ -147,14 +134,11 @@ pub fn sections() -> Vec<Section> {
             title: "Admin controls",
             icon: "🛡️",
             about: "Switches for the bot as a whole. /stop silences it everywhere (slash commands still work so it \
-                    can be brought back); admin-only mode keeps it reading and recording but answering nobody except \
-                    admins. The quiz, arena, quotes and letters carry on in admin-only mode because they never reach \
-                    the AI.",
+                    can be brought back); admin commands are hidden from members without Manage Server.",
             settings: vec![],
             commands: vec![
                 command("stop", ADMINS, "/stop", "Pauses the bot everywhere until /resume: it reads, stores and answers nothing. The quiz holds its place."),
                 command("resume", ADMINS, "/resume", "Brings the bot back after /stop."),
-                command("adminonly", ADMINS, "/adminonly", "Turns admin-only mode on or off: the bot answers admins and quietly reads everyone else."),
                 command("panel", ADMINS, "/panel", "Sends you a private one-time link to the web control panel (valid 10 minutes, keeps you signed in for 7 days)."),
             ],
         },
@@ -722,7 +706,6 @@ pub fn sections() -> Vec<Section> {
             commands: vec![
                 command("fight", EVERYONE, "/fight who: type:", "Challenges someone to a 1v1 in the fight channel, in an optional fight style."),
                 command("battle", ADMINS, "/battle minutes: type:", "Opens a battle royale lobby for that many minutes and pings the Warrior role."),
-                command("warrior", EVERYONE, "/warrior", "Gets or drops the Warrior role, which is pinged when a battle opens."),
                 command("fightboard", EVERYONE, "/fightboard", "Who has won the most fights, with battle crowns, and your own record."),
                 command("battlestop", ADMINS, "/battlestop", "Clears a battle or fight that got stuck, so /battle works again."),
             ],
@@ -831,7 +814,6 @@ pub fn sections() -> Vec<Section> {
             )],
             commands: vec![
                 command("Quote", EVERYONE, "Right-click a message → Apps → Quote", "Makes a quote card of the message to style and save."),
-                command("awards", EVERYONE, "/awards", "The server's awards card, all time, with a menu to switch to last week."),
             ],
         },
         Section {

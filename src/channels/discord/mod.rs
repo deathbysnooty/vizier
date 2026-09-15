@@ -1121,6 +1121,17 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
     }
 }
 
+/// Slash commands the owner retired (2026-09-15), deleted from Discord on start.
+const RETIRED_COMMANDS: &[&str] =
+    &["ping", "new", "session", "abort", "checkpoint", "lobotomy", "thinking", "tool_calls", "adminonly", "awards", "warrior"];
+
+/// Hides an admin command from members' / menu: only people with Manage Server
+/// see it (Server Settings → Integrations can widen it per command). The bot
+/// still checks its own admin list when the command is used.
+fn admin_command(command: CreateCommand) -> CreateCommand {
+    command.default_member_permissions(serenity::all::Permissions::MANAGE_GUILD)
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn guild_member_addition(&self, ctx: Context, member: serenity::all::Member) {
@@ -1239,39 +1250,28 @@ impl EventHandler for Handler {
                 "switch to the topic if not empty",
             ));
 
-        let _ = Command::create_global_command(ctx.http.clone(), ping).await;
-
-        let _ = Command::create_global_command(ctx.http.clone(), new).await;
-        let _ = Command::create_global_command(ctx.http.clone(), session).await;
-
         let abort = CreateCommand::new("abort").description("abort current thinking");
-        let _ = Command::create_global_command(ctx.http.clone(), abort).await;
 
         let checkpoint =
             CreateCommand::new("checkpoint").description("save checkpoint with handover summary");
-        let _ = Command::create_global_command(ctx.http.clone(), checkpoint).await;
 
         let lobotomy = CreateCommand::new("lobotomy")
             .description("save checkpoint without handover (clean break)");
-        let _ = Command::create_global_command(ctx.http.clone(), lobotomy).await;
 
         let thinking = CreateCommand::new("thinking").description("toggle showing thinking output");
-        let _ = Command::create_global_command(ctx.http.clone(), thinking).await;
 
         let tool_calls = CreateCommand::new("tool_calls").description("toggle showing tool call details");
-        let _ = Command::create_global_command(ctx.http.clone(), tool_calls).await;
 
         let stop = CreateCommand::new("stop")
             .description("admin only: silence the bot everywhere until /resume");
-        let _ = Command::create_global_command(ctx.http.clone(), stop).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(stop)).await;
 
         let resume =
             CreateCommand::new("resume").description("admin only: bring the bot back after /stop");
-        let _ = Command::create_global_command(ctx.http.clone(), resume).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(resume)).await;
 
         let admin_only = CreateCommand::new("adminonly")
             .description("admin only: toggle whether the bot answers admins and nobody else");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_only).await;
 
         // Upstream handles /help but never registers it, so it never appears.
         let help = control::help::builder();
@@ -1319,7 +1319,7 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), samebanda).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(samebanda)).await;
 
         // Right-click a message -> Apps -> Quote.
         let quote_cmd = CreateCommand::new("Quote").kind(serenity::all::CommandType::Message);
@@ -1327,7 +1327,6 @@ impl EventHandler for Handler {
 
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
-        let _ = Command::create_global_command(ctx.http.clone(), awards_cmd).await;
 
         let rejoinstats = CreateCommand::new("rejoinstats")
             .description("who keeps leaving and coming back");
@@ -1354,10 +1353,10 @@ impl EventHandler for Handler {
 
         let quiz_news = CreateCommand::new("quiznews")
             .description("admin only: make this week's Bollywood news questions now");
-        let _ = Command::create_global_command(ctx.http.clone(), quiz_news).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(quiz_news)).await;
 
         let quiz_stop = CreateCommand::new("quizstop").description("admin only: stop the quiz until someone runs /quiz again");
-        let _ = Command::create_global_command(ctx.http.clone(), quiz_stop).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(quiz_stop)).await;
 
         let fight_cmd = CreateCommand::new("fight")
             .description("challenge someone to a 1v1 - the fight happens in the fight channel")
@@ -1387,14 +1386,13 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), battle_cmd).await;
 
         let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
-        let _ = Command::create_global_command(ctx.http.clone(), warrior_cmd).await;
 
         let fight_board = CreateCommand::new("fightboard").description("who has won the most fights and battles");
         let _ = Command::create_global_command(ctx.http.clone(), fight_board).await;
 
         let battle_stop =
             CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
-        let _ = Command::create_global_command(ctx.http.clone(), battle_stop).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(battle_stop)).await;
 
         // The four houses. There is no self-serve sorting command: the bot
         // assigns everyone, so the only way in is the draft or a mod's hand.
@@ -1416,23 +1414,23 @@ impl EventHandler for Handler {
                 "reason",
                 "what they are for",
             ));
-        let _ = Command::create_global_command(ctx.http.clone(), house_points).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_points)).await;
 
-        let _ = Command::create_global_command(ctx.http.clone(), snitch::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(snitch::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::card_command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog::drop_command_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(frog::drop_command_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), weekly::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), standings::draw_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), scoreboard::refresh_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(standings::draw_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(scoreboard::refresh_builder())).await;
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -1440,15 +1438,15 @@ impl EventHandler for Handler {
 
         let house_channels = CreateCommand::new("housechannels")
             .description("admin only: make a private common room for each house");
-        let _ = Command::create_global_command(ctx.http.clone(), house_channels).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_channels)).await;
 
         let house_draft = CreateCommand::new("housedraft")
             .description("admin only: work out who goes in which house, and show the plan before anything happens");
-        let _ = Command::create_global_command(ctx.http.clone(), house_draft).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_draft)).await;
 
         let house_roles = CreateCommand::new("houseroles")
             .description("admin only: make the four house roles and put the crests on them");
-        let _ = Command::create_global_command(ctx.http.clone(), house_roles).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_roles)).await;
 
         let house_list = CreateCommand::new("houselist")
             .description("who is in a house - shown only to you, a page at a time")
@@ -1464,7 +1462,7 @@ impl EventHandler for Handler {
                 CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "who becomes captain")
                     .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), captain).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(captain)).await;
 
         let sort = CreateCommand::new("sort")
             .description("admin only: put someone in a house by hand")
@@ -1473,7 +1471,7 @@ impl EventHandler for Handler {
                     .required(true),
             )
             .add_option(house::house_option("house", "which house").required(true));
-        let _ = Command::create_global_command(ctx.http.clone(), sort).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(sort)).await;
         quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
         // Reminders made on the panel, posted on their schedules.
         control::scheduler::spawn(ctx.clone());
@@ -1515,7 +1513,17 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), trace).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(trace)).await;
+
+        // Commands the owner retired: registering fewer doesn't remove them from Discord.
+        if let Ok(existing) = Command::get_global_commands(&ctx.http).await {
+            for command in existing.iter().filter(|c| RETIRED_COMMANDS.contains(&c.name.as_str())) {
+                match Command::delete_global_command(&ctx.http, command.id).await {
+                    Ok(()) => tracing::info!("commands: removed /{}", command.name),
+                    Err(err) => tracing::warn!("commands: couldn't remove /{}: {}", command.name, err),
+                }
+            }
+        }
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
