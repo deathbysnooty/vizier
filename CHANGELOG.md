@@ -2,11 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.20] - 2026-09-15
+
+### 💼 Other
+
+- Freaky (18+) genre - only offered in an age-restricted quiz channel with VIZIER_QUIZ_FREAKY on, never in the mix
+- Hourly House Cup card (month points with bars, last hour's gains) with a private Top scorers this hour button
+- House Cup channel kept in order - live welcome, Snitch & cards post, beginner's guide, and the card always last
+- 596 checked Freaky (18+) questions; commands: retire 11 unused commands and hide admin commands from members
 ## [0.11.19] - 2026-09-14
 
 ### 💼 Other
 
 - Daily top cards go to real activity - most messages, most VC time with others, most wins/catches (capped ones included) for games; points for Wordle and frogs
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.19
 ## [0.11.18] - 2026-09-14
 
 ### 💼 Other
