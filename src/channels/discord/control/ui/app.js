@@ -4630,7 +4630,7 @@
 
   // --- member analyses ----------------------------------------------------------------------
 
-  const activeState = { by: 'overall', tier: 'all', limit: 20, selected: new Set(), data: null, job: null, poll: null };
+  const activeState = { by: 'overall', tier: 'all', hours: 720, limit: 20, selected: new Set(), data: null, job: null, poll: null };
   const TIER_LABEL = { very: 'Very active', fair: 'Fairly active', less: 'Less active' };
   const STATUS_LABEL = { draft: 'Draft', reviewed: 'Reviewed' };
 
@@ -4706,6 +4706,16 @@
     const selectedBtn = h('button', { class: 'btn sm', type: 'button', disabled: true }, icon('flask'), 'Analyse selected');
     const topBtn = h('button', { class: 'btn sm primary', type: 'button', disabled: true }, icon('zap'), 'Analyse all active');
     const tierBar = h('div', { class: 'tier-bar', role: 'radiogroup', 'aria-label': 'Activity tier' });
+    const PERIODS = [[24, '24 hours'], [48, '48 hours'], [168, '7 days'], [720, '30 days']];
+    const periodBar = h('div', { class: 'tier-bar period-bar', role: 'radiogroup', 'aria-label': 'Time period' });
+    const periodLabel = () => (PERIODS.find(([n]) => n === st.hours) || PERIODS[3])[1];
+    const drawPeriods = () => {
+      clear(periodBar);
+      periodBar.appendChild(h('span', { class: 'period-label' }, icon('clock'), 'Period'));
+      PERIODS.forEach(([n, label]) => periodBar.appendChild(h('button', { type: 'button', role: 'radio', class: 'tier-chip', 'aria-checked': st.hours === n ? 'true' : 'false',
+        onclick: () => { if (st.hours === n) return; st.hours = n; st.limit = 20; drawPeriods(); load(); } }, label)));
+    };
+    drawPeriods();
     const updateSelected = () => {
       selectedBtn.disabled = !st.selected.size;
       selectedBtn.lastChild.textContent = st.selected.size ? 'Analyse selected (' + st.selected.size + ')' : 'Analyse selected';
@@ -4751,7 +4761,7 @@
     });
 
     const load = async () => {
-      try { st.data = await api('GET', '/profiles/active?by=' + st.by + '&limit=100' + (st.tier === 'all' ? '' : '&tier=' + st.tier)); }
+      try { st.data = await api('GET', '/profiles/active?by=' + st.by + '&limit=100&hours=' + st.hours + (st.tier === 'all' ? '' : '&tier=' + st.tier)); }
       catch (e) { clear(list).appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); return; }
       drawTiers();
       drawList();
@@ -4768,13 +4778,13 @@
           onclick: () => { if (st.tier === key) return; st.tier = key; st.limit = 20; load(); } }, key === 'all' ? null : h('i', { 'aria-hidden': 'true' }), label, h('b', null, n)));
       });
       const t = st.data.thresholds;
-      tierBar.appendChild(h('a', { class: 'tier-rule', href: '#/s/members', 'data-tip': 'Very active: ' + t.very_messages + ' messages, ' + t.very_voice_minutes + ' voice minutes or ' + t.very_points + ' game points. Fairly active: ' + t.fair_messages + ', ' + t.fair_voice_minutes + ' or ' + t.fair_points + '. Any one is enough.' }, icon('sliders'), 'Tier bars'));
+      tierBar.appendChild(h('a', { class: 'tier-rule', href: '#/s/members', 'data-tip': (st.hours < 720 ? 'Bars scaled to ' + periodLabel() + '. ' : '') + 'Very active: ' + t.very_messages + ' messages, ' + t.very_voice_minutes + ' voice minutes or ' + t.very_points + ' game points. Fairly active: ' + t.fair_messages + ', ' + t.fair_voice_minutes + ' or ' + t.fair_points + '. Any one is enough.' }, icon('sliders'), 'Tier bars'));
     };
     const drawList = () => {
       clear(list);
       if (!st.data) return;
       const rows = st.data.rows.slice(0, st.limit);
-      if (!rows.length) { list.appendChild(h('div', { class: 'empty' }, icon('users'), h('h3', null, 'No activity yet'), h('p', null, 'Messages, voice and game points from the last 30 days show up here.'))); return; }
+      if (!rows.length) { list.appendChild(h('div', { class: 'empty' }, icon('users'), h('h3', null, 'No activity yet'), h('p', null, 'Messages, voice and game points from the last ' + periodLabel() + ' show up here.'))); return; }
       const max = (k) => Math.max(1, ...st.data.rows.map((r) => r[k]));
       const [mm, mv, mp] = [max('messages'), max('voice_min'), max('points')];
       const table = h('ol', { class: 'active-list' });
@@ -4804,13 +4814,14 @@
     };
 
     append(wrap, [
-      h('div', { class: 'section-title' }, h('h2', null, 'Most active'), h('span', null, 'Last 30 days · chat, voice and games')),
+      h('div', { class: 'section-title' }, h('h2', null, 'Most active'), h('span', null, 'Chat, voice and games')),
       h('div', { class: 'card active-card' },
         h('div', { class: 'active-toolbar' },
           segmented([['overall', 'Overall'], ['chat', 'Chat'], ['voice', 'Voice'], ['games', 'Games']], st.by, 'Rank by', (v) => { st.by = v; st.data = null; clear(list).appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Ranking members…')); load(); }),
           h('span', { class: 'grow' }), selectedBtn, topBtn),
+        periodBar,
         tierBar,
-        h('p', { class: 'active-explain' }, icon('info'), h('span', null, h('b', null, 'Overall'), ' is the average of each member’s share of all messages, all voice time and all game points on the server in the last 30 days, so being big in one counts as much as being steady in all three. Tiers need any one of their bars. Bots are left out; mods’ and weekly awards don’t count as game points.')),
+        h('p', { class: 'active-explain' }, icon('info'), h('span', null, h('b', null, 'Overall'), ' is the average of each member’s share of all messages, all voice time and all game points on the server in the chosen period, so being big in one counts as much as being steady in all three. Tiers need any one of their bars (scaled down for shorter periods). Bots are left out; mods’ and weekly awards don’t count as game points.')),
         jobHolder, list),
     ]);
     updateSelected();

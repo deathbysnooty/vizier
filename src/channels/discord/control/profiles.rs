@@ -313,6 +313,25 @@ pub fn thresholds() -> Thresholds {
     }
 }
 
+impl Thresholds {
+    /// The bars for a shorter window, in proportion (at least 1 each): the
+    /// settings are for the 30-day window.
+    pub fn scaled(&self, hours: i64, full_hours: i64) -> Thresholds {
+        if hours >= full_hours || full_hours <= 0 {
+            return self.clone();
+        }
+        let f = |v: i64| ((v as f64) * hours as f64 / full_hours as f64).round().max(1.0) as i64;
+        Thresholds {
+            very_messages: f(self.very_messages),
+            very_voice_minutes: f(self.very_voice_minutes),
+            very_points: f(self.very_points),
+            fair_messages: f(self.fair_messages),
+            fair_voice_minutes: f(self.fair_voice_minutes),
+            fair_points: f(self.fair_points),
+        }
+    }
+}
+
 /// Reaching any one of a tier's three bars puts someone in it.
 pub fn tier(a: &Activity, t: &Thresholds) -> Tier {
     let minutes = a.voice_secs / 60;

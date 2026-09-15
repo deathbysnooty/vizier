@@ -154,6 +154,10 @@ pub trait PanelData: Send + Sync + 'static {
     async fn activity(&self, _now: i64) -> Vec<super::profiles::Activity> {
         Vec::new()
     }
+    /// The same since `start`, for the shorter windows of the active list.
+    async fn activity_since(&self, now: i64, _start: i64) -> Vec<super::profiles::Activity> {
+        self.activity(now).await
+    }
     /// A member's stored messages over the last 30 days, newest first.
     async fn member_messages(&self, _id: u64, _now: i64) -> Vec<super::profiles::RawMessage> {
         Vec::new()
@@ -456,6 +460,10 @@ impl PanelData for LiveData {
 
     async fn activity(&self, now: i64) -> Vec<super::profiles::Activity> {
         tokio::task::spawn_blocking(move || profiles::read_activity_live(now)).await.unwrap_or_default()
+    }
+
+    async fn activity_since(&self, now: i64, start: i64) -> Vec<super::profiles::Activity> {
+        tokio::task::spawn_blocking(move || profiles::read_activity_since(now, start)).await.unwrap_or_default()
     }
 
     async fn member_messages(&self, id: u64, now: i64) -> Vec<super::profiles::RawMessage> {

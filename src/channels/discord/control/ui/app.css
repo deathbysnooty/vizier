@@ -1559,6 +1559,9 @@ input[type="time"]::-webkit-calendar-picker-indicator, input[type="datetime-loca
 
 /* --- tiers, auto-filled notes -------------------------------------------------------------- */
 
+.period-bar { border-bottom: 0; padding-bottom: 0; }
+.period-label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; margin-right: 4px; }
+.period-label svg { width: 14px; height: 14px; }
 .tier-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px var(--pad-card); border-bottom: 1px solid var(--line); }
 .tier-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px; border-radius: 99px; border: 1px solid var(--line-2); background: transparent; color: var(--text-2); font-weight: 550; font-size: 13px; }
 .tier-chip b { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; }

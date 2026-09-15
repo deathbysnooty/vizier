@@ -40,7 +40,11 @@ pub const SCAN_ROWS: usize = 600;
 /// Everyone's messages, voice and game points over the last 30 days, with house
 /// and Muggle flags. Locks are taken one at a time; opt-outs before the house lock.
 pub fn read_activity_live(now: i64) -> Vec<Activity> {
-    let start = now - profiles::WINDOW_DAYS * 86_400;
+    read_activity_since(now, now - profiles::WINDOW_DAYS * 86_400)
+}
+
+/// The same numbers since `start` (to the India hour for messages).
+pub fn read_activity_since(now: i64, start: i64) -> Vec<Activity> {
     let optouts = super::super::super::house::optout_set();
     let mut by_user: HashMap<u64, Activity> = HashMap::new();
     fn row(by_user: &mut HashMap<u64, Activity>, u: u64) -> &mut Activity {
@@ -49,9 +53,12 @@ pub fn read_activity_live(now: i64) -> Vec<Activity> {
     if let Some(db) = super::super::super::stats::db() {
         let conn = db.lock();
         let exclude: std::collections::HashSet<u64> = super::super::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
-        if let Ok(mut stmt) = conn.prepare("SELECT user_id, channel_id, SUM(count) FROM msg_counts WHERE day >= ?1 GROUP BY user_id, channel_id") {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT user_id, channel_id, SUM(count) FROM msg_counts WHERE day > ?1 OR (day = ?1 AND hour >= ?2) GROUP BY user_id, channel_id",
+        ) {
             let first_day = super::super::super::points::ist_day(start);
-            if let Ok(rows) = stmt.query_map(params![first_day], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))) {
+            let first_hour = (start + 5 * 3600 + 30 * 60).rem_euclid(86_400) / 3600;
+            if let Ok(rows) = stmt.query_map(params![first_day, first_hour], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?))) {
                 for (u, c, n) in rows.flatten() {
                     if !exclude.contains(&c) {
                         row(&mut by_user, u).messages += n;
@@ -259,16 +266,24 @@ pub async fn analyse_one(panel: &Panel, user: u64, by: u64, now: i64) -> Result<
 }
 
 async fn activity_cached(panel: &Panel, now: i64) -> Vec<Activity> {
-    static CACHE: LazyLock<Mutex<Option<(i64, Vec<Activity>)>>> = LazyLock::new(|| Mutex::new(None));
-    if let Some((at, rows)) = CACHE.lock().as_ref() {
+    activity_window_cached(panel, now, profiles::WINDOW_DAYS * 24).await
+}
+
+/// Activity over the last `hours`, cached for a minute per window.
+async fn activity_window_cached(panel: &Panel, now: i64, hours: i64) -> Vec<Activity> {
+    static CACHE: LazyLock<Mutex<HashMap<i64, (i64, Vec<Activity>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    if let Some((at, rows)) = CACHE.lock().get(&hours) {
         if (now - at).abs() < 60 && !cfg!(test) {
             return rows.clone();
         }
     }
-    let rows = panel.data.activity(now).await;
-    *CACHE.lock() = Some((now, rows.clone()));
+    let rows = if hours == profiles::WINDOW_DAYS * 24 { panel.data.activity(now).await } else { panel.data.activity_since(now, now - hours * 3600).await };
+    CACHE.lock().insert(hours, (now, rows.clone()));
     rows
 }
+
+/// The windows the active list can show, in hours.
+pub const ACTIVE_WINDOWS: [i64; 4] = [24, 48, 168, 720];
 
 // --- the job ---------------------------------------------------------------------------------
 
@@ -545,6 +560,9 @@ pub struct ActiveQuery {
     /// very, fair or less: only that tier.
     #[serde(default)]
     tier: Option<String>,
+    /// 24, 48, 168 or 720 (the default, 30 days).
+    #[serde(default)]
+    hours: Option<i64>,
 }
 
 pub async fn active(State(panel): State<Panel>, Query(q): Query<ActiveQuery>) -> ApiResult {
@@ -556,11 +574,15 @@ pub async fn active(State(panel): State<Panel>, Query(q): Query<ActiveQuery>) ->
         _ => return Err(ApiError::bad("Sort by overall, chat, voice or games.")),
     };
     let limit = q.limit.unwrap_or(50).clamp(1, 100);
+    let hours = q.hours.unwrap_or(profiles::WINDOW_DAYS * 24);
+    if !ACTIVE_WINDOWS.contains(&hours) {
+        return Err(ApiError::bad("Hours is 24, 48, 168 or 720."));
+    }
     let now = chrono::Utc::now().timestamp();
     let rows: Vec<Activity> =
-        activity_cached(&panel, now).await.into_iter().filter(|a| !panel.data.cached_member(a.user_id).is_some_and(|m| m.bot)).collect();
+        activity_window_cached(&panel, now, hours).await.into_iter().filter(|a| !panel.data.cached_member(a.user_id).is_some_and(|m| m.bot)).collect();
     let index = profiles::index();
-    let thresholds = profiles::thresholds();
+    let thresholds = profiles::thresholds().scaled(hours, profiles::WINDOW_DAYS * 24);
     let want = match q.tier.as_deref().filter(|t| !t.is_empty() && *t != "all") {
         None => None,
         Some("very") => Some(profiles::Tier::Very),
@@ -609,6 +631,7 @@ pub async fn active(State(panel): State<Panel>, Query(q): Query<ActiveQuery>) ->
         .collect();
     ok(json!({
         "window_days": profiles::WINDOW_DAYS,
+        "hours": hours,
         "by": q.by.unwrap_or_else(|| "overall".into()),
         "total": total,
         "tiers": counts,
