@@ -579,7 +579,10 @@ pub fn modal_json_timed(round_id: i64, letter: char, previous: Option<&[String; 
         Some((ends_at, now)) => format!("Letter {} · {}s left", letter, (ends_at - now).max(0)),
         None => format!("Letter {}", letter),
     };
-    if let Some((ends_at, _)) = timer.filter(|_| !PLAIN_MODAL.load(std::sync::atomic::Ordering::Relaxed)) {
+    // The live timer line is a newer kind of pop-up block that has crashed some
+    // Discord apps, so it's off unless switched on; the title always has the time.
+    let timer_line = super::control::on("VIZIER_NPAT_POPUP_TIMER", false);
+    if let Some((ends_at, _)) = timer.filter(|_| timer_line && !PLAIN_MODAL.load(std::sync::atomic::Ordering::Relaxed)) {
         rows.insert(0, json!({ "type": 10, "content": format!("⏱️ **Time's up <t:{}:R>** · everything starting with **{}**", ends_at, letter) }));
     }
     json!({ "type": 9, "data": { "custom_id": format!("npatans:{}", round_id), "title": title, "components": rows } })
@@ -1038,17 +1041,21 @@ async fn judge_round(round_id: i64) -> bool {
         None
     } else {
         let prompt = judge::prompt(round.letter, &fresh);
-        let reply = match tokio::time::timeout(JUDGE_WAIT, control::web::ask_bot_model_with(prompt, judge_model())).await {
-            Ok(Ok(reply)) => Some(reply),
-            Ok(Err(err)) => {
-                tracing::warn!("npat: round {} judge call failed: {}", round_id, err);
-                None
+        // A dropped connection to the model is common enough to be worth one retry.
+        let mut reply = None;
+        for attempt in 1..=2 {
+            match tokio::time::timeout(JUDGE_WAIT, control::web::ask_bot_model_with(prompt.clone(), judge_model())).await {
+                Ok(Ok(r)) => {
+                    reply = Some(r);
+                    break;
+                }
+                Ok(Err(err)) => tracing::warn!("npat: round {} judge call failed (try {}): {}", round_id, attempt, err),
+                Err(_) => tracing::warn!("npat: round {} judge took over {}s (try {})", round_id, JUDGE_WAIT.as_secs(), attempt),
             }
-            Err(_) => {
-                tracing::warn!("npat: round {} judge took over {}s", round_id, JUDGE_WAIT.as_secs());
-                None
+            if attempt == 1 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-        };
+        }
         let parsed = reply.as_deref().and_then(|r| {
             let parsed = judge::parse_verdicts(r);
             if parsed.is_none() {
@@ -2128,10 +2135,8 @@ mod tests {
     fn the_pop_up_shows_a_countdown() {
         let timed = modal_json_timed(12, 'P', None, Some((1_000_045, 1_000_007)));
         assert_eq!(timed["data"]["title"], "Letter P · 38s left");
-        let rows = timed["data"]["components"].as_array().unwrap();
-        assert_eq!(rows.len(), 5, "a timer line and four boxes");
-        assert_eq!(rows[0]["type"], 10);
-        assert!(rows[0]["content"].as_str().unwrap().contains("<t:1000045:R>"));
+        // The live timer line is off by default: only the four boxes.
+        assert_eq!(timed["data"]["components"].as_array().unwrap().len(), 4);
         assert_eq!(modal_json_timed(12, 'P', None, Some((100, 200)))["data"]["title"], "Letter P · 0s left");
     }
 
