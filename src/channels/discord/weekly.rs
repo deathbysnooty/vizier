@@ -292,7 +292,7 @@ fn catch_up_grace() -> i64 {
     super::control::number("VIZIER_WEEKLY_CATCH_UP_HOURS", (CATCH_UP_GRACE / HOUR) as u64) as i64 * HOUR
 }
 
-fn is_safe_corner(channel: u64, name: &str) -> bool {
+pub(crate) fn is_safe_corner(channel: u64, name: &str) -> bool {
     channel == SAFE_CORNER || name.to_lowercase().contains("safe-corner")
 }
 

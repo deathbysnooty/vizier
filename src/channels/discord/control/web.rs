@@ -220,6 +220,14 @@ pub trait PanelData: Send + Sync + 'static {
     async fn drop_frog(&self, _channel: u64, _by: u64) -> Result<super::super::frog_store::Drop, String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// Search messages: one window of the stored history, newest first.
+    async fn search_window(&self, _filter: search::Filter) -> anyhow::Result<search::Window> {
+        anyhow::bail!("no stored history here")
+    }
+    /// The house a member is sorted into. Reads the house store: call it off the async threads.
+    fn member_house(&self, _id: u64) -> Option<&'static super::super::house::House> {
+        None
+    }
     /// Withdraws an open card trade offer and updates its message.
     async fn cancel_trade(&self, _id: i64, _by: u64) -> Result<super::super::frog_trade::Trade, String> {
         Err("Discord isn't connected right now.".into())
@@ -245,6 +253,7 @@ mod posts;
 mod profiles;
 mod rules;
 mod scorers;
+mod search;
 mod welcomes;
 
 // --- the live implementation ------------------------------------------------------
@@ -473,6 +482,19 @@ impl PanelData for LiveData {
         tokio::task::spawn_blocking(move || profiles::query_messages(&conn.lock(), &agent, id, now).unwrap_or_default())
             .await
             .unwrap_or_default()
+    }
+
+    async fn search_window(&self, filter: search::Filter) -> anyhow::Result<search::Window> {
+        let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+        let conn = members::history_conn(deps).ok_or_else(|| anyhow::anyhow!("the history database isn't available"))?;
+        let agent = agent_id.clone();
+        tokio::task::spawn_blocking(move || search::read_window(&conn.lock(), &agent, &filter).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    fn member_house(&self, id: u64) -> Option<&'static super::super::house::House> {
+        super::super::house::house_of(id)
     }
 
     fn thread_parent(&self, channel: u64) -> Option<u64> {
@@ -821,6 +843,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/profiles/{id}/apply", post(profiles::apply))
         .route("/profiles/{id}/apply/preview", post(profiles::apply_preview))
         .route("/profiles/{id}/prompt", get(profiles::prompt_preview))
+        .route("/messages/search", get(search::search))
         .route("/members", get(members::search))
         .route("/members/notes", get(members::noted))
         .route("/members/notes/enable", post(members::enable_notes))
@@ -1519,6 +1542,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("new".into(), Value::Null);
             } else if e.key.starts_with("welcome:") {
                 obj.extend(welcomes::audit_entry(&panel, e));
+            } else if e.key == "messages:search" {
+                obj.extend(search::audit_entry(e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {

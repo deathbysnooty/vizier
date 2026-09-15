@@ -559,6 +559,7 @@
       navItem('#/welcomes', icon('door'), 'Welcomes', S.welcomes && S.welcomes.active ? h('span', { class: 'nav-count', 'aria-label': plural(S.welcomes.active, 'welcome') + ' waiting', 'data-tip': 'Waiting for their member' }, String(S.welcomes.active)) : null),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
+      navItem('#/search', icon('search'), 'Search messages'),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -602,6 +603,7 @@
       ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
       ['Members', '#/members', 'users', 'Profiles, what the bot sees, mods’ notes'],
+      ['Search messages', '#/search', 'search', 'Find who said something and when'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
       ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
@@ -739,6 +741,7 @@
       case 'insights': renderInsights(page); break;
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
+      case 'search': renderSearch(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
     }
@@ -1394,6 +1397,7 @@
       secSel.appendChild(h('option', { value: 'welcomes', selected: section === 'welcomes' }, '👋  Welcomes'));
       if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
       secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
+      secSel.appendChild(h('option', { value: 'search', selected: section === 'search' }, '🔎  Search messages'));
       if (!sectionById('members')) secSel.appendChild(h('option', { value: 'members', selected: section === 'members' }, '👤  Members'));
       clear(keySel);
       keySel.appendChild(h('option', { value: '' }, 'All settings'));
@@ -1428,6 +1432,216 @@
     page.appendChild(h('div', { class: 'filters' }, secSel, keySel, count));
     page.appendChild(h('div', { class: 'card' }, body));
     draw();
+  }
+
+  // --- search messages ----------------------------------------------------------------
+
+  const SEARCH_PERIODS = [['1', '1 day'], ['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['all', 'All']];
+
+  /** "15 Sep, 9:41 pm", India time; the year too when it isn't this one. */
+  function msgWhen(ts) {
+    const d = new Date(ts * 1000);
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: IST, year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).formatToParts(d);
+    const get = (t) => (parts.find((x) => x.type === t) || {}).value || '';
+    const thisYear = new Intl.DateTimeFormat('en-US', { timeZone: IST, year: 'numeric' }).format(new Date());
+    return dayMonth(ts) + (get('year') !== thisYear ? ' ' + get('year') : '') + ', ' + get('hour') + ':' + get('minute') + ' ' + get('dayPeriod').toLowerCase();
+  }
+
+  /** The text with characters start..end (code points, as the server counts) marked. */
+  function markRange(text, start, end) {
+    const cp = Array.from(text || '');
+    if (!(end > start) || start >= cp.length) return text;
+    return [cp.slice(0, start).join(''), h('mark', null, cp.slice(start, end).join('')), cp.slice(end).join('')];
+  }
+
+  function searchChannelItems(selected) {
+    return (q) => {
+      q = q.toLowerCase();
+      const list = S.channels.filter((c) => (c.kind === 'text' || c.kind === 'voice') && !/safe-corner/i.test(c.name)
+        && (!q || c.name.toLowerCase().includes(q) || (c.category || '').toLowerCase().includes(q)))
+        .map((c) => ({ id: c.id, label: c.name, group: c.category || '', lead: c.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
+          trail: selected === c.id ? icon('check', 'check-mark') : null }));
+      return (q ? [] : [{ id: '', label: 'All channels', lead: icon('hash'), trail: !selected ? icon('check', 'check-mark') : null }]).concat(list);
+    };
+  }
+
+  function renderSearch(page, rq) {
+    document.title = 'Search messages · Loduchand';
+    page.appendChild(pageHead('Search messages', 'Find who said something and when. Searches what the bot has stored from its channels (not DMs, never #safe-corner).'));
+    const days = rq.get('days');
+    const st = {
+      q: (rq.get('q') || '').trim().slice(0, 100),
+      member: /^\d{1,20}$/.test(rq.get('member') || '') ? rq.get('member') : '',
+      channel: /^\d{1,20}$/.test(rq.get('channel') || '') ? rq.get('channel') : '',
+      days: SEARCH_PERIODS.some((x) => x[0] === days) ? days : '30',
+    };
+    const hashFor = () => {
+      const p = new URLSearchParams();
+      if (st.q) p.set('q', st.q);
+      if (st.member) p.set('member', st.member);
+      if (st.channel) p.set('channel', st.channel);
+      if (st.days !== '30') p.set('days', st.days);
+      const qs = p.toString();
+      return '#/search' + (qs ? '?' + qs : '');
+    };
+    const input = h('input', { type: 'search', value: st.q, placeholder: 'Words to find, e.g. koto', 'aria-label': 'Words to find', maxlength: '100', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
+    const tooShort = h('p', { class: 'hint msg-short', hidden: true, role: 'status' }, 'Type at least 2 characters.');
+    const go = () => {
+      st.q = input.value.trim();
+      if (Array.from(st.q).length < 2) { tooShort.hidden = false; input.focus(); return; }
+      tooShort.hidden = true;
+      navigate(hashFor());
+    };
+    // Filters apply at once when there is a search to apply them to; otherwise they wait in the address.
+    const refilter = () => { if (Array.from(input.value.trim()).length >= 2) go(); else { const href = hashFor(); history.replaceState(null, '', href); currentHash = href; } };
+
+    const memberBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Member' });
+    const drawMember = (m) => {
+      clear(memberBtn);
+      append(memberBtn, [st.member && m ? avatar(m.avatar, m.name, 'xs') : icon(st.member ? 'user' : 'users'),
+        h('span', { class: 'value' + (st.member ? '' : ' placeholder') }, st.member ? (m ? m.name : 'Member ' + st.member) : 'Any member'), icon('chevron')]);
+    };
+    drawMember(null);
+    if (st.member) memberById(st.member).then((m) => { if (memberBtn.isConnected) drawMember(m); });
+    memberBtn.addEventListener('click', () => openPicker(memberBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180,
+      load: async (q) => (q ? [] : [{ id: '', label: 'Any member', lead: icon('users'), trail: !st.member ? icon('check', 'check-mark') : null }]).concat(await memberItems(q)),
+      onPick: (it) => { st.member = it.id; drawMember(it.member || null); refilter(); } }));
+
+    const channelBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Channel' });
+    const drawChannel = () => {
+      const c = st.channel ? chan(st.channel) : null;
+      clear(channelBtn);
+      append(channelBtn, [c && c.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
+        h('span', { class: 'value' + (st.channel ? '' : ' placeholder') }, st.channel ? (c ? c.name : 'channel ' + st.channel) : 'All channels'), icon('chevron')]);
+    };
+    drawChannel();
+    channelBtn.addEventListener('click', () => openPicker(channelBtn, { title: 'Channel', placeholder: 'Search channels', load: searchChannelItems(st.channel), onPick: (it) => { st.channel = it.id; drawChannel(); refilter(); } }));
+
+    const period = segmented(SEARCH_PERIODS, st.days, 'Period', (v) => { st.days = v; refilter(); });
+    period.classList.add('msg-periods');
+    const form = h('form', { class: 'card msg-search', role: 'search', onsubmit: (e) => { e.preventDefault(); go(); } },
+      h('div', { class: 'msg-search-row' },
+        h('label', { class: 'search-box big' }, icon('search'), input),
+        h('button', { class: 'btn primary', type: 'submit' }, 'Search')),
+      tooShort,
+      h('div', { class: 'msg-search-filters' }, memberBtn, channelBtn, period));
+    page.appendChild(form);
+
+    const out = h('div', { class: 'msg-out' });
+    page.appendChild(out);
+    const periodWords = () => st.days === 'all' ? 'everything the bot has stored' : st.days === '1' ? 'the last day' : 'the last ' + st.days + ' days';
+
+    if (Array.from(st.q).length < 2) {
+      out.appendChild(h('div', { class: 'card empty msg-empty' }, icon('search'), h('h3', null, 'Search what members said'),
+        h('p', null, 'Type a word or phrase and press Enter. Upper and lower case don’t matter.'),
+        h('p', { class: 'hint' }, 'Pick a member or a channel to narrow it down. Only messages the bot has stored show up.')));
+      if (!st.q) setTimeout(() => { if (input.isConnected) input.focus(); }, 0);
+      return;
+    }
+
+    let items = [], next = null, last = null, busy = false, failed = null, failedStatus = 0;
+    const summary = h('div', { class: 'msg-summary', 'aria-live': 'polite' });
+    const list = h('div', { class: 'msg-list' });
+    const foot = h('div', { class: 'msg-foot' });
+    const box = h('div', { class: 'card msg-results' }, list, foot);
+    out.appendChild(summary);
+    out.appendChild(box);
+
+    const whoWords = () => {
+      const bits = [];
+      if (st.member) { const m = S.members.get(st.member); bits.push('from ' + (m ? m.name : 'that member')); }
+      if (st.channel) { const c = chan(st.channel); bits.push('in #' + (c ? c.name : 'that channel')); }
+      return bits.length ? ' ' + bits.join(' ') : '';
+    };
+    const moreBtn = () => h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() }, busy ? h('span', { class: 'spinner' }) : icon('down'), items.length ? 'Load more' : 'Search further back');
+    const draw = () => {
+      clear(summary); clear(list); clear(foot);
+      box.classList.toggle('is-empty', !items.length);
+      if (!items.length && busy) {
+        list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Searching…'));
+        foot.hidden = true;
+        return;
+      }
+      if (failed && !items.length) {
+        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t search'), h('p', null, failed),
+          failedStatus === 0 || failedStatus >= 500 ? h('p', { style: 'margin-top:12px' }, h('button', { class: 'btn', type: 'button', onclick: () => load() }, icon('restart'), 'Try again')) : null));
+        foot.hidden = true;
+        return;
+      }
+      const shownQ = '“' + st.q + '”';
+      summary.appendChild(h('span', null, h('b', null, numberFmt.format(items.length) + (items.length === 1 ? ' message' : ' messages')), ' found' + (next ? ' so far' : ''), ' for ', h('b', null, shownQ), whoWords()));
+      if (!items.length) {
+        if (next) {
+          list.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'Nothing yet back to ' + dayMonth(last.scanned_to)),
+            h('p', null, 'The search pauses after a big stretch so the bot stays quick. It can keep looking further back.')));
+        } else {
+          list.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'No messages found'),
+            h('p', null, 'Nothing in ' + periodWords() + ' matches ' + shownQ + whoWords() + '.'),
+            h('p', { class: 'hint' }, st.days === 'all' ? 'Try fewer words or another spelling.' : 'Try fewer words, another spelling or a longer period.')));
+        }
+      }
+      items.forEach((r) => list.appendChild(msgHit(r)));
+      foot.hidden = false;
+      if (failed) foot.appendChild(h('span', { class: 'msg-foot-error' }, icon('alert'), failed));
+      if (next) foot.appendChild(h('span', null, 'Searched back to ' + dayMonth(last.scanned_to)));
+      else foot.appendChild(h('span', null, st.days === 'all' ? 'Searched everything the bot has stored' : 'Searched ' + periodWords() + (last && last.scanned_to ? ', back to ' + dayMonth(last.scanned_to) : '')));
+      if (next) foot.appendChild(moreBtn());
+    };
+    const load = async () => {
+      if (busy) return;
+      busy = true; failed = null;
+      if (items.length) { const b = foot.querySelector('.btn'); if (b) { b.disabled = true; b.replaceChild(h('span', { class: 'spinner' }), b.firstChild); } } else draw();
+      const p = new URLSearchParams({ q: st.q, days: st.days });
+      if (st.member) p.set('member', st.member);
+      if (st.channel) p.set('channel', st.channel);
+      if (next) p.set('before', String(next));
+      try {
+        const data = await api('GET', '/messages/search?' + p.toString());
+        if (!box.isConnected) return;
+        if (data.member && data.member.name && !S.members.has(data.member.id)) S.members.set(data.member.id, { id: data.member.id, name: data.member.name });
+        items = items.concat(data.results);
+        next = data.next_before;
+        last = data;
+      } catch (e) {
+        if (!box.isConnected) return;
+        failed = e.message;
+        failedStatus = e.status || 0;
+      }
+      busy = false;
+      draw();
+      refreshAudit();
+    };
+    load();
+  }
+
+  function msgHit(r) {
+    const m = r.member || {};
+    const name = m.name || 'Member ' + m.id;
+    const long = Array.from(r.text).length > 420;
+    const textEl = h('p', { class: 'msg-hit-text' });
+    const fill = (full) => { clear(textEl); append(textEl, full ? markRange(r.text, r.match[0], r.match[1]) : markRange(r.snippet.text, r.snippet.start, r.snippet.end)); };
+    fill(!long);
+    const more = long ? h('button', { class: 'btn sm ghost msg-hit-more', type: 'button', 'aria-expanded': 'false', onclick: () => {
+      const open = more.getAttribute('aria-expanded') !== 'true';
+      fill(open);
+      more.setAttribute('aria-expanded', String(open));
+      more.lastChild.textContent = open ? 'Show less' : 'Show the whole message';
+    } }, icon('eye'), 'Show the whole message') : null;
+    const ch = r.channel || {};
+    const d = new Date(r.ts * 1000);
+    return h('article', { class: 'msg-hit' },
+      h('a', { class: 'msg-hit-avatar', href: '#/members/' + m.id, tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.avatar, name, 'lg')),
+      h('div', { class: 'msg-hit-main' },
+        h('div', { class: 'msg-hit-head' },
+          h('a', { class: 'msg-hit-name', href: '#/members/' + m.id }, name),
+          r.house ? h('span', { class: 'house-chip', style: '--house:' + r.house.colour }, r.house.crest + ' ' + r.house.name) : null,
+          h('span', { class: 'msg-hit-chan', title: ch.thread ? 'A thread in #' + ch.name : null }, h('span', { class: 'glyph' }, '#'), ch.name, ch.thread ? h('small', null, '› thread') : null),
+          h('time', { class: 'msg-hit-time', datetime: d.toISOString(), title: fmtFull.format(d) + ' IST' }, msgWhen(r.ts), h('small', null, ' · ' + ago(r.ts)))),
+        r.reply_to ? h('p', { class: 'msg-hit-reply' }, icon('reply'), h('span', null, 'replying to ', h('b', null, '@' + (r.reply_to.author || 'someone')), r.reply_to.text ? ': “' + r.reply_to.text + '”' : '')) : null,
+        textEl, more),
+      h('div', { class: 'msg-hit-actions' }, r.url
+        ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + name + '’s message in Discord' }, 'Open in Discord', icon('external'))
+        : h('span', { class: 'hint', title: 'The bot didn’t keep this message’s id, so there’s no link.' }, 'No link')));
   }
 
   // --- panel settings ---------------------------------------------------------------
@@ -4369,7 +4583,8 @@
         h('div', { class: 'profile-dates' },
           p.joined_at ? h('span', null, icon('calendar'), 'Joined ' + fmtDate(p.joined_at * 1000)) : null,
           p.created_at ? h('span', null, icon('user'), 'Account from ' + fmtDate(p.created_at * 1000)) : null,
-          p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null),
+          p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null,
+          h('a', { class: 'open-link', href: '#/search?member=' + encodeURIComponent(p.id) }, icon('search'), 'Search their messages')),
         p.roles.length ? h('div', { class: 'chips role-chips' }, p.roles.map((r) => h('span', { class: 'chip role-chip' }, h('span', { class: 'role-dot', style: r.color ? 'background:' + r.color : '' }), h('span', { class: 'chip-text' }, r.name)))) : null)));
 
     const grid = h('div', { class: 'profile-grid' });

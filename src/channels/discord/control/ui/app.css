@@ -2059,3 +2059,58 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .frog-trade-foot small { display: none; }
   .frog-cards { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* --- search messages ------------------------------------------------------------------ */
+
+.msg-search { display: grid; gap: 12px; padding: 14px var(--pad-card); margin-bottom: 18px; }
+.msg-search-row { display: flex; gap: 10px; align-items: center; }
+.msg-search-row .search-box { flex: 1; min-width: 0; margin: 0; }
+.msg-search-row .search-box input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
+.msg-search-row .btn { height: 46px; padding: 0 20px; border-radius: 12px; }
+.msg-short { margin-top: -4px; color: var(--warn); }
+.msg-search-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.msg-search-filters .picker-btn { width: auto; min-width: 190px; max-width: 280px; }
+.msg-summary { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; margin: 0 2px 10px; color: var(--muted); font-size: 13.5px; }
+.msg-summary b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.msg-results { padding: 0; overflow: hidden; }
+.msg-results.is-empty .msg-foot { border-top: 0; padding-top: 0; }
+.msg-hit { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 12px; padding: 14px var(--pad-card); border-top: 1px solid var(--line); align-items: start; }
+.msg-hit:first-child { border-top: 0; }
+.msg-hit:hover { background: color-mix(in srgb, var(--hover) 55%, transparent); }
+.msg-hit-avatar { display: block; line-height: 0; }
+.msg-hit-main { min-width: 0; }
+.msg-hit-head { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; font-size: 13px; line-height: 1.4; }
+.msg-hit-name { font-weight: 600; font-size: 14px; color: var(--text); }
+.msg-hit-chan { display: inline-flex; align-items: baseline; color: var(--text-2); white-space: nowrap; }
+.msg-hit-chan .glyph { color: var(--faint); margin-right: 1px; }
+.msg-hit-chan small { color: var(--faint); font-size: 12px; margin-left: 4px; }
+.msg-results .empty .btn .icon { width: 15px; height: 15px; margin: 0; color: inherit; }
+.msg-hit-time { color: var(--muted); font-size: 12.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.msg-hit-time small { color: var(--faint); font-size: 12.5px; }
+.msg-hit-reply { display: flex; align-items: baseline; gap: 6px; margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--line-2); color: var(--muted); font-size: 12.5px; min-width: 0; }
+.msg-hit-reply .icon { width: 12px; height: 12px; flex: none; color: var(--faint); transform: translateY(1px); }
+.msg-hit-reply span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.msg-hit-reply b { color: var(--text-2); font-weight: 600; }
+.msg-hit-text { margin-top: 5px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.msg-hit-text mark { background: color-mix(in srgb, #e8b923 34%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; box-shadow: 0 0 0 1px color-mix(in srgb, #e8b923 40%, transparent); }
+[data-theme="light"] .msg-hit-text mark { background: color-mix(in srgb, #f2c230 42%, transparent); }
+.msg-hit-more { margin-top: 6px; margin-left: -8px; }
+.msg-hit-actions { display: flex; justify-content: flex-end; padding-top: 1px; }
+.msg-hit-actions .btn .icon { width: 13px; height: 13px; }
+.msg-hit-actions .hint { margin: 0; white-space: nowrap; }
+.msg-foot { display: flex; align-items: center; justify-content: center; gap: 10px 14px; flex-wrap: wrap; padding: 14px var(--pad-card); border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; text-align: center; }
+.msg-foot-error { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); }
+.msg-foot-error .icon { width: 14px; height: 14px; }
+.msg-empty .hint { margin-top: 8px; }
+
+@media (max-width: 640px) {
+  .msg-search { padding: 12px; }
+  .msg-search-row .btn { padding: 0 14px; }
+  .msg-search-filters .picker-btn { flex: 1 1 140px; min-width: 0; max-width: none; }
+  .msg-search-filters .segmented { width: 100%; }
+  .msg-search-filters .segmented button { flex: 1; justify-content: center; padding: 0 4px; }
+  .msg-hit { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 12px; }
+  .msg-hit-avatar .avatar { width: 32px; height: 32px; }
+  .msg-hit-actions { grid-column: 2; justify-content: flex-start; padding-top: 0; }
+  .msg-hit-time { flex-basis: 100%; }
+}

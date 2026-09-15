@@ -338,7 +338,22 @@ impl PanelData for FakeData {
     }
 
     fn thread_parent(&self, channel: u64) -> Option<u64> {
-        (channel == 77).then_some(SAFE)
+        match channel {
+            77 => Some(SAFE),
+            78 => Some(21),
+            _ => None,
+        }
+    }
+
+    async fn search_window(&self, filter: super::search::Filter) -> anyhow::Result<super::search::Window> {
+        let conn = fake_history().lock();
+        Ok(super::search::read_window(&conn, "lodu", &filter)?)
+    }
+
+    fn member_house(&self, id: u64) -> Option<&'static super::super::super::house::House> {
+        self.cached_member(id)?;
+        let key = if id >= 2000 { HOUSES_KEYS[((id - 2000) % 4) as usize] } else { HOUSES_KEYS[(id % 4) as usize] };
+        super::super::super::house::house(key)
     }
 
     fn duels(&self, since: i64) -> Vec<(u64, u64, i64)> {
@@ -600,6 +615,107 @@ fn fake_ledger(now: i64) -> &'static parking_lot::Mutex<rusqlite::Connection> {
             )
             .unwrap();
         }
+        parking_lot::Mutex::new(conn)
+    })
+}
+
+/// A stored-history table like vizier.db's, with a month of member chatter and
+/// the bot's answers, plus the rows the message-search tests look for.
+fn fake_history() -> &'static parking_lot::Mutex<rusqlite::Connection> {
+    static HISTORY: OnceLock<parking_lot::Mutex<rusqlite::Connection>> = OnceLock::new();
+    HISTORY.get_or_init(|| {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_history (uid TEXT PRIMARY KEY, agent_id TEXT NOT NULL, channel TEXT NOT NULL, topic TEXT,
+                 timestamp INTEGER NOT NULL, content_type TEXT NOT NULL, data TEXT NOT NULL);
+             CREATE INDEX idx_sh_agent_time ON session_history(agent_id, timestamp);",
+        )
+        .unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut n = 0u64;
+        let mut add = |ago_ms: i64, column: &str, ctype: &str, who: (u64, &str), text: &str, meta: Value| {
+            n += 1;
+            let data = json!({ "uid": format!("u{n}"), "content": { ctype: {
+                "timestamp": "2026-09-14T10:00:00Z",
+                "user": format!("@{} (DiscordId: {})", who.1, who.0),
+                "content": { if n % 5 == 0 { "chat" } else { "silent_read" }: text },
+                "metadata": meta,
+                "attachments": [],
+            }}})
+            .to_string();
+            conn.execute(
+                "INSERT INTO session_history VALUES (?1, 'lodu', ?2, NULL, ?3, ?4, ?5)",
+                rusqlite::params![format!("u{n}"), column, now_ms - ago_ms, ctype, data],
+            )
+            .unwrap();
+            // Another agent's copy never shows.
+            if n % 50 == 0 {
+                conn.execute("INSERT INTO session_history VALUES (?1, 'other', ?2, NULL, ?3, 'Request', ?4)", rusqlite::params![format!("o{n}"), column, now_ms - ago_ms, data]).unwrap();
+            }
+        };
+        let meta = |channel: u64, id: Option<u64>, reply: Option<(&str, &str)>| {
+            json!({
+                "discord_channel_id": channel.to_string(), "is_dm": false, "message_id": id.map(|i| i.to_string()),
+                "is_reply_message": reply.is_some(), "replied_message_author": reply.map(|r| r.0), "replied_message_content": reply.map(|r| r.1),
+                "sent_at": "2026-09-14 10:00:00 UTC",
+            })
+        };
+        let chatter: &[(u64, &str)] = &[
+            (32, "koto today was brutal, took me 6 tries"),
+            (21, "gm gm, chai ready? ☕"),
+            (23, "RCB this year for sure, write it down"),
+            (32, "who solved koto in 3?? teach me"),
+            (22, "this meme is Dev every monday 💀"),
+            (24, "Arijit on loop again, no regrets"),
+            (32, "bhai koto ka answer mat batana abhi, I'm still on try 4"),
+            (21, "Loduchand who is winning the house cup this month?"),
+            (31, "anyone up for a 1v1 in the arena?"),
+            (22, "the snitch just dropped in memes and I missed it AGAIN"),
+            (21, "chai break, back in 10"),
+            (32, "that Sholay question in the quiz was criminal, nobody got it"),
+            (32, "koto streak 14 days, don't jinx it"),
+            (21, "who's on voice tonight? lounge at 10"),
+            (23, "my fantasy team has 4 bowlers, send help"),
+            (32, "quiz night friday? I'm in, Kabir better go easy"),
+        ];
+        let replies = [("Zoya", "who's playing koto today?"), ("Dev", "RCB will choke again, watch"), ("Meera", "quiz starts in 5, get in")];
+        for i in 0..520u64 {
+            let (channel, text) = chatter[(i as usize * 7) % chatter.len()];
+            let who = 2000 + (i * 13) % 43;
+            let ago = 40 * 60_000 + i as i64 * 4_700_000 + ((i * 977) % 600_000) as i64;
+            let reply = (i % 6 == 2).then(|| replies[(i as usize / 6) % replies.len()]);
+            add(ago, &format!("discord__{channel}"), "Request", (who, ROSTER[(who - 2000) as usize]), text, meta(channel, Some(1_300_000_000_000_000_000 + i), reply));
+            if i % 2 == 0 {
+                add(ago - 4_000, &format!("discord__{channel}"), "Response", (0, "Loduchand"), "koto hint: think of a fruit 🍋", json!({}));
+            }
+        }
+        // What the search tests look for.
+        let day = 86_400_000i64;
+        add(2 * 3_600_000, "discord__21", "Request", (2012, "Sameer"), "Anyone seen the ZEBRAFISH meme?", meta(21, Some(7001), Some(("Dev", "which meme are you on about"))));
+        add(2 * 3_600_000 + 10, "discord__5000", "Request", (2007, "Zoya"), "zebrafish secret in a DM", json!({ "discord_channel_id": "5000", "is_dm": true, "message_id": "7002" }));
+        add(2 * 3_600_000 + 20, &format!("discord__{SAFE}"), "Request", (2012, "Sameer"), "zebrafish SECRET-SAFE", meta(SAFE, Some(7003), None));
+        add(2 * 3_600_000 + 30, "discord__77", "Request", (2012, "Sameer"), "zebrafish SECRET-THREAD", meta(77, Some(7004), None));
+        add(2 * 3_600_000 + 40, "discord__999", "Request", (2012, "Sameer"), "zebrafish SECRET-UNKNOWN", meta(999, Some(7005), None));
+        add(3 * day, "discord__22", "Request", (2010, "Dev"), "zebrafish again lol", json!({ "discord_channel_id": "22", "is_dm": false }));
+        add(3 * day + 10, "discord__21", "Request", (MEMBER, "Rohan"), "[replying to @Dev: \"zebrafish SECRET-QUOTE?\"]\nyes", meta(21, Some(7007), Some(("Dev", "zebrafish SECRET-QUOTE?"))));
+        add(3 * day + 20, "discord__21", "Request", (2004, "Vihaan"), "[Private notes from the server mods about people in this message. zebrafish SECRET-NOTES]\n- @Vihaan: fine\n[End of notes]\nhello there", meta(21, Some(7008), None));
+        add(3 * day + 30, "discord__21", "Response", (0, "Loduchand"), "zebrafish SECRET-BOT", json!({}));
+        add(4 * day, "discord__78", "Request", (2008, "Arjun"), "zebrafish in a thread under general", meta(78, Some(7010), None));
+        add(4 * day + 10, "discord__21__koto", "Request", (2008, "Arjun"), "zebrafish with a topic", meta(21, Some(7011), None));
+        add(5 * day, "discord__21", "Request", (20_120, "Imposter"), "zebrafish from someone else", meta(21, Some(7012), None));
+        add(60 * day, "discord__21", "Request", (2012, "Sameer"), "zebrafish from long ago", meta(21, Some(7013), None));
+        add(2 * day, "discord__23", "Request", (2023, "Kavya"), &format!("{} So yes, the zebrafish thing was real. {}",
+            "Okay long story. We went to the aquarium on Saturday because the metro was shut, and the whole group decided it was a good idea to argue about which fish would win a 1v1 in the arena. Dev said shark, obviously, Zoya said octopus because of the eight arms, and Nikhil kept saying the tiny striped one in the corner tank.",
+            "The guide told us they can regrow parts of their heart, which honestly is more than I can say for RCB fans every April. Anyway, if anyone wants to go again next weekend, I'm in, but Nikhil is not choosing the snacks this time."), meta(23, Some(7019), Some(("Nikhil", "wait what happened at the aquarium"))));
+        add(1 * day, "discord__23", "Request", (2003, "Meera"), "ÉCLAIR au café, anyone?", meta(23, Some(7014), None));
+        add(1 * day + 10, "discord__23", "Request", (2003, "Meera"), "this is 100% real", meta(23, Some(7015), None));
+        add(1 * day + 20, "discord__23", "Request", (2003, "Meera"), "this is 1000 real", meta(23, Some(7016), None));
+        add(1 * day + 30, "discord__23", "Request", (2003, "Meera"), "snake a_b case", meta(23, Some(7017), None));
+        add(1 * day + 40, "discord__23", "Request", (2003, "Meera"), "snake aXb case", meta(23, Some(7018), None));
+        for i in 0..7i64 {
+            add(6 * day + i * 3_600_000, "discord__24", "Request", (2011, "Tanvi"), &format!("pagetoken number {}", i + 1), meta(24, Some(7100 + i as u64), None));
+        }
+        add(29 * day + 20 * 3_600_000, "discord__21", "Request", (2012, "Sameer"), "the oldtoken is here", meta(21, Some(7200), None));
         parking_lot::Mutex::new(conn)
     })
 }
@@ -2581,6 +2697,213 @@ async fn chocolate_frogs_round_trip() {
     let (_, audit, _) = call(&app, "GET", "/api/audit?limit=5", Some(&session), None, false).await;
     let last = audit.as_array().unwrap().iter().find(|e| e["key"] == format!("frog:trade:{}", gift.id)).cloned().expect("logged");
     assert_eq!(last["change"], "Cancelled the offer from Zoya to Arjun");
+}
+
+// --- search messages ------------------------------------------------------------------------
+
+async fn search_api(app: &Router, session: &str, query: &str) -> (StatusCode, Value) {
+    let (status, body, _) = call(app, "GET", &format!("/api/messages/search?{}", query), Some(session), None, false).await;
+    (status, body)
+}
+
+fn texts(body: &Value) -> Vec<String> {
+    body["results"].as_array().unwrap().iter().map(|r| r["text"].as_str().unwrap().to_string()).collect()
+}
+
+/// Follows the cursor to the end: every result, and the last page.
+async fn search_all(app: &Router, session: &str, query: &str) -> (Value, Value) {
+    let mut all = Vec::new();
+    let mut before = String::new();
+    for _ in 0..30 {
+        let (status, body) = search_api(app, session, &format!("{query}{before}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        all.extend(body["results"].as_array().unwrap().iter().cloned());
+        match body["next_before"].as_i64() {
+            Some(b) => before = format!("&before={b}"),
+            None => return (json!({ "results": all }), body),
+        }
+    }
+    panic!("paging never ends for {query}");
+}
+
+#[tokio::test]
+async fn message_search_finds_words_and_never_shows_dms_or_safe_corner() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (body, last) = search_all(&app, &session, "q=ZebraFish&days=all").await;
+    let found = texts(&body);
+    for want in ["Anyone seen the ZEBRAFISH meme?", "zebrafish again lol", "zebrafish in a thread under general", "zebrafish with a topic", "zebrafish from someone else", "zebrafish from long ago"] {
+        assert!(found.iter().any(|t| t == want), "missing {want}: {found:?}");
+    }
+    for never in ["DM", "SECRET"] {
+        assert!(!found.iter().any(|t| t.contains(never)), "{never} leaked: {found:?}");
+    }
+    assert!(!found.iter().any(|t| t == "hello there"), "words only in the mods' notes don't count");
+    assert!(!found.iter().any(|t| t == "yes"), "words only in the quoted message don't count");
+    assert_eq!(last["complete"], true);
+    assert!(last["scanned_to"].is_null(), "all time has no start");
+
+    // Newest first, with the member, house, channel, reply and jump link.
+    let first = &body["results"][0];
+    assert_eq!(first["text"], "Anyone seen the ZEBRAFISH meme?");
+    assert_eq!(first["member"]["id"], "2012");
+    assert_eq!(first["member"]["name"], "Sameer");
+    assert!(first["member"]["avatar"].as_str().unwrap().starts_with("data:image"));
+    assert_eq!(first["house"]["key"], "gryffindor");
+    assert_eq!(first["channel"], json!({ "id": "21", "name": "general", "thread": false }));
+    assert_eq!(first["reply_to"], json!({ "author": "Dev", "text": "which meme are you on about" }));
+    assert_eq!(first["url"], "https://discord.com/channels/900/21/7001");
+    let (start, end) = (first["match"][0].as_u64().unwrap() as usize, first["match"][1].as_u64().unwrap() as usize);
+    assert_eq!(first["text"].as_str().unwrap().chars().skip(start).take(end - start).collect::<String>(), "ZEBRAFISH");
+    let snip = &first["snippet"];
+    let (ss, se) = (snip["start"].as_u64().unwrap() as usize, snip["end"].as_u64().unwrap() as usize);
+    assert_eq!(snip["text"].as_str().unwrap().chars().skip(ss).take(se - ss).collect::<String>(), "ZEBRAFISH");
+    let ts: Vec<i64> = body["results"].as_array().unwrap().iter().map(|r| r["ts_ms"].as_i64().unwrap()).collect();
+    assert!(ts.windows(2).all(|w| w[0] >= w[1]), "newest first: {ts:?}");
+
+    let by_text = |t: &str| body["results"].as_array().unwrap().iter().find(|r| r["text"] == t).cloned().unwrap();
+    let thread = by_text("zebrafish in a thread under general");
+    assert_eq!(thread["channel"], json!({ "id": "78", "name": "general", "thread": true }));
+    assert_eq!(thread["url"], "https://discord.com/channels/900/78/7010");
+    assert!(by_text("zebrafish again lol")["url"].is_null(), "no message id, no link");
+    let stranger = by_text("zebrafish from someone else");
+    assert_eq!(stranger["member"]["name"], "Imposter", "the stored name when the cache doesn't know them");
+    assert!(stranger["house"].is_null());
+
+    // The default period is 30 days.
+    let (month, last) = search_all(&app, &session, "q=zebrafish").await;
+    assert!(!texts(&month).iter().any(|t| t == "zebrafish from long ago"));
+    assert_eq!(last["days"], "30");
+    let start = last["scanned_to"].as_i64().unwrap();
+    assert!((start - (chrono::Utc::now().timestamp() - 30 * 86_400)).abs() < 60, "searched back to the period's start");
+    let (quarter, _) = search_all(&app, &session, "q=zebrafish&days=90").await;
+    assert!(texts(&quarter).iter().any(|t| t == "zebrafish from long ago"));
+    let (day, _) = search_all(&app, &session, "q=zebrafish&days=1").await;
+    assert_eq!(texts(&day), vec!["Anyone seen the ZEBRAFISH meme?"]);
+}
+
+#[tokio::test]
+async fn message_search_matches_case_in_any_script_and_escapes_wildcards() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    for q in ["%C3%A9clair", "CAF%C3%89", "%C3%89CLAIR%20AU"] {
+        let (status, body) = search_api(&app, &session, &format!("q={q}&days=7")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(texts(&body), vec!["ÉCLAIR au café, anyone?"], "{q}");
+    }
+    let (_, body) = search_api(&app, &session, "q=100%25&days=7").await;
+    assert_eq!(texts(&body), vec!["this is 100% real"]);
+    let (_, body) = search_api(&app, &session, "q=a_b&days=7").await;
+    assert_eq!(texts(&body), vec!["snake a_b case"]);
+    let (body, last) = search_all(&app, &session, "q=nothing-says-this&days=all").await;
+    assert!(texts(&body).is_empty());
+    assert_eq!(last["complete"], true);
+}
+
+#[tokio::test]
+async fn message_search_filters_by_member_and_channel() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (body, last) = search_all(&app, &session, "q=zebrafish&days=all&member=2012").await;
+    assert_eq!(texts(&body), vec!["Anyone seen the ZEBRAFISH meme?", "zebrafish from long ago"], "not 20120, never safe-corner");
+    assert_eq!(last["member"], json!({ "id": "2012", "name": "Sameer" }));
+    let (body, last) = search_all(&app, &session, "q=zebrafish&days=all&channel=21").await;
+    let found = texts(&body);
+    assert!(found.contains(&"zebrafish with a topic".to_string()), "a topic in the channel counts: {found:?}");
+    assert!(found.contains(&"Anyone seen the ZEBRAFISH meme?".to_string()));
+    assert!(!found.contains(&"zebrafish again lol".to_string()));
+    assert!(body["results"].as_array().unwrap().iter().all(|r| r["channel"]["id"] == "21"));
+    assert_eq!(last["channel"], json!({ "id": "21", "name": "general" }));
+    let (status, body) = search_api(&app, &session, &format!("q=zebrafish&channel={SAFE}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("safe-corner"));
+    let (body, _) = search_all(&app, &session, "q=zebrafish&days=all&channel=5000").await;
+    assert!(texts(&body).is_empty(), "a DM channel gives nothing");
+}
+
+#[tokio::test]
+async fn message_search_pages_with_a_cursor_and_a_scan_budget() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let mut seen: Vec<String> = Vec::new();
+    let mut before: Option<i64> = None;
+    let mut pages = Vec::new();
+    loop {
+        let query = format!("q=pagetoken&days=all&limit=3{}", before.map(|b| format!("&before={b}")).unwrap_or_default());
+        let (status, body) = search_api(&app, &session, &query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["count"].as_u64().unwrap() <= 3);
+        pages.push(body["count"].as_u64().unwrap());
+        seen.extend(texts(&body));
+        match body["next_before"].as_i64() {
+            Some(b) => {
+                assert!(body["scanned_to"].as_i64().unwrap() > 0);
+                before = Some(b);
+            }
+            None => break,
+        }
+        assert!(pages.len() < 20, "paging never ends");
+    }
+    let want: Vec<String> = (1..=7).map(|i| format!("pagetoken number {i}")).collect();
+    assert_eq!(seen, want, "every message once, newest first");
+    assert_eq!(&pages[..2], &[3, 3]);
+
+    // A word that sits past the scan budget: the first request hands back a cursor.
+    let (_, first) = search_api(&app, &session, "q=oldtoken&days=all").await;
+    assert_eq!(first["count"], 0);
+    assert_eq!(first["complete"], false);
+    let mut cursor = first["next_before"].as_i64().expect("a cursor");
+    let mut found = false;
+    for _ in 0..10 {
+        let (_, next) = search_api(&app, &session, &format!("q=oldtoken&days=all&before={cursor}")).await;
+        if next["count"] == 1 {
+            assert_eq!(texts(&next), vec!["the oldtoken is here"]);
+            found = true;
+            break;
+        }
+        cursor = next["next_before"].as_i64().expect("more to read");
+    }
+    assert!(found);
+}
+
+#[tokio::test]
+async fn message_search_checks_its_input_and_needs_an_admin() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    for bad in ["", "q=", "q=a", "q=%20a%20", &format!("q={}", "x".repeat(101)), "q=koto&days=5", "q=koto&member=abc", "q=koto&channel=x1", "q=koto&before=-4", "q=koto&limit=lots"] {
+        let (status, body) = search_api(&app, &session, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert!(body["error"].is_string());
+    }
+    let (status, body) = search_api(&app, &session, "q=koto&limit=1000").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 100);
+    assert!(body["count"].as_u64().unwrap() <= 100);
+    let (_, body) = search_api(&app, &session, "q=koto").await;
+    assert_eq!(body["limit"], 50);
+    assert_eq!(body["count"], 50);
+    assert!(body["next_before"].is_i64());
+
+    let (status, _, _) = call(&app, "GET", "/api/messages/search?q=koto", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "GET", "/api/messages/search?q=koto", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn message_searches_are_in_the_activity_log_once() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    let q = "q=Arijit%20on&member=2005&channel=24&days=7";
+    let (status, _) = search_api(&app, &session, q).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _) = search_api(&app, &session, q).await;
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let entries: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == "messages:search" && e["change"] == "“Arijit on” · @Anaya · #music · last 7 days").collect();
+    assert_eq!(entries.len(), 1, "a repeat isn't logged again: {audit}");
+    assert_eq!(entries[0]["label"], "Searched messages");
+    assert_eq!(entries[0]["user_id"], ADMIN_TWO.to_string());
+    assert_eq!(entries[0]["section"]["id"], "search");
 }
 
 // --- the demo ----------------------------------------------------------------------------
