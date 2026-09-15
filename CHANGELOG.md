@@ -2,11 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.30] - 2026-09-15
+
+### 💼 Other
+
+- Search messages - find who said something and when in the bot's stored channel messages (never DMs or #safe-corner), with member, channel and period filters, jump links, paging and an activity-log entry per search
+- Deleted messages - a log of deleted and edited messages from every server channel the bot sees (never DMs, #safe-corner or bots), with short-lived copies of text and pictures, 7-day copies and a 30-day log, member/channel/period/text filters, a picture lightbox and an activity-log entry per look
 ## [0.11.29] - 2026-09-15
 
 ### 💼 Other
 
 - Messages in any voice channel's text chat (temporary rooms too) count towards chat stats and points
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.29
 ## [0.11.28] - 2026-09-15
 
 ### 💼 Other
