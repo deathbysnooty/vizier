@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.24] - 2026-09-15
+
+### 💼 Other
+
+- Live timer line in the pop-up off by default (crashed some apps), one retry for the judging call
 ## [0.11.23] - 2026-09-15
 
 ### 💼 Other
 
 - Countdown in the answers pop-up - a live timer line and seconds left in the title
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.23
 ## [0.11.22] - 2026-09-15
 
 ### 💼 Other
