@@ -926,7 +926,9 @@ async fn catch_pressed(ctx: &Context, component: &ComponentInteraction) {
         return whisper_component(ctx, component, OUT_OF_TRIES).await;
     }
     let left = MAX_TRIES - used;
-    let legacy = LEGACY_MODAL.load(Ordering::Relaxed);
+    // The text-block pop-up crashes the Discord iPhone app, so the plain form is
+    // the default; the text block is opt-in.
+    let legacy = LEGACY_MODAL.load(Ordering::Relaxed) || !super::control::on("VIZIER_FROG_POPUP_TEXT_BLOCK", false);
     let sent = ctx.http.create_interaction_response(component.id, &component.token, &modal_json(&d, &riddle.riddle, left, legacy), Vec::new()).await;
     match sent {
         Ok(()) => {
