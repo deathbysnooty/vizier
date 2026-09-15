@@ -1219,6 +1219,18 @@ impl EventHandler for Handler {
         npat::on_delete(channel_id, deleted_message_id);
     }
 
+    async fn voice_state_update(&self, ctx: Context, _old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
+        // Deafened stretches, for voice points: Dyno's log has no deafen lines.
+        stats::on_voice_state(&ctx, &new);
+    }
+
+    async fn cache_ready(&self, ctx: Context, _guilds: Vec<serenity::all::GuildId>) {
+        // Every guild's voice states are in the cache only now, not at `ready`:
+        // line the deafened stretches up with who is deafened after a restart
+        // or a fresh session. Safe to run again on every later cache_ready.
+        stats::reconcile_from_cache(&ctx);
+    }
+
     async fn ready(&self, ctx: Context, _ready: Ready) {
         // A running quiz comes back first: registering the slash commands below
         // takes the better part of a minute, and players notice the silence.

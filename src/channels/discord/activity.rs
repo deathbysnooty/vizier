@@ -2,9 +2,12 @@
 //!
 //! Chat pays in tiers across an India day (20, 60 and 150 messages by default),
 //! voice pays a point for every full hour spent in a room with at least one
-//! other person (bots aren't company), up to the daily limits. Nothing new is
-//! recorded for this: the counts already kept for /awards are read back on a
-//! timer, so the numbers here can never disagree with the awards card.
+//! other person (bots aren't company), up to the daily limits. Time spent
+//! deafened doesn't count, and a deafened person isn't company either
+//! (`VIZIER_VOICE_IGNORE_DEAFENED`); muted is fine. Joins and leaves are the
+//! counts already kept for /awards, read back on a timer; deafened stretches
+//! come from the bot's own voice-state events (stats.rs `voice_deaf`), because
+//! Dyno's log has no mute or deafen lines.
 //!
 //! Every award goes through `house::award_person_at` with a key naming the person
 //! and the day, so the timer can rerun as often as it likes - after a restart,
@@ -56,6 +59,12 @@ fn chat_tiers() -> Vec<i64> {
 /// Whether voice time only counts with someone else in the room.
 fn voice_needs_company() -> bool {
     super::control::on("VIZIER_VOICE_NEEDS_COMPANY", true)
+}
+
+/// Whether time spent deafened is left out of voice points (and a deafened
+/// person is not company).
+fn voice_ignores_deafened() -> bool {
+    super::control::on("VIZIER_VOICE_IGNORE_DEAFENED", true)
 }
 
 /// Bots seen in the server, kept fresh by each pass, so music bots never count
@@ -304,11 +313,8 @@ fn load_day(
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        seconds = if voice_needs_company() {
-            shared_seconds(&sittings(&events, bounds, exclude, afk, Some(now)), bots)
-        } else {
-            voice_seconds(&events, bounds, exclude, afk, Some(now))
-        };
+        let real = undeafened_sittings(conn, &events, bounds, exclude, afk, now, None)?;
+        seconds = if voice_needs_company() { shared_seconds(&real, bots) } else { total_seconds(&real) };
     }
     Ok(plan(day, &chat, &seconds))
 }
@@ -333,6 +339,11 @@ pub(crate) fn voice_bar_secs() -> i64 {
 /// Whether voice points only count time with someone else in the room.
 pub(crate) fn voice_company_rule() -> bool {
     voice_needs_company()
+}
+
+/// Whether deafened time is left out of voice points.
+pub(crate) fn voice_deafened_rule() -> bool {
+    voice_ignores_deafened()
 }
 
 /// Voice seconds that count towards voice points inside `[start, end)`: time
@@ -365,7 +376,9 @@ pub(crate) fn voice_points_between(
         })?
         .collect::<rusqlite::Result<_>>()?;
     let bots = BOTS.lock().clone();
-    let mut shared = shared_seconds(&sittings(&events, (start, end), &exclude, afk, Some(now)), &bots);
+    // Everyone's deafened stretches too: a deafened friend is no company.
+    let real = undeafened_sittings(conn, &events, (start, end), &exclude, afk, now, None)?;
+    let mut shared = shared_seconds(&real, &bots);
     if let Some(u) = user {
         shared.retain(|k, _| *k == u);
     }
@@ -393,8 +406,9 @@ pub(crate) fn messages_on(conn: &Connection, day: &str, user: Option<u64>) -> ru
 }
 
 /// Real voice seconds per person inside `[start, end)`, paired exactly as voice
-/// days are (AFK and excluded rooms left out, a room still open counts up to
-/// `now`). Optionally for one person. Read-only.
+/// days are (AFK and excluded rooms left out, deafened time left out when that
+/// rule is on, a room still open counts up to `now`). Optionally for one
+/// person. Read-only.
 pub(crate) fn voice_between(
     conn: &Connection,
     user: Option<u64>,
@@ -422,7 +436,82 @@ pub(crate) fn voice_between(
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(voice_seconds(&events, (start, end), &exclude, afk, Some(now)))
+    Ok(total_seconds(&undeafened_sittings(conn, &events, (start, end), &exclude, afk, now, user)?))
+}
+
+/// `sittings` for `[start, end)` with deafened time cut out when that rule is
+/// on. `user` narrows which deafened stretches are read, for callers that only
+/// have that person's events anyway.
+fn undeafened_sittings(
+    conn: &Connection,
+    events: &[VoiceEvent],
+    (start, end): (i64, i64),
+    exclude: &HashSet<u64>,
+    afk: Option<u64>,
+    now: i64,
+    user: Option<u64>,
+) -> rusqlite::Result<Vec<Sitting>> {
+    let all = sittings(events, (start, end), exclude, afk, Some(now));
+    if !voice_ignores_deafened() {
+        return Ok(all);
+    }
+    let deaf = deafened_between(conn, user, start, end, now)?;
+    Ok(cut_deafened(all, &deaf))
+}
+
+/// Deafened stretches per person overlapping `[start, end)`, as recorded from
+/// the bot's own voice-state events; one still open runs to `now`.
+fn deafened_between(
+    conn: &Connection,
+    user: Option<u64>,
+    start: i64,
+    end: i64,
+    now: i64,
+) -> rusqlite::Result<HashMap<u64, Vec<(i64, i64)>>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_id, start_ts, COALESCE(end_ts, ?3) FROM voice_deaf
+         WHERE start_ts < ?2 AND (end_ts IS NULL OR end_ts > ?1) AND (?4 IS NULL OR user_id = ?4)",
+    )?;
+    let rows = stmt.query_map(params![start, end, now, user.map(|u| u as i64)], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+    })?;
+    let mut out: HashMap<u64, Vec<(i64, i64)>> = HashMap::new();
+    for row in rows {
+        let (u, s, e) = row?;
+        if e > s {
+            out.entry(u).or_default().push((s, e));
+        }
+    }
+    Ok(out)
+}
+
+/// Each sitting with its person's deafened stretches taken out; the pieces
+/// either side stay. A person with no stretches (never deafened, or only
+/// muted) keeps their sittings as they are.
+fn cut_deafened(sittings: Vec<Sitting>, deaf: &HashMap<u64, Vec<(i64, i64)>>) -> Vec<Sitting> {
+    let mut out = Vec::with_capacity(sittings.len());
+    for s in sittings {
+        let Some(spans) = deaf.get(&s.user) else {
+            out.push(s);
+            continue;
+        };
+        let mut spans: Vec<(i64, i64)> = spans.iter().copied().filter(|&(a, b)| b > a && a < s.end && b > s.start).collect();
+        spans.sort_unstable();
+        let mut from = s.start;
+        for (a, b) in spans {
+            if a > from {
+                out.push(Sitting { start: from, end: a, ..s });
+            }
+            from = from.max(b);
+            if from >= s.end {
+                break;
+            }
+        }
+        if from < s.end {
+            out.push(Sitting { start: from, ..s });
+        }
+    }
+    out
 }
 
 /// Messages per person who reached the first chat tier, from (user, channel,
@@ -454,6 +543,7 @@ fn chat_days(rows: &[(u64, u64, i64)], exclude: &HashSet<u64>) -> HashMap<u64, i
 ///   bar. Someone sitting in voice has their hour when the hour is up, on the
 ///   day they spent it, rather than whenever they leave - possibly after
 ///   midnight, when the ledger would book it against the next day.
+#[cfg(test)]
 fn voice_seconds(
     events: &[VoiceEvent],
     day: (i64, i64),
@@ -461,8 +551,12 @@ fn voice_seconds(
     afk: Option<u64>,
     now: Option<i64>,
 ) -> HashMap<u64, i64> {
+    total_seconds(&sittings(events, day, exclude, afk, now))
+}
+
+fn total_seconds(sittings: &[Sitting]) -> HashMap<u64, i64> {
     let mut out: HashMap<u64, i64> = HashMap::new();
-    for s in sittings(events, day, exclude, afk, now) {
+    for s in sittings {
         *out.entry(s.user).or_insert(0) += s.end - s.start;
     }
     out
@@ -702,6 +796,58 @@ mod tests {
         assert_eq!(hours, vec!["voice:2026-09-14:11", "voice:2026-09-14:11:2", "voice:2026-09-14:22", "voice:2026-09-14:33"]);
     }
 
+    fn sit(user: u64, room: u64, start: i64, end: i64) -> Sitting {
+        Sitting { user, room, start, end }
+    }
+
+    fn deaf(spans: &[(u64, i64, i64)]) -> HashMap<u64, Vec<(i64, i64)>> {
+        let mut out: HashMap<u64, Vec<(i64, i64)>> = HashMap::new();
+        for &(u, s, e) in spans {
+            out.entry(u).or_default().push((s, e));
+        }
+        out
+    }
+
+    #[test]
+    fn deafened_stretches_are_cut_out_of_sittings() {
+        let s = sit(ME, ROOM, 10 * H, 14 * H);
+        let cut = |spans: &[(u64, i64, i64)]| cut_deafened(vec![s], &deaf(spans));
+        // Inside: the pieces either side stay.
+        assert_eq!(cut(&[(ME, 11 * H, 12 * H)]), vec![sit(ME, ROOM, 10 * H, 11 * H), sit(ME, ROOM, 12 * H, 14 * H)]);
+        // Over either edge.
+        assert_eq!(cut(&[(ME, 9 * H, 10 * H + 900)]), vec![sit(ME, ROOM, 10 * H + 900, 14 * H)]);
+        assert_eq!(cut(&[(ME, 13 * H, 15 * H)]), vec![sit(ME, ROOM, 10 * H, 13 * H)]);
+        // The whole sitting, or exactly it.
+        assert!(cut(&[(ME, 9 * H, 15 * H)]).is_empty());
+        assert!(cut(&[(ME, 10 * H, 14 * H)]).is_empty());
+        // Touching the edges from outside cuts nothing.
+        assert_eq!(cut(&[(ME, 8 * H, 10 * H), (ME, 14 * H, 16 * H)]), vec![s]);
+        // Several, out of order and overlapping each other.
+        assert_eq!(
+            cut(&[(ME, 13 * H, 13 * H + 600), (ME, 10 * H + 600, 11 * H), (ME, 10 * H + 1200, 11 * H + 1800)]),
+            vec![sit(ME, ROOM, 10 * H, 10 * H + 600), sit(ME, ROOM, 11 * H + 1800, 13 * H), sit(ME, ROOM, 13 * H + 600, 14 * H)]
+        );
+        // Someone else's deafen, or none at all (muted leaves no record), changes nothing.
+        assert_eq!(cut(&[(YOU, 11 * H, 12 * H)]), vec![s]);
+        assert_eq!(cut(&[]), vec![s]);
+        let total: i64 = cut(&[(ME, 11 * H, 12 * H), (ME, 13 * H, 13 * H + 1800)]).iter().map(|p| p.end - p.start).sum();
+        assert_eq!(total, 4 * H - H - 1800);
+    }
+
+    #[test]
+    fn a_deafened_friend_is_not_company_and_earns_nothing_meanwhile() {
+        let (s, _) = bounds();
+        // ME and YOU in ROOM 10:00-12:00; YOU deafened 10:30-11:30.
+        let sittings = vec![sit(ME, ROOM, s + 10 * H, s + 12 * H), sit(YOU, ROOM, s + 10 * H, s + 12 * H)];
+        let cut = cut_deafened(sittings.clone(), &deaf(&[(YOU, s + 10 * H + 1800, s + 11 * H + 1800)]));
+        let shared = shared_seconds(&cut, &HashSet::new());
+        assert_eq!(shared.get(&ME), Some(&H), "alone with a deafened friend is alone");
+        assert_eq!(shared.get(&YOU), Some(&H));
+        // Not deafened (muted, or nothing recorded): the full two hours each.
+        let shared = shared_seconds(&cut_deafened(sittings, &HashMap::new()), &HashSet::new());
+        assert_eq!((shared[&ME], shared[&YOU]), (2 * H, 2 * H));
+    }
+
     #[test]
     fn join_then_leave_is_the_time_between() {
         let (s, _) = bounds();
@@ -789,6 +935,7 @@ mod tests {
                  PRIMARY KEY (msg_id, user_id, action));",
         )
         .unwrap();
+        conn.execute_batch(stats::VOICE_DEAF_SCHEMA).unwrap();
         add_indexes(&conn).unwrap();
         conn
     }
@@ -850,5 +997,22 @@ mod tests {
         let again = load_day(&conn, day(), now + 900, &HashSet::new(), None, true, &HashSet::new()).unwrap();
         assert_eq!(again, first);
         assert!(again.iter().map(write).all(|o| o == Outcome::Duplicate));
+
+        // YOU was deafened for ten minutes of that hour, recorded by the bot's
+        // own voice states: now neither YOU nor 44 (whose only company YOU
+        // was) has a full hour. A stretch still open runs to `now`.
+        stats::apply_voice_state(&conn, YOU, Some(ROOM), true, s + 8 * H + 1200).unwrap();
+        stats::apply_voice_state(&conn, YOU, Some(ROOM), false, s + 8 * H + 1800).unwrap();
+        let deafened = load_day(&conn, day(), now, &HashSet::new(), None, true, &HashSet::new()).unwrap();
+        let keys: Vec<&str> = deafened.iter().map(|a| a.dedupe.as_str()).collect();
+        assert_eq!(keys, vec!["chat:2026-09-14:11"]);
+        let (from, to) = bounds();
+        assert_eq!(voice_between(&conn, Some(YOU), from, to, now).unwrap()[&YOU], H + 5 - 600);
+        assert_eq!(voice_between(&conn, None, from, to, now).unwrap()[&44], H + 5, "44 was never deafened");
+        let points = voice_points_between(&conn, None, from, to, now).unwrap();
+        assert_eq!((points[&YOU], points[&44]), (H + 5 - 600, H + 5 - 600));
+        stats::apply_voice_state(&conn, 44, Some(ROOM), true, s + 9 * H).unwrap();
+        // Deafened from 9:00 and never undeafened: open to `now`, so the last five seconds go.
+        assert_eq!(voice_between(&conn, Some(44), from, to, now).unwrap()[&44], H);
     }
 }

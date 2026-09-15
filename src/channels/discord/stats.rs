@@ -107,6 +107,7 @@ pub fn open(workspace: &str, channels: &[u64]) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS voice_events_user_ts ON voice_events (user_id, ts);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
+    conn.execute_batch(VOICE_DEAF_SCHEMA)?;
     let boundary = snowflake_now();
     for &channel in channels {
         conn.execute(
@@ -384,5 +385,245 @@ pub async fn follow_voice_log(http: Arc<Http>, log_channel: u64) {
             Err(err) => tracing::warn!("stats: reading the voice log failed: {}", err),
         }
         tokio::time::sleep(Duration::from_secs(120)).await;
+    }
+}
+
+// --- deafened time -------------------------------------------------------------
+//
+// Dyno's log says nothing about mute or deafen, so the bot records deafened
+// stretches itself from its own voice-state events. Time inside one does not
+// count towards voice points (see activity.rs), and a deafened person is not
+// company for anyone else. Muting changes nothing and is not recorded.
+//
+// A row is one stretch deafened in one room; `end_ts` stays NULL while it is
+// still going. Stretches are recorded whether or not the rule is switched on,
+// so turning it on later already has the history.
+
+pub(crate) const VOICE_DEAF_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS voice_deaf (
+         user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+         start_ts INTEGER NOT NULL, end_ts INTEGER);
+     CREATE INDEX IF NOT EXISTS voice_deaf_user_start ON voice_deaf (user_id, start_ts);
+     CREATE INDEX IF NOT EXISTS voice_deaf_start ON voice_deaf (start_ts);";
+
+/// What one voice state does to a person's deafened stretch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeafStep {
+    /// Nothing open and nothing to open, or still deafened in the same room.
+    Keep,
+    /// Deafened in a room with nothing open: open a stretch there.
+    Open(u64),
+    /// Undeafened or out of voice: close what was open.
+    Close,
+    /// Still deafened but in another room: close and open again there.
+    Move(u64),
+}
+
+/// The step from the room a stretch is open in (if any) to a new voice state:
+/// the room they are in now (`None` when out of voice) and whether they are
+/// deafened by themselves or by the server.
+pub(crate) fn deaf_step(open_in: Option<u64>, room: Option<u64>, deafened: bool) -> DeafStep {
+    match (open_in, room.filter(|_| deafened)) {
+        (None, None) => DeafStep::Keep,
+        (None, Some(r)) => DeafStep::Open(r),
+        (Some(_), None) => DeafStep::Close,
+        (Some(o), Some(r)) if o == r => DeafStep::Keep,
+        (Some(_), Some(r)) => DeafStep::Move(r),
+    }
+}
+
+/// Record one person's voice state at `ts`. Idempotent: the same state twice
+/// changes nothing.
+pub(crate) fn apply_voice_state(
+    conn: &Connection,
+    user: u64,
+    room: Option<u64>,
+    deafened: bool,
+    ts: i64,
+) -> rusqlite::Result<DeafStep> {
+    let open_in: Option<u64> = conn
+        .query_row(
+            "SELECT channel_id FROM voice_deaf WHERE user_id = ?1 AND end_ts IS NULL ORDER BY start_ts DESC LIMIT 1",
+            params![user as i64],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| Some(c as u64))
+        .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) })?;
+    let step = deaf_step(open_in, room, deafened);
+    if matches!(step, DeafStep::Close | DeafStep::Move(_)) {
+        // Every open row, should an earlier crash ever have left two.
+        conn.execute(
+            "UPDATE voice_deaf SET end_ts = max(?1, start_ts) WHERE user_id = ?2 AND end_ts IS NULL",
+            params![ts, user as i64],
+        )?;
+    }
+    if let DeafStep::Open(r) | DeafStep::Move(r) = step {
+        conn.execute(
+            "INSERT INTO voice_deaf (user_id, channel_id, start_ts, end_ts) VALUES (?1, ?2, ?3, NULL)",
+            params![user as i64, r as i64, ts],
+        )?;
+    }
+    Ok(step)
+}
+
+/// Line the table up with who is in voice right now: `present` is every
+/// person (not bot) in a voice room as (user, room, deafened).
+///
+/// Stretches still open from before a restart are closed at `ts`, the moment
+/// of reconciling, when that person is no longer deafened: when the bot
+/// stopped is not known, so the downtime counts as deafened for them. Someone
+/// still deafened in the same room keeps their stretch open straight through.
+pub(crate) fn reconcile_voice_states(conn: &mut Connection, present: &[(u64, u64, bool)], ts: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    let open: Vec<u64> = tx
+        .prepare("SELECT DISTINCT user_id FROM voice_deaf WHERE end_ts IS NULL")?
+        .query_map([], |r| r.get::<_, i64>(0).map(|u| u as u64))?
+        .collect::<rusqlite::Result<_>>()?;
+    for user in open.into_iter().filter(|u| !present.iter().any(|p| p.0 == *u)) {
+        apply_voice_state(&tx, user, None, false, ts)?;
+    }
+    for &(user, room, deafened) in present {
+        apply_voice_state(&tx, user, Some(room), deafened, ts)?;
+    }
+    tx.commit()
+}
+
+fn is_deafened(state: &serenity::all::VoiceState) -> bool {
+    state.self_deaf || state.deaf
+}
+
+/// A voice state from the gateway: someone joined, left, switched, or changed
+/// mute or deafen.
+pub fn on_voice_state(ctx: &serenity::all::Context, state: &serenity::all::VoiceState) {
+    let Some(db) = DB.get() else { return };
+    let bot = match &state.member {
+        Some(m) => m.user.bot,
+        None => ctx.cache.user(state.user_id).is_some_and(|u| u.bot),
+    };
+    if bot {
+        return;
+    }
+    let room = state.channel_id.map(|c| c.get());
+    let now = chrono::Utc::now().timestamp();
+    if let Err(err) = apply_voice_state(&db.lock(), state.user_id.get(), room, is_deafened(state), now) {
+        tracing::warn!("stats: could not record deafen state for {}: {}", state.user_id, err);
+    }
+}
+
+/// Once the cache holds every guild: close what ended while the bot was away
+/// and open what began.
+pub fn reconcile_from_cache(ctx: &serenity::all::Context) {
+    let Some(db) = DB.get() else { return };
+    let mut present: Vec<(u64, u64, bool)> = Vec::new();
+    for g in ctx.cache.guilds() {
+        let Some(guild) = ctx.cache.guild(g) else { continue };
+        for (user, state) in &guild.voice_states {
+            let Some(room) = state.channel_id else { continue };
+            let bot = guild.members.get(user).map(|m| m.user.bot).or_else(|| state.member.as_ref().map(|m| m.user.bot));
+            if bot == Some(true) {
+                continue;
+            }
+            present.push((user.get(), room.get(), is_deafened(state)));
+        }
+    }
+    let now = chrono::Utc::now().timestamp();
+    let deafened = present.iter().filter(|p| p.2).count();
+    match reconcile_voice_states(&mut db.lock(), &present, now) {
+        Ok(()) => tracing::info!("stats: voice states reconciled - {} in voice, {} deafened", present.len(), deafened),
+        Err(err) => tracing::warn!("stats: could not reconcile deafen states: {}", err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: u64 = 11;
+    const YOU: u64 = 22;
+    const ROOM: u64 = 500;
+    const OTHER: u64 = 501;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(VOICE_DEAF_SCHEMA).unwrap();
+        conn
+    }
+
+    fn rows(conn: &Connection) -> Vec<(u64, u64, i64, Option<i64>)> {
+        conn.prepare("SELECT user_id, channel_id, start_ts, end_ts FROM voice_deaf ORDER BY user_id, start_ts, rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_deafen_steps_follow_room_and_state() {
+        assert_eq!(deaf_step(None, None, false), DeafStep::Keep);
+        assert_eq!(deaf_step(None, None, true), DeafStep::Keep, "deafened out of voice is nothing");
+        assert_eq!(deaf_step(None, Some(ROOM), false), DeafStep::Keep, "muted or plain in voice is nothing");
+        assert_eq!(deaf_step(None, Some(ROOM), true), DeafStep::Open(ROOM));
+        assert_eq!(deaf_step(Some(ROOM), Some(ROOM), true), DeafStep::Keep);
+        assert_eq!(deaf_step(Some(ROOM), Some(ROOM), false), DeafStep::Close);
+        assert_eq!(deaf_step(Some(ROOM), None, true), DeafStep::Close);
+        assert_eq!(deaf_step(Some(ROOM), Some(OTHER), true), DeafStep::Move(OTHER));
+        assert_eq!(deaf_step(Some(ROOM), Some(OTHER), false), DeafStep::Close);
+    }
+
+    #[test]
+    fn deafen_stretches_open_and_close_with_the_voice_states() {
+        let conn = db();
+        // Joins already deafened, a repeat of the same state, then undeafens.
+        assert_eq!(apply_voice_state(&conn, ME, Some(ROOM), true, 100).unwrap(), DeafStep::Open(ROOM));
+        assert_eq!(apply_voice_state(&conn, ME, Some(ROOM), true, 150).unwrap(), DeafStep::Keep);
+        assert_eq!(apply_voice_state(&conn, ME, Some(ROOM), false, 200).unwrap(), DeafStep::Close);
+        // Muting alone opens nothing.
+        assert_eq!(apply_voice_state(&conn, ME, Some(ROOM), false, 250).unwrap(), DeafStep::Keep);
+        // Deafens, switches rooms still deafened, then leaves.
+        apply_voice_state(&conn, ME, Some(ROOM), true, 300).unwrap();
+        assert_eq!(apply_voice_state(&conn, ME, Some(OTHER), true, 400).unwrap(), DeafStep::Move(OTHER));
+        assert_eq!(apply_voice_state(&conn, ME, None, true, 500).unwrap(), DeafStep::Close);
+        // Someone else's stretch is theirs alone.
+        apply_voice_state(&conn, YOU, Some(ROOM), true, 450).unwrap();
+        assert_eq!(
+            rows(&conn),
+            vec![
+                (ME, ROOM, 100, Some(200)),
+                (ME, ROOM, 300, Some(400)),
+                (ME, OTHER, 400, Some(500)),
+                (YOU, ROOM, 450, None),
+            ]
+        );
+        // Switching away undeafened just closes.
+        apply_voice_state(&conn, YOU, Some(OTHER), false, 460).unwrap();
+        assert_eq!(rows(&conn)[3], (YOU, ROOM, 450, Some(460)));
+    }
+
+    #[test]
+    fn reconciling_closes_what_ended_and_opens_what_began_while_away() {
+        let mut conn = db();
+        const THIRD: u64 = 33;
+        const FOURTH: u64 = 44;
+        apply_voice_state(&conn, ME, Some(ROOM), true, 100).unwrap(); // left while the bot was down
+        apply_voice_state(&conn, YOU, Some(ROOM), true, 100).unwrap(); // still deafened, same room
+        apply_voice_state(&conn, THIRD, Some(ROOM), true, 100).unwrap(); // still in voice, undeafened
+        apply_voice_state(&conn, 55, Some(ROOM), true, 100).unwrap(); // still deafened, moved room
+        let present = [(YOU, ROOM, true), (THIRD, ROOM, false), (FOURTH, OTHER, true), (55, OTHER, true)];
+        reconcile_voice_states(&mut conn, &present, 900).unwrap();
+        assert_eq!(
+            rows(&conn),
+            vec![
+                (ME, ROOM, 100, Some(900)),
+                (YOU, ROOM, 100, None),
+                (THIRD, ROOM, 100, Some(900)),
+                (FOURTH, OTHER, 900, None),
+                (55, ROOM, 100, Some(900)),
+                (55, OTHER, 900, None),
+            ]
+        );
+        // Running it again changes nothing.
+        reconcile_voice_states(&mut conn, &present, 950).unwrap();
+        assert_eq!(rows(&conn).len(), 6);
+        assert!(rows(&conn).iter().all(|r| r.3 != Some(950)));
     }
 }

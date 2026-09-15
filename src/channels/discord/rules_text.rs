@@ -33,6 +33,8 @@ pub struct Rules {
     pub voice_minutes: i64,
     pub voice_cap: Option<i64>,
     pub voice_company: bool,
+    /// Deafened time is left out of voice.
+    pub voice_ignore_deaf: bool,
 
     pub quiz: [i64; 3],
     pub quiz_cap: Option<i64>,
@@ -134,6 +136,7 @@ impl Rules {
             voice_minutes: (super::activity::voice_bar_secs() / 60).max(1),
             voice_cap: limit(Source::Voice.cap()),
             voice_company: super::activity::voice_company_rule(),
+            voice_ignore_deaf: super::activity::voice_deafened_rule(),
 
             quiz: [
                 control::number("VIZIER_POINTS_QUIZ_1ST", 2) as i64,
@@ -518,6 +521,16 @@ fn voice_line(r: &Rules) -> Option<String> {
     Some(format!("🎙️ **Voice** — every full {} in VC{} → **1 point** {}", voice_block(r.voice_minutes), company, max_words(r.voice_cap)))
 }
 
+/// The small print under the voice line: what doesn't count.
+fn voice_note(r: &Rules) -> Option<&'static str> {
+    match (r.voice_company, r.voice_ignore_deaf) {
+        (true, true) => Some("Alone in VC or only with a music bot doesn't count, and neither does deafened time."),
+        (true, false) => Some("Alone in VC or only with a music bot doesn't count."),
+        (false, true) => Some("Deafened time doesn't count."),
+        (false, false) => None,
+    }
+}
+
 fn cat_range(r: &Rules) -> String {
     let (lo, hi) = (r.cat.iter().min().copied().unwrap_or(0), r.cat.iter().max().copied().unwrap_or(0));
     if lo == hi { format!("**{}**", hi) } else { format!("**{}–{}**", lo, hi) }
@@ -606,8 +619,8 @@ pub fn guide(r: &Rules, cards_post_above: bool) -> Vec<Panel> {
         let lines: Vec<String> = [chat_line(r), voice_line(r)].into_iter().flatten().collect();
         if !lines.is_empty() {
             let mut body = lines.join("\n");
-            if r.voice_company && voice_line(r).is_some() {
-                body.push_str("\n-# Alone in VC or only with a music bot doesn't count.");
+            if let Some(note) = voice_note(r).filter(|_| voice_line(r).is_some()) {
+                body.push_str(&format!("\n-# {}", note));
             }
             sections.push(("💬", "Just hang out", body, 0x3BA55C));
         }
@@ -660,7 +673,8 @@ pub fn earn_text(r: &Rules) -> String {
         if r.voice_cap != Some(0) {
             let company = if r.voice_company { " with others" } else { "" };
             let per = if r.voice_minutes == 60 { "hour".to_string() } else { format!("{} min", r.voice_minutes) };
-            lines.push(format!("🎙️ VC{} → 1/{} {}", company, per, max_words(r.voice_cap)));
+            let deaf = if r.voice_ignore_deaf { " · deafened time doesn't count" } else { "" };
+            lines.push(format!("🎙️ VC{} → 1/{} {}{}", company, per, max_words(r.voice_cap), deaf));
         }
     }
     let mut games = Vec::new();
@@ -838,6 +852,7 @@ pub(crate) mod tests {
             voice_minutes: 60,
             voice_cap: Some(4),
             voice_company: true,
+            voice_ignore_deaf: true,
             quiz: [2, 1, 1],
             quiz_cap: Some(6),
             games_on: true,
@@ -1038,6 +1053,7 @@ pub(crate) mod tests {
         let hang = &panels[1].body;
         assert!(hang.contains("💬 **Chat** — 20, 60 and 150 messages in a day → **1 point each** (max 3)"), "{}", hang);
         assert!(hang.contains("🎙️ **Voice** — every full hour in VC **with at least one other person** → **1 point** (max 4)"), "{}", hang);
+        assert!(hang.contains("-# Alone in VC or only with a music bot doesn't count, and neither does deafened time."), "{}", hang);
         let games = &panels[2].body;
         assert!(games.contains("🧠 **Quiz** in <#1547862192932528138> — vote a genre, answer first; top 3 of each round get **2 · 1 · 1** (max 6)"), "{}", games);
         assert!(games.contains("🐱 **Cat Bot** — catch a cat **1–3** by rarity (max 3)"), "{}", games);
@@ -1071,13 +1087,20 @@ pub(crate) mod tests {
         let hang = &guide(&lonely, true)[1].body;
         assert!(hang.contains("every full 30 minutes in VC → **1 point** (no limit)"), "{}", hang);
         assert!(!hang.contains("music bot"));
+        assert!(hang.contains("-# Deafened time doesn't count."), "{}", hang);
+        let hearing = Rules { voice_ignore_deaf: false, ..defaults() };
+        let hang = &guide(&hearing, true)[1].body;
+        assert!(hang.contains("-# Alone in VC or only with a music bot doesn't count.") && !hang.contains("deafened"), "{}", hang);
+        let hang = &guide(&Rules { voice_ignore_deaf: false, ..lonely }, true)[1].body;
+        assert!(!hang.contains("-#"), "{}", hang);
     }
 
     #[test]
     fn how_to_earn_is_short_and_live() {
         let text = earn_text(&defaults());
         assert!(text.contains("💬 Chat 20·60·150 msgs → 1 each (max 3)"), "{}", text);
-        assert!(text.contains("🎙️ VC with others → 1/hour (max 4)"), "{}", text);
+        assert!(text.contains("🎙️ VC with others → 1/hour (max 4) · deafened time doesn't count"), "{}", text);
+        assert!(!earn_text(&Rules { voice_ignore_deaf: false, ..defaults() }).contains("deafened"));
         assert!(text.contains("🧠 Quiz podium 2·1·1 · 🔤 Koto 3 · 🔡 Anagram 3 · 🐱 Cats 1–3"), "{}", text);
         assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–10 (no limit)"), "{}", text);
         assert!(text.contains("👑 Royale champion +8 · runner-up +3 · daily 3 pm & 8 pm"), "{}", text);

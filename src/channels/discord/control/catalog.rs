@@ -585,6 +585,11 @@ pub fn sections() -> Vec<Section> {
                     "Voice needs company",
                     "Only count voice time spent with at least one other person in the room (bots don't count). Off counts time alone too.",
                 ),
+                toggle(
+                    "VIZIER_VOICE_IGNORE_DEAFENED",
+                    "Deafened time doesn't count",
+                    "Time a person spends deafened (by themselves or by a moderator) earns them no voice time, and they don't count as company for anyone else while deafened. Muted still counts. Needs the bot's own voice-state events, so only time since this was added is known.",
+                ),
                 at_start(
                     "VIZIER_VOICE_LOG_CHANNEL",
                     "Voice log channel",
