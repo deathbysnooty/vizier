@@ -45,6 +45,7 @@ mod house_draft;
 mod points;
 mod snitch;
 mod standings;
+mod scoreboard;
 mod activity;
 mod games;
 mod weekly;
@@ -1472,6 +1473,7 @@ impl EventHandler for Handler {
         }
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
+        scoreboard::spawn(ctx.clone());
         // A card in the houses channel when a different house takes the lead.
         standings::spawn_lead_watch(ctx.clone());
         // The daily battle royale, when switched on in the panel.
@@ -1520,6 +1522,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
                 frog::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("scoreboard:") {
+                scoreboard::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("remindcancel:") {

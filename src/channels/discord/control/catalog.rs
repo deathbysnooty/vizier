@@ -422,6 +422,13 @@ pub fn sections() -> Vec<Section> {
                     (set under Houses), only when points actually moved, and only for the hours below.",
             settings: vec![
                 toggle("VIZIER_HOUSE_SUMMARY", "Hourly summary", "Post the hourly points summary."),
+                toggle("VIZIER_SCOREBOARD", "Scoreboard card", "Post the House Cup scoreboard card (each house's points this month, what it gained in the last hour, and a Top scorers button) in the scoreboard channel."),
+                setting("VIZIER_SCOREBOARD_CHANNEL", "Scoreboard channel", "Where the scoreboard card goes, e.g. a gaming updates channel. Empty turns it off.", Kind::Channel, ""),
+                setting("VIZIER_SCOREBOARD_EVERY_HOURS", "Scoreboard every", "How often the scoreboard card is posted, counted from the first hour below.", number(1, 24, "hours"), "1"),
+                setting("VIZIER_SCOREBOARD_FIRST_HOUR", "Scoreboard first hour", "The first India hour the scoreboard covers: 10 covers 10:00-11:00 and posts at 11:00.", number(0, 23, "hour"), "10"),
+                setting("VIZIER_SCOREBOARD_LAST_HOUR", "Scoreboard last hour", "The last India hour the scoreboard covers: 23 posts at midnight.", number(0, 23, "hour"), "23"),
+                toggle("VIZIER_SCOREBOARD_REPLACE", "Scoreboard replaces itself", "Delete the previous scoreboard card when a new one goes up, so the channel shows only the latest. Off stacks them."),
+                toggle("VIZIER_SCOREBOARD_QUIET_SKIP", "Skip quiet hours", "Don't post the scoreboard for an hour in which no house's points moved."),
                 toggle("VIZIER_LEAD_CARD", "Lead change card", "Post a card in the houses channel when a different house takes the lead in this month's House Cup."),
                 setting("VIZIER_LEAD_CARD_GAP_MINUTES", "Lead card cooldown", "Least time between two lead cards, so a close race doesn't flood the channel.", number(0, 1440, "minutes"), "30"),
                 setting("VIZIER_LEAD_CARD_MIN_POINTS", "Lead card from", "No lead card until the leading house has at least this many points in the month (quiet early days).", number(0, 10000, "points"), "20"),
