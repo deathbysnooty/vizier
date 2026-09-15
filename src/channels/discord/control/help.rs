@@ -72,7 +72,7 @@ fn overview(sections: &[Section], is_admin: bool) -> CreateEmbed {
         }
         text.push_str(&line);
     }
-    text.push_str("\n\n**Without a command:** reply **ACCIO** to a Snitch card to catch it · press 🐸 **Catch it** on a Chocolate Frog and answer its riddle · right-click a message → Apps → **Quote** for a quote card.");
+    text.push_str("\n\n**Without a command:** reply **ACCIO** to a Snitch card to catch it · press 🐸 **Catch it** on a Chocolate Frog and answer its riddle · press ✋ **I'm in** on the Name Place Animal Thing lobby, then ✍️ **Submit answers** · right-click a message → Apps → **Quote** for a quote card.");
     let footer = if is_admin {
         "/help topic: for details · admin commands included because you're a bot admin"
     } else {
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn every_command_the_bot_registers_is_explained() {
         let names: Vec<&str> = catalog::sections().iter().flat_map(|s| s.commands.iter().map(|c| c.name)).collect();
-        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "frogdrop", "frogs", "frogcard", "trade", "trades", "sellset", "panel", "guiderefresh"] {
+        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "frogdrop", "frogs", "frogcard", "trade", "trades", "sellset", "panel", "guiderefresh", "npatstop"] {
             assert!(names.contains(&needed), "/{} is missing from the catalog", needed);
         }
     }

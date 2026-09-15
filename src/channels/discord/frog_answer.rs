@@ -13,7 +13,7 @@
 const FILLERS: &[&str] = &["a", "an", "the", "my"];
 
 /// One accented Latin letter as its plain letter(s).
-fn fold_char(c: char) -> Option<&'static str> {
+pub(super) fn fold_char(c: char) -> Option<&'static str> {
     Some(match c {
         'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
         'æ' => "ae",

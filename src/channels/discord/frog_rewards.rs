@@ -39,12 +39,14 @@ pub const ACTIVITIES: &[(&str, &[&str])] = &[
     ("arena", &["arena"]),
     ("snitch", &["snitch", "golden_snitch"]),
     ("frog", &["frog"]),
+    ("npat", &["npat"]),
 ];
 
 pub fn activity_label(key: &str) -> String {
     match key {
         "snitch" => "🪽 Snitch".to_string(),
         "frog" => "🐸 Frogs".to_string(),
+        "npat" => "🔤 Name Place Animal Thing".to_string(),
         other => Source::from_key(other).map(|s| s.label().to_string()).unwrap_or_else(|| other.to_string()),
     }
 }
@@ -175,6 +177,45 @@ pub fn measured_top(rows: &[LedgerRow], source: &str, measure: &HashMap<u64, i64
         .map(|(u, n, _)| (u, n))
 }
 
+/// Name Place Animal Thing's top: the most round wins, then the most 2nd
+/// places, then whoever got there first (their last placing earliest). `places`
+/// is every 1st and 2nd of the day as (user, place, when); only people the
+/// ledger paid for the game that day can win (so opt-outs and the unsorted
+/// can't). Returns the winner and their wins.
+pub fn npat_top(rows: &[LedgerRow], places: &[(u64, u8, i64)]) -> Option<(u64, i64)> {
+    let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "npat");
+    // (user, wins, seconds, reached)
+    let mut tally: Vec<(u64, i64, i64, i64)> = Vec::new();
+    for (user, place, at) in places.iter().filter(|(u, p, _)| matches!(p, 1 | 2) && paid(*u)) {
+        let (first, second) = if *place == 1 { (1, 0) } else { (0, 1) };
+        match tally.iter_mut().find(|(u, _, _, _)| u == user) {
+            Some(t) => {
+                t.1 += first;
+                t.2 += second;
+                t.3 = t.3.max(*at);
+            }
+            None => tally.push((*user, first, second, *at)),
+        }
+    }
+    tally
+        .into_iter()
+        .min_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0)))
+        .map(|(user, wins, _, _)| (user, wins))
+}
+
+/// Swaps Name Place Animal Thing's points-based top for round wins.
+fn with_npat_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let Some(db) = super::npat_store::db() else {
+        return tops;
+    };
+    let places = super::npat_store::places_on(&db.lock(), day);
+    tops.retain(|(a, _, _)| *a != "npat");
+    if let Some((user, wins)) = npat_top(rows, &places) {
+        tops.push(("npat", user, wins));
+    }
+    tops
+}
+
 /// India midnight at the start of `day` (YYYY-MM-DD).
 fn day_start(day: &str) -> Option<i64> {
     let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
@@ -269,7 +310,7 @@ fn give(key: &str, user: u64, origin: &str, what: &AwardFor) -> Option<Award> {
 /// Hands out a day's top cards and posts the summary.
 pub async fn run_daily_top(ctx: &Context, day: &str) {
     let rows = day_rows(day);
-    let tops = order_like_activities(with_chat_and_voice_measured(daily_tops(&rows), &rows, day));
+    let tops = order_like_activities(with_npat_measured(with_chat_and_voice_measured(daily_tops(&rows), &rows, day), &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -290,7 +331,7 @@ pub async fn run_daily_top(ctx: &Context, day: &str) {
             .title("🐸 Yesterday's top frogs")
             .description(lines.join("\n"))
             .colour(0xC68E54)
-            .footer(CreateEmbedFooter::new("Most messages, most VC time, most wins in each game, most Wordle and frog points: each wins a card"));
+            .footer(CreateEmbedFooter::new("Most messages, most VC time, most wins in each game, most Wordle and frog points, most Name Place Animal Thing round wins: each wins a card"));
         let message = CreateMessage::new().embed(embed).allowed_mentions(CreateAllowedMentions::new());
         match tokio::time::timeout(Duration::from_secs(20), channel.send_message(&ctx.http, message)).await {
             Ok(Ok(_)) => {
@@ -485,6 +526,21 @@ mod tests {
         for writer in [concat!("award", "_person"), concat!("points::", "write"), concat!("INSERT INTO ", "ledger")] {
             assert!(!code.contains(writer), "frog_rewards writes to the ledger via {writer}");
         }
+    }
+
+    #[test]
+    fn name_place_animal_thing_goes_to_the_most_round_wins() {
+        let rows = vec![row(1, "npat", 2, 10), row(2, "npat", 1, 10), row(3, "npat", 2, 20), row(2, "npat", 2, 30), row(4, "quiz", 1, 5)];
+        // 1: one win · 2: one win, one 2nd · 3: one win · 4 never paid for the game · 9 never paid at all.
+        let places = vec![(1, 1, 100), (2, 2, 100), (3, 1, 200), (4, 2, 200), (2, 1, 300), (9, 1, 400), (9, 1, 500)];
+        assert_eq!(npat_top(&rows, &places), Some((2, 1)), "equal wins: more 2nd places");
+        let no_seconds: Vec<(u64, u8, i64)> = places.iter().copied().filter(|p| p.1 == 1).collect();
+        assert_eq!(npat_top(&rows, &no_seconds), Some((1, 1)), "all level: whoever got there first");
+        assert_eq!(npat_top(&rows, &[]), None);
+        assert_eq!(npat_top(&[], &places), None, "nobody paid for the game");
+        // The ledger's own points don't decide it: daily_tops' points-based pick is swapped out.
+        assert_eq!(daily_tops(&[row(5, "npat", 6, 1)]), vec![("npat", 5, 6)]);
+        assert_eq!(activity_label("npat"), "🔤 Name Place Animal Thing");
     }
 
     #[test]

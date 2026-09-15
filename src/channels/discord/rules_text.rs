@@ -75,6 +75,14 @@ pub struct Rules {
     pub trades_on: bool,
     pub daily_top_cards: bool,
     pub royale_cards: bool,
+
+    /// Name Place Animal Thing's channel, only while the game is on.
+    pub npat_channel: Option<u64>,
+    /// Game score for a unique and a shared answer.
+    pub npat_scores: [i64; 2],
+    /// House points for a round's 1st and 2nd.
+    pub npat_prizes: [i64; 2],
+    pub npat_cap: Option<i64>,
 }
 
 fn limit(cap: Cap) -> Option<i64> {
@@ -177,6 +185,17 @@ impl Rules {
             trades_on: frogs_on && control::on("VIZIER_TRADES", true),
             daily_top_cards: frogs_on && control::on("VIZIER_FROG_DAILY_TOP", true),
             royale_cards: frogs_on && control::on("VIZIER_FROG_ROYALE_CARDS", true),
+
+            npat_channel: super::npat::live_channel(),
+            npat_scores: {
+                let p = super::npat::points();
+                [p.unique, p.shared]
+            },
+            npat_prizes: {
+                let p = super::npat::prizes();
+                [p.first, p.second]
+            },
+            npat_cap: limit(Source::Npat.cap()),
         }
     }
 }
@@ -512,6 +531,15 @@ fn game_lines(r: &Rules) -> Vec<String> {
             r.wordle[0], r.wordle[1], r.wordle[2], r.wordle[3], crown
         ));
     }
+    if let Some(c) = channel(r.npat_channel).filter(|_| r.npat_prizes.iter().any(|p| *p > 0)) {
+        lines.push(format!(
+            "🔤 **Name Place Animal Thing** in {} — press I'm in, then a real name, place, living animal and thing (no brands) for the letter; each round's best two in a house 🥇 **+{}** · 🥈 **+{}** {}",
+            c,
+            r.npat_prizes[0],
+            r.npat_prizes[1],
+            max_words(r.npat_cap)
+        ));
+    }
     if r.arena_win > 0 {
         lines.push(format!("⚔️ **1v1 fights** — `/fight` someone, win **{}** {}", r.arena_win, max_words(r.arena_cap)));
     }
@@ -639,6 +667,9 @@ pub fn earn_text(r: &Rules) -> String {
     if r.arena_win > 0 {
         more.push(format!("⚔️ 1v1 win {}", r.arena_win));
     }
+    if r.npat_channel.is_some() && r.npat_prizes.iter().any(|p| *p > 0) {
+        more.push(format!("🔤 NPAT round 1st +{} · 2nd +{}", r.npat_prizes[0], r.npat_prizes[1]));
+    }
     if !more.is_empty() {
         lines.push(more.join(" · "));
     }
@@ -723,6 +754,10 @@ pub(crate) mod tests {
             trades_on: true,
             daily_top_cards: true,
             royale_cards: true,
+            npat_channel: Some(1549000000000000001),
+            npat_scores: [10, 5],
+            npat_prizes: [2, 1],
+            npat_cap: Some(6),
         }
     }
 
@@ -760,6 +795,10 @@ pub(crate) mod tests {
             frog_cap: Some(99),
             cards: Some(50),
             set_bonus: 1000,
+            npat_channel: Some(u64::MAX),
+            npat_scores: [1000, 1000],
+            npat_prizes: [100, 100],
+            npat_cap: Some(99),
             ..defaults()
         }
     }
@@ -861,6 +900,9 @@ pub(crate) mod tests {
         assert!(games.contains("🐱 **Cat Bot** — catch a cat **1–3** by rarity (max 3)"), "{}", games);
         assert!(games.contains("🟩 **Wordle** — solve in 1–2 **4** · 3 **3** · 4 **2** · 5–6 **1**, 👑 best of the day **+1**"), "{}", games);
         assert!(games.contains("daily at **3 pm & 8 pm** in <#1548160947766698074>: press Join; champion **+8**, runner-up **+3** (no limit)"), "{}", games);
+        assert!(games.contains("🔤 **Name Place Animal Thing** in <#1549000000000000001> — press I'm in, then a real name, place, living animal and thing (no brands) for the letter; each round's best two in a house 🥇 **+2** · 🥈 **+1** (max 6)"), "{}", games);
+        let no_npat = guide(&Rules { npat_channel: None, ..defaults() }, true);
+        assert!(!no_npat[2].body.contains("Name Place Animal Thing"), "left out while off or without a channel");
         assert!(panels[3].body.contains("`/frogs` your cards") && panels[3].body.contains("scoreboard below ⬇️"));
         assert!(panels.len() <= 10);
         for r in [defaults(), huge()] {
@@ -896,6 +938,8 @@ pub(crate) mod tests {
         assert!(text.contains("🧠 Quiz podium 2·1·1 · 🔤 Koto 3 · 🔡 Anagram 3 · 🐱 Cats 1–3"), "{}", text);
         assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–10 (no limit)"), "{}", text);
         assert!(text.contains("👑 Royale champion +8 · runner-up +3 · daily 3 pm & 8 pm"), "{}", text);
+        assert!(text.contains("⚔️ 1v1 win 1 · 🔤 NPAT round 1st +2 · 2nd +1"), "{}", text);
+        assert!(!earn_text(&Rules { npat_channel: None, ..defaults() }).contains("NPAT"));
         assert!(earn_text(&huge()).chars().count() < MESSAGE_LIMIT);
         let off = earn_text(&Rules { snitch_on: false, frogs_on: false, games_on: false, ..defaults() });
         assert!(!off.contains("Snitch") && !off.contains("Frogs") && !off.contains("Koto"), "{}", off);

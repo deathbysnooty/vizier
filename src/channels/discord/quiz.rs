@@ -1256,7 +1256,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 /// Romanised Hindi is spelled many ways: Kabeer/Kabir, kotwaal/kotwal,
 /// Pawan/Pavan, Phir/Fir. Folds those to one spelling before comparing.
-fn fold(normed: &str) -> String {
+pub(super) fn fold(normed: &str) -> String {
     let swapped = normed.replace("aa", "a").replace("ee", "i").replace("oo", "u").replace("ph", "f").replace('w', "v");
     let mut out = String::with_capacity(swapped.len());
     for c in swapped.chars() {

@@ -245,6 +245,7 @@ pub fn sections() -> Vec<Section> {
                     "6",
                 ),
                 setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
+                setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
                     "Weekly scan points",
@@ -354,7 +355,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_POINTS_FROG_COMMON", "Common points", "Points for catching a Common frog.", number(0, 100, "points"), "2"),
                 setting("VIZIER_POINTS_FROG_UNCOMMON", "Uncommon points", "Points for catching an Uncommon frog.", number(0, 100, "points"), "4"),
                 setting("VIZIER_POINTS_FROG_LEGENDARY", "Legendary points", "Points for catching a Legendary frog.", number(0, 100, "points"), "10"),
-                toggle("VIZIER_FROG_DAILY_TOP", "Top of the day cards", "Each morning, give the day before's top scorer in every game (chat, voice, quiz, Koto, anagram, cats, Wordle, arena, Snitch, frogs) a random Common or Uncommon card (no house points: only catching frogs pays those). Only while scheduled frog drops are on."),
+                toggle("VIZIER_FROG_DAILY_TOP", "Top of the day cards", "Each morning, give the day before's top scorer in every game (chat, voice, quiz, Koto, anagram, cats, Wordle, arena, Snitch, frogs, Name Place Animal Thing round wins) a random Common or Uncommon card (no house points: only catching frogs pays those). Only while scheduled frog drops are on."),
                 setting("VIZIER_FROG_DAILY_TOP_TIME", "Top of the day time", "India time the top of the day cards go out, for the day before. After Wordle's morning results is best. Missed while the bot was down, they go out when it's back.", Kind::Time, "10:00"),
                 setting("VIZIER_FROG_DAILY_TOP_CHANNEL", "Top of the day channel", "Where the morning summary of who won which card is posted. Empty uses the houses channel.", Kind::Channel, ""),
                 toggle("VIZIER_FROG_ROYALE_CARDS", "Battle royale cards", "Give a battle royale's champion and runner-up a random Common or Uncommon card each (no house points). Only while scheduled frog drops are on."),
@@ -396,6 +397,48 @@ pub fn sections() -> Vec<Section> {
                     "One card by its No.: which card and copy it is, who owns it, when it was caught and the answer that won it. Only you see it.",
                 ),
             ],
+        },
+        Section {
+            id: "npat",
+            title: "Name Place Animal Thing",
+            icon: "🔤",
+            about: "The classic game in its own channel, played only with the bot's cards, buttons and pop-ups (members \
+                    can't type there: deny Send Messages for @everyone and let the bot send, embed, read history and \
+                    manage messages). A lobby card collects players with I'm in; once enough are in, from enough \
+                    different houses, a round starts after a 10 second countdown. Muggles can join and count as players \
+                    but not as a house. A round shows a letter and a timer; everyone presses Submit answers and types a \
+                    Name, Place, Animal and Thing in a private pop-up, changing them as often as they like until the \
+                    timer ends. One AI call then judges every answer by a fixed rulebook (real names, real places on a \
+                    map, real living animals, real touchable things, no brands, Hindi and Hinglish welcome) and merges \
+                    spellings and languages, so Bombay and Mumbai count as the same answer; answers it has judged before \
+                    are remembered and not asked again. If the AI can't be reached, answers are checked by their first \
+                    letter only and the card says so. Unique answers score 10, shared ones 5; the two best house members \
+                    win house points (a Muggle can top a round but never earns them). Players can challenge their own \
+                    answers for 30 minutes and mods press Review to flip an answer, which rescores the round and fixes \
+                    the house points. With enough players the next round follows after a short break, otherwise the \
+                    lobby comes back. Never runs in #safe-corner.",
+            settings: vec![
+                toggle("VIZIER_NPAT", "Game on", "Run the Name Place Animal Thing lobby and rounds in its channel. Off stops new rounds; a round already running still finishes."),
+                setting("VIZIER_NPAT_CHANNEL", "Game channel", "The channel the game lives in. Empty means the game is off. Never #safe-corner.", Kind::Channel, ""),
+                setting("VIZIER_NPAT_MIN_PLAYERS", "Players to start", "How many must press I'm in before a round starts. Also how many must answer a round for the next one to start by itself after the break.", number(1, 50, "players"), "5"),
+                setting("VIZIER_NPAT_MIN_HOUSES", "Houses to start", "Those players must come from at least this many different houses (Muggles don't count as a house). The same rule decides whether the next round starts by itself.", number(1, 4, "houses"), "2"),
+                setting("VIZIER_NPAT_LOBBY_MINUTES", "Lobby empties after", "If nobody joins or leaves the lobby for this long, it empties.", number(1, 1440, "minutes"), "30"),
+                setting("VIZIER_NPAT_SECONDS", "Round time", "How long players have to send their answers each round. A few seconds of grace after the timer catch last-second pop-ups.", number(15, 600, "seconds"), "45"),
+                setting("VIZIER_NPAT_BREAK_SECONDS", "Break between rounds", "The pause after the results before the next round starts by itself.", number(3, 600, "seconds"), "20"),
+                setting("VIZIER_NPAT_LETTERS", "Letters", "The letters a round can use; each round avoids the last five used. Hard letters like Q, X, Y and Z are left out by default.", Kind::Text, "ABCDEFGHIJKLMNOPRSTUVW"),
+                setting("VIZIER_NPAT_SCORE_UNIQUE", "Score: unique answer", "Game score for a valid answer nobody else gave in that box. Shown on the results card; not house points.", number(0, 1000, "score"), "10"),
+                setting("VIZIER_NPAT_SCORE_SHARED", "Score: shared answer", "Game score for a valid answer someone else also gave. Not house points.", number(0, 1000, "score"), "5"),
+                setting("VIZIER_POINTS_NPAT_1ST", "1st place house points", "House points for the best house member of a round. A tie on score goes to whoever sent their final answers first.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_NPAT_2ND", "2nd place house points", "House points for the second best house member of a round.", number(0, 100, "points"), "1"),
+                setting("VIZIER_NPAT_MIN_SCORED", "Players for house points", "A round only pays house points if at least this many people answered it.", number(1, 50, "players"), "3"),
+                setting("VIZIER_NPAT_AI_MODEL", "Judge model", "The AI model that judges answers, on the bot's own provider (OpenRouter). Type agent to use the bot's usual model. Empty uses the default, a quick and cheap one.", Kind::Text, "google/gemini-2.5-flash-lite"),
+            ],
+            commands: vec![command(
+                "npatstop",
+                ADMINS,
+                "/npatstop",
+                "Stops the Name Place Animal Thing round that is running (or the break or countdown) with no points, and puts the lobby back.",
+            )],
         },
         Section {
             id: "summary",

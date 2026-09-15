@@ -593,6 +593,12 @@ pub(crate) async fn ask_bot_model(prompt: String) -> anyhow::Result<String> {
     super::super::weekly::ask_model(deps, agent_id, prompt).await
 }
 
+/// `ask_bot_model` with another model name on the bot's own provider (`None`: its usual model).
+pub(crate) async fn ask_bot_model_with(prompt: String, model_name: Option<String>) -> anyhow::Result<String> {
+    let (deps, agent_id) = AGENT.get().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
+    super::super::weekly::ask_model_with(deps, agent_id, prompt, model_name).await
+}
+
 /// Starts the panel once per process and (re)registers `/panel`. Called from
 /// `ready`, which fires again on every reconnect.
 pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agent_id: &str) {

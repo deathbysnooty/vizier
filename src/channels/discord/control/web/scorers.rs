@@ -199,7 +199,7 @@ pub fn activity_chips(sources: &HashMap<String, i64>, messages: i64, voice_secs:
         "with_company": activity::voice_company_rule(),
         "reached": voice_cap > 0 && voice_pts >= voice_cap,
     }));
-    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch, Source::Frog] {
+    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat] {
         let (icon, name) = label(s);
         let cap = match s.cap() {
             Cap::PerDay(n) => Some(n),

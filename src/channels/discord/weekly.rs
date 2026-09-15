@@ -1283,12 +1283,19 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
 // --- the scan -------------------------------------------------------------------------------------
 
 pub(crate) async fn ask_model(deps: &VizierDependencies, agent_id: &str, prompt: String) -> anyhow::Result<String> {
+    ask_model_with(deps, agent_id, prompt, None).await
+}
+
+/// `ask_model` with another model name on the bot's own provider, or the bot's
+/// usual model with `None`.
+pub(crate) async fn ask_model_with(deps: &VizierDependencies, agent_id: &str, prompt: String, model_name: Option<String>) -> anyhow::Result<String> {
     use crate::agents::agent::model::{VizierModel, VizierModelTrait};
     use crate::storage::agent::AgentStorage;
     use rig_core::message::{AssistantContent, Message as ModelMessage};
 
     let config = deps.storage.get_agent(agent_id).await?.ok_or_else(|| anyhow::anyhow!("no config for {}", agent_id))?;
-    let model = VizierModel::new_with_override(deps, &config, None).await?;
+    let named = model_name.map(|name| (config.provider.clone(), name));
+    let model = VizierModel::new_with_override(deps, &config, named).await?;
     let (_, choice, _) = model.completion(ModelMessage::user(prompt), vec![], vec![]).await?;
     Ok(choice
         .iter()
