@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.22] - 2026-09-15
+
+### 💼 Other
+
+- Games of 5 letters with house points at the end, a join window, a rules post from the live settings, and the game card always last
 ## [0.11.21] - 2026-09-15
 
 ### 💼 Other
 
 - Name Place Animal Thing in its own channel - lobby, letter rounds with a private 4-box pop-up, one AI judging call with a verdict cache, game scores and house points for the best two house members, challenges and mod reviews
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.21
 ## [0.11.20] - 2026-09-15
 
 ### 💼 Other
