@@ -368,11 +368,8 @@ pub struct Scored {
     pub score: i64,
     /// Valid answers nobody else gave.
     pub unique: i64,
-    /// Position in the round, from 1, Muggles included.
+    /// Position in the letter, from 1.
     pub rank: usize,
-    /// 1 or 2 for the two best house members, who win house points; 0 for
-    /// everyone else. A Muggle can top the round but never places.
-    pub place: u8,
     /// When their final answers went in.
     pub at: i64,
 }
@@ -394,11 +391,9 @@ fn key_of(answer: &str, v: &Verdict) -> String {
     if key.is_empty() { fold_key(answer) } else { key }
 }
 
-/// Scores and ranks a round. A valid answer nobody else gave in that category
-/// scores `unique`, one someone else also gave `shared`, anything else nothing.
-/// Highest score first; a tie goes to whoever sent their final answers first,
-/// so there is only ever one 1st and one 2nd. The two best house members with
-/// more than 0 place (Muggles keep their rank but are passed over).
+/// Scores one letter. A valid answer nobody else gave in that category scores
+/// `unique`, one someone else also gave `shared`, anything else nothing.
+/// Highest score first; a tie goes to whoever sent their final answers first.
 pub fn score(entries: &[Judged], p: Points) -> Vec<Scored> {
     let mut counts: [HashMap<String, usize>; 4] = Default::default();
     for entry in entries {
@@ -423,15 +418,70 @@ pub fn score(entries: &[Judged], p: Points) -> Vec<Scored> {
             }
             let unique = marks.iter().filter(|m| **m == Mark::Unique).count() as i64;
             let shared = marks.iter().filter(|m| **m == Mark::Shared).count() as i64;
-            Scored { user: entry.user, marks, score: unique * p.unique + shared * p.shared, unique, rank: 0, place: 0, at: entry.at }
+            Scored { user: entry.user, marks, score: unique * p.unique + shared * p.shared, unique, rank: 0, at: entry.at }
         })
         .collect();
     out.sort_by(|a, b| b.score.cmp(&a.score).then(a.at.cmp(&b.at)).then(a.user.cmp(&b.user)));
-    let in_house = |user: u64| entries.iter().any(|e| e.user == user && e.in_house);
+    for (i, s) in out.iter_mut().enumerate() {
+        s.rank = i + 1;
+    }
+    out
+}
+
+/// One player's score in one letter of a game, in letter order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LetterScore {
+    pub user: u64,
+    pub score: i64,
+    /// When their final answers for that letter went in.
+    pub at: i64,
+    /// In a house when they answered it (not a Muggle).
+    pub in_house: bool,
+}
+
+/// One player's place in a whole game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub user: u64,
+    pub total: i64,
+    /// When they locked in their final total: the answers of the last letter
+    /// that scored for them. `i64::MAX` when nothing scored.
+    pub reached_at: i64,
+    /// In a house, as of the last letter they answered.
+    pub in_house: bool,
+    /// Position in the game, from 1, Muggles included.
+    pub rank: usize,
+    /// 1 or 2 for the two best house members, who win house points; 0 for
+    /// everyone else. A Muggle can top the game but never places.
+    pub place: u8,
+}
+
+/// Adds a game's letters up and ranks everyone: highest total first, a tie to
+/// whoever reached their total first. The two best house members above 0 place.
+/// `letters` is each letter's scores, in the order the letters were played.
+pub fn standings(letters: &[Vec<LetterScore>]) -> Vec<Standing> {
+    let mut out: Vec<Standing> = Vec::new();
+    for letter in letters {
+        for s in letter {
+            let entry = match out.iter_mut().position(|e| e.user == s.user) {
+                Some(i) => &mut out[i],
+                None => {
+                    out.push(Standing { user: s.user, total: 0, reached_at: i64::MAX, in_house: s.in_house, rank: 0, place: 0 });
+                    out.last_mut().expect("just pushed")
+                }
+            };
+            entry.total += s.score;
+            entry.in_house = s.in_house;
+            if s.score > 0 {
+                entry.reached_at = s.at;
+            }
+        }
+    }
+    out.sort_by(|a, b| b.total.cmp(&a.total).then(a.reached_at.cmp(&b.reached_at)).then(a.user.cmp(&b.user)));
     let mut next_place = 1u8;
     for (i, s) in out.iter_mut().enumerate() {
         s.rank = i + 1;
-        if next_place <= 2 && s.score > 0 && in_house(s.user) {
+        if next_place <= 2 && s.total > 0 && s.in_house {
             s.place = next_place;
             next_place += 1;
         }
@@ -439,8 +489,8 @@ pub fn score(entries: &[Judged], p: Points) -> Vec<Scored> {
     out
 }
 
-/// Whether a round with this many players pays house points.
-pub fn round_pays(players: usize, min_scored: usize) -> bool {
+/// Whether a game this many different people answered in pays house points.
+pub fn game_pays(players: usize, min_scored: usize) -> bool {
     players > 0 && players >= min_scored
 }
 
@@ -656,7 +706,7 @@ mod tests {
         assert_eq!((by(2).score, by(2).unique), (20, 1));
         assert_eq!(by(3).marks, [Mark::Unique, Mark::Unique, Mark::Shared, Mark::Unique], "no canonical: the text itself is the key");
         assert_eq!(by(3).score, 35);
-        assert_eq!(scored.iter().map(|s| (s.user, s.place)).collect::<Vec<_>>(), vec![(3, 1), (2, 2), (1, 0)], "highest first, top two placed");
+        assert_eq!(scored.iter().map(|s| (s.user, s.rank)).collect::<Vec<_>>(), vec![(3, 1), (2, 2), (1, 3)], "highest first");
         // Hinglish spellings of the same answer are shared.
         let hinglish = vec![
             judged(1, [None, None, Some(("Sherr", true, "")), None]),
@@ -669,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn the_top_two_place_and_ties_go_to_the_earlier_final_answers() {
+    fn letter_ties_go_to_the_earlier_final_answers() {
         let mut entries = vec![
             judged(1, [Some(("Priya", true, "")), Some(("Pune", true, "")), Some(("Parrot", true, "")), Some(("Pen", true, ""))]),
             judged(2, [Some(("Pooja", true, "")), Some(("Pune", true, "")), Some(("Panda", true, "")), Some(("Plate", true, ""))]),
@@ -679,50 +729,61 @@ mod tests {
         entries[1].at = 40;
         entries[2].at = 1;
         let scored = score(&entries, P);
-        let rows: Vec<(u64, i64, u8)> = scored.iter().map(|s| (s.user, s.score, s.place)).collect();
-        assert_eq!(rows, vec![(2, 35, 1), (1, 35, 2), (3, 0, 0)], "35 each: the one who finished answering first wins");
+        let rows: Vec<(u64, i64, usize)> = scored.iter().map(|s| (s.user, s.score, s.rank)).collect();
+        assert_eq!(rows, vec![(2, 35, 1), (1, 35, 2), (3, 0, 3)], "35 each: the one who finished answering first ranks higher");
         entries[1].at = 60;
         assert_eq!(score(&entries, P)[0].user, 1);
-        // Nobody on 0 places, even with only two players.
-        let one = score(&[entries[0].clone(), entries[2].clone()], P);
-        assert_eq!(one.iter().map(|s| s.place).collect::<Vec<_>>(), vec![1, 0]);
         let nobody = score(&[judged(9, [None, None, None, None])], P);
-        assert_eq!((nobody[0].score, nobody[0].place, nobody[0].marks), (0, 0, [Mark::Blank; 4]));
+        assert_eq!((nobody[0].score, nobody[0].marks), (0, [Mark::Blank; 4]));
         let custom = score(&entries[..1], Points { unique: 3, shared: 1 });
         assert_eq!(custom[0].score, 12);
         let prizes = Prizes { first: 2, second: 1 };
-        assert_eq!(scored.iter().map(|s| s.rank).collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!((prizes.for_place(1), prizes.for_place(2), prizes.for_place(0), prizes.for_place(3)), (2, 1, 0, 0));
     }
 
-    #[test]
-    fn a_muggle_can_top_the_round_but_house_points_go_to_the_next_two_house_members() {
-        let mut entries = vec![
-            judged(1, [Some(("Priya", true, "")), Some(("Pune", true, "")), Some(("Parrot", true, "")), Some(("Pen", true, ""))]),
-            judged(2, [Some(("Pooja", true, "")), Some(("Patna", true, "")), Some(("Panda", true, "")), None]),
-            judged(3, [Some(("Pari", true, "")), Some(("Pisa", true, "")), None, None]),
-            judged(4, [Some(("Prem", true, "")), None, None, None]),
-        ];
-        entries[0].in_house = false;
-        let scored = score(&entries, P);
-        let rows: Vec<(u64, i64, usize, u8)> = scored.iter().map(|s| (s.user, s.score, s.rank, s.place)).collect();
-        assert_eq!(rows, vec![(1, 40, 1, 0), (2, 30, 2, 1), (3, 20, 3, 2), (4, 10, 4, 0)], "the Muggle keeps 1st on the card; 2 and 3 win the house points");
-        // Two Muggles on top: the house points go down to 3rd and 4th.
-        entries[1].in_house = false;
-        let places: Vec<u8> = score(&entries, P).iter().map(|s| s.place).collect();
-        assert_eq!(places, vec![0, 0, 1, 2]);
-        // A house member on 0 still can't place.
-        entries[3].answers = [None, None, None, None];
-        assert_eq!(score(&entries, P).iter().map(|s| s.place).collect::<Vec<_>>(), vec![0, 0, 1, 0]);
+    fn ls(user: u64, score: i64, at: i64) -> LetterScore {
+        LetterScore { user, score, at, in_house: true }
     }
 
     #[test]
-    fn a_round_needs_enough_players_to_pay() {
-        assert!(!round_pays(0, 0));
-        assert!(!round_pays(2, 3));
-        assert!(round_pays(3, 3));
-        assert!(round_pays(1, 1));
-        assert!(round_pays(1, 0));
+    fn a_game_adds_its_letters_up_and_places_the_best_two() {
+        // Letter 1: 1 scores 30, 2 scores 20. Letter 2: 2 scores 20, 3 (a late joiner) scores 45.
+        let letters = vec![vec![ls(1, 30, 100), ls(2, 20, 110)], vec![ls(2, 20, 205), ls(3, 45, 210), ls(1, 0, 220)]];
+        let table = standings(&letters);
+        let rows: Vec<(u64, i64, usize, u8)> = table.iter().map(|s| (s.user, s.total, s.rank, s.place)).collect();
+        assert_eq!(rows, vec![(3, 45, 1, 1), (2, 40, 2, 2), (1, 30, 3, 0)]);
+        // Level totals: whoever locked in their final total first. 1's last scoring answers came at 100, 2's at 205.
+        let level = vec![vec![ls(1, 40, 100), ls(2, 20, 110)], vec![ls(2, 20, 205), ls(1, 0, 150)]];
+        let table = standings(&level);
+        assert_eq!(table.iter().map(|s| (s.user, s.place, s.reached_at)).collect::<Vec<_>>(), vec![(1, 1, 100), (2, 2, 205)]);
+        // Nobody on 0 places; a blank game places nobody.
+        let zero = standings(&[vec![ls(1, 10, 5), ls(2, 0, 6)]]);
+        assert_eq!(zero.iter().map(|s| s.place).collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(zero[1].reached_at, i64::MAX);
+        assert!(standings(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_muggle_can_win_the_game_but_house_points_go_to_the_next_two_house_members() {
+        let muggle = |user, score, at| LetterScore { user, score, at, in_house: false };
+        let letters = vec![vec![muggle(1, 40, 1), ls(2, 30, 2), ls(3, 20, 3), ls(4, 10, 4)]];
+        let table = standings(&letters);
+        let rows: Vec<(u64, usize, u8)> = table.iter().map(|s| (s.user, s.rank, s.place)).collect();
+        assert_eq!(rows, vec![(1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 0)], "the Muggle keeps 1st; 2 and 3 win the house points");
+        let two = vec![vec![muggle(1, 40, 1), muggle(2, 30, 2), ls(3, 20, 3), ls(4, 10, 4)]];
+        assert_eq!(standings(&two).iter().map(|s| s.place).collect::<Vec<_>>(), vec![0, 0, 1, 2]);
+        // Someone who stepped out of their house mid-game counts as they were at their last letter.
+        let left = vec![vec![ls(1, 40, 1), ls(2, 10, 2)], vec![muggle(1, 5, 10)]];
+        assert_eq!(standings(&left).iter().map(|s| (s.user, s.place)).collect::<Vec<_>>(), vec![(1, 0), (2, 1)]);
+    }
+
+    #[test]
+    fn a_game_needs_enough_players_to_pay() {
+        assert!(!game_pays(0, 0));
+        assert!(!game_pays(2, 3));
+        assert!(game_pays(3, 3));
+        assert!(game_pays(1, 1));
+        assert!(game_pays(1, 0));
     }
 
     #[test]

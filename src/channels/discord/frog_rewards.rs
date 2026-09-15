@@ -177,7 +177,7 @@ pub fn measured_top(rows: &[LedgerRow], source: &str, measure: &HashMap<u64, i64
         .map(|(u, n, _)| (u, n))
 }
 
-/// Name Place Animal Thing's top: the most round wins, then the most 2nd
+/// Name Place Animal Thing's top: the most game wins, then the most 2nd
 /// places, then whoever got there first (their last placing earliest). `places`
 /// is every 1st and 2nd of the day as (user, place, when); only people the
 /// ledger paid for the game that day can win (so opt-outs and the unsorted
@@ -203,7 +203,7 @@ pub fn npat_top(rows: &[LedgerRow], places: &[(u64, u8, i64)]) -> Option<(u64, i
         .map(|(user, wins, _, _)| (user, wins))
 }
 
-/// Swaps Name Place Animal Thing's points-based top for round wins.
+/// Swaps Name Place Animal Thing's points-based top for game wins.
 fn with_npat_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
     let Some(db) = super::npat_store::db() else {
         return tops;
@@ -331,7 +331,7 @@ pub async fn run_daily_top(ctx: &Context, day: &str) {
             .title("🐸 Yesterday's top frogs")
             .description(lines.join("\n"))
             .colour(0xC68E54)
-            .footer(CreateEmbedFooter::new("Most messages, most VC time, most wins in each game, most Wordle and frog points, most Name Place Animal Thing round wins: each wins a card"));
+            .footer(CreateEmbedFooter::new("Most messages, most VC time, most wins in each game, most Wordle and frog points, most Name Place Animal Thing game wins: each wins a card"));
         let message = CreateMessage::new().embed(embed).allowed_mentions(CreateAllowedMentions::new());
         match tokio::time::timeout(Duration::from_secs(20), channel.send_message(&ctx.http, message)).await {
             Ok(Ok(_)) => {
@@ -529,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn name_place_animal_thing_goes_to_the_most_round_wins() {
+    fn name_place_animal_thing_goes_to_the_most_game_wins() {
         let rows = vec![row(1, "npat", 2, 10), row(2, "npat", 1, 10), row(3, "npat", 2, 20), row(2, "npat", 2, 30), row(4, "quiz", 1, 5)];
         // 1: one win · 2: one win, one 2nd · 3: one win · 4 never paid for the game · 9 never paid at all.
         let places = vec![(1, 1, 100), (2, 2, 100), (3, 1, 200), (4, 2, 200), (2, 1, 300), (9, 1, 400), (9, 1, 500)];

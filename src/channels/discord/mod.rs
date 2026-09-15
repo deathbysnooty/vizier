@@ -1216,6 +1216,7 @@ impl EventHandler for Handler {
     ) {
         // A deleted House Cup post goes back up, in order.
         scoreboard::on_delete(&ctx, channel_id, deleted_message_id);
+        npat::on_delete(channel_id, deleted_message_id);
     }
 
     async fn ready(&self, ctx: Context, _ready: Ready) {

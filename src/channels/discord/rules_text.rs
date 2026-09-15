@@ -1,6 +1,7 @@
 //! The words for the House Cup posts in the scoreboard channel - the welcome,
-//! the Snitch & Chocolate Frog cards post, the beginner's guide - and the
-//! "How to earn" button, all written from the LIVE settings. [`Rules::live`]
+//! the Snitch & Chocolate Frog cards post, the beginner's guide - the "How to
+//! earn" button, and the rules post in the Name Place Animal Thing channel, all
+//! written from the LIVE settings. [`Rules::live`]
 //! reads everything once; every text builder below is a plain function of those
 //! values, so a changed setting changes the text and the tests can pin values.
 
@@ -76,13 +77,33 @@ pub struct Rules {
     pub daily_top_cards: bool,
     pub royale_cards: bool,
 
-    /// Name Place Animal Thing's channel, only while the game is on.
-    pub npat_channel: Option<u64>,
+    pub npat: NpatRules,
+}
+
+/// Name Place Animal Thing's live settings, for its rules post and the lines
+/// about it in the House Cup posts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NpatRules {
+    /// The game's channel, only while the game is on.
+    pub channel: Option<u64>,
+    pub min_players: i64,
+    pub min_houses: i64,
+    /// How long the lobby stays open after the first I'm in.
+    pub join_secs: i64,
+    /// The countdown once enough players are in.
+    pub start_secs: i64,
+    /// The letters a round can use.
+    pub letters: String,
+    pub letters_per_game: i64,
+    pub round_secs: i64,
+    pub break_secs: i64,
     /// Game score for a unique and a shared answer.
-    pub npat_scores: [i64; 2],
-    /// House points for a round's 1st and 2nd.
-    pub npat_prizes: [i64; 2],
-    pub npat_cap: Option<i64>,
+    pub scores: [i64; 2],
+    /// House points for a game's 1st and 2nd.
+    pub prizes: [i64; 2],
+    pub cap: Option<i64>,
+    /// People who must play a game for it to pay.
+    pub min_scored: i64,
 }
 
 fn limit(cap: Cap) -> Option<i64> {
@@ -186,16 +207,7 @@ impl Rules {
             daily_top_cards: frogs_on && control::on("VIZIER_FROG_DAILY_TOP", true),
             royale_cards: frogs_on && control::on("VIZIER_FROG_ROYALE_CARDS", true),
 
-            npat_channel: super::npat::live_channel(),
-            npat_scores: {
-                let p = super::npat::points();
-                [p.unique, p.shared]
-            },
-            npat_prizes: {
-                let p = super::npat::prizes();
-                [p.first, p.second]
-            },
-            npat_cap: limit(Source::Npat.cap()),
+            npat: super::npat::npat_rules(limit(Source::Npat.cap())),
         }
     }
 }
@@ -291,6 +303,14 @@ pub fn welcome_text(r: &Rules) -> String {
     }
     if let Some(c) = channel(r.quiz_channel) {
         action.push(format!("🧠 {} · the quiz (vote a genre, answer first)", c));
+    }
+    if let Some(c) = channel(r.npat.channel) {
+        action.push(format!(
+            "🔤 {} · Name Place Animal Thing (games need {} from {})",
+            c,
+            plural(r.npat.min_players, "player", "players"),
+            plural(r.npat.min_houses, "house", "houses")
+        ));
     }
     if let Some(c) = channel(r.fight_channel) {
         let what = if r.battle_daily { "fights and the daily Battle Royale" } else { "fights and Battle Royales" };
@@ -531,13 +551,14 @@ fn game_lines(r: &Rules) -> Vec<String> {
             r.wordle[0], r.wordle[1], r.wordle[2], r.wordle[3], crown
         ));
     }
-    if let Some(c) = channel(r.npat_channel).filter(|_| r.npat_prizes.iter().any(|p| *p > 0)) {
+    if let Some(c) = channel(r.npat.channel).filter(|_| r.npat.prizes.iter().any(|p| *p > 0)) {
         lines.push(format!(
-            "🔤 **Name Place Animal Thing** in {} — press I'm in, then a real name, place, living animal and thing (no brands) for the letter; each round's best two in a house 🥇 **+{}** · 🥈 **+{}** {}",
+            "🔤 **Name Place Animal Thing** in {} — press I'm in; a game is {}, and its best two house members win 🥇 **+{}** · 🥈 **+{}** {}",
             c,
-            r.npat_prizes[0],
-            r.npat_prizes[1],
-            max_words(r.npat_cap)
+            plural(r.npat.letters_per_game, "letter", "letters"),
+            r.npat.prizes[0],
+            r.npat.prizes[1],
+            max_words(r.npat.cap)
         ));
     }
     if r.arena_win > 0 {
@@ -667,8 +688,8 @@ pub fn earn_text(r: &Rules) -> String {
     if r.arena_win > 0 {
         more.push(format!("⚔️ 1v1 win {}", r.arena_win));
     }
-    if r.npat_channel.is_some() && r.npat_prizes.iter().any(|p| *p > 0) {
-        more.push(format!("🔤 NPAT round 1st +{} · 2nd +{}", r.npat_prizes[0], r.npat_prizes[1]));
+    if r.npat.channel.is_some() && r.npat.prizes.iter().any(|p| *p > 0) {
+        more.push(format!("🔤 NPAT game 1st +{} · 2nd +{} {}", r.npat.prizes[0], r.npat.prizes[1], max_words(r.npat.cap)));
     }
     if !more.is_empty() {
         lines.push(more.join(" · "));
@@ -701,6 +722,102 @@ pub fn earn_text(r: &Rules) -> String {
     }
     lines.push("-# Limits reset at midnight India time · the full guide sits above the scoreboard".into());
     lines.join("\n")
+}
+
+// --- the Name Place Animal Thing rules post -------------------------------------------
+
+pub const NPAT_RULES_TITLE: &str = "📜 How Name · Place · Animal · Thing works";
+
+/// "45 seconds", "3 minutes", "90 seconds".
+fn duration_words(secs: i64) -> String {
+    if secs >= 60 && secs % 60 == 0 { plural(secs / 60, "minute", "minutes") } else { plural(secs, "second", "seconds") }
+}
+
+/// The letters of A to Z a pool leaves out, in order.
+pub fn skipped_letters(pool: &str) -> Vec<char> {
+    let used: Vec<char> = pool.chars().filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_ascii_uppercase()).collect();
+    ('A'..='Z').filter(|c| !used.contains(c)).collect()
+}
+
+/// Which letters come up, in a few words.
+fn letters_words(pool: &str) -> String {
+    let skipped = skipped_letters(pool);
+    let used: Vec<String> = ('A'..='Z').filter(|c| !skipped.contains(c)).map(|c| c.to_string()).collect();
+    let skipped: Vec<String> = skipped.iter().map(|c| c.to_string()).collect();
+    match (skipped.len(), used.len()) {
+        (0, _) => "Any letter from A to Z can come up.".to_string(),
+        (_, 0) => "Any letter from A to Z can come up.".to_string(),
+        (n, _) if n <= 13 => format!("{} never come{} up.", and_list(&skipped, "and"), if n == 1 { "s" } else { "" }),
+        _ => format!("Only {} come up.", and_list(&used, "and")),
+    }
+}
+
+/// The rules post's body, under [`NPAT_RULES_TITLE`]: everything a beginner
+/// needs, from the live settings.
+pub fn npat_rules_text(n: &NpatRules) -> String {
+    let houses = if n.min_houses > 1 { format!(" from at least **{} different houses**", n.min_houses) } else { String::new() };
+    let letters = plural(n.letters_per_game, "letter", "letters");
+    let mut t = String::new();
+    t.push_str("**✋ Joining a game**\n");
+    t.push_str(&format!(
+        "• Press **✋ I'm in** on the game card at the bottom (press again to leave). That opens the lobby for **{}**.\n",
+        duration_words(n.join_secs)
+    ));
+    t.push_str(&format!(
+        "• A game starts once **{}** are in{}. You still get **{}** after that to jump in.\n",
+        plural(n.min_players, "player", "players"),
+        houses,
+        duration_words(n.start_secs)
+    ));
+    t.push_str("• Anyone in a house can play. 🧙 Muggles can play too: they count as players but not as a house, and never win house points. Not in a house? Join one first.\n");
+    t.push_str("• Not enough players in time? The lobby resets, and anyone can press **I'm in** to try again.\n");
+
+    t.push_str("\n**✍️ Playing**\n");
+    t.push_str(&format!("• A game is **{}**. For each one you get **{}**. {}\n", letters, duration_words(n.round_secs), letters_words(&n.letters)));
+    t.push_str("• Press **✍️ Submit answers** and fill in a **Name, Place, Animal and Thing** starting with that letter.\n");
+    t.push_str("• Your answers are private, and you can change them until time's up. Came in late? Answer the letters that are left.\n");
+    t.push_str("• Nobody types in this channel: everything happens with buttons.\n");
+
+    t.push_str("\n**✅ What counts**\n");
+    t.push_str("• **Name:** a real first name or surname (Priya, Patel), or a famous real person. No fictional characters (Pikachu, Harry Potter), no brands.\n");
+    t.push_str("• **Place:** a real place on a map: a country, state, city, town, village or named landmark (Pune, Punjab, Paris). No made-up places.\n");
+    t.push_str("• **Animal:** a real living animal, breeds included (Parrot, Pug). Nothing mythical or extinct (Pegasus, Pterodactyl), no plants.\n");
+    t.push_str("• **Thing:** a real object you can touch or use, food and drink included (Pen, Pizza, Piano). No brand names (Pepsi, Parle-G), no feelings or ideas.\n");
+    t.push_str("• Hindi and Hinglish count (Sher = Lion). Small typos are fine. One answer per box. \"The\", \"a\" and \"an\" at the start are ignored.\n");
+
+    t.push_str("\n**🎯 Game score**\n");
+    t.push_str(&format!("✅ unique **{}** · 🟰 shared **{}** · ❌ wrong or blank **0**\n", n.scores[0], n.scores[1]));
+    t.push_str(&format!(
+        "Shared means someone else gave the same answer, even in another spelling or language (Bombay = Mumbai). Scores add up over the {}.\n",
+        letters
+    ));
+
+    t.push_str("\n**🏠 House points** (paid when the game ends)\n");
+    t.push_str(&format!("• 🥇 The game's best house member gets **+{}**, 🥈 the next **+{}**.\n", n.prizes[0], n.prizes[1]));
+    t.push_str("• Level scores go to whoever locked in their final score first.\n");
+    let limit = match n.cap {
+        Some(c) => format!("Up to **{}** a day each.", plural(c, "house point", "house points")),
+        None => "No daily limit.".to_string(),
+    };
+    t.push_str(&format!("• Only when at least **{}** played the game. {}\n", plural(n.min_scored, "person", "people"), limit));
+    t.push_str("• Muggles keep their place, but the points pass to the next house members.\n");
+
+    t.push_str("\n**⚖️ Challenges**\n");
+    t.push_str("Think an answer was judged wrong? Press **⚖️ Challenge** on that letter's results within 30 minutes. A mod decides with 🛡️ Review, and scores and house points are corrected automatically.\n");
+
+    t.push_str("\n**🔁 Letters keep coming**\n");
+    t.push_str(&format!(
+        "The next letter comes **{}** after each letter's results, even if fewer people play. If nobody answers a letter, the game ends early. After the last letter the final results go up and the lobby opens again.",
+        duration_words(n.break_secs)
+    ));
+    t
+}
+
+/// The rules post as it goes up: plain text under a heading when it fits one
+/// message, otherwise `None` and it goes in an embed with the title.
+pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
+    let text = format!("## {}\n\n{}", NPAT_RULES_TITLE, npat_rules_text(n));
+    (text.chars().count() <= MESSAGE_LIMIT).then_some(text)
 }
 
 #[cfg(test)]
@@ -754,10 +871,25 @@ pub(crate) mod tests {
             trades_on: true,
             daily_top_cards: true,
             royale_cards: true,
-            npat_channel: Some(1549000000000000001),
-            npat_scores: [10, 5],
-            npat_prizes: [2, 1],
-            npat_cap: Some(6),
+            npat: npat_defaults(),
+        }
+    }
+
+    pub(crate) fn npat_defaults() -> NpatRules {
+        NpatRules {
+            channel: Some(1549000000000000001),
+            min_players: 5,
+            min_houses: 2,
+            join_secs: 180,
+            start_secs: 30,
+            letters: "ABCDEFGHIJKLMNOPRSTUVW".into(),
+            letters_per_game: 5,
+            round_secs: 45,
+            break_secs: 20,
+            scores: [10, 5],
+            prizes: [2, 1],
+            cap: Some(6),
+            min_scored: 3,
         }
     }
 
@@ -795,10 +927,21 @@ pub(crate) mod tests {
             frog_cap: Some(99),
             cards: Some(50),
             set_bonus: 1000,
-            npat_channel: Some(u64::MAX),
-            npat_scores: [1000, 1000],
-            npat_prizes: [100, 100],
-            npat_cap: Some(99),
+            npat: NpatRules {
+                channel: Some(u64::MAX),
+                min_players: 50,
+                min_houses: 4,
+                join_secs: 1799,
+                start_secs: 599,
+                letters: "A".into(),
+                letters_per_game: 10,
+                round_secs: 599,
+                break_secs: 599,
+                scores: [1000, 1000],
+                prizes: [100, 100],
+                cap: Some(99),
+                min_scored: 50,
+            },
             ..defaults()
         }
     }
@@ -830,7 +973,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 
@@ -900,8 +1043,8 @@ pub(crate) mod tests {
         assert!(games.contains("🐱 **Cat Bot** — catch a cat **1–3** by rarity (max 3)"), "{}", games);
         assert!(games.contains("🟩 **Wordle** — solve in 1–2 **4** · 3 **3** · 4 **2** · 5–6 **1**, 👑 best of the day **+1**"), "{}", games);
         assert!(games.contains("daily at **3 pm & 8 pm** in <#1548160947766698074>: press Join; champion **+8**, runner-up **+3** (no limit)"), "{}", games);
-        assert!(games.contains("🔤 **Name Place Animal Thing** in <#1549000000000000001> — press I'm in, then a real name, place, living animal and thing (no brands) for the letter; each round's best two in a house 🥇 **+2** · 🥈 **+1** (max 6)"), "{}", games);
-        let no_npat = guide(&Rules { npat_channel: None, ..defaults() }, true);
+        assert!(games.contains("🔤 **Name Place Animal Thing** in <#1549000000000000001> — press I'm in; a game is 5 letters, and its best two house members win 🥇 **+2** · 🥈 **+1** (max 6)"), "{}", games);
+        let no_npat = guide(&Rules { npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() }, true);
         assert!(!no_npat[2].body.contains("Name Place Animal Thing"), "left out while off or without a channel");
         assert!(panels[3].body.contains("`/frogs` your cards") && panels[3].body.contains("scoreboard below ⬇️"));
         assert!(panels.len() <= 10);
@@ -938,12 +1081,71 @@ pub(crate) mod tests {
         assert!(text.contains("🧠 Quiz podium 2·1·1 · 🔤 Koto 3 · 🔡 Anagram 3 · 🐱 Cats 1–3"), "{}", text);
         assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–10 (no limit)"), "{}", text);
         assert!(text.contains("👑 Royale champion +8 · runner-up +3 · daily 3 pm & 8 pm"), "{}", text);
-        assert!(text.contains("⚔️ 1v1 win 1 · 🔤 NPAT round 1st +2 · 2nd +1"), "{}", text);
-        assert!(!earn_text(&Rules { npat_channel: None, ..defaults() }).contains("NPAT"));
+        assert!(text.contains("⚔️ 1v1 win 1 · 🔤 NPAT game 1st +2 · 2nd +1 (max 6)"), "{}", text);
+        assert!(!earn_text(&Rules { npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() }).contains("NPAT"));
         assert!(earn_text(&huge()).chars().count() < MESSAGE_LIMIT);
         let off = earn_text(&Rules { snitch_on: false, frogs_on: false, games_on: false, ..defaults() });
         assert!(!off.contains("Snitch") && !off.contains("Frogs") && !off.contains("Koto"), "{}", off);
         assert!(earn_text(&Rules { snitch_cap: Some(6), ..defaults() }).contains("🪽 Snitch 1–6 (max 6, Gold no limit)"));
+    }
+
+    #[test]
+    fn the_welcome_lists_name_place_animal_thing_only_with_its_channel() {
+        let text = welcome_text(&defaults());
+        assert!(text.contains("🔤 <#1549000000000000001> · Name Place Animal Thing (games need 5 players from 2 houses)"), "{}", text);
+        let off = welcome_text(&Rules { npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() });
+        assert!(!off.contains("Name Place Animal Thing"), "{}", off);
+        assert!(welcome_text(&huge()).chars().count() < MESSAGE_LIMIT);
+    }
+
+    #[test]
+    fn the_npat_rules_post_reads_from_the_settings() {
+        let n = npat_defaults();
+        let text = npat_rules_text(&n);
+        for part in [
+            "**✋ Joining a game**\n• Press **✋ I'm in** on the game card at the bottom (press again to leave). That opens the lobby for **3 minutes**.",
+            "• A game starts once **5 players** are in from at least **2 different houses**. You still get **30 seconds** after that to jump in.",
+            "🧙 Muggles can play too: they count as players but not as a house, and never win house points.",
+            "• A game is **5 letters**. For each one you get **45 seconds**. Q, X, Y and Z never come up.",
+            "fill in a **Name, Place, Animal and Thing** starting with that letter",
+            "No fictional characters (Pikachu, Harry Potter), no brands.",
+            "Nothing mythical or extinct (Pegasus, Pterodactyl), no plants.",
+            "No brand names (Pepsi, Parle-G), no feelings or ideas.",
+            "Hindi and Hinglish count (Sher = Lion). Small typos are fine. One answer per box.",
+            "✅ unique **10** · 🟰 shared **5** · ❌ wrong or blank **0**",
+            "Scores add up over the 5 letters.",
+            "• 🥇 The game's best house member gets **+2**, 🥈 the next **+1**.",
+            "• Only when at least **3 people** played the game. Up to **6 house points** a day each.",
+            "within 30 minutes. A mod decides with 🛡️ Review",
+            "The next letter comes **20 seconds** after each letter's results",
+        ] {
+            assert!(text.contains(part), "missing {:?} in\n{}", part, text);
+        }
+        assert!(!text.contains("<#"), "the post sits in the game's own channel");
+        let text = npat_rules_text(&NpatRules { cap: None, min_houses: 1, join_secs: 90, letters: "abcxyz".into(), min_scored: 1, ..n.clone() });
+        assert!(text.contains("No daily limit."), "{text}");
+        assert!(text.contains("• A game starts once **5 players** are in. You still"), "one house needed: no house words: {text}");
+        assert!(text.contains("That opens the lobby for **90 seconds**."), "{text}");
+        assert!(text.contains("Only A, B, C, X, Y and Z come up."), "most letters skipped: say which are used: {text}");
+        assert!(text.contains("at least **1 person** played"), "{text}");
+        assert!(npat_rules_text(&NpatRules { letters: "ABCDEFGHIJKLMNOPQRSTUVWXYZ".into(), ..n.clone() }).contains("Any letter from A to Z can come up."));
+        assert!(npat_rules_text(&NpatRules { letters: "ABCDEFGHIJKLMNOPQRSTUVWXY".into(), ..n.clone() }).contains("Z never comes up."));
+        assert_eq!(skipped_letters("ABCDEFGHIJKLMNOPRSTUVW"), vec!['Q', 'X', 'Y', 'Z']);
+        assert_eq!(duration_words(60), "1 minute");
+        assert_eq!(duration_words(1799), "1799 seconds");
+    }
+
+    #[test]
+    fn the_npat_rules_post_fits_discord() {
+        for n in [npat_defaults(), huge().npat] {
+            let body = npat_rules_text(&n);
+            assert!(body.chars().count() <= DESCRIPTION_LIMIT, "{} chars", body.chars().count());
+            assert!(NPAT_RULES_TITLE.chars().count() <= 256);
+            if let Some(message) = npat_rules_message(&n) {
+                assert!(message.chars().count() <= MESSAGE_LIMIT);
+                assert!(message.starts_with("## 📜 How Name · Place · Animal · Thing works\n\n**✋ Joining a game**"));
+            }
+        }
     }
 
     #[test]
