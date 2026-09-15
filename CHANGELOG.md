@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.25] - 2026-09-15
+
+### 💼 Other
+
+- Plain riddle pop-up by default - the text-block pop-up crashes the Discord iPhone app
 ## [0.11.24] - 2026-09-15
 
 ### 💼 Other
 
 - Live timer line in the pop-up off by default (crashed some apps), one retry for the judging call
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.24
 ## [0.11.23] - 2026-09-15
 
 ### 💼 Other
