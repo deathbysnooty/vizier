@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.23] - 2026-09-15
+
+### 💼 Other
+
+- Countdown in the answers pop-up - a live timer line and seconds left in the title
 ## [0.11.22] - 2026-09-15
 
 ### 💼 Other
 
 - Games of 5 letters with house points at the end, a join window, a rules post from the live settings, and the game card always last
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.22
 ## [0.11.21] - 2026-09-15
 
 ### 💼 Other
