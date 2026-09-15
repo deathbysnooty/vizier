@@ -52,6 +52,8 @@ const HTTP_WAIT: Duration = Duration::from_secs(20);
 const JUDGE_WAIT: Duration = Duration::from_secs(20);
 /// The live answer count is edited at most this often.
 const COUNT_EDIT_SECS: i64 = 3;
+/// When a countdown card was last edited.
+static LAST_COUNTDOWN_EDIT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 /// How long the game card waits after the last message below it before moving down.
 pub const MOVE_DELAY_MS: i64 = 3_000;
 /// The shortest countdown once enough players are in, even at the very end of the join window.
@@ -438,7 +440,18 @@ fn needs_words(n: &NpatRules) -> String {
 }
 
 /// The lobby card's text.
-pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules) -> String {
+/// Time left as the card shows it: "2:40" above a minute, "35 s" below.
+pub fn left_words(until: i64, now: i64) -> String {
+    let left = (until - now).max(0);
+    if left >= 60 { format!("{}:{:02}", left / 60, left % 60) } else { format!("{} s", left) }
+}
+
+/// How often a card with a countdown is edited, so the time on it moves even
+/// where Discord doesn't refresh its own relative times.
+const COUNTDOWN_EDIT_SECS: i64 = 5;
+const LOBBY_COUNTDOWN_EDIT_SECS: i64 = 10;
+
+pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules, now: i64) -> String {
     let mut text = format!(
         "A game is **{}**. For each, find a **Name, Place, Animal and Thing** starting with it in **{} s**.\n\
          ✍️ Answers go in a private pop-up · unique **{}** · shared **{}** · the game's best two house members win {}\n\
@@ -454,13 +467,13 @@ pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules) -> String
     match state {
         LobbyState::Idle => text.push_str(&format!("▶️ Press **✋ I'm in** to start a game · needs {}", needs_words(n))),
         LobbyState::Open { closes_at } => {
-            text.push_str(&format!("⏳ Game starts <t:{}:R> if {} are in", closes_at, needs_words(n)));
+            text.push_str(&format!("⏳ Game starts in **{}** if {} are in", left_words(closes_at, now), needs_words(n)));
             if joined.len() as i64 >= n.min_players && houses < n.min_houses {
                 text.push_str("\n-# Waiting for someone from another house");
             }
         }
         LobbyState::Starting { starts_at, .. } => {
-            text.push_str(&format!("✅ **Enough players!** Starting <t:{}:R> — jump in now", starts_at))
+            text.push_str(&format!("✅ **Enough players!** Starting in **{}** — jump in now", left_words(starts_at, now)))
         }
         LobbyState::Missed { .. } => text.push_str("😴 Not enough players this time. Press **✋ I'm in** to try again."),
     }
@@ -484,7 +497,7 @@ pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules) -> String
 }
 
 fn lobby_embed(joined: &[Player], state: LobbyState) -> CreateEmbed {
-    CreateEmbed::new().title("🔤 Name · Place · Animal · Thing").description(lobby_text(joined, state, &npat_rules(daily_cap()))).colour(COLOUR)
+    CreateEmbed::new().title("🔤 Name · Place · Animal · Thing").description(lobby_text(joined, state, &npat_rules(daily_cap()), Utc::now().timestamp())).colour(COLOUR)
 }
 
 fn lobby_row() -> CreateActionRow {
@@ -512,11 +525,11 @@ pub fn round_title(game_id: i64, letter_no: i64, letters: i64) -> String {
     format!("🔤 Game {} · Letter {}/{}", game_id, letter_no, letters)
 }
 
-pub fn round_text(letter: char, ends_at: i64, answers: usize, state: RoundState) -> String {
+pub fn round_text(letter: char, ends_at: i64, answers: usize, state: RoundState, now: i64) -> String {
     let head = format!("## Letter **{}**\n**Name · Place · Animal · Thing**, each starting with **{}**\n", letter, letter);
     let count = format!("📝 **{}** in", plural(answers as i64, "answer", "answers"));
     let tail = match state {
-        RoundState::Live => format!("⏱️ Ends <t:{}:R>\n{}", ends_at, count),
+        RoundState::Live => format!("⏱️ **{}** left\n{}", left_words(ends_at, now), count),
         RoundState::Judging => format!("⏱️ Time's up · {} · judging…", count),
         RoundState::Stopped => "🛑 Stopped by a mod · no house points".to_string(),
     };
@@ -526,7 +539,7 @@ pub fn round_text(letter: char, ends_at: i64, answers: usize, state: RoundState)
 fn round_embed(round: &Round, letters: i64, answers: usize, state: RoundState) -> CreateEmbed {
     CreateEmbed::new()
         .title(round_title(round.game_id, round.letter_no, letters))
-        .description(round_text(round.letter, round.ends_at, answers, state))
+        .description(round_text(round.letter, round.ends_at, answers, state, Utc::now().timestamp()))
         .colour(if state == RoundState::Stopped { STOPPED_COLOUR } else { COLOUR })
 }
 
@@ -548,8 +561,8 @@ fn round_message(round: &Round, answers: usize, state: RoundState) -> CreateMess
 }
 
 /// The line that is the game card between two letters.
-pub fn break_text(next: i64, letters: i64, until: i64) -> String {
-    format!("⏭️ Letter **{}/{}** starts <t:{}:R>", next, letters, until)
+pub fn break_text(next: i64, letters: i64, until: i64, now: i64) -> String {
+    format!("⏭️ Letter **{}/{}** starts in **{}**", next, letters, left_words(until, now))
 }
 
 /// The answers pop-up, as the raw interaction response: four short boxes,
@@ -1423,7 +1436,7 @@ async fn keep_card_last(ctx: &Context, phase: &mut Phase) {
             }
         }
         Phase::Break { game_id, next, until } => {
-            let text = break_text(*next, game_letters(*game_id), *until);
+            let text = break_text(*next, game_letters(*game_id), *until, Utc::now().timestamp());
             place_card(ctx, channel, CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
         }
     }
@@ -1473,7 +1486,15 @@ async fn lobby_tick(ctx: &Context, channel: Option<u64>, stop: bool, now: i64) -
             }
         }
         event => {
-            if dirty || event != LobbyEvent::Nothing {
+            let every = match SHARED.lock().lobby.state {
+                LobbyState::Starting { .. } => Some(COUNTDOWN_EDIT_SECS),
+                LobbyState::Open { .. } => Some(LOBBY_COUNTDOWN_EDIT_SECS),
+                _ => None,
+            };
+            let last = LAST_COUNTDOWN_EDIT.load(std::sync::atomic::Ordering::Relaxed);
+            let countdown_due = every.is_some_and(|e| now - last >= e);
+            if dirty || event != LobbyEvent::Nothing || countdown_due {
+                LAST_COUNTDOWN_EDIT.store(now, std::sync::atomic::Ordering::Relaxed);
                 edit_lobby(ctx).await;
             }
             Phase::Lobby
@@ -1497,7 +1518,8 @@ async fn round_tick(ctx: &Context, round: Round, channel: Option<u64>, stop: boo
         return Phase::Lobby;
     }
     if status == Status::Open && now <= round.ends_at + GRACE_SECS {
-        if (shown.0 != round.id || shown.1 != answers) && now - shown.2 >= COUNT_EDIT_SECS && now < round.ends_at {
+        let changed = shown.0 != round.id || shown.1 != answers;
+        if (changed || now - shown.2 >= COUNTDOWN_EDIT_SECS) && now - shown.2 >= COUNT_EDIT_SECS && now < round.ends_at {
             edit_round(ctx, &round, answers, RoundState::Live).await;
             *shown = (round.id, answers, now);
         }
@@ -1536,7 +1558,7 @@ async fn round_tick(ctx: &Context, round: Round, channel: Option<u64>, stop: boo
     }
     let until = Utc::now().timestamp() + break_secs();
     let next = done.letter_no + 1;
-    place_card(ctx, game.channel, CreateMessage::new().content(break_text(next, game.letters, until)).allowed_mentions(CreateAllowedMentions::new())).await;
+    place_card(ctx, game.channel, CreateMessage::new().content(break_text(next, game.letters, until, Utc::now().timestamp())).allowed_mentions(CreateAllowedMentions::new())).await;
     Phase::Break { game_id: game.id, next, until }
 }
 
@@ -1554,6 +1576,17 @@ async fn break_tick(ctx: &Context, game_id: i64, next: i64, until: i64, channel:
         return Phase::Lobby;
     }
     if now < until {
+        let last = LAST_COUNTDOWN_EDIT.load(std::sync::atomic::Ordering::Relaxed);
+        if now - last >= COUNTDOWN_EDIT_SECS {
+            LAST_COUNTDOWN_EDIT.store(now, std::sync::atomic::Ordering::Relaxed);
+            if let Some((ch, message)) = SHARED.lock().card {
+                let edit = EditMessage::new().content(break_text(next, game.letters, until, now)).allowed_mentions(CreateAllowedMentions::new());
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _ = call(ChannelId::new(ch).edit_message(&ctx.http, MessageId::new(message), edit)).await;
+                });
+            }
+        }
         return Phase::Break { game_id, next, until };
     }
     match start_round(ctx, game_id, next, game.channel).await {
@@ -2094,25 +2127,25 @@ mod tests {
     #[test]
     fn the_lobby_card_reads_as_agreed() {
         let n = rules();
-        let idle = lobby_text(&[], LobbyState::Idle, &n);
+        let idle = lobby_text(&[], LobbyState::Idle, &n, 0);
         assert!(idle.starts_with("A game is **5 letters**. For each, find a **Name, Place, Animal and Thing** starting with it in **45 s**.\n"), "{idle}");
         assert!(idle.contains("✍️ Answers go in a private pop-up · unique **10** · shared **5** · the game's best two house members win 🥇 +2 🥈 +1 house points\n"), "{idle}");
         assert!(idle.contains("-# Real names · real places on a map · real living animals · real things you can touch, no brands · Hindi and Hinglish welcome · 📜 full rules above\n\n"), "{idle}");
         assert!(idle.ends_with("▶️ Press **✋ I'm in** to start a game · needs **5 players** from **2+ houses**"), "{idle}");
 
         let four = [(11, G), (22, S), (33, G), (44, G)];
-        let open = lobby_text(&four, LobbyState::Open { closes_at: 1_789_367_580 }, &n);
-        assert!(open.contains("⏳ Game starts <t:1789367580:R> if **5 players** from **2+ houses** are in\n\n**4/5 players · 🦁🐍 2 houses**\n<@11> · <@22> · <@33> · <@44>"), "{open}");
+        let open = lobby_text(&four, LobbyState::Open { closes_at: 1_789_367_580 }, &n, 1_789_367_420);
+        assert!(open.contains("⏳ Game starts in **2:40** if **5 players** from **2+ houses** are in\n\n**4/5 players · 🦁🐍 2 houses**\n<@11> · <@22> · <@33> · <@44>"), "{open}");
         let one_house: Vec<Player> = (1..=5).map(|u| (u, G)).collect();
-        let waiting = lobby_text(&one_house, LobbyState::Open { closes_at: 9 }, &n);
+        let waiting = lobby_text(&one_house, LobbyState::Open { closes_at: 9 }, &n, 0);
         assert!(waiting.contains("are in\n-# Waiting for someone from another house\n\n**5/5 players · 🦁 1 house**"), "{waiting}");
-        let starting = lobby_text(&four, LobbyState::Starting { starts_at: 1_789_367_430, closes_at: 9 }, &n);
-        assert!(starting.contains("✅ **Enough players!** Starting <t:1789367430:R> — jump in now"), "{starting}");
-        assert!(lobby_text(&[], LobbyState::Missed { until: 9 }, &n).ends_with("😴 Not enough players this time. Press **✋ I'm in** to try again."));
+        let starting = lobby_text(&four, LobbyState::Starting { starts_at: 1_789_367_430, closes_at: 9 }, &n, 1_789_367_400);
+        assert!(starting.contains("✅ **Enough players!** Starting in **30 s** — jump in now"), "{starting}");
+        assert!(lobby_text(&[], LobbyState::Missed { until: 9 }, &n, 0).ends_with("😴 Not enough players this time. Press **✋ I'm in** to try again."));
         let many: Vec<Player> = (1..=45).map(|u| (u, G)).collect();
-        assert!(lobby_text(&many, LobbyState::Open { closes_at: 9 }, &n).ends_with("<@40> · and 5 more"));
+        assert!(lobby_text(&many, LobbyState::Open { closes_at: 9 }, &n, 0).ends_with("<@40> · and 5 more"));
         let solo = NpatRules { min_houses: 1, prizes: [3, 0], ..rules() };
-        let text = lobby_text(&four, LobbyState::Open { closes_at: 9 }, &solo);
+        let text = lobby_text(&four, LobbyState::Open { closes_at: 9 }, &solo, 0);
         assert!(text.contains("if **5 players** are in\n\n**4/5 players**\n"), "no house words when one house is enough: {text}");
         assert!(text.contains("win 🥇 +3 house points"), "{text}");
         let row = serde_json::to_value(lobby_row()).unwrap();
@@ -2122,10 +2155,12 @@ mod tests {
     #[test]
     fn the_letter_card_and_break_line_read_as_agreed() {
         assert_eq!(round_title(4, 3, 5), "🔤 Game 4 · Letter 3/5");
-        assert_eq!(round_text('P', 1_789_367_445, 3, RoundState::Live), "## Letter **P**\n**Name · Place · Animal · Thing**, each starting with **P**\n⏱️ Ends <t:1789367445:R>\n📝 **3 answers** in");
-        assert!(round_text('P', 0, 1, RoundState::Judging).ends_with("⏱️ Time's up · 📝 **1 answer** in · judging…"));
-        assert!(round_text('P', 0, 1, RoundState::Stopped).ends_with("🛑 Stopped by a mod · no house points"));
-        assert_eq!(break_text(3, 5, 1_789_367_500), "⏭️ Letter **3/5** starts <t:1789367500:R>");
+        assert_eq!(round_text('P', 1_789_367_445, 3, RoundState::Live, 1_789_367_410), "## Letter **P**\n**Name · Place · Animal · Thing**, each starting with **P**\n⏱️ **35 s** left\n📝 **3 answers** in");
+        assert_eq!(left_words(1_000, 840), "2:40");
+        assert_eq!(left_words(1_000, 1_200), "0 s");
+        assert!(round_text('P', 0, 1, RoundState::Judging, 0).ends_with("⏱️ Time's up · 📝 **1 answer** in · judging…"));
+        assert!(round_text('P', 0, 1, RoundState::Stopped, 0).ends_with("🛑 Stopped by a mod · no house points"));
+        assert_eq!(break_text(3, 5, 1_789_367_500, 1_789_367_485), "⏭️ Letter **3/5** starts in **15 s**");
         let open = serde_json::to_value(round_row(12, true)).unwrap();
         assert_eq!((open["components"][0]["custom_id"].as_str(), open["components"][0]["disabled"].as_bool()), (Some("npatsubmit:12"), Some(false)));
         assert_eq!(serde_json::to_value(round_row(12, false)).unwrap()["components"][0]["disabled"], true);
