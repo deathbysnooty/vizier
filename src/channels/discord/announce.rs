@@ -546,6 +546,14 @@ pub const NEWS: &[News] = &[News {
            square, tap a number.\n           • When it's full, press **Copy code** on the page, come back and press **📋 Submit code**.\n           • The first correct code wins: 🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6** points. A new puzzle appears \
            the moment one is solved.\n           • Stuck? **💡 Hint** fills one square and costs a point off that puzzle. Beaten to it? Your code still \
            works for a day, so you can see whether you had it right.\n\n           `/sudokuhelp` explains the lot, `/sudoku` finds your puzzles again.",
+}, News {
+    id: "chess-2026-09",
+    title: "♟️ Chess is here",
+    body: "Challenge anyone to a game of chess in {chess}.\n\n           • `/chess @someone` sends a challenge; they press **Accept**. Pick **casual** (hours per move) or \
+           **live** (play it out there and then).\n           • Press **♟️ Open board** for your own board - tap a piece, tap where it goes - or **✍️ Type move** \
+           if you prefer `e4`, `Nf3`, `O-O`.\n           • The card in the channel shows the board after every move, so everyone can follow along, and **👀 Watch** \
+           opens a live board for anyone. Finished games can be replayed.\n           • Beat someone from **another house** for **4** points; a draw pays **1** each (up to 8 a day). Games \
+           against your own house are just for the fun of it.\n\n           `/chesshelp` explains everything, `/chess` on its own lists your games.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`, `{npat}`

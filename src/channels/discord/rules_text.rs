@@ -364,6 +364,9 @@ pub fn welcome_text(r: &Rules) -> String {
             plural(r.npat.min_houses, "house", "houses")
         ));
     }
+    if let Some(c) = channel(r.sudoku.channel) {
+        action.push(format!("🔢 {} · a sudoku always waiting, first to solve it wins", c));
+    }
     if let Some(c) = channel(r.chess.channel) {
         action.push(format!("♟️ {} · chess, one move at a time or all in one sitting", c));
     }
@@ -1268,7 +1271,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 
