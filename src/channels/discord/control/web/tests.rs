@@ -572,6 +572,17 @@ impl PanelData for FakeData {
             .ok_or_else(|| "The frog vanished.".to_string())
     }
 
+    /// The real decisions - the claim on the arena, the minutes, who is tagged -
+    /// but nothing is posted: a test must never start a battle for real.
+    async fn start_battle(
+        &self,
+        minutes: Option<i64>,
+        ping: Option<&str>,
+        theme: Option<&str>,
+    ) -> Result<super::super::super::battle::StartedBattle, String> {
+        super::super::super::battle::start_plan_for_tests(FIGHT_CHANNEL, minutes, ping, theme)
+    }
+
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
         let (start, end) = super::scorers::day_bounds(now, days_back);
         let conn = fake_ledger(now).lock();
@@ -586,6 +597,8 @@ impl PanelData for FakeData {
 }
 
 const SAFE: u64 = 1543162777642868736;
+/// #fight-fight-fight in the fake server: the arena a battle would open in.
+const FIGHT_CHANNEL: u64 = 31;
 
 /// Lucky, whose special welcome is seeded, and the two who missed him: Discord
 /// knows them, the fake server's member list doesn't.
@@ -3019,6 +3032,80 @@ async fn chocolate_frogs_round_trip() {
     let (_, audit, _) = call(&app, "GET", "/api/audit?limit=5", Some(&session), None, false).await;
     let last = audit.as_array().unwrap().iter().find(|e| e["key"] == format!("frog:trade:{}", gift.id)).cloned().expect("logged");
     assert_eq!(last["change"], "Cancelled the offer from Zoya to Arjun");
+}
+
+// --- the arena: "Start a battle royale now" --------------------------------------------------
+
+#[tokio::test]
+async fn a_battle_royale_starts_from_the_panel() {
+    use super::super::super::battle;
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    // Signed in, admins only, and from the panel's own page only.
+    for (method, path) in [("GET", "/api/arena"), ("POST", "/api/arena/battle")] {
+        let (status, _, _) = call(&app, method, path, None, Some(json!({})), true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        let (status, _, _) = call(&app, method, path, Some(&session_for(MEMBER)), Some(json!({})), true).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} as someone who isn't an admin");
+    }
+    let (status, _, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({})), false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "without the panel header");
+
+    // What the dialog needs: where it posts and how long a lobby runs.
+    let (status, page, _) = call(&app, "GET", "/api/arena", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["channel"]["name"], "fight-fight-fight");
+    assert_eq!(page["channel"]["id"], FIGHT_CHANNEL.to_string());
+    assert_eq!(page["default_minutes"], battle::default_lobby_minutes());
+    assert_eq!(page["max_minutes"], battle::max_lobby_minutes());
+    assert_eq!(page["min_minutes"], battle::MIN_WAIT);
+    let pings: Vec<&str> = page["pings"].as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap()).collect();
+    assert_eq!(pings, vec!["houses", "warriors", "none"], "the houses first: they are the default");
+
+    // Started with nothing said: the four houses, the usual lobby length.
+    let (status, started, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({})), true).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["channel"]["name"], "fight-fight-fight");
+    assert_eq!((started["ping"].as_str(), started["ping_label"].as_str()), (Some("houses"), Some("the four houses")));
+    assert_eq!(started["minutes"], battle::default_lobby_minutes());
+    assert!(started["theme_label"].as_str().is_some_and(|t| !t.is_empty()), "{started}");
+
+    // One at a time: the arena is busy until that lobby is done.
+    let (status, busy, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({ "minutes": 3 })), true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+    assert!(busy["error"].as_str().unwrap().contains("already running"), "{busy}");
+
+    // It shows up in the activity log, under the Arena, in words.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=20", Some(&session), None, false).await;
+    let key = format!("battle:now:{}", FIGHT_CHANNEL);
+    let entry = audit.as_array().unwrap().iter().find(|e| e["key"] == key).cloned().expect("logged");
+    assert_eq!(entry["label"], "Battle royale");
+    assert_eq!(entry["section"], json!({ "id": "arena", "title": "Arena", "icon": "⚔️" }));
+    assert_eq!(entry["user_name"], "Kabir");
+    let change = entry["change"].as_str().unwrap();
+    assert!(change.starts_with("Started a battle royale in #fight-fight-fight ("), "{change}");
+    assert!(change.contains(&format!("{} min", battle::default_lobby_minutes())) && change.contains("the four houses"), "{change}");
+
+    // The lobby ends, which frees the arena, and the next start is allowed.
+    battle::free_arena_for_tests(FIGHT_CHANNEL);
+    let (status, again, _) = call(&app, "POST", "/api/arena/battle", Some(&session),
+        Some(json!({ "minutes": 999, "ping": "none", "theme": "wwe" })), true).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["minutes"], battle::max_lobby_minutes(), "a silly length is brought back down");
+    assert_eq!((again["ping"].as_str(), again["ping_label"].as_str()), (Some("none"), Some("nobody")));
+    assert_eq!((again["theme"].as_str(), again["theme_label"].as_str()), (Some("wwe"), Some("WWE")));
+    battle::free_arena_for_tests(FIGHT_CHANNEL);
+
+    // Nonsense in the body is refused, and refusing leaves the arena free.
+    let (status, res, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({ "ping": "the mods" })), true).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{res}");
+    assert!(res["error"].as_str().unwrap().contains("the mods"), "{res}");
+    let (status, res, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({ "minutes": "ten" })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    let (status, fine, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({})), true).await;
+    assert_eq!(status, StatusCode::OK, "a refused start never wedges the arena: {fine}");
+    battle::free_arena_for_tests(FIGHT_CHANNEL);
 }
 
 // --- search messages ------------------------------------------------------------------------

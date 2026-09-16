@@ -61,7 +61,7 @@ const CHALLENGE_WAIT: u64 = 120;
 const FIGHT_COOLDOWN: u64 = 60;
 /// Lobby length an admin may ask for: at least a minute, at most
 /// `VIZIER_BATTLE_LOBBY_MAX_MINUTES`, `VIZIER_BATTLE_LOBBY_MINUTES` if not said.
-const MIN_WAIT: i64 = 1;
+pub const MIN_WAIT: i64 = 1;
 const MAX_WAIT: u64 = 15;
 const DEFAULT_WAIT: u64 = 5;
 /// Fewer joiners than this and the battle is called off, `VIZIER_BATTLE_MIN_PLAYERS`.
@@ -1219,6 +1219,38 @@ impl Ping {
             _ => Ping::Houses,
         }
     }
+
+    /// The same keys, but a word nobody recognises is refused instead of
+    /// quietly tagging all four houses: the panel names who it will tag, so it
+    /// must not tag someone else.
+    fn parse(key: &str) -> Result<Ping, String> {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "warriors" | "warrior" => Ok(Ping::Warriors),
+            "houses" | "house" => Ok(Ping::Houses),
+            "everyone" => Ok(Ping::Everyone),
+            "none" | "nobody" => Ok(Ping::Nobody),
+            other => Err(format!("“{}” isn't someone to tag. Pick the houses, the Warrior role, @everyone or nobody.", other)),
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Ping::Warriors => "warriors",
+            Ping::Houses => "houses",
+            Ping::Everyone => "everyone",
+            Ping::Nobody => "none",
+        }
+    }
+
+    /// How the panel says who was tagged, as the end of "… were tagged".
+    fn label(self) -> &'static str {
+        match self {
+            Ping::Warriors => "the Warrior role",
+            Ping::Houses => "the four houses",
+            Ping::Everyone => "everyone",
+            Ping::Nobody => "nobody",
+        }
+    }
 }
 
 /// Opens a lobby in the arena, waits it out, and runs the battle. The arena
@@ -1471,6 +1503,134 @@ pub fn spawn_daily(ctx: Context) {
             });
         }
     });
+}
+
+// --- starting a battle from the web panel -----------------------------------
+
+/// Why a panel start was refused, in words an admin can act on.
+const NO_GUILD: &str = "The bot isn't in a server right now, so there's nowhere to fight. Try again once it's back online.";
+const NO_ARENA: &str = "There's no arena to fight in. Set the fight channel in Arena → Fight channel, or make a channel called #fight-fight-fight.";
+const ARENA_BUSY: &str = "A battle or fight is already running in the arena. Wait for it to finish, or clear it with /battlestop.";
+
+/// A lobby the panel has just opened, so it can say what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartedBattle {
+    /// The arena the lobby went up in.
+    pub channel: u64,
+    pub minutes: i64,
+    /// `houses`, `warriors`, `everyone` or `none`.
+    pub ping: &'static str,
+    /// "the four houses", for the sentence the panel shows.
+    pub ping_label: &'static str,
+    pub theme: &'static str,
+    pub theme_label: &'static str,
+}
+
+/// Marks the arena busy. `true` means the claim is ours: it has to be handed to
+/// [`open_lobby`] (which frees it when the battle ends) or given back with
+/// [`free_arena`], or nothing can fight there again until a restart.
+fn claim_arena(arena: ChannelId) -> bool {
+    BUSY.lock().insert(arena.get())
+}
+
+fn free_arena(arena: ChannelId) {
+    BUSY.lock().remove(&arena.get());
+}
+
+/// The arena a panel start would use: the same channel `/battle` picks, but with
+/// no command channel to fall back on, so "nowhere to fight" is an answer.
+async fn arena_or_none(ctx: &Context, guild: GuildId) -> Option<ChannelId> {
+    let nowhere = ChannelId::new(u64::MAX);
+    let found = arena(ctx, guild, nowhere).await;
+    (found != nowhere).then_some(found)
+}
+
+/// Everything a panel start settles once the arena is known: the claim on it,
+/// the lobby length, who gets tagged and the fight style. Split from the Discord
+/// half so it can be tested without a server, and it owns the claim - a start
+/// that ends up refused frees the arena again rather than wedging it.
+fn start_plan(
+    arena: ChannelId,
+    minutes: Option<i64>,
+    ping: Option<&str>,
+    theme: Option<&str>,
+    roll: u64,
+) -> Result<(StartedBattle, Ping, Theme), String> {
+    if !claim_arena(arena) {
+        return Err(ARENA_BUSY.to_string());
+    }
+    let plan = (|| {
+        let minutes = minutes.unwrap_or_else(default_lobby_minutes).clamp(MIN_WAIT, max_lobby_minutes());
+        let ping = match ping.map(str::trim).filter(|k| !k.is_empty()) {
+            Some(key) => Ping::parse(key)?,
+            // The four houses, like the daily battle: a panel start is meant to
+            // wake the whole server up.
+            None => Ping::Houses,
+        };
+        let theme = match theme.map(str::trim).filter(|k| !k.is_empty()) {
+            Some("random") => daily_theme("random", roll),
+            Some(key) => Theme::from_key(key)
+                .ok_or_else(|| format!("“{}” isn't a fight style. Leave it out for the daily one.", key))?,
+            None => daily_theme(&super::control::var("VIZIER_BATTLE_DAILY_THEME").unwrap_or_else(|| "classic".into()), roll),
+        };
+        let started = StartedBattle {
+            channel: arena.get(),
+            minutes,
+            ping: ping.key(),
+            ping_label: ping.label(),
+            theme: theme.key(),
+            theme_label: theme.label(),
+        };
+        Ok((started, ping, theme))
+    })();
+    if plan.is_err() {
+        free_arena(arena);
+    }
+    plan
+}
+
+/// Opens a battle royale lobby this instant, with no command behind it: the web
+/// panel's "Start a battle royale now". The same lobby `/battle` and the daily
+/// battle open, in the same arena, so nothing about the battle itself differs.
+pub async fn start_now(
+    ctx: &Context,
+    minutes: Option<i64>,
+    ping: Option<&str>,
+    theme: Option<&str>,
+) -> Result<StartedBattle, String> {
+    let Some(guild) = ctx.cache.guilds().first().copied() else {
+        return Err(NO_GUILD.to_string());
+    };
+    let Some(arena) = arena_or_none(ctx, guild).await else {
+        return Err(NO_ARENA.to_string());
+    };
+    let (started, tags, theme) = start_plan(arena, minutes, ping, theme, Utc::now().timestamp() as u64)?;
+    tracing::info!("battle: panel opened a lobby in {} ({} min, {:?}, {:?})", arena, started.minutes, theme, tags);
+    let ctx = ctx.clone();
+    let minutes = started.minutes;
+    tokio::spawn(async move {
+        open_lobby(&ctx, guild, arena, arena, minutes, theme, tags).await;
+    });
+    Ok(started)
+}
+
+/// A panel start with the Discord half left out: the arena is handed in rather
+/// than found in the server, and no lobby is posted. The panel's own tests drive
+/// its endpoint through this, so a test never starts a real battle.
+#[cfg(test)]
+pub(crate) fn start_plan_for_tests(
+    arena: u64,
+    minutes: Option<i64>,
+    ping: Option<&str>,
+    theme: Option<&str>,
+) -> Result<StartedBattle, String> {
+    start_plan(ChannelId::new(arena), minutes, ping, theme, 0).map(|(plan, _, _)| plan)
+}
+
+/// Gives a test's claim on an arena back, as a finished lobby would.
+#[cfg(test)]
+pub(crate) fn free_arena_for_tests(arena: u64) {
+    free_arena(ChannelId::new(arena));
 }
 
 /// Knockout rounds until one is left, on a draw fixed at the start: winners
@@ -2299,5 +2459,123 @@ mod tests {
         assert_eq!(ids.len(), 9);
         let chunks: Vec<usize> = list.chunks(2).map(|c| c.len()).collect();
         assert_eq!(chunks.iter().filter(|n| **n == 1).count(), 1, "odd rounds need exactly one bye");
+    }
+
+    // --- "Start a battle royale now", from the panel -------------------------
+
+    /// A channel of its own per test: BUSY is shared by the whole process.
+    fn spare_arena(n: u64) -> ChannelId {
+        ChannelId::new(7_000_000 + n)
+    }
+
+    #[test]
+    fn a_panel_start_defaults_to_the_four_houses_and_the_daily_style() {
+        let arena = spare_arena(1);
+        let (plan, ping, theme) = start_plan(arena, None, None, None, 0).expect("nothing in the way");
+        assert_eq!(ping, Ping::Houses, "a panel start wakes the whole server up");
+        assert_eq!((plan.ping, plan.ping_label), ("houses", "the four houses"));
+        assert_eq!(plan.channel, arena.get());
+        assert_eq!(plan.minutes, default_lobby_minutes());
+        assert_eq!((plan.theme, theme), ("classic", Theme::Classic));
+        assert_eq!(plan.theme_label, "Classic");
+        free_arena(arena);
+    }
+
+    #[test]
+    fn a_panel_start_reads_who_to_tag_and_refuses_anyone_else() {
+        for (asked, want, label) in [
+            ("houses", Ping::Houses, "the four houses"),
+            ("warriors", Ping::Warriors, "the Warrior role"),
+            ("warrior", Ping::Warriors, "the Warrior role"),
+            ("  Everyone ", Ping::Everyone, "everyone"),
+            ("none", Ping::Nobody, "nobody"),
+            ("nobody", Ping::Nobody, "nobody"),
+        ] {
+            assert_eq!(Ping::parse(asked), Ok(want), "{}", asked);
+            assert_eq!(want.label(), label);
+            assert_eq!(Ping::parse(want.key()), Ok(want), "{} survives the round trip", asked);
+        }
+        let refused = Ping::parse("the mods").expect_err("an unknown word is never a silent @everyone");
+        assert!(refused.contains("the mods") && refused.contains("Warrior"), "{}", refused);
+        // Blank means "not said", which is the houses, not a refusal.
+        let arena = spare_arena(2);
+        let (plan, ping, _) = start_plan(arena, None, Some("   "), None, 0).expect("nothing in the way");
+        assert_eq!((ping, plan.ping), (Ping::Houses, "houses"));
+        free_arena(arena);
+    }
+
+    #[test]
+    fn a_panel_start_keeps_the_lobby_between_one_minute_and_the_longest_allowed() {
+        let arena = spare_arena(3);
+        let minutes = |asked| {
+            let (plan, _, _) = start_plan(arena, asked, None, None, 0).expect("nothing in the way");
+            free_arena(arena);
+            plan.minutes
+        };
+        assert_eq!(minutes(Some(7)), 7);
+        assert_eq!(minutes(Some(0)), MIN_WAIT, "no zero-minute lobby nobody can join");
+        assert_eq!(minutes(Some(-99)), MIN_WAIT);
+        assert_eq!(minutes(Some(9_999)), max_lobby_minutes(), "never longer than the longest allowed");
+        assert_eq!(minutes(None), default_lobby_minutes());
+        assert!((MIN_WAIT..=max_lobby_minutes()).contains(&minutes(None)));
+    }
+
+    #[test]
+    fn a_panel_start_picks_the_style_asked_for_or_the_daily_rotation() {
+        let arena = spare_arena(4);
+        let style = |asked: Option<&str>, roll| {
+            let out = start_plan(arena, None, None, asked, roll);
+            if out.is_ok() {
+                free_arena(arena);
+            }
+            out.map(|(plan, _, theme)| (plan.theme, theme))
+        };
+        assert_eq!(style(Some("wwe"), 0), Ok(("wwe", Theme::Wrestling)));
+        assert_eq!(style(Some("eldenring"), 0), Ok(("eldenring", Theme::Tarnished)));
+        // "random" is the daily rotation's own word: a different style per roll.
+        assert_eq!(style(Some("random"), 1), Ok((Theme::ALL[1].key(), Theme::ALL[1])));
+        assert_eq!(style(Some("random"), 2), Ok((Theme::ALL[2].key(), Theme::ALL[2])));
+        let refused = style(Some("kabaddi"), 0).expect_err("only real styles");
+        assert!(refused.contains("kabaddi"), "{}", refused);
+    }
+
+    #[test]
+    fn a_second_panel_start_is_refused_while_the_arena_is_busy() {
+        let arena = spare_arena(5);
+        let (first, _, _) = start_plan(arena, None, None, None, 0).expect("the arena was free");
+        assert_eq!(first.channel, arena.get());
+        let busy = start_plan(arena, None, None, None, 0).expect_err("one battle at a time");
+        assert_eq!(busy, ARENA_BUSY);
+        assert!(busy.contains("/battlestop"), "it says how to clear a stuck one: {}", busy);
+        // A second arena is untouched by the first one being busy.
+        let other = spare_arena(6);
+        assert!(start_plan(other, None, None, None, 0).is_ok());
+        free_arena(other);
+        // Only once the lobby gives the claim back does the arena open again.
+        free_arena(arena);
+        assert!(start_plan(arena, None, None, None, 0).is_ok(), "free again");
+        free_arena(arena);
+    }
+
+    #[test]
+    fn a_refused_panel_start_leaves_the_arena_free() {
+        let arena = spare_arena(7);
+        // Everything is settled after the arena is claimed, so a refusal there
+        // must give the claim back or nothing could ever fight in it again.
+        assert!(start_plan(arena, None, Some("the mods"), None, 0).is_err());
+        assert!(!BUSY.lock().contains(&arena.get()), "a refused start never wedges the arena");
+        assert!(start_plan(arena, None, Some("houses"), None, 0).is_ok(), "and the next start works");
+        free_arena(arena);
+        assert!(!BUSY.lock().contains(&arena.get()));
+    }
+
+    #[test]
+    fn the_panel_says_in_plain_english_why_it_could_not_start_one() {
+        assert!(NO_GUILD.contains("server"), "{}", NO_GUILD);
+        // The one an admin can actually fix names the setting and the channel.
+        assert!(NO_ARENA.contains("Fight channel") && NO_ARENA.contains("#fight-fight-fight"), "{}", NO_ARENA);
+        for line in [NO_GUILD, NO_ARENA, ARENA_BUSY] {
+            assert!(line.ends_with('.') && !line.contains("VIZIER_"), "no settings jargon: {}", line);
+        }
     }
 }

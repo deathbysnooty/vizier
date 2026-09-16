@@ -1899,6 +1899,29 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .welcome-editor .segmented button { flex: 1; justify-content: center; }
 }
 
+/* --- the arena ---------------------------------------------------------------------------- */
+
+.arena-start .card-body > .banner.inline { margin: 0; }
+.arena-start .cup-loading { padding: 14px 0; justify-content: flex-start; }
+.arena-now { display: grid; gap: 4px; color: var(--text-2); line-height: 1.55; }
+.arena-now .inline-ref { color: var(--text); }
+.arena-now .hint { margin-top: 4px; }
+
+.arena-ask { display: grid; gap: 14px; }
+.arena-field { display: grid; gap: 7px; }
+.arena-field > label { font-weight: 600; color: var(--text); font-size: 13px; }
+.arena-field .hint { margin-top: 0; }
+.arena-minutes { display: flex; align-items: center; gap: 9px; color: var(--muted); }
+.arena-minutes .input { width: 92px; }
+.arena-ask .segmented { flex-wrap: wrap; }
+.arena-about { min-height: 2.4em; }
+
+/* Three tags side by side wrap to two lines each on a phone: one per row reads. */
+@media (max-width: 560px) {
+  .arena-ask .segmented { width: 100%; flex-direction: column; align-items: stretch; }
+  .arena-ask .segmented button { height: 34px; justify-content: flex-start; }
+}
+
 /* --- chocolate frogs -------------------------------------------------------------------- */
 
 .frog-page { display: block; }

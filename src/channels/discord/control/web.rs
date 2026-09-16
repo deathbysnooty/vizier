@@ -220,6 +220,15 @@ pub trait PanelData: Send + Sync + 'static {
     async fn drop_frog(&self, _channel: u64, _by: u64) -> Result<super::super::frog_store::Drop, String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// Opens a battle royale lobby in the arena this instant.
+    async fn start_battle(
+        &self,
+        _minutes: Option<i64>,
+        _ping: Option<&str>,
+        _theme: Option<&str>,
+    ) -> Result<super::super::battle::StartedBattle, String> {
+        Err("Discord isn't connected right now.".into())
+    }
     /// Search messages: one window of the stored history, newest first.
     async fn search_window(&self, _filter: search::Filter) -> anyhow::Result<search::Window> {
         anyhow::bail!("no stored history here")
@@ -264,6 +273,7 @@ pub struct EmojiInfo {
 }
 
 mod agent;
+mod arena;
 mod chess;
 mod frogs;
 mod houses;
@@ -650,6 +660,16 @@ impl PanelData for LiveData {
         super::super::frog::drop_now(ctx, channel, by).await
     }
 
+    async fn start_battle(
+        &self,
+        minutes: Option<i64>,
+        ping: Option<&str>,
+        theme: Option<&str>,
+    ) -> Result<super::super::battle::StartedBattle, String> {
+        let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
+        super::super::battle::start_now(ctx, minutes, ping, theme).await
+    }
+
     async fn cancel_trade(&self, id: i64, by: u64) -> Result<super::super::frog_trade::Trade, String> {
         let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
         super::super::frog_trade::admin_cancel(ctx, id, by).await
@@ -895,6 +915,8 @@ pub fn router(panel: Panel) -> Router {
         .route("/frogs/sales", get(frogs::sales))
         .route("/frogs/trades", get(frogs::trades))
         .route("/frogs/trades/{id}/cancel", post(frogs::cancel_trade))
+        .route("/arena", get(arena::overview))
+        .route("/arena/battle", post(arena::start))
         .route("/memos", get(memos::list).post(memos::create))
         .route("/memos/when", get(memos::when))
         .route("/memos/{id}/cancel", post(memos::cancel))
@@ -1646,6 +1668,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(left::audit_entry(e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
+            } else if e.key.starts_with("battle:now:") {
+                obj.extend(arena::audit_entry(e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {
                 let entry = posts::audit_entry(&panel, e);
                 obj.extend(entry);

@@ -1032,6 +1032,7 @@
       S.fields.push(f);
       rows.appendChild(f.el);
     });
+    if (sec.id === 'arena') renderArena(page);
     if (sec.id === 'frogs') renderFrogs(page);
     if (sec.id === 'autoreplies') {
       page.appendChild(h('a', { class: 'banner inline info link-banner', href: '#/autoreplies' }, icon('reply'),
@@ -3482,6 +3483,87 @@
     draw();
     refresh();
     requestAnimationFrame(() => { const first = body.querySelector(existing ? '.line-row textarea' : '#w-member'); if (first) first.focus({ preventScroll: true }); });
+  }
+
+  // --- the arena: starting a battle royale by hand ----------------------------------------
+
+  /** The last length and tag the admin picked, so the dialog remembers them. */
+  const ARENA = { data: null, minutes: null, ping: 'houses', busy: false };
+
+  /** How the toast says who was tagged, kept grammatical. */
+  const TAGGED = { houses: 'the four houses were tagged', warriors: 'the Warrior role was tagged', everyone: 'everyone was tagged', none: 'nobody was tagged' };
+
+  const arenaMinutes = (n, d) => Math.min(Math.max(Math.round(n) || d.default_minutes, d.min_minutes), d.max_minutes);
+
+  /** The dialog: where it posts, how long the lobby stays open, who gets tagged. */
+  async function askBattle(d) {
+    let ping = d.pings.some((p) => p.key === ARENA.ping) ? ARENA.ping : d.pings[0].key;
+    const num = h('input', { class: 'input', type: 'number', inputmode: 'numeric', id: 'arena-minutes',
+      min: String(d.min_minutes), max: String(d.max_minutes), step: '1', value: String(arenaMinutes(ARENA.minutes || d.default_minutes, d)) });
+    const about = h('p', { class: 'hint arena-about' }, (d.pings.find((p) => p.key === ping) || {}).about);
+    const tags = segmented(d.pings.map((p) => [p.key, p.emoji + ' ' + p.label]), ping, 'Who gets tagged', (v) => {
+      ping = v;
+      about.textContent = (d.pings.find((p) => p.key === v) || {}).about || '';
+    });
+    const field = (label, control, hint) => h('div', { class: 'arena-field' },
+      h('label', { for: control.id || null }, label), control, hint || null);
+    const ok = await confirmDialog({ title: 'Start a battle royale now?', icon: 'zap', confirm: 'Open the lobby',
+      body: h('div', { class: 'arena-ask' },
+        h('p', null, 'The lobby goes up in ', d.channel ? channelRef(d.channel.id) : h('b', null, 'the arena'),
+          ' this instant and anyone can join while it is open. When it closes the bracket runs itself, and the champion takes the role and the points.'),
+        field('Lobby open for', h('div', { class: 'arena-minutes' }, num, h('span', null, 'minutes')),
+          h('p', { class: 'hint' }, 'Between ' + d.min_minutes + ' and ' + d.max_minutes + ' · ' + d.default_minutes + ' if you leave it')),
+        field('Tag', tags, about)) });
+    if (!ok) return null;
+    ARENA.minutes = arenaMinutes(parseInt(num.value, 10) || d.default_minutes, d);
+    ARENA.ping = ping;
+    return { minutes: ARENA.minutes, ping: ARENA.ping };
+  }
+
+  /** The extra part of the Arena page, above its settings: start one now. */
+  function renderArena(page) {
+    const holder = h('div', { class: 'arena-start' });
+    page.appendChild(holder);
+    const load = () => api('GET', '/arena').then((d) => { ARENA.data = d; }).catch(() => null);
+    const draw = () => {
+      clear(holder);
+      const d = ARENA.data;
+      const btn = h('button', { class: 'btn primary', type: 'button' }, icon('zap'),
+        h('span', { class: 'hide-sm' }, 'Start a battle royale now'), h('span', { class: 'show-sm' }, 'Start one now'));
+      btn.disabled = !d || !d.channel || ARENA.busy;
+      let body;
+      if (!d) {
+        body = h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the arena…');
+      } else if (!d.channel) {
+        body = h('div', { class: 'banner inline', role: 'alert' }, icon('alert'),
+          h('p', null, h('b', null, 'There is nowhere to fight yet. '),
+            h('span', null, 'Pick a fight channel in the settings below, or make a channel called #fight-fight-fight.')));
+      } else {
+        body = h('div', { class: 'arena-now' },
+          h('p', null, 'A lobby opens in ', channelRef(d.channel.id), ' straight away, tagging ',
+            h('b', null, (d.pings.find((p) => p.key === ARENA.ping) || d.pings[0]).label.toLowerCase()),
+            ', and stays open ' + plural(arenaMinutes(ARENA.minutes || d.default_minutes, d), 'minute') + ' for people to join.'),
+          h('p', { class: 'hint' }, 'Exactly the lobby /battle and the daily battle open — this one just doesn’t wait for the clock.'));
+      }
+      btn.addEventListener('click', async () => {
+        const ask = await askBattle(ARENA.data);
+        if (!ask) return;
+        ARENA.busy = true;
+        btn.disabled = true;
+        try {
+          const res = await api('POST', '/arena/battle', ask);
+          const where = res.channel && res.channel.name ? '#' + res.channel.name : 'the arena';
+          toast('Lobby open for ' + plural(res.minutes, 'minute') + ' in ' + where + ' — ' + (TAGGED[res.ping] || res.ping_label + ' was tagged'));
+          refreshAudit();
+        } catch (e) { toast(e.message, 'error'); }
+        ARENA.busy = false;
+        await load();
+        if (holder.isConnected) draw();
+      });
+      holder.appendChild(card('arena-now', 'Battle royale', 'Open a lobby without waiting for the daily one', body, { pad: true, actions: btn }));
+    };
+    draw();
+    load().then(() => { if (holder.isConnected) draw(); });
   }
 
   // --- chocolate frogs -------------------------------------------------------------------
