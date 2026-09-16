@@ -2207,7 +2207,7 @@ export default function AgentSettings() {
                               })
                             }
                           />
-                          Docker
+                          Docker (needs a docker-shell build)
                         </label>
                       </div>
 

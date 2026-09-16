@@ -89,7 +89,7 @@ glob = "0.3.3"
 tar = "0.4"
 bzip2 = "0.5"
 shellexpand = "3.1.2"
-bollard = { version = "0.20.2", features = ["buildkit", "chrono"] }
+bollard = { version = "0.20.2", features = ["buildkit", "chrono"], optional = true }
 rmcp = { version = "1.3.0", features = [
   "client",
   "macros",
@@ -127,6 +127,15 @@ local-speech = ["dep:sherpa-onnx"]
 # stay available in every build. Turn the binary formats back on with:
 # cargo build --release --features documents
 documents = ["dep:pdf-extract", "dep:docx-rs", "dep:calamine"]
+# The Docker backend of the `shell_exec` tool (bollard): pulls or builds an image,
+# creates a container and runs the agent's commands inside it. Left out of
+# `default` because no agent uses the shell tool at all, while the Docker API
+# client costs 17 crates of build. The `local` shell backend is unaffected and
+# stays available in every build, and a config asking for the `docker`
+# environment is refused outright - never quietly run on the host - when this
+# feature is off. Turn the Docker backend back on with:
+# cargo build --release --features docker-shell
+docker-shell = ["dep:bollard"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/vizier-v{ version }-{ target }.tar.gz"

@@ -5,6 +5,9 @@ pub mod discord;
 pub mod logo;
 pub mod markdown;
 pub mod ollama;
+// Only the Docker shell backend builds a tar archive (the image build context);
+// the speech engines read tarballs through the `tar` crate directly.
+#[cfg(feature = "docker-shell")]
 pub mod tar;
 pub mod telegram;
 

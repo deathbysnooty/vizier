@@ -2114,7 +2114,7 @@ export default function AgentForm({
                               })
                             }
                           />
-                          Docker
+                          Docker (needs a docker-shell build)
                         </label>
                       </div>
 
