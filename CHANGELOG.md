@@ -2,12 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.43] - 2026-09-16
+
+### 🚀 Features
+
+- *(anagrams)* Anagram points, an uncapped score the cap can't hide
 ## [0.11.42] - 2026-09-16
 
 ### 💼 Other
 
 - Doodle pack for the Guess the Word game
 - An ending round must not delete the next round's card
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.42
 ## [0.11.41] - 2026-09-16
 
 ### 🚀 Features
