@@ -45,6 +45,10 @@ mod msglog;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
+mod guess;
+mod guess_bank;
+mod guess_draw;
+mod guess_store;
 mod chess;
 mod chess_board;
 mod chess_rules;
@@ -130,6 +134,11 @@ impl VizierChannel for DiscordChannelReader {
         }
         // The word bank, read once. Missing only means the anagrams game is off.
         anagram_words::open(&self.deps.config.workspace);
+        if let Err(err) = guess_store::open(&self.deps.config.workspace) {
+            tracing::warn!("guess: store not opened: {}", err);
+        }
+        // The doodle bank, read once. Missing only means Guess the Word is off.
+        guess_bank::open(&self.deps.config.workspace);
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
         }
@@ -1260,6 +1269,7 @@ impl EventHandler for Handler {
         sudoku::on_delete(channel_id, deleted_message_id);
         chess::on_delete(channel_id, deleted_message_id);
         anagram::on_delete(channel_id, deleted_message_id);
+        guess::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1508,6 +1518,10 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), anagram::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), guess::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), guess::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::skip_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1592,6 +1606,8 @@ impl EventHandler for Handler {
         chess::spawn(ctx.clone());
         // Anagrams: picks up the round a restart left in its channel, or sets one.
         anagram::spawn(ctx.clone());
+        // Guess the Word: picks up the doodle a restart left in its channel, or draws one.
+        guess::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -2216,6 +2232,22 @@ impl EventHandler for Handler {
             }
             if command.data.name == "anagramstop" {
                 anagram::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "guess" {
+                guess::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "guesshelp" {
+                guess::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "guessskip" {
+                guess::skip_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "guessstop" {
+                guess::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -2997,6 +3029,8 @@ impl EventHandler for Handler {
         // Chat in the anagrams channel buries the scramble card, which follows
         // it down once enough has landed under it.
         anagram::note_message(&ctx, &msg);
+        // And chat in the guess-the-word channel buries the doodle card the same way.
+        guess::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
@@ -3006,6 +3040,10 @@ impl EventHandler for Handler {
         // Anagrams is played by typing: a word that fits wins the round, and
         // !hint / !skip steer it. Everything else in that channel is left alone.
         anagram::on_message(&ctx, &msg).await;
+
+        // Guess the Word is played the same way: a guess that names the doodle
+        // wins the round, and !hint / !skip steer it.
+        guess::on_message(&ctx, &msg).await;
 
         let agent_id = self.0.clone();
 
