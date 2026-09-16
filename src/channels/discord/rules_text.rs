@@ -544,7 +544,7 @@ fn game_lines(r: &Rules) -> Vec<String> {
     if r.games_on {
         let mut koto = Vec::new();
         if r.koto_win > 0 {
-            let played = if r.koto_played > 0 { format!(", play **{}**", r.koto_played) } else { String::new() };
+            let played = if r.koto_played > 0 { format!(", **{}** for guesses that score", r.koto_played) } else { String::new() };
             koto.push(format!("🔤 **Koto** — solve **{}**{} {}", r.koto_win, played, max_words(r.koto_cap)));
         }
         if r.anagram > 0 {
@@ -1078,7 +1078,7 @@ pub(crate) mod tests {
         assert_eq!(panels[1].title, "🎮 1 · Play the games");
         assert_eq!(panels[2].title, "📊 2 · Check your progress");
         assert!(!panels[0].body.contains("post above"));
-        assert!(panels[1].body.contains("🔤 **Koto** — solve **3**, play **1** (no limit)"), "{}", panels[1].body);
+        assert!(panels[1].body.contains("🔤 **Koto** — solve **3**, **1** for guesses that score (no limit)"), "{}", panels[1].body);
         assert!(panels[1].body.contains("when one opens in <#1548160947766698074>, press Join"), "{}", panels[1].body);
         assert!(!panels[1].body.contains("Quiz"));
         assert!(!panels[2].body.contains("/frogs"));
