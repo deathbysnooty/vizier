@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.42] - 2026-09-16
+
+### 💼 Other
+
+- Doodle pack for the Guess the Word game
+- An ending round must not delete the next round's card
 ## [0.11.41] - 2026-09-16
 
 ### 🚀 Features
@@ -12,6 +18,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Drop the ableist words from the accepted answers
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.41
 ## [0.11.40] - 2026-09-16
 
 ### 💼 Other
