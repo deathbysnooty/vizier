@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Mods can play too - frogs, trades, sets and Name Place Animal Thing (still no house points)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.33
 ## [0.11.32] - 2026-09-16
 
 ### 💼 Other
