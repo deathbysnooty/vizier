@@ -562,10 +562,19 @@ pub const NEWS: &[News] = &[News {
            by `beast`, `bates` and `tabes` alike.\n           • First right answer gets a ✅ and the points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or more \
            (up to 10 a day). The next word goes up straight away.\n           • Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
            letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n           `/anagramhelp` explains the lot, `/anagram` shows the round that's up.",
+}, News {
+    id: "guess-the-word-2026-09",
+    title: "🎨 Guess the Word is here",
+    body: "There's a doodle waiting in {guess}, and all you have to do is say what it is.\n\n           • Somebody really drew it — every picture comes from Google's Quick, Draw! dataset, so they're quick, wobbly and \
+           human.\n           • Just type your guess in the channel. Capitals, spaces and hyphens don't matter (`Ice-Cream`, `ice cream` \
+           and `icecream` are all the same answer), and a spelling slip is forgiven on longer words — `gitar` wins a \
+           guitar.\n           • First right guess gets a ✅ and **2** points (up to 10 a day), and the next doodle goes up straight \
+           away.\n           • Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
+           off the round), and **`!skip`** moves on once a hint is out.\n\n           `/guesshelp` explains the lot, `/guess` shows the doodle that's up.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
-/// `{anagram}`, `{npat}`
+/// `{anagram}`, `{guess}`, `{npat}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -576,6 +585,7 @@ pub fn fill_channels(body: &str) -> String {
     body.replace("{sudoku}", &mention("VIZIER_SUDOKU_CHANNEL", "the sudoku channel"))
         .replace("{chess}", &mention("VIZIER_CHESS_CHANNEL", "the chess channel"))
         .replace("{anagram}", &mention("VIZIER_ANAGRAM_CHANNEL", "the anagrams channel"))
+        .replace("{guess}", &mention("VIZIER_GUESS_CHANNEL", "the guess-the-word channel"))
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
@@ -1094,6 +1104,7 @@ mod tests {
     fn a_release_note_is_posted_once() {
         assert_eq!(fill_channels("play in {sudoku}"), "play in **the sudoku channel**", "no channel set in tests");
         assert_eq!(fill_channels("type it in {anagram}"), "type it in **the anagrams channel**");
+        assert_eq!(fill_channels("draw in {guess}"), "draw in **the guess-the-word channel**");
         // Every note's channel marks are ones fill_channels knows, or a note
         // would go out with `{anagram}` in it.
         for note in NEWS {

@@ -83,6 +83,24 @@ pub struct Rules {
     pub sudoku: SudokuRules,
     pub chess: ChessRules,
     pub anagrams: AnagramRules,
+    pub guess: GuessRules,
+}
+
+/// Guess the Word's live settings, for `/guesshelp` and the lines about it in
+/// the House Cup posts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuessRules {
+    /// The game's channel, only while the game is on and there is a bank.
+    pub channel: Option<u64>,
+    /// What naming a doodle pays.
+    pub points: i64,
+    pub cap: Option<i64>,
+    /// How long a round nobody names stays up.
+    pub idle_minutes: i64,
+    /// How long a word - and each drawing of it - is held back.
+    pub no_repeat_days: i64,
+    /// Words in the bank, when there is one.
+    pub words: Option<usize>,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -280,6 +298,7 @@ impl Rules {
             sudoku: super::sudoku::sudoku_rules(),
             chess: super::chess::chess_rules(limit(Source::Chess.cap())),
             anagrams: super::anagram::anagram_rules(),
+            guess: super::guess::guess_rules(),
         }
     }
 }
@@ -392,6 +411,9 @@ pub fn welcome_text(r: &Rules) -> String {
     }
     if let Some(c) = channel(r.anagrams.channel) {
         action.push(format!("🔀 {} · anagrams — unscramble the letters and type the word", c));
+    }
+    if let Some(c) = channel(r.guess.channel) {
+        action.push(format!("🎨 {} · guess the word — say what the doodle is", c));
     }
     if let Some(c) = channel(r.fight_channel) {
         let what = if r.battle_daily { "fights and the daily Battle Royale" } else { "fights and Battle Royales" };
@@ -674,6 +696,14 @@ fn game_lines(r: &Rules) -> Vec<String> {
             c, r.anagrams.points[0], r.anagrams.points[1], r.anagrams.points[2], max_words(r.anagrams.cap)
         ));
     }
+    if let Some(c) = channel(r.guess.channel).filter(|_| r.guess.points > 0) {
+        lines.push(format!(
+            "🎨 **Guess the Word** in {} — a doodle is always up; first to type what it is wins **{}** {}",
+            c,
+            r.guess.points,
+            max_words(r.guess.cap)
+        ));
+    }
     if r.arena_win > 0 {
         lines.push(format!("⚔️ **1v1 fights** — `/fight` someone, win **{}** {}", r.arena_win, max_words(r.arena_cap)));
     }
@@ -823,6 +853,9 @@ pub fn earn_text(r: &Rules) -> String {
             r.anagrams.points.iter().max().copied().unwrap_or(0),
             max_words(r.anagrams.cap)
         ));
+    }
+    if r.guess.channel.is_some() && r.guess.points > 0 {
+        more.push(format!("🎨 Guess the Word {} first to name it {}", r.guess.points, max_words(r.guess.cap)));
     }
     if !more.is_empty() {
         lines.push(more.join(" · "));
@@ -1162,6 +1195,56 @@ pub fn anagram_help_text(a: &AnagramRules) -> String {
     t
 }
 
+// --- guess the word -------------------------------------------------------------------------
+
+pub const GUESS_RULES_TITLE: &str = "🎨 How Guess the Word works";
+
+fn guess_where(id: Option<u64>) -> String {
+    match channel(id) {
+        Some(c) => format!("in {}", c),
+        None => "in its own channel (a mod has to set one)".to_string(),
+    }
+}
+
+/// What `/guesshelp` says: the whole game in one card, from the settings as
+/// they are now. The doodles are somebody else's work, so the credit the
+/// dataset's licence asks for goes out with every telling of the rules.
+pub fn guess_help_text(g: &GuessRules) -> String {
+    let mut t = format!(
+        "**🎨 What it is**\nThe bot puts a hand-drawn doodle up {}. Be the first to type what it is and your house scores.\n\n",
+        guess_where(g.channel)
+    );
+    t.push_str("**⌨️ How to play**\n");
+    t.push_str("• Just type your guess in the channel — no buttons, no commands. Capitals, spaces and punctuation are all forgiven, so `Ice-Cream`, `ice cream` and `icecream` are one answer.\n");
+    t.push_str("• Near enough counts on longer words: `gitar` takes a guitar. Short words have to be right.\n");
+    t.push_str("• The first right guess wins, gets a ✅ on the message, and the next doodle goes up at once.\n");
+    t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
+
+    t.push_str("**💡 Stuck?**\n");
+    t.push_str("• `!hint` puts a **second drawing of the same thing** up beside the first and gives away the word's **first letter**. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!skip` moves on to a new doodle, but only once a hint has been used. It pays nobody.\n");
+    t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one picture.\n\n", plural(g.idle_minutes, "minute", "minutes")));
+
+    t.push_str("**🏠 House points**\n");
+    t.push_str(&format!("• **{}** for naming the doodle first.\n", plural(g.points, "house point", "house points")));
+    t.push_str(&format!("• {}\n", match g.cap {
+        Some(n) => format!("Up to **{}** a day from guessing.", plural(n, "house point", "house points")),
+        None => "No daily limit from guessing.".to_string(),
+    }));
+    t.push_str("• Muggles and anyone not yet sorted earn nothing, here as everywhere — mods are welcome to play, they just can't score.\n");
+    if g.no_repeat_days > 0 {
+        t.push_str(&format!("• Neither the same word nor the same drawing comes round again for **{}**.\n", plural(g.no_repeat_days, "day", "days")));
+    }
+    if let Some(words) = g.words {
+        t.push_str(&format!("-# {} in the bank.\n", plural(words as i64, "word", "words")));
+    }
+
+    t.push_str("\n**⌨️ Commands**\n");
+    t.push_str("`/guess` the doodle that's up · `/guesshelp` this card · mods: `/guessskip` for a fresh one, `/guessstop` to switch it off\n");
+    t.push_str(&format!("-# {}", super::guess_bank::ATTRIBUTION));
+    t
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1225,6 +1308,18 @@ pub(crate) mod tests {
             sudoku: sudoku_defaults(),
             chess: chess_defaults(),
             anagrams: anagram_defaults(),
+            guess: guess_defaults(),
+        }
+    }
+
+    pub(crate) fn guess_defaults() -> GuessRules {
+        GuessRules {
+            channel: Some(super::super::guess::HOME_CHANNEL),
+            points: 2,
+            cap: Some(10),
+            idle_minutes: 15,
+            no_repeat_days: 14,
+            words: Some(240),
         }
     }
 
@@ -1348,6 +1443,7 @@ pub(crate) mod tests {
             },
             chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, replay_days: 365, win: 100, draw: 100, cap: Some(99), ..chess_defaults() },
             anagrams: AnagramRules { channel: Some(u64::MAX), points: [100, 100, 100], cap: Some(99), idle_minutes: 1440, no_repeat_days: 365, words: Some(500_000) },
+            guess: GuessRules { channel: Some(u64::MAX), points: 100, cap: Some(99), idle_minutes: 1440, no_repeat_days: 365, words: Some(500_000) },
             ..defaults()
         }
     }
@@ -1379,7 +1475,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, guess: GuessRules { channel: None, ..guess_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 
@@ -1546,6 +1642,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn guesshelp_explains_a_game_played_by_typing_and_credits_the_doodles() {
+        let text = guess_help_text(&guess_defaults());
+        for part in [
+            "doodle up in <#1518233664016617582>",
+            "type your guess in the channel",
+            "`gitar` takes a guitar",
+            "first right guess wins",
+            "ignored",
+            "second drawing of the same thing",
+            "**first letter**",
+            "`!skip` moves on",
+            "**15 minutes**",
+            "**2 house points** for naming the doodle first",
+            "Up to **10 house points** a day",
+            "comes round again for **14 days**",
+            "240 words in the bank",
+            "`/guessskip`",
+            "`/guessstop`",
+            "Quick, Draw!",
+            "CC BY 4.0",
+        ] {
+            assert!(text.contains(part), "missing \u{201c}{}\u{201d} in:\n{}", part, text);
+        }
+        assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
+        // Every setting at its highest still fits an embed.
+        assert!(guess_help_text(&huge().guess).chars().count() < DESCRIPTION_LIMIT);
+        // No channel, no limit, no bank read yet, and no no-repeat window.
+        let bare = GuessRules { channel: None, cap: None, words: None, no_repeat_days: 0, ..guess_defaults() };
+        let text = guess_help_text(&bare);
+        assert!(text.contains("in its own channel") && text.contains("No daily limit"), "{}", text);
+        assert!(!text.contains("in the bank") && !text.contains("comes round again"), "{}", text);
+        assert!(GUESS_RULES_TITLE.contains("Guess the Word"));
+    }
+
+    #[test]
     fn the_guide_and_the_earn_button_carry_anagrams_from_its_live_settings() {
         let games = &guide(&defaults(), true)[2].body;
         assert!(
@@ -1555,6 +1686,14 @@ pub(crate) mod tests {
         );
         assert!(earn_text(&defaults()).contains("🔀 Anagrams 1–3 first to type it (max 10)"), "{}", earn_text(&defaults()));
         // Off, or worth nothing: not advertised at all.
+        assert!(
+            games.contains("🎨 **Guess the Word** in <#1518233664016617582> — a doodle is always up; first to type what it is wins **2** (max 10)"),
+            "{}",
+            games
+        );
+        assert!(earn_text(&defaults()).contains("🎨 Guess the Word 2 first to name it (max 10)"), "{}", earn_text(&defaults()));
+        let no_guess = Rules { guess: GuessRules { channel: None, ..guess_defaults() }, ..defaults() };
+        assert!(!guide(&no_guess, true)[2].body.contains("Guess the Word") && !earn_text(&no_guess).contains("Guess the Word"));
         let off = Rules { anagrams: AnagramRules { channel: None, ..anagram_defaults() }, ..defaults() };
         assert!(!guide(&off, true)[2].body.contains("Anagrams") && !earn_text(&off).contains("Anagrams"));
         let free = Rules { anagrams: AnagramRules { points: [0, 0, 0], ..anagram_defaults() }, ..defaults() };

@@ -246,6 +246,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_VOICE", "Voice points a day", "Most voice points one person can earn in a day (one per full hour, or whatever the voice block is set to).", number(0, 24, "points"), "4"),
                 setting("VIZIER_CAP_QUIZ", "Quiz points a day", "Most points one person can earn from quiz rounds in a day. 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_KOTO", "Koto points a day", "Most points one person can earn from Koto in a day. 100 means no limit.", number(0, 100, "points"), "4"),
+                setting("VIZIER_CAP_GUESS", "Guess the Word points a day", "Most points one person can earn from Guess the Word in a day. 100 means no limit.", number(0, 100, "points"), "10"),
                 setting("VIZIER_CAP_ANAGRAM", "Anagram points a day", "Most points one person can earn from anagrams in a day — the bot's own Anagrams game and Anagram Bot together, since they are one kind of word game. 100 means no limit.", number(0, 100, "points"), "10"),
                 setting("VIZIER_CAP_CAT", "Cat Bot points a day", "Most points one person can earn from Cat Bot catches in a day. 100 means no limit.", number(0, 100, "points"), "3"),
                 setting("VIZIER_CAP_ARENA", "Arena points a day", "Most points one person can earn from 1v1 fights in a day. 100 means no limit.", number(0, 100, "points"), "3"),
@@ -547,6 +548,43 @@ pub fn sections() -> Vec<Section> {
                 command("anagramhelp", EVERYONE, "/anagramhelp", "How the anagrams game works, written from the settings as they are right now: how to answer, what each length pays, and what !hint and !skip do. Only you see it."),
                 command("anagramskip", ADMINS, "/anagramskip", "Drops the round that is up, with no points for anyone, reveals the word and sets a fresh one at once. Unlike !skip, no hint is needed first."),
                 command("anagramstop", ADMINS, "/anagramstop", "Switches the anagrams game off: the card comes down, the channel topic is cleared and no new rounds are set. Switch Game on back on to play again."),
+            ],
+        },
+        Section {
+            id: "guess",
+            title: "Guess the Word",
+            icon: "🎨",
+            about: "A hand-drawn doodle is always waiting in its own channel (Game channel below), and the first person to \
+                    say what it is wins house points. Members DO type here - guessing is typing - so leave Send Messages \
+                    on for @everyone and let the bot send, embed, attach files, read history, add reactions and manage \
+                    messages. The bot inks out one of the drawings from the doodle bank and asks what it is; members type \
+                    their guess straight into the channel. Capitals, spaces and punctuation are forgiven, so Ice-Cream, \
+                    ice cream and icecream are one answer, and a spelling slip is forgiven on longer words - gitar takes a \
+                    guitar - but never as far as a different word in the bank, so car can't take a police car. The first \
+                    right guess gets a ✅ on the message, a line naming the winner, and the next doodle at once. Wrong \
+                    guesses are ignored in silence, because a ❌ on every stray message in a chatty channel would be \
+                    noise. Typing !hint puts a SECOND drawing of the same thing up beside the first and gives away the \
+                    word's first letter, once a round, and takes a point off what the round pays; !skip opens up only \
+                    after a hint and pays nobody. A round nobody gets is replaced by the bot itself, and neither a word \
+                    nor any single drawing of it comes round again inside the no-repeat window. The doodles come from \
+                    drawbank/words.json and drawbank/doodles.bin in the bot's workspace, read at start: with no bank \
+                    there the game simply stays off and says so in the log. The drawings are real ones out of Google's \
+                    Quick, Draw! dataset, used under CC BY 4.0, and the game credits them wherever they appear. Never \
+                    runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_GUESS", "Game on", "Run Guess the Word in its channel. Off takes the card down and stops new rounds; the round that was up is left as it is. The game also stays off, whatever this says, when there is no doodle bank to play with.", Kind::Toggle, "off"),
+                setting("VIZIER_GUESS_CHANNEL", "Game channel", "The channel the doodle card lives in. Members need to be able to type there - that is how guesses are given. Empty means ❓guess-the-word, the channel the game was made for. Never #safe-corner.", Kind::Channel, "1518233664016617582"),
+                setting("VIZIER_POINTS_GUESS", "Points for naming it", "House points for the first person to say what the doodle is. A hint takes one off, never below one.", number(0, 100, "points"), "2"),
+                setting("VIZIER_GUESS_IDLE_MINUTES", "Replace a round after", "How long a doodle nobody names and nobody skips stays up before the bot says what it was and draws a new one by itself. A picture is quicker to give up on than a word, so this is shorter than the anagrams one.", number(1, 1440, "minutes"), "15"),
+                setting("VIZIER_GUESS_NO_REPEAT_DAYS", "Don't repeat a word for", "How long a word is held back before it can be drawn again - and, inside that, how long each particular drawing of it is held back, so the same picture is never shown twice.", number(0, 365, "days"), "14"),
+                setting("VIZIER_GUESS_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted. The channel is a chatty one, so the card follows the conversation down rather than jumping after every message.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_GUESS_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "120"),
+            ],
+            commands: vec![
+                command("guess", EVERYONE, "/guess", "The doodle that is up now, sent privately with the picture: what it is worth, whether the hint has gone, and how you have done today. Only you see it."),
+                command("guesshelp", EVERYONE, "/guesshelp", "How Guess the Word works, written from the settings as they are right now: how to guess, what a round pays, and what !hint and !skip do. Only you see it."),
+                command("guessskip", ADMINS, "/guessskip", "Drops the doodle that is up, with no points for anyone, says what it was and draws a fresh one at once. Unlike !skip, no hint is needed first."),
+                command("guessstop", ADMINS, "/guessstop", "Switches Guess the Word off: the card comes down and no new doodles go up. Switch Game on back on to play again."),
             ],
         },
         Section {
