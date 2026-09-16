@@ -224,6 +224,15 @@ pub trait PanelData: Send + Sync + 'static {
     async fn search_window(&self, _filter: search::Filter) -> anyhow::Result<search::Window> {
         anyhow::bail!("no stored history here")
     }
+    /// The join log: everyone the bot has seen join or leave, one row per person.
+    async fn join_logs(&self) -> Vec<left::JoinRow> {
+        Vec::new()
+    }
+    /// Points, messages and voice for members who are gone, read by id from the
+    /// bot's own databases.
+    async fn left_stats(&self, _ids: Vec<u64>, _now: i64) -> HashMap<u64, left::LeftStats> {
+        HashMap::new()
+    }
     /// The house a member is sorted into. Reads the house store: call it off the async threads.
     fn member_house(&self, _id: u64) -> Option<&'static super::super::house::House> {
         None
@@ -259,6 +268,7 @@ mod chess;
 mod frogs;
 mod houses;
 mod insights;
+mod left;
 mod media;
 mod members;
 mod memos;
@@ -510,6 +520,27 @@ impl PanelData for LiveData {
 
     fn member_house(&self, id: u64) -> Option<&'static super::super::house::House> {
         super::super::house::house_of(id)
+    }
+
+    async fn join_logs(&self) -> Vec<left::JoinRow> {
+        let Some((deps, _)) = AGENT.get() else { return Vec::new() };
+        super::super::joinlog_all(&deps.storage)
+            .await
+            .into_iter()
+            .map(|(id, log)| left::JoinRow {
+                id,
+                name: log.name,
+                joins: log.joins,
+                leaves: log.leaves,
+                first_join: log.first_join,
+                last_join: log.last_join,
+                last_leave: log.last_leave,
+            })
+            .collect()
+    }
+
+    async fn left_stats(&self, ids: Vec<u64>, now: i64) -> HashMap<u64, left::LeftStats> {
+        tokio::task::spawn_blocking(move || left::read_stats_live(&ids, now)).await.unwrap_or_default()
     }
 
     async fn msglog_deleted(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
@@ -895,6 +926,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/msglog/edited", get(msglog::edited))
         .route("/msglog/file/{id}/{n}", get(msglog::file))
         .route("/members", get(members::search))
+        .route("/members/left", get(left::list))
         .route("/members/notes", get(members::noted))
         .route("/members/notes/enable", post(members::enable_notes))
         .route("/members/{id}", get(members::profile))
@@ -1113,6 +1145,7 @@ async fn status(State(panel): State<Panel>) -> ApiResult {
         })
         .collect();
     let all = reminders::list();
+    let left_recently = left::recent_count(&panel, chrono::Utc::now().timestamp()).await;
     ok(json!({
         "bot": {
             "name": BOT_NAME,
@@ -1125,6 +1158,8 @@ async fn status(State(panel): State<Panel>) -> ApiResult {
         "reminders": { "total": all.len(), "active": all.iter().filter(|r| r.enabled).count() },
         "panel_url": super::var("VIZIER_PANEL_URL"),
         "notes_to_review": super::members::list().iter().filter(|n| n.awaits_review()).count(),
+        "left_recently": left_recently,
+        "left_days": left::TILE_DAYS,
     }))
 }
 
@@ -1607,6 +1642,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(search::audit_entry(e));
             } else if e.key == "msglog:deleted" || e.key == "msglog:edited" {
                 obj.extend(msglog::audit_entry(e));
+            } else if e.key == "members:left" {
+                obj.extend(left::audit_entry(e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("memo:") || e.key.starts_with("media:") {

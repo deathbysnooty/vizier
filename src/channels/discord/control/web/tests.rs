@@ -194,7 +194,27 @@ impl PanelData for FakeData {
     async fn member_stats(&self, id: u64, now: i64) -> super::members::MemberStats {
         use super::members::{JoinSummary, MemberStats};
         if self.cached_member(id).is_none() {
-            return MemberStats { hours: vec![0; 24], ..Default::default() };
+            // Someone who left: Discord knows nothing, but the join log and the
+            // old numbers are still here, which is what their profile shows.
+            let Some(log) = fake_joinlog(now).into_iter().find(|r| r.id == id) else {
+                return MemberStats { hours: vec![0; 24], ..Default::default() };
+            };
+            let stats = self.left_stats(vec![id], now).await.remove(&id).unwrap_or_default();
+            return MemberStats {
+                house: self.member_house(id).map(|h| h.key.to_string()),
+                muggle: stats.muggle,
+                all_time: stats.points,
+                messages_30d: stats.messages_30d,
+                hours: vec![0; 24],
+                joins: Some(JoinSummary {
+                    joins: log.joins,
+                    leaves: log.leaves,
+                    first_join: log.first_join,
+                    last_join: log.last_join,
+                    last_leave: log.last_leave,
+                }),
+                ..Default::default()
+            };
         }
         let (today_rows, month_rows, all_time) = {
             let conn = fake_ledger(now).lock();
@@ -364,9 +384,45 @@ impl PanelData for FakeData {
     }
 
     fn member_house(&self, id: u64) -> Option<&'static super::super::super::house::House> {
+        // Some of those who left still have their row in the house store.
+        if (3000..3100).contains(&id) {
+            return (id % 3 != 0).then(|| super::super::super::house::house(HOUSES_KEYS[(id % 4) as usize])).flatten();
+        }
         self.cached_member(id)?;
         let key = if id >= 2000 { HOUSES_KEYS[((id - 2000) % 4) as usize] } else { HOUSES_KEYS[(id % 4) as usize] };
         super::super::super::house::house(key)
+    }
+
+    async fn join_logs(&self) -> Vec<super::left::JoinRow> {
+        fake_joinlog(chrono::Utc::now().timestamp())
+    }
+
+    async fn left_stats(&self, ids: Vec<u64>, now: i64) -> std::collections::HashMap<u64, super::left::LeftStats> {
+        let conn = fake_ledger(now).lock();
+        ids.into_iter()
+            .map(|id| {
+                // 3009 is someone the databases never recorded at all.
+                if id == 3009 {
+                    return (id, super::left::LeftStats::default());
+                }
+                let seed = id % 89;
+                let points: i64 = conn
+                    .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE user_id = ?1", rusqlite::params![id as i64], |r| r.get(0))
+                    .unwrap_or(0);
+                let all = 40 + (seed as i64 * 37) % 4_000;
+                (
+                    id,
+                    super::left::LeftStats {
+                        points: points + (seed as i64 * 11) % 300,
+                        messages_30d: if seed % 5 == 0 { 0 } else { (seed as i64 * 3) % 120 },
+                        messages_all: all,
+                        voice_30d_secs: ((seed as i64 * 17) % 400) * 60,
+                        last_message_day: Some(super::super::super::points::ist_day(now - ((seed as i64 * 3) % 90) * 86_400)),
+                        muggle: id == 3004,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn duels(&self, since: i64) -> Vec<(u64, u64, i64)> {
@@ -576,6 +632,52 @@ static FAKE_AGENT: std::sync::LazyLock<parking_lot::Mutex<super::agent::AgentSet
         max_tokens: Some(1200),
     })
 });
+
+/// The join log behind the "Left the server" page: id, the name the bot stored,
+/// joins, leaves, hours since they last went, and days they were here before
+/// that. A negative "hours" means they came back an hour after that leave.
+const JOINLOG: &[(u64, &str, u32, u32, i64, i64)] = &[
+    (3001, "ofcadeath", 4, 4, 3, 84),
+    (3002, "kritika_x", 1, 1, 26, 412),
+    (3003, "notyourbhai", 2, 2, 50, 9),
+    (2019, "Sana", 1, 1, 96, 620),
+    (3004, "quietkid", 1, 1, 220, 47),
+    (3005, "aarav.dev", 3, 3, 400, 150),
+    (3006, "meme_lord_99", 1, 1, 620, 5),
+    (2031, "Mehak", 2, 2, 24 * 44, 300),
+    (3007, "sleepyhead", 1, 1, 24 * 70, 210),
+    (3008, "raghav", 1, 1, 24 * 88, 33),
+    (3009, "ghost_account", 1, 1, 24 * 200, 2),
+    (3010, "old_timer", 5, 5, 24 * 400, 900),
+    // Gone for good, but the bot never saw them join: seeded from the old Dyno log.
+    (3011, "dyno_only", 0, 1, 24 * 12, -1),
+    // Left and came back: never in the list.
+    (3012, "wapas_aagaya", 4, 3, -30, 260),
+    // Never left at all.
+    (3013, "still_here", 1, 0, 0, 500),
+];
+
+/// [`JOINLOG`] as the panel reads it.
+fn fake_joinlog(now: i64) -> Vec<super::left::JoinRow> {
+    let stamp = |ts: i64| chrono::DateTime::from_timestamp(ts, 0).unwrap().to_rfc3339();
+    JOINLOG
+        .iter()
+        .map(|(id, name, joins, leaves, hours, here_days)| {
+            let left = now - hours.abs() * 3600;
+            let first = (*here_days >= 0).then(|| stamp(left - here_days * 86_400));
+            super::left::JoinRow {
+                id: *id,
+                name: (*name).to_string(),
+                joins: *joins,
+                leaves: *leaves,
+                first_join: first.clone(),
+                // Someone who came back joined after they left; everyone else, before.
+                last_join: first.as_ref().map(|_| if *hours < 0 { stamp(left + 3600) } else { stamp(left - 3600) }),
+                last_leave: (*leaves > 0).then(|| stamp(left)),
+            }
+        })
+        .collect()
+}
 
 /// A house ledger with about six weeks of made-up points, the busiest in the last day.
 fn fake_ledger(now: i64) -> &'static parking_lot::Mutex<rusqlite::Connection> {
@@ -3320,6 +3422,183 @@ async fn pictures_are_served_only_for_deleted_messages_and_only_from_the_folder(
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, _) = call(&app, "GET", &format!("/api/msglog/file/{}/0", log.meme), Some(&session_for(MEMBER)), None, false).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// --- who left the server ----------------------------------------------------------------
+
+async fn left_api(app: &Router, session: &str, query: &str) -> (StatusCode, Value) {
+    let (status, body, _) = call(app, "GET", &format!("/api/members/left?{query}"), Some(session), None, false).await;
+    (status, body)
+}
+
+fn left_names(body: &Value) -> Vec<String> {
+    body["results"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+#[tokio::test]
+async fn the_left_list_holds_only_those_who_havent_come_back() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = left_api(&app, &session, "days=all").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names = left_names(&body);
+    // Newest departure first.
+    assert_eq!(names[0], "ofcadeath");
+    assert_eq!(names.last().unwrap(), "old_timer");
+    assert_eq!(names.len(), 13);
+    assert_eq!(body["total"], 13);
+    assert!(!names.contains(&"wapas_aagaya".to_string()), "they came back: {names:?}");
+    assert!(!names.contains(&"still_here".to_string()), "they never left: {names:?}");
+    // Seeded from the old member log: a leave with no join of its own.
+    let dyno = body["results"].as_array().unwrap().iter().find(|r| r["name"] == "dyno_only").expect("the seeded row");
+    assert!(dyno["first_join_ts"].is_null() && dyno["here_secs"].is_null());
+    assert_eq!((&dyno["joins"], &dyno["leaves"]), (&json!(0), &json!(1)));
+    // Departures are in order, and each row says how long they were here.
+    let ts: Vec<i64> = body["results"].as_array().unwrap().iter().map(|r| r["left_ts"].as_i64().unwrap()).collect();
+    assert!(ts.windows(2).all(|w| w[0] >= w[1]), "{ts:?}");
+    let first = &body["results"][0];
+    assert_eq!(first["here_secs"], json!(84 * 86_400));
+    assert_eq!(first["joins"], json!(4));
+    assert_eq!(first["in_server"], json!(false), "Discord no longer knows them");
+    assert!(first["avatar"].is_null());
+    // Someone the cache still holds is named and pictured from it.
+    let sana = body["results"].as_array().unwrap().iter().find(|r| r["name"] == "Sana").expect("Sana");
+    assert_eq!(sana["in_server"], json!(true));
+    assert!(sana["avatar"].as_str().unwrap().starts_with("data:image/svg+xml"));
+}
+
+#[tokio::test]
+async fn the_left_list_filters_by_period_and_name_and_pages() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let count = |body: &Value| body["results"].as_array().unwrap().len();
+    for (days, want) in [("7", 4), ("30", 8), ("90", 11), ("all", 13)] {
+        let (status, body) = left_api(&app, &session, &format!("days={days}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(count(&body), want, "{days} days: {:?}", left_names(&body));
+        assert_eq!(body["total"], want);
+        assert_eq!(body["days"], days);
+    }
+    // 30 days is what a page with no period asked for shows.
+    let (_, body) = left_api(&app, &session, "").await;
+    assert_eq!(count(&body), 8);
+    assert_eq!(body["days"], "30");
+
+    // The name is matched anywhere in the stored one, ignoring case.
+    let (_, body) = left_api(&app, &session, "days=all&q=AARAV").await;
+    assert_eq!(left_names(&body), vec!["aarav.dev"]);
+    assert_eq!(body["q"], "AARAV", "the name is echoed as it was typed");
+    let (_, body) = left_api(&app, &session, "days=all&q=o").await;
+    assert_eq!(left_names(&body), vec!["ofcadeath", "notyourbhai", "dyno_only", "meme_lord_99", "ghost_account", "old_timer"]);
+    let (_, body) = left_api(&app, &session, "days=7&q=o").await;
+    assert_eq!(left_names(&body), vec!["ofcadeath", "notyourbhai"]);
+    let (_, body) = left_api(&app, &session, "days=all&q=nobody-by-that-name").await;
+    assert_eq!((count(&body), body["total"].as_u64()), (0, Some(0)));
+
+    // Paging: each page carries on from the last, and the count is the whole period.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<i64> = None;
+    for page in 0..5 {
+        let q = match cursor {
+            Some(c) => format!("days=all&limit=3&before={c}"),
+            None => "days=all&limit=3".to_string(),
+        };
+        let (status, body) = left_api(&app, &session, &q).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total"], 13, "the count is of the period, not the page");
+        seen.extend(left_names(&body));
+        cursor = body["next_before"].as_i64();
+        if cursor.is_none() {
+            assert_eq!(count(&body), if page == 4 { 1 } else { 3 });
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 13, "every row, once: {seen:?}");
+    let (_, all) = left_api(&app, &session, "days=all").await;
+    assert_eq!(seen, left_names(&all));
+}
+
+#[tokio::test]
+async fn left_rows_carry_what_the_databases_still_hold() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = left_api(&app, &session, "days=all").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = |name: &str| body["results"].as_array().unwrap().iter().find(|r| r["name"] == name).cloned().expect(name);
+    let first = row("ofcadeath");
+    assert!(first["points"].as_i64().unwrap() > 0);
+    assert!(first["messages_all"].as_i64().unwrap() > 0);
+    assert!(first["voice_30d_min"].as_i64().unwrap() >= 0);
+    assert_eq!(first["house"]["name"], "Slytherin", "their house row is still there");
+    assert_eq!(first["muggle"], json!(false));
+    assert!(first["last_message_day"].as_str().unwrap().len() == 10);
+    // A member the house store has forgotten has no chip.
+    assert!(row("notyourbhai")["house"].is_null());
+    assert_eq!(row("quietkid")["muggle"], json!(true));
+    // Someone none of the databases ever saw is zeros, not missing numbers.
+    let ghost = row("ghost_account");
+    for field in ["points", "messages_30d", "messages_all", "voice_30d_min"] {
+        assert_eq!(ghost[field], json!(0), "{field}: {ghost}");
+    }
+    assert!(ghost["last_message_day"].is_null());
+    // The Overview tile counts the same 30 days the page shows.
+    let (_, status_body, _) = call(&app, "GET", "/api/status", Some(&session), None, false).await;
+    assert_eq!(status_body["left_recently"], json!(8));
+    assert_eq!(status_body["left_days"], json!(30));
+}
+
+#[tokio::test]
+async fn the_left_list_checks_its_input_and_needs_an_admin() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    for bad in ["days=5", "days=yesterday", "before=-4", "before=abc", "limit=lots", &format!("q={}", "x".repeat(101))] {
+        let (status, body) = left_api(&app, &session, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert!(body["error"].is_string());
+    }
+    let (status, body) = left_api(&app, &session, "days=all&limit=1000").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["limit"], 100);
+
+    let (status, _, _) = call(&app, "GET", "/api/members/left", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "GET", "/api/members/left", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The list is its own page, not a member id.
+    let (status, body, _) = call(&app, "GET", "/api/members/2019", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "2019");
+}
+
+#[tokio::test]
+async fn looks_at_who_left_are_in_the_activity_log_once() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    for _ in 0..2 {
+        let (status, _) = left_api(&app, &session, "days=90&q=aarav").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine = |audit: &Value, change: Option<&str>| -> Vec<Value> {
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["key"] == "members:left" && e["user_id"] == ADMIN_TWO.to_string() && change.is_none_or(|c| e["change"] == c))
+            .cloned()
+            .collect()
+    };
+    let entries = mine(&audit, Some("last 90 days · “aarav”"));
+    assert_eq!(entries.len(), 1, "a repeat isn't logged again: {audit}");
+    assert_eq!(entries[0]["label"], "Looked at who left");
+    assert_eq!(entries[0]["section"]["id"], "left");
+    assert_eq!(entries[0]["user_id"], ADMIN_TWO.to_string());
+    // A different look is its own entry.
+    let (_, _) = left_api(&app, &session, "days=all").await;
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let all = mine(&audit, None);
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().any(|e| e["change"] == "all time · any name"), "{audit}");
 }
 
 // --- the demo ----------------------------------------------------------------------------

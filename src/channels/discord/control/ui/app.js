@@ -106,6 +106,7 @@
     image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
     send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
     door: '<path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><path d="M14.5 12.5h.01"/>',
+    userminus: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M17 11h5"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
   };
 
@@ -561,6 +562,7 @@
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/search', icon('search'), 'Search messages'),
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
+      navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -607,6 +609,7 @@
       ['Search messages', '#/search', 'search', 'Find who said something and when'],
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
+      ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
       ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
@@ -746,6 +749,7 @@
       case 'activity': renderActivity(page, r.q); break;
       case 'search': renderSearch(page, r.q); break;
       case 'deleted': renderDeleted(page, r.q); break;
+      case 'left': renderLeft(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
     }
@@ -877,7 +881,9 @@
     page.appendChild(h('div', { class: 'tiles' },
       tile('Version', 'tag', 'v' + st.bot.version, h('span', null, h('span', { class: 'ok' }, '● '), 'Online')),
       upTile,
-      tile('Members', 'users', guild ? numberFmt.format(guild.members) : '—', guild ? guild.name : 'Server not loaded yet'),
+      tile('Members', 'users', guild ? numberFmt.format(guild.members) : '—', st.left_recently
+        ? h('a', { class: 'tile-link', href: '#/left' }, icon('userminus'), st.left_recently + ' left in the last ' + (st.left_days || 30) + ' days')
+        : (guild ? guild.name : 'Server not loaded yet')),
       tile('Reminders', 'bell', activeReminders + ' active', plural(S.reminders.length, 'reminder') + ' in total')));
     clearInterval(renderOverview.timer);
     renderOverview.timer = setInterval(() => {
@@ -1402,6 +1408,7 @@
       if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
       secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
       secSel.appendChild(h('option', { value: 'search', selected: section === 'search' }, '🔎  Search messages'));
+      secSel.appendChild(h('option', { value: 'left', selected: section === 'left' }, '🚪  Left the server'));
       if (!sectionById('members')) secSel.appendChild(h('option', { value: 'members', selected: section === 'members' }, '👤  Members'));
       clear(keySel);
       keySel.appendChild(h('option', { value: '' }, 'All settings'));
@@ -1937,6 +1944,149 @@
       h('div', { class: 'msg-hit-actions' }, r.url
         ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + ((r.member && r.member.name) || 'the') + '’s message in Discord' }, h('span', { class: 'hide-sm' }, 'Open in Discord'), h('span', { class: 'show-sm' }, 'Open'), icon('external'))
         : null));
+  }
+
+  // --- left the server -----------------------------------------------------------------
+
+  const LEFT_PERIODS = [['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['all', 'All']];
+
+  /** How long someone was here, in round words: "12 days", "2 months", "3 years". */
+  function stayWords(secs) {
+    const d = Math.round(secs / 86400);
+    if (d < 1) return 'less than a day';
+    if (d < 45) return plural(d, 'day');
+    const m = Math.round(d / 30.44);
+    if (m < 24) return plural(m, 'month');
+    const y = Math.floor(d / 365.25);
+    const rest = Math.round((d - y * 365.25) / 30.44);
+    return plural(y, 'year') + (rest ? ' ' + plural(rest, 'month') : '');
+  }
+
+  function renderLeft(page, rq) {
+    document.title = 'Left the server · Loduchand';
+    const days = rq.get('days');
+    const st = {
+      q: (rq.get('q') || '').trim().slice(0, 100),
+      days: LEFT_PERIODS.some((x) => x[0] === days) ? days : '30',
+    };
+    const hashFor = (over) => {
+      const s = Object.assign({}, st, over || {});
+      const p = new URLSearchParams();
+      if (s.days !== '30') p.set('days', s.days);
+      if (s.q) p.set('q', s.q);
+      const qs = p.toString();
+      return '#/left' + (qs ? '?' + qs : '');
+    };
+    const apply = (over) => navigate(hashFor(over));
+
+    page.appendChild(pageHead('Left the server', 'Members the bot has seen leave, and what they did while they were here.'));
+    page.appendChild(h('div', { class: 'banner info inline left-note', role: 'note' }, icon('info'),
+      h('p', null, h('b', null, 'Only what the bot recorded. '),
+        h('span', null, 'Discord tells bots nothing about people who are gone, so someone who left before the bot started watching isn’t here.'))));
+
+    const input = h('input', { type: 'search', value: st.q, placeholder: 'Search the name the bot stored', 'aria-label': 'Filter by name', maxlength: '100', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
+    input.addEventListener('search', () => { if (!input.value.trim() && st.q) apply({ q: '' }); });
+    const period = segmented(LEFT_PERIODS, st.days, 'Period', (v) => apply({ days: v }));
+    page.appendChild(h('form', { class: 'card msg-search left-filters', role: 'search', onsubmit: (e) => { e.preventDefault(); apply({ q: input.value.trim() }); } },
+      h('div', { class: 'msg-search-row' }, h('label', { class: 'search-box' }, icon('search'), input)),
+      h('div', { class: 'msg-search-filters' }, period)));
+
+    const summary = h('div', { class: 'msg-summary', 'aria-live': 'polite' });
+    const list = h('div', { class: 'msg-list' });
+    const foot = h('div', { class: 'msg-foot' });
+    const box = h('div', { class: 'card msg-results left-results' }, list, foot);
+    page.appendChild(summary);
+    page.appendChild(box);
+
+    let items = [], next = null, total = 0, busy = false, failed = null, failedStatus = 0;
+    const periodWords = () => st.days === 'all' ? 'since the bot started keeping count' : 'in the last ' + st.days + ' days';
+    const nameWords = () => st.q ? ' with “' + st.q + '” in their name' : '';
+    const draw = () => {
+      clear(summary); clear(list); clear(foot);
+      box.classList.toggle('is-empty', !items.length);
+      if (!items.length && busy) { list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); foot.hidden = true; return; }
+      if (failed && !items.length) {
+        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load who left'), h('p', null, failed),
+          failedStatus === 0 || failedStatus >= 500 ? h('p', { style: 'margin-top:12px' }, h('button', { class: 'btn', type: 'button', onclick: () => load() }, icon('restart'), 'Try again')) : null));
+        foot.hidden = true;
+        return;
+      }
+      summary.appendChild(h('span', null, h('b', null, plural(total, 'member') + ' left'), ' ' + periodWords() + nameWords()));
+      if (!items.length) {
+        list.appendChild(h('div', { class: 'empty' }, icon('userminus'), h('h3', null, 'Nobody left'),
+          h('p', null, 'The bot has seen nobody go ' + periodWords() + nameWords() + '.'),
+          st.q || st.days !== 'all' ? h('p', { class: 'hint' }, h('a', { href: hashFor({ q: '', days: 'all' }) }, 'Look at everyone it has seen leave')) : null));
+      }
+      items.forEach((r) => list.appendChild(leftRow(r)));
+      foot.hidden = !items.length;
+      if (failed) foot.appendChild(h('span', { class: 'msg-foot-error' }, icon('alert'), failed));
+      if (next) foot.appendChild(h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() }, busy ? h('span', { class: 'spinner' }) : icon('down'), 'Load more'));
+      else if (items.length) foot.appendChild(h('span', null, 'That’s everyone ' + periodWords()));
+    };
+    const load = async () => {
+      if (busy) return;
+      busy = true; failed = null;
+      if (items.length) { const b = foot.querySelector('.btn'); if (b) { b.disabled = true; b.replaceChild(h('span', { class: 'spinner' }), b.firstChild); } } else draw();
+      const p = new URLSearchParams({ days: st.days });
+      if (st.q) p.set('q', st.q);
+      if (next) p.set('before', String(next));
+      try {
+        const data = await api('GET', '/members/left?' + p.toString());
+        if (!box.isConnected) return;
+        items = items.concat(data.results);
+        next = data.next_before;
+        total = data.total;
+      } catch (e) {
+        if (!box.isConnected) return;
+        failed = e.message;
+        failedStatus = e.status || 0;
+      }
+      busy = false;
+      draw();
+      refreshAudit();
+    };
+    load();
+  }
+
+  function leftRow(r) {
+    const href = '#/members/' + r.id;
+    const facts = [h('time', { datetime: new Date(r.left_ts * 1000).toISOString(), title: fmtFull.format(new Date(r.left_ts * 1000)) + ' IST' },
+      h('b', null, 'left ' + ago(r.left_ts)), ' (' + msgWhen(r.left_ts) + ')')];
+    if (r.here_secs) facts.push(h('span', null, 'was here ' + stayWords(r.here_secs)));
+    if (r.joins > 1 || r.leaves > 1) facts.push(h('span', null, 'joined ' + plural(r.joins, 'time') + ' · left ' + plural(r.leaves, 'time')));
+    const line = h('p', { class: 'left-times' });
+    facts.forEach((f, i) => { if (i) append(line, h('span', { class: 'sep', 'aria-hidden': 'true' }, ' · ')); append(line, f); });
+
+    const chip = (ic, text, tip) => h('span', { class: 'left-stat', title: tip || null }, icon(ic), text);
+    const stats = [];
+    if (r.points) stats.push(chip('zap', numberFmt.format(r.points) + ' points', 'House points they earned in all their time here'));
+    if (r.messages_all) stats.push(chip('message', numberFmt.format(r.messages_all) + ' messages',
+      numberFmt.format(r.messages_30d) + ' of them in their last 30 days here'));
+    if (r.voice_30d_min) stats.push(chip('voice', numberFmt.format(r.voice_30d_min) + ' min in voice', 'In the last 30 days they were here'));
+    if (r.last_message_day) stats.push(chip('clock', 'last said something ' + dayWords(r.last_message_day), 'The day of their last counted message'));
+    if (!stats.length) stats.push(h('span', { class: 'left-stat quiet' }, icon('info'), 'nothing recorded'));
+
+    return h('article', { class: 'msg-hit left-row' },
+      h('a', { class: 'msg-hit-avatar', href, tabindex: '-1', 'aria-hidden': 'true' }, avatar(r.avatar, r.name, 'lg')),
+      h('div', { class: 'msg-hit-main' },
+        h('div', { class: 'msg-hit-head' },
+          h('a', { class: 'msg-hit-name', href }, r.name),
+          r.house ? h('span', { class: 'house-chip', style: '--house:' + r.house.colour }, 'was ' + r.house.crest + ' ' + r.house.name) : null,
+          r.muggle ? h('span', { class: 'badge', title: 'They had stepped out of the house game' }, 'Muggle') : null),
+        line,
+        h('div', { class: 'left-stats' }, stats)),
+      h('div', { class: 'msg-hit-actions' }, h('a', { class: 'btn sm', href, 'aria-label': 'Open ' + r.name + '’s profile' }, 'Profile', icon('right'))));
+  }
+
+  /** "on 14 Sep" for an India day, "YYYY-MM-DD"; today and yesterday by name. */
+  function dayWords(day) {
+    const ts = Date.parse(day + 'T12:00:00+05:30') / 1000;
+    if (!ts) return day;
+    // "14/09/2026" in India time, turned round to compare with the day as stored.
+    const istDay = (ms) => istParts(ms, { day: '2-digit', month: '2-digit', year: 'numeric' }).split('/').reverse().join('-');
+    if (day === istDay(Date.now())) return 'today';
+    if (day === istDay(Date.now() - 86400000)) return 'yesterday';
+    return 'on ' + dayMonth(ts);
   }
 
   // --- panel settings ---------------------------------------------------------------

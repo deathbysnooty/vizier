@@ -2179,3 +2179,25 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .lightbox { padding: 12px; }
 }
 .msg-hit-chan .icon { width: 13px; height: 13px; margin-right: 3px; align-self: center; color: var(--faint); }
+
+/* --- left the server -------------------------------------------------------------------- */
+
+.left-note { margin-bottom: 14px; }
+.left-row .msg-hit-head { row-gap: 2px; }
+.left-times { margin-top: 3px; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.left-times b { color: var(--text-2); font-weight: 600; }
+.left-times .sep { color: var(--faint); }
+.left-stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.left-stat { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+.left-stat .icon { width: 13px; height: 13px; flex: none; color: var(--faint); }
+.left-stat.quiet { color: var(--faint); font-style: italic; border-style: dashed; }
+.left-results .msg-hit-actions .btn .icon { width: 14px; height: 14px; }
+.tile-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent-text); }
+.tile-link .icon { width: 13px; height: 13px; flex: none; }
+.tile-link:hover { text-decoration: underline; }
+
+@media (max-width: 640px) {
+  .left-filters .msg-search-filters .segmented { width: 100%; }
+  .left-stats { gap: 5px; }
+  .left-stat { font-size: 12px; padding: 2px 8px; }
+}
