@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.37] - 2026-09-16
+
+### 🚀 Features
+
+- *(panel)* A "Left the server" page
+
+### 💼 Other
+
+- Newcomers wait for a mod, with a card that says why
+- White pawns stay white, and every square is the same size
+## [0.11.36] - 2026-09-16
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.36
 ## [0.11.35] - 2026-09-16
 
 ### ⚙️ Miscellaneous Tasks
