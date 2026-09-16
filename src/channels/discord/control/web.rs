@@ -255,6 +255,7 @@ pub struct EmojiInfo {
 }
 
 mod agent;
+mod chess;
 mod frogs;
 mod houses;
 mod insights;
@@ -700,6 +701,12 @@ pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agen
 
 // --- /panel ------------------------------------------------------------------------
 
+/// The panel's public web address, without its trailing slash, when the owner
+/// has set one. The private chess board pages hang off it too.
+pub fn panel_base() -> Option<String> {
+    super::var("VIZIER_PANEL_URL").map(|u| u.trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
+}
+
 pub fn command() -> CreateCommand {
     CreateCommand::new("panel").description("admin only: a sign-in link for the Loduchand control panel")
 }
@@ -710,7 +717,7 @@ pub async fn on_command(ctx: &Context, command: &CommandInteraction) {
     if !super::super::admin_ids().contains(&user) {
         message = message.content("The control panel is for server admins only.");
     } else {
-        match super::var("VIZIER_PANEL_URL").map(|u| u.trim_end_matches('/').to_string()) {
+        match panel_base() {
             None => {
                 message = message.content("The panel has no public address yet: set `VIZIER_PANEL_URL`.");
             }
@@ -761,6 +768,12 @@ impl Panel {
             let setting = section.settings.iter().find(|s| s.key == key).cloned()?;
             Some((section, setting))
         })
+    }
+
+    /// A member's display name from the cache only, for pages that name people
+    /// and must not call Discord for each one.
+    pub fn cached_name(&self, id: u64) -> Option<String> {
+        self.data.cached_member(id).map(|m| m.name)
     }
 
     /// True when the address may try another sign-in now.
@@ -900,6 +913,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/assets/app.css", get(|| async { asset("text/css; charset=utf-8", APP_CSS) }))
         .route("/assets/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", FAVICON) }))
+        .merge(chess::routes())
         .nest("/api", api)
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))

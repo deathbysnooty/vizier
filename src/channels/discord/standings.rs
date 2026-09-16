@@ -431,7 +431,7 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
         format!("{} {}/{} · {} min{}, next point at {}", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company, next)
     });
     let mut left = 0;
-    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat] {
+    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat, Source::Chess] {
         match s.cap() {
             ledger::Cap::PerDay(cap) if pts(s) >= cap => lines.push(format!("{} ✅ maxed {}/{}", s.label(), pts(s), cap)),
             ledger::Cap::PerDay(cap) => {

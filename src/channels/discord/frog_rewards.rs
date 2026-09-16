@@ -40,6 +40,7 @@ pub const ACTIVITIES: &[(&str, &[&str])] = &[
     ("snitch", &["snitch", "golden_snitch"]),
     ("frog", &["frog"]),
     ("npat", &["npat"]),
+    ("chess", &["chess"]),
 ];
 
 pub fn activity_label(key: &str) -> String {
@@ -47,6 +48,7 @@ pub fn activity_label(key: &str) -> String {
         "snitch" => "🪽 Snitch".to_string(),
         "frog" => "🐸 Frogs".to_string(),
         "npat" => "🔤 Name Place Animal Thing".to_string(),
+        "chess" => "♟️ Chess".to_string(),
         other => Source::from_key(other).map(|s| s.label().to_string()).unwrap_or_else(|| other.to_string()),
     }
 }
@@ -203,6 +205,45 @@ pub fn npat_top(rows: &[LedgerRow], places: &[(u64, u8, i64)]) -> Option<(u64, i
         .map(|(user, wins, _, _)| (user, wins))
 }
 
+/// Chess's top: the most games WON, then the most points, then whoever got
+/// there first (their last win earliest). `wins` is every win of the day as
+/// (user, when); only people the ledger paid for chess that day can win, so
+/// Muggles, the unsorted and same-house games can't. Returns the winner and
+/// their wins.
+pub fn chess_top(rows: &[LedgerRow], wins: &[(u64, i64)]) -> Option<(u64, i64)> {
+    let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "chess");
+    let points = |u: u64| rows.iter().filter(|r| r.user == u && r.source == "chess").map(|r| r.points).sum::<i64>();
+    // (user, wins, latest win)
+    let mut tally: Vec<(u64, i64, i64)> = Vec::new();
+    for (user, at) in wins.iter().filter(|(u, _)| paid(*u)) {
+        match tally.iter_mut().find(|(u, _, _)| u == user) {
+            Some(t) => {
+                t.1 += 1;
+                t.2 = t.2.max(*at);
+            }
+            None => tally.push((*user, 1, *at)),
+        }
+    }
+    tally
+        .into_iter()
+        .map(|(user, won, reached)| (user, won, points(user), reached))
+        .min_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0)))
+        .map(|(user, won, _, _)| (user, won))
+}
+
+/// Swaps chess's points-based top for games won.
+fn with_chess_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let (Some(db), Some(start)) = (super::chess_store::db(), day_start(day)) else {
+        return tops;
+    };
+    let wins = super::chess_store::wins_between(&db.lock(), start, start + DAY);
+    tops.retain(|(a, _, _)| *a != "chess");
+    if let Some((user, won)) = chess_top(rows, &wins) {
+        tops.push(("chess", user, won));
+    }
+    tops
+}
+
 /// Swaps Name Place Animal Thing's points-based top for game wins.
 fn with_npat_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
     let Some(db) = super::npat_store::db() else {
@@ -310,7 +351,7 @@ fn give(key: &str, user: u64, origin: &str, what: &AwardFor) -> Option<Award> {
 /// Hands out a day's top cards and posts the summary.
 pub async fn run_daily_top(ctx: &Context, day: &str) {
     let rows = day_rows(day);
-    let tops = order_like_activities(with_npat_measured(with_chat_and_voice_measured(daily_tops(&rows), &rows, day), &rows, day));
+    let tops = order_like_activities(with_chess_measured(with_npat_measured(with_chat_and_voice_measured(daily_tops(&rows), &rows, day), &rows, day), &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -541,6 +582,23 @@ mod tests {
         // The ledger's own points don't decide it: daily_tops' points-based pick is swapped out.
         assert_eq!(daily_tops(&[row(5, "npat", 6, 1)]), vec![("npat", 5, 6)]);
         assert_eq!(activity_label("npat"), "🔤 Name Place Animal Thing");
+    }
+
+    #[test]
+    fn the_days_chess_card_goes_to_the_most_wins_then_the_most_points() {
+        let rows = vec![row(1, "chess", 4, 10), row(2, "chess", 4, 20), row(2, "chess", 1, 30), row(3, "quiz", 5, 5)];
+        let wins = vec![(1u64, 100i64), (2, 110), (2, 120)];
+        assert_eq!(chess_top(&rows, &wins), Some((2, 2)), "two wins beat one");
+        // Level on wins: the one with more chess points that day.
+        assert_eq!(chess_top(&rows, &[(1, 100), (2, 110)]), Some((2, 1)));
+        // Level on both: whoever finished their last win first.
+        let even = vec![row(1, "chess", 4, 10), row(2, "chess", 4, 20)];
+        assert_eq!(chess_top(&even, &[(2, 200), (1, 100)]), Some((1, 1)));
+        assert_eq!(chess_top(&even, &[]), None, "nobody won");
+        assert_eq!(chess_top(&[], &wins), None, "the ledger paid nobody for chess");
+        assert_eq!(chess_top(&even, &[(9, 100)]), None, "a win by someone chess never paid");
+        assert_eq!(activity_label("chess"), "♟️ Chess");
+        assert!(ACTIVITIES.iter().any(|(a, s)| *a == "chess" && s.contains(&"chess")));
     }
 
     #[test]

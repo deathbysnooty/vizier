@@ -38,6 +38,8 @@ pub enum Source {
     Frog,
     /// Name Place Animal Thing: a letter, four answers, points for unique ones.
     Npat,
+    /// Chess: a whole game, paid to the winner (or both, for a draw).
+    Chess,
 }
 
 /// How much one person may earn from a source.
@@ -53,7 +55,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 15] = [
+    pub const ALL: [Source; 16] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -69,6 +71,7 @@ impl Source {
         Source::Wordle,
         Source::Frog,
         Source::Npat,
+        Source::Chess,
     ];
 
     pub fn key(self) -> &'static str {
@@ -88,6 +91,7 @@ impl Source {
             Source::Wordle => "wordle",
             Source::Frog => "frog",
             Source::Npat => "npat",
+            Source::Chess => "chess",
         }
     }
 
@@ -112,6 +116,7 @@ impl Source {
             Source::Wordle => "🟩 Wordle",
             Source::Frog => "🐸 Chocolate Frog",
             Source::Npat => "🔤 Name Place Animal Thing",
+            Source::Chess => "♟️ Chess",
         }
     }
 
@@ -132,6 +137,7 @@ impl Source {
             // No limit unless the owner sets one: a frog is a riddle won outright.
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
+            Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.

@@ -1049,6 +1049,7 @@ pub fn store() {
             .collect();
         std::fs::write(bank.join("test.jsonl"), lines.join("\n")).unwrap();
         super::super::super::frog_store::open(dir.path().to_str().unwrap()).expect("frog store");
+        super::super::super::chess_store::open(dir.path().to_str().unwrap()).expect("chess store");
         dir
     });
 }
@@ -1056,6 +1057,13 @@ pub fn store() {
 pub fn panel() -> Router {
     store();
     router(Panel::new(Arc::new(FakeData), fake_catalog))
+}
+
+/// A `Panel` over the fake Discord, for pages whose builders are tested
+/// directly rather than through the router.
+pub fn fake_panel() -> Panel {
+    store();
+    Panel::new(Arc::new(FakeData), fake_catalog)
 }
 
 pub fn session_for(user: u64) -> String {

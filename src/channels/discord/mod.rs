@@ -41,6 +41,10 @@ mod frog_store;
 mod frog_trade;
 mod house;
 mod msglog;
+mod chess;
+mod chess_board;
+mod chess_rules;
+mod chess_store;
 mod npat;
 mod npat_judge;
 mod npat_store;
@@ -105,6 +109,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = npat_store::open(&self.deps.config.workspace) {
             tracing::warn!("npat: store not opened: {}", err);
+        }
+        if let Err(err) = chess_store::open(&self.deps.config.workspace) {
+            tracing::warn!("chess: store not opened: {}", err);
         }
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
@@ -1233,6 +1240,7 @@ impl EventHandler for Handler {
         // A deleted House Cup post goes back up, in order.
         scoreboard::on_delete(&ctx, channel_id, deleted_message_id);
         npat::on_delete(channel_id, deleted_message_id);
+        chess::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1470,6 +1478,9 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(npat::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1544,6 +1555,8 @@ impl EventHandler for Handler {
         frog::spawn(ctx.clone());
         // Name Place Animal Thing: resumes or judges a round a restart left, then the lobby.
         npat::spawn(ctx.clone());
+        // Chess: pays and announces games a restart left, then keeps the clocks.
+        chess::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1594,6 +1607,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("npat") {
                 npat::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("chess") {
+                chess::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -1807,6 +1824,10 @@ impl EventHandler for Handler {
             }
             if modal.data.custom_id.starts_with("npatans:") {
                 npat::on_modal(&ctx, modal).await;
+                return;
+            }
+            if modal.data.custom_id.starts_with("chessmove:") {
+                chess::on_modal(&ctx, modal).await;
                 return;
             }
             if let Some(orig_id) = modal.data.custom_id.strip_prefix("lrmodal:") {
@@ -2108,6 +2129,18 @@ impl EventHandler for Handler {
             }
             if command.data.name == "npatstop" {
                 npat::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "chess" {
+                chess::command_handler(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "chesshelp" {
+                chess::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "chessstop" {
+                chess::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -2878,6 +2911,8 @@ impl EventHandler for Handler {
         scoreboard::on_message(&ctx, &msg);
         // Anything posted in the Name Place Animal Thing channel moves its card back down.
         npat::note_message(&ctx, &msg);
+        // The same for the chess channel's active card.
+        chess::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
