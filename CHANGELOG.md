@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.38] - 2026-09-16
+
+### 🚀 Features
+
+- *(panel)* "Start a battle royale now" on the Arena page
 ## [0.11.37] - 2026-09-16
 
 ### 🚀 Features
@@ -12,6 +17,10 @@ All notable changes to this project will be documented in this file.
 
 - Newcomers wait for a mod, with a card that says why
 - White pawns stay white, and every square is the same size
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.37
 ## [0.11.36] - 2026-09-16
 
 ### ⚙️ Miscellaneous Tasks
