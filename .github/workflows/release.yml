@@ -186,6 +186,10 @@ jobs:
             perl \
             make
 
+      - name: Clear stale sherpa-onnx prebuilt libs
+        shell: bash
+        run: rm -rf target/sherpa-onnx-prebuilt
+
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 
