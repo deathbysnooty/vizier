@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.41] - 2026-09-16
+
+### 🚀 Features
+
+- *(anagrams)* Add the word bank data files
+- *(anagrams)* A scrambled word always waiting in its own channel
+
+### 💼 Other
+
+- Drop the ableist words from the accepted answers
 ## [0.11.40] - 2026-09-16
 
 ### 💼 Other
@@ -9,6 +19,10 @@ All notable changes to this project will be documented in this file.
 - Take the sherpa-onnx speech engine out of the default build
 - Take the PDF/DOCX/XLSX parsers out of the default build
 - Take the Docker shell backend out of the default build
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.40
 ## [0.11.39] - 2026-09-16
 
 ### 🚀 Features
