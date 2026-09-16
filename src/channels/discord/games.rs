@@ -189,7 +189,7 @@ pub fn on_message_update(ctx: &Context, event: &MessageUpdateEvent) {
             Err(KotoSkip::NoRows) | Err(KotoSkip::NoGame) => {
                 tracing::warn!("games: Koto card {} says solved but could not be read", id)
             }
-            Err(KotoSkip::NotSolved) => {}
+            Err(KotoSkip::NotOver) => {}
         }
     });
 }
@@ -335,14 +335,17 @@ fn pay(user: u64, source: Source, points: i64, reason: String, dedupe: String) {
 #[derive(Debug, PartialEq, Eq)]
 struct KotoWin {
     game: u64,
-    winner: u64,
-    /// Everyone else who guessed, each once.
+    /// Who solved it, when anyone did: a game can end "out of guesses".
+    winner: Option<u64>,
+    /// Everyone else whose guesses scored at least one point, each once.
+    /// A guesser whose every row is `+0` earns nothing.
     others: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum KotoSkip {
-    NotSolved,
+    /// Still being played.
+    NotOver,
     NoGame,
     NoRows,
 }
@@ -351,7 +354,7 @@ static KOTO_GAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bkoto\s*#
 static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@!?(\d+)>").expect("regex"));
 /// A guess row ends in the guesser and Koto's score for it: `<@123> +4`, maybe
 /// dressed in markdown. Custom emoji tiles are `<:name:id>` and never match.
-static KOTO_ROW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@!?(\d+)>[\s*_`]*\(?\+\d").expect("regex"));
+static KOTO_ROW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<@!?(\d+)>[\s*_`]*\(?\+(\d+)").expect("regex"));
 
 fn parse_koto(embeds: &[Embed]) -> Result<KotoWin, KotoSkip> {
     let mut title = String::new();
@@ -374,9 +377,13 @@ fn parse_koto(embeds: &[Embed]) -> Result<KotoWin, KotoSkip> {
 /// The card as plain text: its title, then every text block in display order
 /// (description, field names and values, footer).
 fn parse_koto_parts(title: &str, blocks: &[&str]) -> Result<KotoWin, KotoSkip> {
-    let solved = std::iter::once(title).chain(blocks.iter().copied()).any(|b| b.to_lowercase().contains("good job!"));
-    if !solved {
-        return Err(KotoSkip::NotSolved);
+    let text: Vec<String> = std::iter::once(title).chain(blocks.iter().copied()).map(|b| b.to_lowercase()).collect();
+    let solved = text.iter().any(|b| b.contains("good job!"));
+    // A game that runs out of guesses or time is over too: its scoring guesses
+    // still earn, there is just nobody to pay for solving it.
+    let ended = text.iter().any(|b| b.contains("out of guesses") || b.contains("time's up") || b.contains("correct word was"));
+    if !solved && !ended {
+        return Err(KotoSkip::NotOver);
     }
     let game = std::iter::once(title)
         .chain(blocks.iter().copied())
@@ -384,25 +391,37 @@ fn parse_koto_parts(title: &str, blocks: &[&str]) -> Result<KotoWin, KotoSkip> {
         .ok_or(KotoSkip::NoGame)?;
 
     let lines: Vec<&str> = blocks.iter().flat_map(|b| b.lines()).collect();
-    let mut rows: Vec<u64> =
-        lines.iter().filter_map(|l| KOTO_ROW.captures_iter(l).last()).filter_map(|c| c[1].parse().ok()).collect();
+    // (guesser, what Koto scored that guess)
+    let mut rows: Vec<(u64, i64)> = lines
+        .iter()
+        .filter_map(|l| KOTO_ROW.captures_iter(l).last())
+        .filter_map(|c| Some((c[1].parse().ok()?, c[2].parse().unwrap_or(0))))
+        .collect();
     if rows.is_empty() {
         // Should Koto ever drop the score column, a line naming exactly one
-        // person is still a guess row. Lines naming several are not rows.
+        // person is still a guess row, and counts as a scoring guess. Lines
+        // naming several are not rows.
         rows = lines
             .iter()
             .filter_map(|l| {
                 let ids: Vec<u64> = MENTION.captures_iter(l).filter_map(|c| c[1].parse().ok()).collect();
-                if ids.len() == 1 { Some(ids[0]) } else { None }
+                if ids.len() == 1 { Some((ids[0], 1)) } else { None }
             })
             .collect();
     }
-    let winner = *rows.last().ok_or(KotoSkip::NoRows)?;
+    if rows.is_empty() {
+        return Err(KotoSkip::NoRows);
+    }
+    let winner = solved.then(|| rows.last().map(|(u, _)| *u)).flatten();
     let mut others = Vec::new();
-    for id in rows {
-        if id != winner && !others.contains(&id) {
+    for (id, score) in rows {
+        // Only guesses that found something pay: a row of `+0` earns nothing.
+        if score > 0 && Some(id) != winner && !others.contains(&id) {
             others.push(id);
         }
+    }
+    if winner.is_none() && others.is_empty() {
+        return Err(KotoSkip::NoRows);
     }
     Ok(KotoWin { game, winner, others })
 }
@@ -411,18 +430,17 @@ fn pay_koto(channel: ChannelId, win: KotoWin) {
     if !KOTO_DONE.lock().insert(win.game) {
         return;
     }
-    tracing::info!(
-        "games: Koto #{} solved in {} by {} with {} other player(s)",
-        win.game,
-        channel,
-        win.winner,
-        win.others.len()
-    );
+    match win.winner {
+        Some(w) => tracing::info!("games: Koto #{} solved in {} by {}, {} other scorer(s)", win.game, channel, w, win.others.len()),
+        None => tracing::info!("games: Koto #{} ended unsolved in {}, {} scorer(s)", win.game, channel, win.others.len()),
+    }
     let won = super::control::number("VIZIER_POINTS_KOTO_WIN", KOTO_WIN) as i64;
     let played = super::control::number("VIZIER_POINTS_KOTO_PLAYED", KOTO_PLAYED) as i64;
-    pay(win.winner, Source::Koto, won, format!("solved Koto #{}", win.game), koto_key(win.game, win.winner));
+    if let Some(winner) = win.winner {
+        pay(winner, Source::Koto, won, format!("solved Koto #{}", win.game), koto_key(win.game, winner));
+    }
     for &user in &win.others {
-        pay(user, Source::Koto, played, format!("played Koto #{}", win.game), koto_key(win.game, user));
+        pay(user, Source::Koto, played, format!("scoring guesses in Koto #{}", win.game), koto_key(win.game, user));
     }
     let mut done = KOTO_DONE.lock();
     if done.len() > 1000 {
@@ -692,7 +710,7 @@ mod tests {
             a = ALICE
         );
         let win = parse_koto_parts("Koto #887", &[&desc]).unwrap();
-        assert_eq!(win, KotoWin { game: 887, winner: ALICE, others: vec![] });
+        assert_eq!(win, KotoWin { game: 887, winner: Some(ALICE), others: vec![] });
     }
 
     #[test]
@@ -705,7 +723,7 @@ mod tests {
             c = CARA
         );
         let win = parse_koto_parts("Koto #12", &[&desc]).unwrap();
-        assert_eq!(win.winner, CARA);
+        assert_eq!(win.winner, Some(CARA));
         assert_eq!(win.others, vec![BOB, ALICE]);
     }
 
@@ -714,15 +732,29 @@ mod tests {
         let rows = format!("1 {} <@{}> **+1**\n2 {} <@{}> **+4**", tiles("CRANES"), BOB, tiles("BARMAN"), ALICE);
         let blocks = ["", "Guesses", &rows, "Good job! Everyone who participated gets +2 points!"];
         let win = parse_koto_parts("Koto #5", &blocks).unwrap();
-        assert_eq!(win, KotoWin { game: 5, winner: ALICE, others: vec![BOB] });
+        assert_eq!(win, KotoWin { game: 5, winner: Some(ALICE), others: vec![BOB] });
     }
 
     #[test]
-    fn koto_times_up_and_nine_misses_pay_nothing() {
-        let desc = format!("1 QWERTY <@{}> +1\nTime's up! The correct word was **BARMAN**!", ALICE);
-        assert_eq!(parse_koto_parts("Koto #888", &[&desc]), Err(KotoSkip::NotSolved));
+    fn koto_zero_scoring_guesses_never_pay() {
+        // Out of guesses: nobody solved it, but guesses that found letters still earn.
+        let desc = format!(
+            "1 IGNITE <@{a}> +2\n2 FLIGHT <@{a}> +0\n3 RETIRE <@{a}> +0\n\nOut of guesses, The correct word was **AVOIDS**!",
+            a = ALICE
+        );
+        let win = parse_koto_parts("Koto #1343", &[&desc]).unwrap();
+        assert_eq!(win, KotoWin { game: 1343, winner: None, others: vec![ALICE] });
+        // Every guess +0, solved by someone else: the blank guesser earns nothing.
+        let desc = format!("1 WRONGS <@{}> +0\n2 MAILED <@{}> +4\nGood job!", BOB, ALICE);
+        let win = parse_koto_parts("Koto #890", &[&desc]).unwrap();
+        assert_eq!(win, KotoWin { game: 890, winner: Some(ALICE), others: vec![] });
+        // Nine misses and nobody scoring: nothing to pay.
         let nine: String = (1..=9).map(|i| format!("{} WRONGS <@{}> +0\n", i, BOB)).collect();
-        assert_eq!(parse_koto_parts("Koto #889", &[&nine]), Err(KotoSkip::NotSolved));
+        let over = format!("{}Out of guesses, The correct word was **BARMAN**!", nine);
+        assert_eq!(parse_koto_parts("Koto #889", &[&over]), Err(KotoSkip::NoRows));
+        // A game still being played pays nothing yet.
+        let live = format!("1 QWERTY <@{}> +2\n", ALICE);
+        assert_eq!(parse_koto_parts("Koto #891", &[&live]), Err(KotoSkip::NotOver));
     }
 
     #[test]
@@ -730,7 +762,7 @@ mod tests {
         // Emoji ids are long numbers too; only <@...> is a person.
         let desc = format!("1 <:g_a:123456789012345678><a:y_b:223456789012345678> <@{}> +4\nGood job!", BOB);
         let win = parse_koto_parts("Koto #1", &[&desc]).unwrap();
-        assert_eq!(win, KotoWin { game: 1, winner: BOB, others: vec![] });
+        assert_eq!(win, KotoWin { game: 1, winner: Some(BOB), others: vec![] });
     }
 
     #[test]
@@ -743,7 +775,7 @@ mod tests {
         assert_eq!(parse_koto_parts("Koto #4", &[&desc]), Err(KotoSkip::NoRows));
         // Rows without the score column still read, one person per line.
         let desc = format!("1 QWERTY <@{}>\n2 MAILED <@{}>\nGood job!", ALICE, BOB);
-        assert_eq!(parse_koto_parts("Koto #6", &[&desc]).unwrap().winner, BOB);
+        assert_eq!(parse_koto_parts("Koto #6", &[&desc]).unwrap().winner, Some(BOB));
     }
 
     #[test]
@@ -751,7 +783,7 @@ mod tests {
         let mut e = Embed::default();
         e.title = Some("Koto #887".into());
         e.description = Some(format!("1 MAILED <@{}> +4\n\nGood job! Everyone who participated gets +2 points!", BOB));
-        assert_eq!(parse_koto(&[e]).unwrap().winner, BOB);
+        assert_eq!(parse_koto(&[e]).unwrap().winner, Some(BOB));
     }
 
     #[test]
