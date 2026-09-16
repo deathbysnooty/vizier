@@ -1,0 +1,3084 @@
+{
+ "format": "QDPACK1",
+ "pack": "doodles.bin",
+ "source": "Google Quick, Draw! dataset (simplified), CC BY 4.0",
+ "attribution": "Doodles from Google's Quick, Draw! dataset (CC BY 4.0).",
+ "words": 240,
+ "doodles": 9600,
+ "index": [
+  {
+   "word": "eiffel tower",
+   "answers": [
+    "eiffel tower",
+    "eiffel",
+    "the eiffel tower",
+    "effiel tower",
+    "eifel tower",
+    "paris tower",
+    "tower"
+   ],
+   "count": 40,
+   "offset": 8,
+   "bytes": 2470
+  },
+  {
+   "word": "aeroplane",
+   "answers": [
+    "aeroplane",
+    "airplane",
+    "plane",
+    "aircraft",
+    "jet",
+    "flight"
+   ],
+   "count": 40,
+   "offset": 2478,
+   "bytes": 3285
+  },
+  {
+   "word": "ambulance",
+   "answers": [
+    "ambulance",
+    "ambulance van"
+   ],
+   "count": 40,
+   "offset": 5763,
+   "bytes": 5344
+  },
+  {
+   "word": "angel",
+   "answers": [
+    "angel",
+    "fairy",
+    "pari",
+    "angle"
+   ],
+   "count": 40,
+   "offset": 11107,
+   "bytes": 6038
+  },
+  {
+   "word": "ant",
+   "answers": [
+    "ant",
+    "chiti",
+    "cheenti",
+    "chinti"
+   ],
+   "count": 40,
+   "offset": 17145,
+   "bytes": 5598
+  },
+  {
+   "word": "apple",
+   "answers": [
+    "apple",
+    "seb",
+    "aapple"
+   ],
+   "count": 40,
+   "offset": 22743,
+   "bytes": 3066
+  },
+  {
+   "word": "axe",
+   "answers": [
+    "axe",
+    "ax",
+    "hatchet",
+    "kulhadi",
+    "kulhari"
+   ],
+   "count": 40,
+   "offset": 25809,
+   "bytes": 2262
+  },
+  {
+   "word": "backpack",
+   "answers": [
+    "backpack",
+    "bagpack",
+    "bag",
+    "school bag",
+    "rucksack",
+    "knapsack"
+   ],
+   "count": 40,
+   "offset": 28071,
+   "bytes": 4649
+  },
+  {
+   "word": "banana",
+   "answers": [
+    "banana",
+    "kela",
+    "keley",
+    "bananas"
+   ],
+   "count": 40,
+   "offset": 32720,
+   "bytes": 2687
+  },
+  {
+   "word": "bandage",
+   "answers": [
+    "bandage",
+    "band aid",
+    "plaster",
+    "patti",
+    "dressing",
+    "bandege"
+   ],
+   "count": 40,
+   "offset": 35407,
+   "bytes": 2783
+  },
+  {
+   "word": "basket",
+   "answers": [
+    "basket",
+    "tokri",
+    "tokari",
+    "basket tokri",
+    "wicker basket"
+   ],
+   "count": 40,
+   "offset": 38190,
+   "bytes": 5320
+  },
+  {
+   "word": "basketball",
+   "answers": [
+    "basketball",
+    "basket ball hoop",
+    "hoop"
+   ],
+   "count": 40,
+   "offset": 43510,
+   "bytes": 4407
+  },
+  {
+   "word": "bathtub",
+   "answers": [
+    "bathtub",
+    "tub",
+    "bath",
+    "bathing tub"
+   ],
+   "count": 40,
+   "offset": 47917,
+   "bytes": 3433
+  },
+  {
+   "word": "bear",
+   "answers": [
+    "bear",
+    "bhalu",
+    "grizzly",
+    "grizzly bear",
+    "polar bear"
+   ],
+   "count": 40,
+   "offset": 51350,
+   "bytes": 5434
+  },
+  {
+   "word": "bed",
+   "answers": [
+    "bed",
+    "palang",
+    "palang bed",
+    "cot",
+    "bedstead"
+   ],
+   "count": 40,
+   "offset": 56784,
+   "bytes": 3128
+  },
+  {
+   "word": "bee",
+   "answers": [
+    "bee",
+    "honeybee",
+    "bumblebee",
+    "madhumakhi"
+   ],
+   "count": 40,
+   "offset": 59912,
+   "bytes": 5788
+  },
+  {
+   "word": "belt",
+   "answers": [
+    "belt",
+    "waist belt",
+    "leather belt"
+   ],
+   "count": 40,
+   "offset": 65700,
+   "bytes": 3129
+  },
+  {
+   "word": "bench",
+   "answers": [
+    "bench",
+    "park bench",
+    "sitting bench"
+   ],
+   "count": 40,
+   "offset": 68829,
+   "bytes": 2422
+  },
+  {
+   "word": "bicycle",
+   "answers": [
+    "bicycle",
+    "cycle",
+    "bike",
+    "push bike",
+    "bycycle"
+   ],
+   "count": 40,
+   "offset": 71251,
+   "bytes": 5002
+  },
+  {
+   "word": "binoculars",
+   "answers": [
+    "binoculars",
+    "binocular",
+    "binocs",
+    "doorbeen",
+    "dooerbeen",
+    "field glasses"
+   ],
+   "count": 40,
+   "offset": 76253,
+   "bytes": 5020
+  },
+  {
+   "word": "bird",
+   "answers": [
+    "bird",
+    "chidiya",
+    "chiriya",
+    "sparrow",
+    "birdie"
+   ],
+   "count": 40,
+   "offset": 81273,
+   "bytes": 4320
+  },
+  {
+   "word": "book",
+   "answers": [
+    "book",
+    "notebook",
+    "kitab",
+    "kitaab",
+    "diary",
+    "novel",
+    "copy"
+   ],
+   "count": 40,
+   "offset": 85593,
+   "bytes": 3955
+  },
+  {
+   "word": "bowtie",
+   "answers": [
+    "bowtie",
+    "bow",
+    "ribbon"
+   ],
+   "count": 40,
+   "offset": 89548,
+   "bytes": 2983
+  },
+  {
+   "word": "brain",
+   "answers": [
+    "brain",
+    "dimaag",
+    "dimag",
+    "mind"
+   ],
+   "count": 40,
+   "offset": 92531,
+   "bytes": 6744
+  },
+  {
+   "word": "bread",
+   "answers": [
+    "bread",
+    "loaf",
+    "bread loaf",
+    "double roti",
+    "pav",
+    "slice of bread",
+    "toast"
+   ],
+   "count": 40,
+   "offset": 99275,
+   "bytes": 2507
+  },
+  {
+   "word": "bridge",
+   "answers": [
+    "bridge",
+    "pul",
+    "pull bridge",
+    "flyover",
+    "brige"
+   ],
+   "count": 40,
+   "offset": 101782,
+   "bytes": 2778
+  },
+  {
+   "word": "broom",
+   "answers": [
+    "broom",
+    "broomstick",
+    "jhadu",
+    "jhaadu",
+    "jharu"
+   ],
+   "count": 40,
+   "offset": 104560,
+   "bytes": 3357
+  },
+  {
+   "word": "bucket",
+   "answers": [
+    "bucket",
+    "balti",
+    "baalti",
+    "pail"
+   ],
+   "count": 40,
+   "offset": 107917,
+   "bytes": 2999
+  },
+  {
+   "word": "bulldozer",
+   "answers": [
+    "bulldozer",
+    "jcb",
+    "digger",
+    "excavator",
+    "earth mover",
+    "dozer"
+   ],
+   "count": 40,
+   "offset": 110916,
+   "bytes": 5197
+  },
+  {
+   "word": "bus",
+   "answers": [
+    "bus",
+    "school bus",
+    "public bus"
+   ],
+   "count": 40,
+   "offset": 116113,
+   "bytes": 5291
+  },
+  {
+   "word": "butterfly",
+   "answers": [
+    "butterfly",
+    "titli"
+   ],
+   "count": 40,
+   "offset": 121404,
+   "bytes": 4749
+  },
+  {
+   "word": "cactus",
+   "answers": [
+    "cactus",
+    "cacti",
+    "nagfani",
+    "naagfani",
+    "cactas"
+   ],
+   "count": 40,
+   "offset": 126153,
+   "bytes": 3508
+  },
+  {
+   "word": "cake",
+   "answers": [
+    "cake",
+    "birthday cake",
+    "pastry",
+    "cup cake"
+   ],
+   "count": 40,
+   "offset": 129661,
+   "bytes": 4885
+  },
+  {
+   "word": "calculator",
+   "answers": [
+    "calculator",
+    "calc",
+    "calculater"
+   ],
+   "count": 40,
+   "offset": 134546,
+   "bytes": 4681
+  },
+  {
+   "word": "calendar",
+   "answers": [
+    "calendar",
+    "calender",
+    "date sheet",
+    "wall calendar"
+   ],
+   "count": 40,
+   "offset": 139227,
+   "bytes": 4888
+  },
+  {
+   "word": "camel",
+   "answers": [
+    "camel",
+    "oont",
+    "unt",
+    "ount"
+   ],
+   "count": 40,
+   "offset": 144115,
+   "bytes": 4052
+  },
+  {
+   "word": "camera",
+   "answers": [
+    "camera",
+    "dslr",
+    "kamera",
+    "photo camera"
+   ],
+   "count": 40,
+   "offset": 148167,
+   "bytes": 3618
+  },
+  {
+   "word": "campfire",
+   "answers": [
+    "campfire",
+    "fire",
+    "bonfire",
+    "aag"
+   ],
+   "count": 40,
+   "offset": 151785,
+   "bytes": 5480
+  },
+  {
+   "word": "candle",
+   "answers": [
+    "candle",
+    "mombatti",
+    "mombati",
+    "candles"
+   ],
+   "count": 40,
+   "offset": 157265,
+   "bytes": 2554
+  },
+  {
+   "word": "car",
+   "answers": [
+    "car",
+    "gaadi",
+    "gadi",
+    "automobile",
+    "sedan",
+    "motor car"
+   ],
+   "count": 40,
+   "offset": 159819,
+   "bytes": 4602
+  },
+  {
+   "word": "carrot",
+   "answers": [
+    "carrot",
+    "gajar",
+    "carrots"
+   ],
+   "count": 40,
+   "offset": 164421,
+   "bytes": 3404
+  },
+  {
+   "word": "castle",
+   "answers": [
+    "castle",
+    "fort",
+    "qila",
+    "kila",
+    "palace",
+    "mahal",
+    "castel"
+   ],
+   "count": 40,
+   "offset": 167825,
+   "bytes": 3229
+  },
+  {
+   "word": "cat",
+   "answers": [
+    "cat",
+    "billi",
+    "kitten",
+    "kitty",
+    "billy cat"
+   ],
+   "count": 40,
+   "offset": 171054,
+   "bytes": 5377
+  },
+  {
+   "word": "ceiling fan",
+   "answers": [
+    "ceiling fan",
+    "fan",
+    "pankha",
+    "panka",
+    "celing fan",
+    "roof fan"
+   ],
+   "count": 40,
+   "offset": 176431,
+   "bytes": 4100
+  },
+  {
+   "word": "mobile phone",
+   "answers": [
+    "mobile phone",
+    "mobile",
+    "phone",
+    "cellphone",
+    "smartphone",
+    "iphone",
+    "handset"
+   ],
+   "count": 40,
+   "offset": 180531,
+   "bytes": 3585
+  },
+  {
+   "word": "chair",
+   "answers": [
+    "chair",
+    "kursi",
+    "kurshi",
+    "stool"
+   ],
+   "count": 40,
+   "offset": 184116,
+   "bytes": 2460
+  },
+  {
+   "word": "church",
+   "answers": [
+    "church",
+    "cathedral",
+    "chapel",
+    "girja",
+    "girja ghar"
+   ],
+   "count": 40,
+   "offset": 186576,
+   "bytes": 2835
+  },
+  {
+   "word": "circle",
+   "answers": [
+    "circle",
+    "round",
+    "gola",
+    "circel",
+    "ring"
+   ],
+   "count": 40,
+   "offset": 189411,
+   "bytes": 2166
+  },
+  {
+   "word": "clock",
+   "answers": [
+    "clock",
+    "watch",
+    "ghadi",
+    "ghari",
+    "wall clock",
+    "time",
+    "alarm clock"
+   ],
+   "count": 40,
+   "offset": 191577,
+   "bytes": 3442
+  },
+  {
+   "word": "cloud",
+   "answers": [
+    "cloud",
+    "clouds",
+    "badal",
+    "baadal"
+   ],
+   "count": 40,
+   "offset": 195019,
+   "bytes": 4095
+  },
+  {
+   "word": "computer",
+   "answers": [
+    "computer",
+    "pc",
+    "desktop",
+    "monitor",
+    "screen",
+    "cpu",
+    "computor"
+   ],
+   "count": 40,
+   "offset": 199114,
+   "bytes": 3869
+  },
+  {
+   "word": "cookie",
+   "answers": [
+    "cookie",
+    "biscuit",
+    "biscuits",
+    "cookies",
+    "parle g"
+   ],
+   "count": 40,
+   "offset": 202983,
+   "bytes": 5622
+  },
+  {
+   "word": "couch",
+   "answers": [
+    "couch",
+    "sofa",
+    "settee",
+    "sofa set",
+    "divan"
+   ],
+   "count": 40,
+   "offset": 208605,
+   "bytes": 3800
+  },
+  {
+   "word": "cow",
+   "answers": [
+    "cow",
+    "gaay",
+    "gai",
+    "gau",
+    "cattle",
+    "calf"
+   ],
+   "count": 40,
+   "offset": 212405,
+   "bytes": 7795
+  },
+  {
+   "word": "crab",
+   "answers": [
+    "crab",
+    "kekda",
+    "kekra"
+   ],
+   "count": 40,
+   "offset": 220200,
+   "bytes": 5583
+  },
+  {
+   "word": "crocodile",
+   "answers": [
+    "crocodile",
+    "croc",
+    "alligator",
+    "magarmach",
+    "magarmachh",
+    "gharial"
+   ],
+   "count": 40,
+   "offset": 225783,
+   "bytes": 3649
+  },
+  {
+   "word": "crown",
+   "answers": [
+    "crown",
+    "taj",
+    "tiara",
+    "king crown"
+   ],
+   "count": 40,
+   "offset": 229432,
+   "bytes": 2761
+  },
+  {
+   "word": "cruise ship",
+   "answers": [
+    "cruise ship",
+    "cruise",
+    "ship",
+    "cruise liner",
+    "boat"
+   ],
+   "count": 40,
+   "offset": 232193,
+   "bytes": 3283
+  },
+  {
+   "word": "diamond",
+   "answers": [
+    "diamond",
+    "gem",
+    "jewel",
+    "heera",
+    "hira",
+    "diamond stone"
+   ],
+   "count": 40,
+   "offset": 235476,
+   "bytes": 2361
+  },
+  {
+   "word": "dog",
+   "answers": [
+    "dog",
+    "kutta",
+    "puppy",
+    "pup",
+    "doggy"
+   ],
+   "count": 40,
+   "offset": 237837,
+   "bytes": 5446
+  },
+  {
+   "word": "dolphin",
+   "answers": [
+    "dolphin",
+    "dolfin"
+   ],
+   "count": 40,
+   "offset": 243283,
+   "bytes": 2973
+  },
+  {
+   "word": "donut",
+   "answers": [
+    "donut",
+    "doughnut",
+    "doughnuts",
+    "donuts"
+   ],
+   "count": 40,
+   "offset": 246256,
+   "bytes": 4057
+  },
+  {
+   "word": "door",
+   "answers": [
+    "door",
+    "darwaza",
+    "darwaaza",
+    "gate",
+    "doorway"
+   ],
+   "count": 40,
+   "offset": 250313,
+   "bytes": 2144
+  },
+  {
+   "word": "dragon",
+   "answers": [
+    "dragon",
+    "dragan",
+    "dinosaur"
+   ],
+   "count": 40,
+   "offset": 252457,
+   "bytes": 5713
+  },
+  {
+   "word": "drill",
+   "answers": [
+    "drill",
+    "drill machine",
+    "drilling machine",
+    "power drill",
+    "driller"
+   ],
+   "count": 40,
+   "offset": 258170,
+   "bytes": 2912
+  },
+  {
+   "word": "drums",
+   "answers": [
+    "drums",
+    "drum",
+    "drum set",
+    "drum kit",
+    "dholak",
+    "dhol"
+   ],
+   "count": 40,
+   "offset": 261082,
+   "bytes": 4903
+  },
+  {
+   "word": "duck",
+   "answers": [
+    "duck",
+    "batak",
+    "batakh",
+    "ducky",
+    "duckling"
+   ],
+   "count": 40,
+   "offset": 265985,
+   "bytes": 4407
+  },
+  {
+   "word": "dumbbell",
+   "answers": [
+    "dumbbell",
+    "dumbell",
+    "dumble",
+    "weights",
+    "weight",
+    "barbell",
+    "gym weight"
+   ],
+   "count": 40,
+   "offset": 270392,
+   "bytes": 3116
+  },
+  {
+   "word": "ear",
+   "answers": [
+    "ear",
+    "kaan",
+    "ears"
+   ],
+   "count": 40,
+   "offset": 273508,
+   "bytes": 2663
+  },
+  {
+   "word": "elephant",
+   "answers": [
+    "elephant",
+    "hathi",
+    "haathi",
+    "elefant"
+   ],
+   "count": 40,
+   "offset": 276171,
+   "bytes": 5016
+  },
+  {
+   "word": "envelope",
+   "answers": [
+    "envelope",
+    "letter",
+    "mail",
+    "lifafa",
+    "lifaafa",
+    "envelop"
+   ],
+   "count": 40,
+   "offset": 281187,
+   "bytes": 2179
+  },
+  {
+   "word": "eye",
+   "answers": [
+    "eye",
+    "eyes",
+    "aankh",
+    "ankh"
+   ],
+   "count": 40,
+   "offset": 283366,
+   "bytes": 4357
+  },
+  {
+   "word": "glasses",
+   "answers": [
+    "glasses",
+    "spectacles",
+    "specs",
+    "eyeglasses",
+    "sunglasses",
+    "chashma",
+    "chasma",
+    "goggles"
+   ],
+   "count": 40,
+   "offset": 287723,
+   "bytes": 3233
+  },
+  {
+   "word": "face",
+   "answers": [
+    "face",
+    "smiley",
+    "smiley face",
+    "smile",
+    "emoji",
+    "chehra",
+    "happy face"
+   ],
+   "count": 40,
+   "offset": 290956,
+   "bytes": 5367
+  },
+  {
+   "word": "feather",
+   "answers": [
+    "feather",
+    "pankh",
+    "quill",
+    "feathers"
+   ],
+   "count": 40,
+   "offset": 296323,
+   "bytes": 3187
+  },
+  {
+   "word": "fire truck",
+   "answers": [
+    "fire truck",
+    "fire engine",
+    "fire brigade",
+    "fire brigade truck"
+   ],
+   "count": 40,
+   "offset": 299510,
+   "bytes": 5054
+  },
+  {
+   "word": "fish",
+   "answers": [
+    "fish",
+    "machli",
+    "machhli",
+    "machhi"
+   ],
+   "count": 40,
+   "offset": 304564,
+   "bytes": 2864
+  },
+  {
+   "word": "flamingo",
+   "answers": [
+    "flamingo",
+    "flamingoes",
+    "flemingo"
+   ],
+   "count": 40,
+   "offset": 307428,
+   "bytes": 3572
+  },
+  {
+   "word": "torch",
+   "answers": [
+    "torch",
+    "flashlight",
+    "torch light",
+    "hand torch",
+    "battery torch"
+   ],
+   "count": 40,
+   "offset": 311000,
+   "bytes": 3263
+  },
+  {
+   "word": "slippers",
+   "answers": [
+    "slippers",
+    "slipper",
+    "chappal",
+    "chappals",
+    "chapal",
+    "flip flops",
+    "flip flop",
+    "sandals",
+    "sandal",
+    "hawai chappal"
+   ],
+   "count": 40,
+   "offset": 314263,
+   "bytes": 3528
+  },
+  {
+   "word": "floor lamp",
+   "answers": [
+    "floor lamp",
+    "lamp",
+    "lampshade",
+    "table lamp",
+    "standing lamp",
+    "light"
+   ],
+   "count": 40,
+   "offset": 317791,
+   "bytes": 2427
+  },
+  {
+   "word": "flower",
+   "answers": [
+    "flower",
+    "phool",
+    "phul",
+    "rose",
+    "daisy",
+    "flowers"
+   ],
+   "count": 40,
+   "offset": 320218,
+   "bytes": 5269
+  },
+  {
+   "word": "flying saucer",
+   "answers": [
+    "flying saucer",
+    "ufo",
+    "alien ship",
+    "spaceship",
+    "saucer",
+    "alien spaceship"
+   ],
+   "count": 40,
+   "offset": 325487,
+   "bytes": 3235
+  },
+  {
+   "word": "fork",
+   "answers": [
+    "fork",
+    "kanta",
+    "kaanta",
+    "table fork"
+   ],
+   "count": 40,
+   "offset": 328722,
+   "bytes": 2115
+  },
+  {
+   "word": "frog",
+   "answers": [
+    "frog",
+    "toad",
+    "mendak",
+    "mendhak"
+   ],
+   "count": 40,
+   "offset": 330837,
+   "bytes": 5370
+  },
+  {
+   "word": "frying pan",
+   "answers": [
+    "frying pan",
+    "pan",
+    "tawa",
+    "tava",
+    "kadhai",
+    "kadai",
+    "karahi",
+    "skillet",
+    "fry pan"
+   ],
+   "count": 40,
+   "offset": 336207,
+   "bytes": 2980
+  },
+  {
+   "word": "giraffe",
+   "answers": [
+    "giraffe",
+    "giraf",
+    "jiraffe",
+    "zaraffa"
+   ],
+   "count": 40,
+   "offset": 339187,
+   "bytes": 3937
+  },
+  {
+   "word": "grapes",
+   "answers": [
+    "grapes",
+    "grape",
+    "angoor",
+    "angur"
+   ],
+   "count": 40,
+   "offset": 343124,
+   "bytes": 7620
+  },
+  {
+   "word": "guitar",
+   "answers": [
+    "guitar",
+    "gitar",
+    "bass guitar"
+   ],
+   "count": 40,
+   "offset": 350744,
+   "bytes": 5014
+  },
+  {
+   "word": "burger",
+   "answers": [
+    "burger",
+    "hamburger",
+    "cheeseburger",
+    "beef burger"
+   ],
+   "count": 40,
+   "offset": 355758,
+   "bytes": 4426
+  },
+  {
+   "word": "hammer",
+   "answers": [
+    "hammer",
+    "hathoda",
+    "hathoda hammer",
+    "mallet",
+    "hamer"
+   ],
+   "count": 40,
+   "offset": 360184,
+   "bytes": 2952
+  },
+  {
+   "word": "hand",
+   "answers": [
+    "hand",
+    "palm",
+    "haath",
+    "hath",
+    "fingers",
+    "five fingers"
+   ],
+   "count": 40,
+   "offset": 363136,
+   "bytes": 3674
+  },
+  {
+   "word": "hat",
+   "answers": [
+    "hat",
+    "cap",
+    "topi",
+    "sun hat"
+   ],
+   "count": 40,
+   "offset": 366810,
+   "bytes": 2268
+  },
+  {
+   "word": "headphones",
+   "answers": [
+    "headphones",
+    "headphone",
+    "headset",
+    "earphones"
+   ],
+   "count": 40,
+   "offset": 369078,
+   "bytes": 3761
+  },
+  {
+   "word": "helicopter",
+   "answers": [
+    "helicopter",
+    "chopper",
+    "helicoptor"
+   ],
+   "count": 40,
+   "offset": 372839,
+   "bytes": 4773
+  },
+  {
+   "word": "helmet",
+   "answers": [
+    "helmet",
+    "helmate",
+    "hat helmet"
+   ],
+   "count": 40,
+   "offset": 377612,
+   "bytes": 3319
+  },
+  {
+   "word": "hexagon",
+   "answers": [
+    "hexagon",
+    "hexagone",
+    "six sided shape",
+    "hexagan"
+   ],
+   "count": 40,
+   "offset": 380931,
+   "bytes": 1608
+  },
+  {
+   "word": "horse",
+   "answers": [
+    "horse",
+    "ghoda",
+    "pony",
+    "stallion",
+    "mare"
+   ],
+   "count": 40,
+   "offset": 382539,
+   "bytes": 5179
+  },
+  {
+   "word": "hospital",
+   "answers": [
+    "hospital",
+    "clinic",
+    "aspatal",
+    "hospitle",
+    "medical"
+   ],
+   "count": 40,
+   "offset": 387718,
+   "bytes": 3476
+  },
+  {
+   "word": "hot air balloon",
+   "answers": [
+    "hot air balloon",
+    "air balloon",
+    "balloon",
+    "parachute balloon"
+   ],
+   "count": 40,
+   "offset": 391194,
+   "bytes": 3341
+  },
+  {
+   "word": "hot dog",
+   "answers": [
+    "hot dog",
+    "sausage",
+    "sausage roll"
+   ],
+   "count": 40,
+   "offset": 394535,
+   "bytes": 3512
+  },
+  {
+   "word": "hourglass",
+   "answers": [
+    "hourglass",
+    "sand clock",
+    "sand timer",
+    "sandglass",
+    "sand watch"
+   ],
+   "count": 40,
+   "offset": 398047,
+   "bytes": 2687
+  },
+  {
+   "word": "house",
+   "answers": [
+    "house",
+    "home",
+    "ghar",
+    "hut",
+    "makan",
+    "cottage"
+   ],
+   "count": 40,
+   "offset": 400734,
+   "bytes": 2508
+  },
+  {
+   "word": "house plant",
+   "answers": [
+    "house plant",
+    "plant",
+    "pot plant",
+    "potted plant",
+    "flower pot",
+    "gamla",
+    "indoor plant"
+   ],
+   "count": 40,
+   "offset": 403242,
+   "bytes": 4484
+  },
+  {
+   "word": "ice cream",
+   "answers": [
+    "ice cream",
+    "cone",
+    "ice cream cone",
+    "softy",
+    "soft serve"
+   ],
+   "count": 40,
+   "offset": 407726,
+   "bytes": 3207
+  },
+  {
+   "word": "jacket",
+   "answers": [
+    "jacket",
+    "coat",
+    "blazer",
+    "hoodie",
+    "overcoat",
+    "windcheater"
+   ],
+   "count": 40,
+   "offset": 410933,
+   "bytes": 3454
+  },
+  {
+   "word": "kangaroo",
+   "answers": [
+    "kangaroo",
+    "kangroo"
+   ],
+   "count": 40,
+   "offset": 414387,
+   "bytes": 5150
+  },
+  {
+   "word": "key",
+   "answers": [
+    "key",
+    "chaabi",
+    "chabi",
+    "chaabhi",
+    "keys"
+   ],
+   "count": 40,
+   "offset": 419537,
+   "bytes": 3425
+  },
+  {
+   "word": "keyboard",
+   "answers": [
+    "keyboard",
+    "computer keyboard",
+    "keybord"
+   ],
+   "count": 40,
+   "offset": 422962,
+   "bytes": 1990
+  },
+  {
+   "word": "knife",
+   "answers": [
+    "knife",
+    "chaku",
+    "chakku",
+    "dagger",
+    "blade",
+    "kitchen knife"
+   ],
+   "count": 40,
+   "offset": 424952,
+   "bytes": 1919
+  },
+  {
+   "word": "ladder",
+   "answers": [
+    "ladder",
+    "seedhi",
+    "sidhi",
+    "seedi",
+    "step ladder"
+   ],
+   "count": 40,
+   "offset": 426871,
+   "bytes": 1998
+  },
+  {
+   "word": "lantern",
+   "answers": [
+    "lantern",
+    "lalten",
+    "laltein",
+    "lamp",
+    "oil lamp",
+    "hanging lantern"
+   ],
+   "count": 40,
+   "offset": 428869,
+   "bytes": 4345
+  },
+  {
+   "word": "laptop",
+   "answers": [
+    "laptop",
+    "macbook",
+    "notebook computer",
+    "computer"
+   ],
+   "count": 40,
+   "offset": 433214,
+   "bytes": 3637
+  },
+  {
+   "word": "leaf",
+   "answers": [
+    "leaf",
+    "patta",
+    "pata",
+    "leaves",
+    "leafs"
+   ],
+   "count": 40,
+   "offset": 436851,
+   "bytes": 3088
+  },
+  {
+   "word": "bulb",
+   "answers": [
+    "bulb",
+    "light bulb",
+    "light",
+    "lamp",
+    "idea",
+    "led bulb"
+   ],
+   "count": 40,
+   "offset": 439939,
+   "bytes": 3317
+  },
+  {
+   "word": "lighter",
+   "answers": [
+    "lighter",
+    "cigarette lighter",
+    "gas lighter",
+    "liter"
+   ],
+   "count": 40,
+   "offset": 443256,
+   "bytes": 3005
+  },
+  {
+   "word": "lighthouse",
+   "answers": [
+    "lighthouse",
+    "light tower"
+   ],
+   "count": 40,
+   "offset": 446261,
+   "bytes": 3645
+  },
+  {
+   "word": "lightning",
+   "answers": [
+    "lightning",
+    "thunder",
+    "bolt",
+    "lightning bolt",
+    "bijli",
+    "thunderbolt",
+    "lighting"
+   ],
+   "count": 40,
+   "offset": 449906,
+   "bytes": 2278
+  },
+  {
+   "word": "lion",
+   "answers": [
+    "lion",
+    "sher",
+    "lioness"
+   ],
+   "count": 40,
+   "offset": 452184,
+   "bytes": 7198
+  },
+  {
+   "word": "lipstick",
+   "answers": [
+    "lipstick",
+    "lipgloss",
+    "lip balm"
+   ],
+   "count": 40,
+   "offset": 459382,
+   "bytes": 2083
+  },
+  {
+   "word": "lobster",
+   "answers": [
+    "lobster",
+    "prawn",
+    "shrimp",
+    "crayfish",
+    "jhinga"
+   ],
+   "count": 40,
+   "offset": 461465,
+   "bytes": 5756
+  },
+  {
+   "word": "lollipop",
+   "answers": [
+    "lollipop",
+    "lolly pop",
+    "lolly",
+    "candy",
+    "chupa chups"
+   ],
+   "count": 40,
+   "offset": 467221,
+   "bytes": 2997
+  },
+  {
+   "word": "megaphone",
+   "answers": [
+    "megaphone",
+    "loudspeaker",
+    "speaker",
+    "bullhorn",
+    "horn"
+   ],
+   "count": 40,
+   "offset": 470218,
+   "bytes": 3022
+  },
+  {
+   "word": "mermaid",
+   "answers": [
+    "mermaid",
+    "jalpari",
+    "merman"
+   ],
+   "count": 40,
+   "offset": 473240,
+   "bytes": 5803
+  },
+  {
+   "word": "microphone",
+   "answers": [
+    "microphone",
+    "mic",
+    "mike",
+    "mic stand"
+   ],
+   "count": 40,
+   "offset": 479043,
+   "bytes": 4272
+  },
+  {
+   "word": "microwave",
+   "answers": [
+    "microwave",
+    "microwave oven",
+    "oven",
+    "otg"
+   ],
+   "count": 40,
+   "offset": 483315,
+   "bytes": 3378
+  },
+  {
+   "word": "monkey",
+   "answers": [
+    "monkey",
+    "bandar",
+    "ape",
+    "chimp",
+    "chimpanzee",
+    "gorilla",
+    "langur"
+   ],
+   "count": 40,
+   "offset": 486693,
+   "bytes": 6901
+  },
+  {
+   "word": "moon",
+   "answers": [
+    "moon",
+    "chand",
+    "chaand",
+    "crescent",
+    "half moon",
+    "cresent"
+   ],
+   "count": 40,
+   "offset": 493594,
+   "bytes": 2911
+  },
+  {
+   "word": "mosquito",
+   "answers": [
+    "mosquito",
+    "machar",
+    "machhar",
+    "musquito",
+    "fly",
+    "insect"
+   ],
+   "count": 40,
+   "offset": 496505,
+   "bytes": 4581
+  },
+  {
+   "word": "motorbike",
+   "answers": [
+    "motorbike",
+    "motorcycle",
+    "bike",
+    "scooter",
+    "scooty",
+    "bullet",
+    "two wheeler"
+   ],
+   "count": 40,
+   "offset": 501086,
+   "bytes": 5084
+  },
+  {
+   "word": "mountain",
+   "answers": [
+    "mountain",
+    "mountains",
+    "hill",
+    "hills",
+    "pahad",
+    "pahaad",
+    "mountan"
+   ],
+   "count": 40,
+   "offset": 506170,
+   "bytes": 1755
+  },
+  {
+   "word": "mouse",
+   "answers": [
+    "mouse",
+    "rat",
+    "chuha",
+    "chooha",
+    "computer mouse",
+    "mice"
+   ],
+   "count": 40,
+   "offset": 507925,
+   "bytes": 3538
+  },
+  {
+   "word": "moustache",
+   "answers": [
+    "moustache",
+    "mustache",
+    "mooch",
+    "moonch",
+    "moustach",
+    "mustach"
+   ],
+   "count": 40,
+   "offset": 511463,
+   "bytes": 2680
+  },
+  {
+   "word": "mouth",
+   "answers": [
+    "mouth",
+    "lips",
+    "lip",
+    "smile",
+    "muh",
+    "honth"
+   ],
+   "count": 40,
+   "offset": 514143,
+   "bytes": 3136
+  },
+  {
+   "word": "mug",
+   "answers": [
+    "mug",
+    "cup",
+    "coffee mug",
+    "coffee cup",
+    "tea cup",
+    "chai cup",
+    "glass",
+    "beer mug"
+   ],
+   "count": 40,
+   "offset": 517279,
+   "bytes": 3530
+  },
+  {
+   "word": "mushroom",
+   "answers": [
+    "mushroom",
+    "mushrooms",
+    "khumb",
+    "toadstool",
+    "khumbi"
+   ],
+   "count": 40,
+   "offset": 520809,
+   "bytes": 2915
+  },
+  {
+   "word": "necklace",
+   "answers": [
+    "necklace",
+    "chain",
+    "haar",
+    "har",
+    "locket",
+    "pendant",
+    "neck chain"
+   ],
+   "count": 40,
+   "offset": 523724,
+   "bytes": 4072
+  },
+  {
+   "word": "nose",
+   "answers": [
+    "nose",
+    "naak",
+    "nak"
+   ],
+   "count": 40,
+   "offset": 527796,
+   "bytes": 2073
+  },
+  {
+   "word": "octopus",
+   "answers": [
+    "octopus",
+    "squid",
+    "octapus"
+   ],
+   "count": 40,
+   "offset": 529869,
+   "bytes": 4707
+  },
+  {
+   "word": "onion",
+   "answers": [
+    "onion",
+    "pyaz",
+    "pyaaz",
+    "piyaz",
+    "onions"
+   ],
+   "count": 40,
+   "offset": 534576,
+   "bytes": 4949
+  },
+  {
+   "word": "owl",
+   "answers": [
+    "owl",
+    "ullu",
+    "uluu"
+   ],
+   "count": 40,
+   "offset": 539525,
+   "bytes": 6090
+  },
+  {
+   "word": "paintbrush",
+   "answers": [
+    "paintbrush",
+    "brush",
+    "painting brush",
+    "art brush"
+   ],
+   "count": 40,
+   "offset": 545615,
+   "bytes": 4592
+  },
+  {
+   "word": "palm tree",
+   "answers": [
+    "palm tree",
+    "coconut tree",
+    "palm",
+    "nariyal tree",
+    "coconut palm",
+    "date tree"
+   ],
+   "count": 40,
+   "offset": 550207,
+   "bytes": 4333
+  },
+  {
+   "word": "panda",
+   "answers": [
+    "panda",
+    "panda bear"
+   ],
+   "count": 40,
+   "offset": 554540,
+   "bytes": 9287
+  },
+  {
+   "word": "pants",
+   "answers": [
+    "pants",
+    "pant",
+    "trousers",
+    "trouser",
+    "jeans",
+    "slacks"
+   ],
+   "count": 40,
+   "offset": 563827,
+   "bytes": 2253
+  },
+  {
+   "word": "parachute",
+   "answers": [
+    "parachute",
+    "paraglider",
+    "paragliding"
+   ],
+   "count": 40,
+   "offset": 566080,
+   "bytes": 4017
+  },
+  {
+   "word": "parrot",
+   "answers": [
+    "parrot",
+    "tota",
+    "totta",
+    "macaw"
+   ],
+   "count": 40,
+   "offset": 570097,
+   "bytes": 4418
+  },
+  {
+   "word": "peanut",
+   "answers": [
+    "peanut",
+    "peanuts",
+    "groundnut",
+    "moongfali",
+    "mungfali",
+    "mungphali"
+   ],
+   "count": 40,
+   "offset": 574515,
+   "bytes": 2740
+  },
+  {
+   "word": "pear",
+   "answers": [
+    "pear",
+    "nashpati",
+    "naspati"
+   ],
+   "count": 40,
+   "offset": 577255,
+   "bytes": 2463
+  },
+  {
+   "word": "pencil",
+   "answers": [
+    "pencil",
+    "pensil",
+    "pen",
+    "lead pencil"
+   ],
+   "count": 40,
+   "offset": 579718,
+   "bytes": 2544
+  },
+  {
+   "word": "penguin",
+   "answers": [
+    "penguin",
+    "pengiun",
+    "pengu"
+   ],
+   "count": 40,
+   "offset": 582262,
+   "bytes": 5140
+  },
+  {
+   "word": "piano",
+   "answers": [
+    "piano",
+    "keyboard",
+    "grand piano",
+    "pianoo"
+   ],
+   "count": 40,
+   "offset": 587402,
+   "bytes": 3777
+  },
+  {
+   "word": "photo frame",
+   "answers": [
+    "photo frame",
+    "picture frame",
+    "frame",
+    "painting",
+    "photo",
+    "wall frame"
+   ],
+   "count": 40,
+   "offset": 591179,
+   "bytes": 3417
+  },
+  {
+   "word": "pig",
+   "answers": [
+    "pig",
+    "suar",
+    "piggy",
+    "hog",
+    "swine",
+    "piglet"
+   ],
+   "count": 40,
+   "offset": 594596,
+   "bytes": 6605
+  },
+  {
+   "word": "pineapple",
+   "answers": [
+    "pineapple",
+    "ananas",
+    "anaanas",
+    "anannas"
+   ],
+   "count": 40,
+   "offset": 601201,
+   "bytes": 4660
+  },
+  {
+   "word": "pizza",
+   "answers": [
+    "pizza",
+    "pizza slice",
+    "piza"
+   ],
+   "count": 40,
+   "offset": 605861,
+   "bytes": 5936
+  },
+  {
+   "word": "police car",
+   "answers": [
+    "police car",
+    "police",
+    "cop car",
+    "police van",
+    "police jeep"
+   ],
+   "count": 40,
+   "offset": 611797,
+   "bytes": 4748
+  },
+  {
+   "word": "purse",
+   "answers": [
+    "purse",
+    "handbag",
+    "bag",
+    "wallet",
+    "ladies bag",
+    "clutch"
+   ],
+   "count": 40,
+   "offset": 616545,
+   "bytes": 3364
+  },
+  {
+   "word": "rabbit",
+   "answers": [
+    "rabbit",
+    "bunny",
+    "khargosh",
+    "hare"
+   ],
+   "count": 40,
+   "offset": 619909,
+   "bytes": 5576
+  },
+  {
+   "word": "radio",
+   "answers": [
+    "radio",
+    "transistor",
+    "boombox",
+    "radio set",
+    "fm radio"
+   ],
+   "count": 40,
+   "offset": 625485,
+   "bytes": 4596
+  },
+  {
+   "word": "rain",
+   "answers": [
+    "rain",
+    "raining",
+    "barish",
+    "baarish",
+    "rainy",
+    "rainfall",
+    "rain cloud"
+   ],
+   "count": 40,
+   "offset": 630081,
+   "bytes": 4358
+  },
+  {
+   "word": "rainbow",
+   "answers": [
+    "rainbow",
+    "indradhanush",
+    "indradhanus"
+   ],
+   "count": 40,
+   "offset": 634439,
+   "bytes": 2550
+  },
+  {
+   "word": "rhino",
+   "answers": [
+    "rhino",
+    "rhinoceros",
+    "gainda",
+    "gaida",
+    "rhinocerous"
+   ],
+   "count": 40,
+   "offset": 636989,
+   "bytes": 4152
+  },
+  {
+   "word": "gun",
+   "answers": [
+    "gun",
+    "rifle",
+    "bandook",
+    "banduk",
+    "shotgun",
+    "riffle"
+   ],
+   "count": 40,
+   "offset": 641141,
+   "bytes": 2006
+  },
+  {
+   "word": "roller skates",
+   "answers": [
+    "roller skates",
+    "skates",
+    "skating shoes",
+    "roller blades",
+    "skate shoes"
+   ],
+   "count": 40,
+   "offset": 643147,
+   "bytes": 4935
+  },
+  {
+   "word": "sailboat",
+   "answers": [
+    "sailboat",
+    "boat",
+    "yacht",
+    "ship",
+    "sailing boat"
+   ],
+   "count": 40,
+   "offset": 648082,
+   "bytes": 2444
+  },
+  {
+   "word": "sandwich",
+   "answers": [
+    "sandwich",
+    "sandwhich",
+    "sandwitch",
+    "toast sandwich"
+   ],
+   "count": 40,
+   "offset": 650526,
+   "bytes": 4219
+  },
+  {
+   "word": "saw",
+   "answers": [
+    "saw",
+    "handsaw",
+    "aari",
+    "ari",
+    "hacksaw"
+   ],
+   "count": 40,
+   "offset": 654745,
+   "bytes": 3287
+  },
+  {
+   "word": "saxophone",
+   "answers": [
+    "saxophone",
+    "sax",
+    "saxaphone",
+    "saxophon"
+   ],
+   "count": 40,
+   "offset": 658032,
+   "bytes": 3779
+  },
+  {
+   "word": "scissors",
+   "answers": [
+    "scissors",
+    "scissor",
+    "kainchi",
+    "kenchi",
+    "cutter",
+    "sissors"
+   ],
+   "count": 40,
+   "offset": 661811,
+   "bytes": 4210
+  },
+  {
+   "word": "scorpion",
+   "answers": [
+    "scorpion",
+    "bichhu",
+    "bichu",
+    "scorpian"
+   ],
+   "count": 40,
+   "offset": 666021,
+   "bytes": 5713
+  },
+  {
+   "word": "turtle",
+   "answers": [
+    "turtle",
+    "sea turtle",
+    "tortoise",
+    "kachua",
+    "kachhua"
+   ],
+   "count": 40,
+   "offset": 671734,
+   "bytes": 5560
+  },
+  {
+   "word": "see saw",
+   "answers": [
+    "see saw",
+    "seesaw ride"
+   ],
+   "count": 40,
+   "offset": 677294,
+   "bytes": 2216
+  },
+  {
+   "word": "shark",
+   "answers": [
+    "shark",
+    "sharks"
+   ],
+   "count": 40,
+   "offset": 679510,
+   "bytes": 3108
+  },
+  {
+   "word": "sheep",
+   "answers": [
+    "sheep",
+    "lamb",
+    "goat",
+    "bhed",
+    "bakri",
+    "ram"
+   ],
+   "count": 40,
+   "offset": 682618,
+   "bytes": 5602
+  },
+  {
+   "word": "shoe",
+   "answers": [
+    "shoe",
+    "shoes",
+    "sneaker",
+    "sneakers",
+    "boot",
+    "boots",
+    "juta",
+    "joota",
+    "jutta"
+   ],
+   "count": 40,
+   "offset": 688220,
+   "bytes": 2883
+  },
+  {
+   "word": "shorts",
+   "answers": [
+    "shorts",
+    "short",
+    "half pant",
+    "half pants",
+    "boxers",
+    "nicker"
+   ],
+   "count": 40,
+   "offset": 691103,
+   "bytes": 2427
+  },
+  {
+   "word": "shovel",
+   "answers": [
+    "shovel",
+    "spade",
+    "phavda",
+    "phawda",
+    "fawda",
+    "digger",
+    "garden spade"
+   ],
+   "count": 40,
+   "offset": 693530,
+   "bytes": 2409
+  },
+  {
+   "word": "sink",
+   "answers": [
+    "sink",
+    "washbasin",
+    "basin",
+    "hand wash basin",
+    "kitchen sink"
+   ],
+   "count": 40,
+   "offset": 695939,
+   "bytes": 4929
+  },
+  {
+   "word": "skateboard",
+   "answers": [
+    "skateboard",
+    "skating board",
+    "skate"
+   ],
+   "count": 40,
+   "offset": 700868,
+   "bytes": 3372
+  },
+  {
+   "word": "skull",
+   "answers": [
+    "skull",
+    "skeleton",
+    "khopdi",
+    "skull and bones"
+   ],
+   "count": 40,
+   "offset": 704240,
+   "bytes": 5478
+  },
+  {
+   "word": "skyscraper",
+   "answers": [
+    "skyscraper",
+    "building",
+    "tower",
+    "high rise",
+    "apartment"
+   ],
+   "count": 40,
+   "offset": 709718,
+   "bytes": 1742
+  },
+  {
+   "word": "snail",
+   "answers": [
+    "snail",
+    "ghongha",
+    "slug"
+   ],
+   "count": 40,
+   "offset": 711460,
+   "bytes": 4809
+  },
+  {
+   "word": "snake",
+   "answers": [
+    "snake",
+    "saanp",
+    "sanp",
+    "serpent",
+    "cobra",
+    "python"
+   ],
+   "count": 40,
+   "offset": 716269,
+   "bytes": 3014
+  },
+  {
+   "word": "snowflake",
+   "answers": [
+    "snowflake",
+    "snow",
+    "ice crystal"
+   ],
+   "count": 40,
+   "offset": 719283,
+   "bytes": 2382
+  },
+  {
+   "word": "snowman",
+   "answers": [
+    "snowman",
+    "frosty"
+   ],
+   "count": 40,
+   "offset": 721665,
+   "bytes": 4029
+  },
+  {
+   "word": "football",
+   "answers": [
+    "football",
+    "soccer ball",
+    "soccer",
+    "ball",
+    "footbal"
+   ],
+   "count": 40,
+   "offset": 725694,
+   "bytes": 6598
+  },
+  {
+   "word": "sock",
+   "answers": [
+    "sock",
+    "socks",
+    "stocking",
+    "mojey",
+    "moja"
+   ],
+   "count": 40,
+   "offset": 732292,
+   "bytes": 2521
+  },
+  {
+   "word": "speedboat",
+   "answers": [
+    "speedboat",
+    "boat",
+    "motorboat"
+   ],
+   "count": 40,
+   "offset": 734813,
+   "bytes": 3374
+  },
+  {
+   "word": "spider",
+   "answers": [
+    "spider",
+    "makdi",
+    "makadi",
+    "makri",
+    "tarantula"
+   ],
+   "count": 40,
+   "offset": 738187,
+   "bytes": 4916
+  },
+  {
+   "word": "spoon",
+   "answers": [
+    "spoon",
+    "chammach",
+    "chamach",
+    "chamcha",
+    "table spoon"
+   ],
+   "count": 40,
+   "offset": 743103,
+   "bytes": 2191
+  },
+  {
+   "word": "square",
+   "answers": [
+    "square",
+    "box",
+    "chokor",
+    "squre"
+   ],
+   "count": 40,
+   "offset": 745294,
+   "bytes": 1490
+  },
+  {
+   "word": "squirrel",
+   "answers": [
+    "squirrel",
+    "gilhari",
+    "gilheri",
+    "chipmunk",
+    "squirel"
+   ],
+   "count": 40,
+   "offset": 746784,
+   "bytes": 6145
+  },
+  {
+   "word": "stairs",
+   "answers": [
+    "stairs",
+    "staircase",
+    "steps",
+    "seedhi",
+    "stair"
+   ],
+   "count": 40,
+   "offset": 752929,
+   "bytes": 1545
+  },
+  {
+   "word": "star",
+   "answers": [
+    "star",
+    "sitara",
+    "taara",
+    "tara",
+    "stars"
+   ],
+   "count": 40,
+   "offset": 754474,
+   "bytes": 2209
+  },
+  {
+   "word": "stethoscope",
+   "answers": [
+    "stethoscope",
+    "stethescope",
+    "stethoscop",
+    "doctor stethoscope"
+   ],
+   "count": 40,
+   "offset": 756683,
+   "bytes": 3568
+  },
+  {
+   "word": "stove",
+   "answers": [
+    "stove",
+    "gas stove",
+    "chulha",
+    "chulah",
+    "burner",
+    "gas burner",
+    "cooktop"
+   ],
+   "count": 40,
+   "offset": 760251,
+   "bytes": 6488
+  },
+  {
+   "word": "strawberry",
+   "answers": [
+    "strawberry",
+    "strawberries"
+   ],
+   "count": 40,
+   "offset": 766739,
+   "bytes": 4371
+  },
+  {
+   "word": "streetlight",
+   "answers": [
+    "streetlight",
+    "lamp post",
+    "street lamp",
+    "pole light"
+   ],
+   "count": 40,
+   "offset": 771110,
+   "bytes": 2162
+  },
+  {
+   "word": "submarine",
+   "answers": [
+    "submarine",
+    "sub",
+    "subarine"
+   ],
+   "count": 40,
+   "offset": 773272,
+   "bytes": 3432
+  },
+  {
+   "word": "suitcase",
+   "answers": [
+    "suitcase",
+    "briefcase",
+    "luggage",
+    "trolley bag",
+    "attache",
+    "bag"
+   ],
+   "count": 40,
+   "offset": 776704,
+   "bytes": 2399
+  },
+  {
+   "word": "sun",
+   "answers": [
+    "sun",
+    "sooraj",
+    "suraj",
+    "sunshine"
+   ],
+   "count": 40,
+   "offset": 779103,
+   "bytes": 3555
+  },
+  {
+   "word": "swan",
+   "answers": [
+    "swan",
+    "goose",
+    "hans",
+    "duck",
+    "geese"
+   ],
+   "count": 40,
+   "offset": 782658,
+   "bytes": 3729
+  },
+  {
+   "word": "sweater",
+   "answers": [
+    "sweater",
+    "jumper",
+    "pullover",
+    "sweat shirt",
+    "hoodie",
+    "woolen"
+   ],
+   "count": 40,
+   "offset": 786387,
+   "bytes": 2828
+  },
+  {
+   "word": "swing",
+   "answers": [
+    "swing",
+    "swing set",
+    "jhoola",
+    "jhula",
+    "jhoolaa",
+    "swings"
+   ],
+   "count": 40,
+   "offset": 789215,
+   "bytes": 2124
+  },
+  {
+   "word": "sword",
+   "answers": [
+    "sword",
+    "talwar",
+    "talvaar",
+    "katana",
+    "blade",
+    "sord"
+   ],
+   "count": 40,
+   "offset": 791339,
+   "bytes": 2560
+  },
+  {
+   "word": "syringe",
+   "answers": [
+    "syringe",
+    "injection",
+    "needle",
+    "sui",
+    "suii",
+    "siringe",
+    "injection needle"
+   ],
+   "count": 40,
+   "offset": 793899,
+   "bytes": 2532
+  },
+  {
+   "word": "t shirt",
+   "answers": [
+    "t shirt",
+    "tee shirt",
+    "shirt",
+    "tee",
+    "half sleeve shirt"
+   ],
+   "count": 40,
+   "offset": 796431,
+   "bytes": 2547
+  },
+  {
+   "word": "table",
+   "answers": [
+    "table",
+    "desk",
+    "mez",
+    "mej",
+    "meaz",
+    "study table"
+   ],
+   "count": 40,
+   "offset": 798978,
+   "bytes": 2208
+  },
+  {
+   "word": "teapot",
+   "answers": [
+    "teapot",
+    "kettle",
+    "chai pot",
+    "ketli",
+    "kettel"
+   ],
+   "count": 40,
+   "offset": 801186,
+   "bytes": 4047
+  },
+  {
+   "word": "telephone",
+   "answers": [
+    "telephone",
+    "landline",
+    "phone",
+    "receiver",
+    "old phone",
+    "telefone"
+   ],
+   "count": 40,
+   "offset": 805233,
+   "bytes": 4497
+  },
+  {
+   "word": "tv",
+   "answers": [
+    "tv",
+    "television",
+    "telly",
+    "idiot box"
+   ],
+   "count": 40,
+   "offset": 809730,
+   "bytes": 3506
+  },
+  {
+   "word": "tennis racket",
+   "answers": [
+    "tennis racket",
+    "tennis racquet",
+    "racket",
+    "racquet",
+    "badminton racket",
+    "raquet",
+    "bat racket"
+   ],
+   "count": 40,
+   "offset": 813236,
+   "bytes": 4502
+  },
+  {
+   "word": "tent",
+   "answers": [
+    "tent",
+    "camp",
+    "tambu",
+    "tambo",
+    "camping tent",
+    "tant"
+   ],
+   "count": 40,
+   "offset": 817738,
+   "bytes": 2099
+  },
+  {
+   "word": "toaster",
+   "answers": [
+    "toaster",
+    "toast",
+    "bread toaster",
+    "toster",
+    "pop up toaster"
+   ],
+   "count": 40,
+   "offset": 819837,
+   "bytes": 3710
+  },
+  {
+   "word": "toilet",
+   "answers": [
+    "toilet",
+    "commode",
+    "wc",
+    "western toilet",
+    "loo",
+    "toilet seat",
+    "latrine"
+   ],
+   "count": 40,
+   "offset": 823547,
+   "bytes": 3896
+  },
+  {
+   "word": "tooth",
+   "answers": [
+    "tooth",
+    "teeth",
+    "daant",
+    "dant",
+    "molar"
+   ],
+   "count": 40,
+   "offset": 827443,
+   "bytes": 2671
+  },
+  {
+   "word": "toothbrush",
+   "answers": [
+    "toothbrush",
+    "brush",
+    "tuthbrush"
+   ],
+   "count": 40,
+   "offset": 830114,
+   "bytes": 2729
+  },
+  {
+   "word": "toothpaste",
+   "answers": [
+    "toothpaste",
+    "paste",
+    "colgate",
+    "tooth past"
+   ],
+   "count": 40,
+   "offset": 832843,
+   "bytes": 3026
+  },
+  {
+   "word": "tornado",
+   "answers": [
+    "tornado",
+    "twister",
+    "cyclone",
+    "whirlwind",
+    "hurricane",
+    "tornedo"
+   ],
+   "count": 40,
+   "offset": 835869,
+   "bytes": 8107
+  },
+  {
+   "word": "tractor",
+   "answers": [
+    "tractor",
+    "farm tractor"
+   ],
+   "count": 40,
+   "offset": 843976,
+   "bytes": 4826
+  },
+  {
+   "word": "traffic light",
+   "answers": [
+    "traffic light",
+    "signal",
+    "traffic signal",
+    "stop light",
+    "red light",
+    "traffic lights"
+   ],
+   "count": 40,
+   "offset": 848802,
+   "bytes": 4215
+  },
+  {
+   "word": "train",
+   "answers": [
+    "train",
+    "rail",
+    "railway",
+    "locomotive",
+    "engine",
+    "rail gadi",
+    "railgaadi"
+   ],
+   "count": 40,
+   "offset": 853017,
+   "bytes": 6308
+  },
+  {
+   "word": "tree",
+   "answers": [
+    "tree",
+    "ped",
+    "pedh",
+    "plant",
+    "trees"
+   ],
+   "count": 40,
+   "offset": 859325,
+   "bytes": 4866
+  },
+  {
+   "word": "triangle",
+   "answers": [
+    "triangle",
+    "tringle",
+    "triangel"
+   ],
+   "count": 40,
+   "offset": 864191,
+   "bytes": 1428
+  },
+  {
+   "word": "truck",
+   "answers": [
+    "truck",
+    "lorry",
+    "tempo",
+    "goods truck",
+    "van"
+   ],
+   "count": 40,
+   "offset": 865619,
+   "bytes": 4417
+  },
+  {
+   "word": "trumpet",
+   "answers": [
+    "trumpet",
+    "horn",
+    "bugle",
+    "trumpit"
+   ],
+   "count": 40,
+   "offset": 870036,
+   "bytes": 3521
+  },
+  {
+   "word": "umbrella",
+   "answers": [
+    "umbrella",
+    "chatri",
+    "chhatri",
+    "chhata",
+    "chata",
+    "umbrela"
+   ],
+   "count": 40,
+   "offset": 873557,
+   "bytes": 3146
+  },
+  {
+   "word": "underwear",
+   "answers": [
+    "underwear",
+    "undies",
+    "briefs",
+    "chaddi",
+    "chadi",
+    "panty",
+    "boxers",
+    "innerwear"
+   ],
+   "count": 40,
+   "offset": 876703,
+   "bytes": 2183
+  },
+  {
+   "word": "vase",
+   "answers": [
+    "vase",
+    "flower vase",
+    "pot",
+    "flower pot",
+    "gamla",
+    "vaas",
+    "urn"
+   ],
+   "count": 40,
+   "offset": 878886,
+   "bytes": 3116
+  },
+  {
+   "word": "violin",
+   "answers": [
+    "violin",
+    "fiddle",
+    "voilin",
+    "vayolin"
+   ],
+   "count": 40,
+   "offset": 882002,
+   "bytes": 4243
+  },
+  {
+   "word": "washing machine",
+   "answers": [
+    "washing machine",
+    "washing machin",
+    "washer",
+    "clothes washer"
+   ],
+   "count": 40,
+   "offset": 886245,
+   "bytes": 4149
+  },
+  {
+   "word": "watermelon",
+   "answers": [
+    "watermelon",
+    "tarbooj",
+    "tarbuj",
+    "tarbuz",
+    "melon"
+   ],
+   "count": 40,
+   "offset": 890394,
+   "bytes": 3968
+  },
+  {
+   "word": "whale",
+   "answers": [
+    "whale",
+    "blue whale",
+    "wale"
+   ],
+   "count": 40,
+   "offset": 894362,
+   "bytes": 4100
+  },
+  {
+   "word": "wheel",
+   "answers": [
+    "wheel",
+    "tyre",
+    "tire",
+    "wheel tyre",
+    "pahiya",
+    "car wheel"
+   ],
+   "count": 40,
+   "offset": 898462,
+   "bytes": 4758
+  },
+  {
+   "word": "windmill",
+   "answers": [
+    "windmill",
+    "wind turbine",
+    "windmil",
+    "turbine"
+   ],
+   "count": 40,
+   "offset": 903220,
+   "bytes": 4178
+  },
+  {
+   "word": "wine bottle",
+   "answers": [
+    "wine bottle",
+    "bottle",
+    "wine",
+    "beer bottle",
+    "liquor bottle",
+    "daru bottle"
+   ],
+   "count": 40,
+   "offset": 907398,
+   "bytes": 2161
+  },
+  {
+   "word": "wine glass",
+   "answers": [
+    "wine glass",
+    "glass",
+    "goblet",
+    "champagne glass",
+    "cocktail glass"
+   ],
+   "count": 40,
+   "offset": 909559,
+   "bytes": 2879
+  },
+  {
+   "word": "wrist watch",
+   "answers": [
+    "wrist watch",
+    "watch",
+    "hand watch",
+    "ghadi",
+    "ghari"
+   ],
+   "count": 40,
+   "offset": 912438,
+   "bytes": 3897
+  },
+  {
+   "word": "zebra",
+   "answers": [
+    "zebra",
+    "zeebra"
+   ],
+   "count": 40,
+   "offset": 916335,
+   "bytes": 5860
+  }
+ ]
+}
