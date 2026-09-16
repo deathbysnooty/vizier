@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.33] - 2026-09-16
+
+### 💼 Other
+
+- Mods can play too - frogs, trades, sets and Name Place Animal Thing (still no house points)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.33
 ## [0.11.32] - 2026-09-16
 
 ### 💼 Other
@@ -12,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - A whole game in its own channel, with a private board page
 - Anyone can watch, replays, and a restart that costs nobody a game
 - A note for chess; welcome lists the sudoku channel too
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.32
 ## [0.11.31] - 2026-09-16
 
 ### 💼 Other
