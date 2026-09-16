@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.32] - 2026-09-16
+
+### 💼 Other
+
+- A note for sudoku, and channel links filled in from the settings
+- Pay only guesses that scored, and pay them in unsolved games too
+- Koto line says points come from guesses that score
+- A whole game in its own channel, with a private board page
+- Anyone can watch, replays, and a restart that costs nobody a game
+- A note for chess; welcome lists the sudoku channel too
 ## [0.11.31] - 2026-09-16
 
 ### 💼 Other
@@ -10,6 +20,10 @@ All notable changes to this project will be documented in this file.
 - Koto line says points come from guesses that score
 - The bot tells the common rooms what changed, by itself
 - A puzzle always waiting in its own channel, solved on a web page and won with a short code
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.31
 ## [0.11.30] - 2026-09-15
 
 ### 💼 Other
