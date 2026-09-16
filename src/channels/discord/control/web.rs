@@ -1644,6 +1644,22 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("change".into(), json!(change));
                 obj.insert("old".into(), Value::Null);
                 obj.insert("new".into(), Value::Null);
+            } else if let Some(what) = e.key.strip_prefix("announce:") {
+                let label = match what {
+                    "settings" => "Change announced in the common rooms",
+                    "news" => "New feature announced in the common rooms",
+                    _ => "Announcement sent with /announce",
+                };
+                obj.insert("label".into(), json!(label));
+                obj.insert("section".into(), json!({ "id": "announce", "title": "Announcements", "icon": "📣" }));
+                obj.insert("change".into(), json!(e.new.clone().unwrap_or_else(|| "Posted".into())));
+                obj.insert("old".into(), Value::Null);
+                obj.insert("new".into(), Value::Null);
+                // The bot itself, not a member of the panel.
+                if e.user_id == "0" {
+                    obj.insert("user_name".into(), json!("Loduchand"));
+                    obj.insert("system".into(), json!(true));
+                }
             } else if let Some(field) = e.key.strip_prefix("agent:") {
                 obj.insert("label".into(), json!(agent::label(field)));
                 obj.insert("section".into(), json!({ "id": "agent", "title": "Bot behaviour", "icon": "🤖" }));

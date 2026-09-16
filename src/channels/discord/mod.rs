@@ -27,6 +27,7 @@ use crate::storage::state::StateStorage;
 use crate::transport::VizierTransport;
 use crate::utils::remove_think_tags;
 
+mod announce;
 mod awards;
 mod battle;
 mod battle_bracket;
@@ -1479,6 +1480,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(standings::draw_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(scoreboard::refresh_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(announce::builder())).await;
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -1534,6 +1536,9 @@ impl EventHandler for Handler {
         standings::spawn(ctx.clone());
         // The House Cup channel: welcome, rules, and the scoreboard card kept last.
         scoreboard::spawn(ctx.clone());
+        // Tells the common rooms when the points, limits or games change, and
+        // posts the hand-written notes about anything new.
+        announce::spawn(ctx.clone());
         // A card in the houses channel when a different house takes the lead.
         standings::spawn_lead_watch(ctx.clone());
         // The daily battle royale, when switched on in the panel.
@@ -2150,6 +2155,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "guiderefresh" {
                 scoreboard::refresh_command(&ctx, &command).await;
+            }
+            if command.data.name == "announce" {
+                announce::command(&ctx, &command).await;
+                return;
             }
             if command.data.name == "houseopt" {
                 house::opt_command(&ctx, &command).await;

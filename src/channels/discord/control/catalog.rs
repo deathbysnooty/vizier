@@ -982,6 +982,61 @@ pub fn sections() -> Vec<Section> {
             commands: vec![],
         },
         Section {
+            id: "announce",
+            title: "Announcements",
+            icon: "📣",
+            about: "The bot tells everyone what changed, so nobody has to write a post. Whenever a game is switched \
+                    on or off, or points, limits or how often something happens are edited here, it waits for the \
+                    changes to stop and then posts one gold “📣 What's new” card in each channel below, listing \
+                    exactly what moved and what it was before - a run of edits becomes one message, never one per \
+                    click. Notes about a brand-new game or feature are written into the bot and posted the same way, \
+                    once each. Where a player looks things up doesn't change: the welcome, the guide and the rules in \
+                    the House Cup channel are still edited in place to match. Nothing is ever pinged, and a restart \
+                    in the middle can't say the same thing twice.",
+            settings: vec![
+                toggle(
+                    "VIZIER_ANNOUNCE",
+                    "Announcements on",
+                    "Off stops both the automatic “what's new” cards and the notes about new features. The settings \
+                     are still followed - only the telling stops, and changes made while it's off are never announced \
+                     later.",
+                ),
+                setting(
+                    "VIZIER_ANNOUNCE_CHANNELS",
+                    "Where to announce",
+                    "Every channel a “what's new” card goes to. The five meant here are the four house common rooms \
+                     and the houses channel: 1548413022744350732, 1548413025470390332, 1548413028117258321, \
+                     1548413030738436117, 1548371226890604665. Empty means nothing is announced anywhere. A channel \
+                     the bot can't post in is warned about in the log and tried twice more, then left.",
+                    Kind::Channels,
+                    "",
+                ),
+                setting(
+                    "VIZIER_ANNOUNCE_DELAY_MINUTES",
+                    "Wait for quiet",
+                    "How long the settings must sit still before the card goes out, so a session of edits on this \
+                     panel becomes one message instead of a dozen. Higher means later but tidier.",
+                    number(1, 240, "minutes"),
+                    "10",
+                ),
+                setting(
+                    "VIZIER_ANNOUNCE_MIN_GAP_MINUTES",
+                    "Least gap between announcements",
+                    "No automatic announcement goes out within this long of the last one, whatever else changes in \
+                     between - the changes simply wait and go together.",
+                    number(0, 1440, "minutes"),
+                    "30",
+                ),
+            ],
+            commands: vec![command(
+                "announce",
+                ADMINS,
+                "/announce text:",
+                "Posts your own message as a gold card in the same channels, in your own words. Only you see the \
+                 reply, which says which channels took it. It's written to the activity log with your name.",
+            )],
+        },
+        Section {
             id: "autoreplies",
             title: "Auto-responses",
             icon: "💬",
