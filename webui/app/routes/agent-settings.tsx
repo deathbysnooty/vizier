@@ -1575,7 +1575,7 @@ export default function AgentSettings() {
                           </option>
                           <option value="xai">xAI</option>
                           <option value="hyperbolic">Hyperbolic</option>
-                          <option value="kokoro">Kokoro (Offline)</option>
+                          <option value="kokoro">Kokoro (Offline — needs a local-speech build)</option>
                         </select>
                       </div>
                       <div>
@@ -1766,7 +1766,7 @@ export default function AgentSettings() {
                           <option value="elevenlabs">
                             ElevenLabs
                           </option>
-                          <option value="whisper">Local Whisper</option>
+                          <option value="whisper">Local Whisper (Offline — needs a local-speech build)</option>
                         </select>
                       </div>
                       <div>

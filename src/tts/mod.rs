@@ -1,5 +1,6 @@
 pub mod elevenlabs;
 pub mod hyperbolic;
+#[cfg(feature = "local-speech")]
 pub mod kokoro;
 pub mod openai;
 pub mod openrouter;
@@ -88,12 +89,22 @@ impl VizierTts {
                     .unwrap_or_else(|| "Melo-TTS".into());
                 Arc::new(hyperbolic::HyperbolicTtsModel::new(resolved.api_key, model))
             }
+            #[cfg(feature = "local-speech")]
             TtsProvider::Kokoro => {
                 let model = settings
                     .model
                     .clone()
                     .unwrap_or_else(|| "kokoro-en-v0_19".into());
                 Arc::new(kokoro::KokoroTtsModel::new(model, _workspace))
+            }
+            #[cfg(not(feature = "local-speech"))]
+            TtsProvider::Kokoro => {
+                return Err(VizierError(
+                    "This build has no local speech engine. Build with --features local-speech \
+                     to use Kokoro, or pick an HTTP text-to-speech provider (openai, openrouter, \
+                     elevenlabs, xai, hyperbolic)."
+                        .into(),
+                ));
             }
         };
 

@@ -4,6 +4,7 @@ pub mod groq;
 pub mod huggingface;
 pub mod mistral;
 pub mod openai;
+#[cfg(feature = "local-speech")]
 pub mod whisper;
 
 use std::sync::Arc;
@@ -110,12 +111,22 @@ impl VizierStt {
                     .unwrap_or_else(|| SttProvider::Gemini.default_model().into());
                 Arc::new(gemini::GeminiSttModel::new(resolved.api_key, model))
             }
+            #[cfg(feature = "local-speech")]
             SttProvider::Whisper => {
                 let model = settings
                     .model
                     .clone()
                     .unwrap_or_else(|| SttProvider::Whisper.default_model().into());
                 Arc::new(whisper::WhisperSttModel::new(model, _workspace))
+            }
+            #[cfg(not(feature = "local-speech"))]
+            SttProvider::Whisper => {
+                return Err(crate::VizierError(
+                    "This build has no local speech engine. Build with --features local-speech \
+                     to use local Whisper, or pick an HTTP speech-to-text provider (openai, \
+                     elevenlabs, groq, mistral, huggingface, gemini)."
+                        .into(),
+                ));
             }
         };
 
