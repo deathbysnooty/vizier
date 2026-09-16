@@ -38,7 +38,7 @@ pub const SCHEMA: &str = "
         message_id INTEGER, result TEXT, winner INTEGER, by_resignation INTEGER NOT NULL DEFAULT 0,
         finished_at INTEGER, points_white INTEGER NOT NULL DEFAULT 0, points_black INTEGER NOT NULL DEFAULT 0,
         paid_out INTEGER NOT NULL DEFAULT 0, why_nothing TEXT NOT NULL DEFAULT '',
-        draw_offer INTEGER, draw_announced INTEGER NOT NULL DEFAULT 0,
+        draw_offer INTEGER, draw_announced INTEGER NOT NULL DEFAULT 0, given_back INTEGER NOT NULL DEFAULT 0,
         nudged_white INTEGER NOT NULL DEFAULT 0, nudged_black INTEGER NOT NULL DEFAULT 0,
         day TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS games_status ON games (status);
@@ -51,8 +51,25 @@ pub const SCHEMA: &str = "
         PRIMARY KEY (day, low, high));
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
+/// Columns added after the first build, for a database made before them.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("games", "draw_announced", "INTEGER NOT NULL DEFAULT 0"),
+    ("games", "given_back", "INTEGER NOT NULL DEFAULT 0"),
+];
+
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    for (table, column, kind) in ADDED_COLUMNS {
+        let has: bool = conn
+            .prepare(&format!("PRAGMA table_info({})", table))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .flatten()
+            .any(|name| name == *column);
+        if !has {
+            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, kind))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -247,6 +264,9 @@ pub struct Game {
     pub draw_announced: bool,
     pub nudged_white: bool,
     pub nudged_black: bool,
+    /// Seconds handed back to this game's clock after the bot was down, still
+    /// waiting to be mentioned on its card. A move clears it.
+    pub given_back: i64,
 }
 
 impl Game {
@@ -284,7 +304,8 @@ fn split_moves(text: &str) -> Vec<String> {
 
 const GAME_COLUMNS: &str = "id, channel_id, white, black, white_house, black_house, fen, moves, status, time_control, \
      per_move_secs, started_at, last_move_ts, message_id, result, winner, by_resignation, finished_at, \
-     points_white, points_black, paid_out, why_nothing, draw_offer, nudged_white, nudged_black, draw_announced";
+     points_white, points_black, paid_out, why_nothing, draw_offer, nudged_white, nudged_black, draw_announced, \
+     given_back";
 
 fn game_from(row: &rusqlite::Row) -> rusqlite::Result<Game> {
     Ok(Game {
@@ -314,6 +335,7 @@ fn game_from(row: &rusqlite::Row) -> rusqlite::Result<Game> {
         nudged_white: row.get::<_, i64>(23)? != 0,
         nudged_black: row.get::<_, i64>(24)? != 0,
         draw_announced: row.get::<_, i64>(25)? != 0,
+        given_back: row.get(26)?,
     })
 }
 
@@ -414,7 +436,7 @@ pub fn play_move(
     }
     now_list.push_str(san);
     let changed = conn.execute(
-        "UPDATE games SET moves = ?2, fen = ?3, last_move_ts = ?4, draw_offer = NULL
+        "UPDATE games SET moves = ?2, fen = ?3, last_move_ts = ?4, draw_offer = NULL, given_back = 0
          WHERE id = ?1 AND status = 'running' AND moves = ?5",
         params![id, now_list, fen, now, was],
     )?;
@@ -491,6 +513,36 @@ pub fn mark_nudged(conn: &Connection, id: i64, white: bool) -> rusqlite::Result<
         params![id],
     )?;
     Ok(changed > 0)
+}
+
+// --- giving time back after the bot was away ------------------------------------------
+
+/// Pushes every running game's move deadline forward by `seconds`, so nobody
+/// loses on a clock that was ticking while the bot was not there to watch it.
+/// Returns how many games were given the time.
+pub fn give_time_back(conn: &Connection, seconds: i64) -> rusqlite::Result<usize> {
+    if seconds <= 0 {
+        return Ok(0);
+    }
+    conn.execute(
+        "UPDATE games SET last_move_ts = last_move_ts + ?1, given_back = given_back + ?1 WHERE status = 'running'",
+        params![seconds],
+    )
+}
+
+/// The earliest moment a LIVE game needs a move by, for a deploy script that
+/// would rather wait a minute than cost somebody a game. `None` when no live
+/// game is running; casual games never hold a restart up.
+pub fn live_move_until(conn: &Connection) -> Option<i64> {
+    conn.query_row(
+        "SELECT MIN(last_move_ts + per_move_secs) FROM games WHERE status = 'running' AND time_control = 'live'",
+        [],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 // --- the private board links -------------------------------------------------------------
@@ -744,6 +796,43 @@ mod tests {
         assert_eq!(wins_between(&conn, 0, 6_000), vec![(1, 5_000)], "a draw has no winner");
         assert_eq!(wins_between(&conn, 0, 10_000), vec![(1, 5_000), (2, 9_000)]);
         assert!(wins_between(&conn, 10_000, 20_000).is_empty());
+    }
+
+    #[test]
+    fn time_lost_to_a_restart_is_handed_back_to_every_running_game() {
+        let conn = conn();
+        let a = game(&conn);
+        let b = start_game(&conn, 5, 3, 4, "hufflepuff", "slytherin", "fen", "live", 180, 1_000, "2026-09-16").unwrap();
+        finish_game(&conn, b.id, "resign", Some(4), true, 1_050).unwrap();
+        let c = start_game(&conn, 5, 5, 6, "hufflepuff", "slytherin", "fen", "live", 180, 2_000, "2026-09-16").unwrap();
+        assert_eq!(give_time_back(&conn, 120).unwrap(), 2, "the finished game is left alone");
+        assert_eq!(get_game(&conn, a.id).unwrap().last_move_ts, 1_120);
+        assert_eq!(get_game(&conn, a.id).unwrap().given_back, 120);
+        assert_eq!(get_game(&conn, c.id).unwrap().last_move_ts, 2_120);
+        assert_eq!(get_game(&conn, b.id).unwrap().last_move_ts, 1_000, "a finished game keeps its clock");
+        assert_eq!(give_time_back(&conn, 0).unwrap(), 0);
+        assert_eq!(give_time_back(&conn, -5).unwrap(), 0);
+        // The note goes as soon as that game is played on.
+        let a = get_game(&conn, a.id).unwrap();
+        play_move(&conn, a.id, &a.moves, "e4", "fen", 3_000).unwrap();
+        assert_eq!(get_game(&conn, a.id).unwrap().given_back, 0);
+    }
+
+    #[test]
+    fn a_deploy_can_ask_when_the_next_live_move_is_due() {
+        let conn = conn();
+        assert_eq!(live_move_until(&conn), None, "nothing running");
+        let casual = game(&conn);
+        assert_eq!(live_move_until(&conn), None, "a casual game never holds a restart up");
+        let live = start_game(&conn, 5, 3, 4, "hufflepuff", "slytherin", "fen", "live", 180, 2_000, "2026-09-16").unwrap();
+        assert_eq!(live_move_until(&conn), Some(2_180));
+        let sooner = start_game(&conn, 5, 7, 8, "hufflepuff", "slytherin", "fen", "live", 180, 1_500, "2026-09-16").unwrap();
+        assert_eq!(live_move_until(&conn), Some(1_680), "the earliest one is the one that matters");
+        finish_game(&conn, sooner.id, "draw", None, false, 1_600).unwrap();
+        assert_eq!(live_move_until(&conn), Some(2_180));
+        finish_game(&conn, live.id, "draw", None, false, 2_100).unwrap();
+        assert_eq!(live_move_until(&conn), None);
+        assert!(casual.running());
     }
 
     #[test]

@@ -30,6 +30,8 @@ use super::Panel;
 
 const PAGE_HTML: &str = include_str!("../ui/chess.html");
 const PAGE_JS: &str = include_str!("../ui/chess.js");
+const WATCH_HTML: &str = include_str!("../ui/chess-watch.html");
+const WATCH_JS: &str = include_str!("../ui/chess-watch.js");
 
 /// The board page's routes. They go on the outer router, so neither the panel
 /// session nor the `X-Panel` header is in the way.
@@ -40,7 +42,10 @@ pub fn routes() -> Router<Panel> {
         .route("/chess/{game}/{token}/move", post(play))
         .route("/chess/{game}/{token}/resign", post(resign))
         .route("/chess/{game}/{token}/draw", post(draw))
+        .route("/chess/watch/{game}", get(watch_page))
+        .route("/chess/watch/{game}/state", get(watch_state))
         .route("/assets/chess.js", get(|| async { asset("text/javascript; charset=utf-8", PAGE_JS) }))
+        .route("/assets/chess-watch.js", get(|| async { asset("text/javascript; charset=utf-8", WATCH_JS) }))
 }
 
 fn asset(kind: &'static str, body: &'static str) -> Response {
@@ -177,6 +182,103 @@ async fn state(State(panel): State<Panel>, Path((game_id, token)): Path<(i64, St
     }
 }
 
+// --- watching, and the replay a finished game becomes -------------------------------
+
+/// Why a game cannot be watched, if it cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoWatch {
+    /// No such game, or the store isn't open.
+    Unknown,
+    /// It finished longer ago than replays are kept for.
+    AgedOut,
+}
+
+impl NoWatch {
+    fn words(self) -> &'static str {
+        match self {
+            NoWatch::Unknown => "There's no game with that number.",
+            NoWatch::AgedOut => "This game has aged out — its replay is no longer kept.",
+        }
+    }
+}
+
+/// The game behind a watching address, when it may still be looked at. Needs no
+/// link and no sign-in: a game's number is on its card in the channel for
+/// everyone to see, and nothing here can change anything.
+pub fn watchable(game_id: i64, now: i64) -> Result<Game, NoWatch> {
+    let db = store::db().ok_or(NoWatch::Unknown)?;
+    let game = store::get_game(&db.lock(), game_id).ok_or(NoWatch::Unknown)?;
+    if game.running() {
+        return Ok(game);
+    }
+    if chess::replay_open(game.finished_at, now, chess::replay_window_days()) { Ok(game) } else { Err(NoWatch::AgedOut) }
+}
+
+/// Everything the watching page draws. It is the same for everybody, so it
+/// carries no link of either player's - there is nothing private in it at all.
+pub fn watch_json(panel: &Panel, game: &Game, now: i64) -> Value {
+    let replay = rules::Replay::from_sans(&game.moves).unwrap_or_default();
+    let turn_white = replay.turn() == Color::White;
+    let left = rules::seconds_left(game.last_move_ts, game.per_move_secs, now);
+    let time = TimeControl::from_key(&game.time_control);
+    let running = game.running();
+    // A move clock only runs for the side to move: the other side's allowance
+    // starts when their turn does, so saying so is honest where a second
+    // counting number would not be.
+    let side = |user: u64, white: bool, points: i64| {
+        let theirs = running && white == turn_white;
+        json!({
+            "name": panel.cached_name(user).unwrap_or_else(|| format!("member {}", user)),
+            "crest": chess::crest(user),
+            "to_move": theirs,
+            "clock": if theirs { rules::clock_words(left) } else { String::new() },
+            "waiting": running && !theirs,
+            "points": points,
+        })
+    };
+    let frames: Vec<Value> = rules::frames(&game.moves)
+        .into_iter()
+        .map(|f| json!({"fen": f.fen, "last": f.last, "check": f.check, "san": f.san}))
+        .collect();
+    let winner = match game.winner {
+        Some(w) if w == game.white => Some("white"),
+        Some(_) => Some("black"),
+        None => None,
+    };
+    json!({
+        "game": game.id,
+        "white": side(game.white, true, game.points_white),
+        "black": side(game.black, false, game.points_black),
+        "turn": if turn_white { "white" } else { "black" },
+        "move_number": replay.move_number(),
+        "running": running,
+        "result": game.result,
+        "headline": game.result.as_deref().map(chess::result_headline),
+        "winner": winner,
+        "why_nothing": game.why_nothing,
+        "same_house": game.same_house(),
+        "pace": chess::control_words(time, game.per_move_secs),
+        "lasted": rules::span_words(game.finished_at.unwrap_or(now) - game.started_at),
+        "moves": game.moves,
+        "frames": frames,
+    })
+}
+
+async fn watch_page(Path(game_id): Path<i64>) -> Response {
+    match watchable(game_id, chrono::Utc::now().timestamp()) {
+        Ok(_) => html(StatusCode::OK, WATCH_HTML),
+        Err(_) => html(StatusCode::NOT_FOUND, WATCH_HTML),
+    }
+}
+
+async fn watch_state(State(panel): State<Panel>, Path(game_id): Path<i64>) -> Response {
+    let now = chrono::Utc::now().timestamp();
+    match watchable(game_id, now) {
+        Ok(game) => json_out(StatusCode::OK, watch_json(&panel, &game, now)),
+        Err(why) => json_out(StatusCode::NOT_FOUND, json!({"error": why.words()})),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct MoveBody {
     /// A move in either notation; the page sends the long form.
@@ -251,6 +353,7 @@ mod tests {
             draw_announced: false,
             nudged_white: false,
             nudged_black: false,
+            given_back: 0,
         }
     }
 
@@ -354,6 +457,19 @@ mod tests {
         let white = store::token_for(&conn, g.id, 111, now, &mut roll).expect("white's link");
         let black = store::token_for(&conn, g.id, 222, now, &mut roll).expect("black's link");
         (g.id, white, black)
+    }
+
+    /// Black's link for a game the helper made, looked up rather than passed
+    /// around, so a test can play both sides.
+    fn black_token(game_id: i64) -> String {
+        let db = store::db().expect("chess store");
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT token FROM tokens WHERE game_id = ?1 AND user_id = 222",
+            rusqlite::params![game_id],
+            |r| r.get::<_, String>(0),
+        )
+        .expect("black's link")
     }
 
     async fn hit(method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -475,6 +591,89 @@ mod tests {
         assert_eq!(done.winner, None);
     }
 
+    // --- watching and replays ---------------------------------------------------
+
+    #[tokio::test]
+    async fn anyone_can_watch_without_a_link_and_is_told_nothing_private() {
+        let (id, white, black) = live_game();
+        let (status, seen) = hit("GET", &format!("/chess/watch/{}/state", id), None).await;
+        assert_eq!(status, StatusCode::OK, "no link and no sign-in needed");
+        let text = seen.to_string();
+        assert!(!text.contains(&white) && !text.contains(&black), "no player's link is ever in it: {}", text);
+        assert!(!text.contains("token"), "{}", text);
+        assert_eq!(seen["game"], id);
+        assert_eq!(seen["running"], true);
+        assert_eq!(seen["turn"], "white");
+        assert_eq!(seen["white"]["to_move"], true);
+        assert_eq!(seen["black"]["to_move"], false);
+        assert_eq!(seen["black"]["clock"], "", "a move clock only runs for the side to move");
+        assert_eq!(seen["black"]["waiting"], true, "but the page still says what black is doing");
+        assert_eq!(seen["white"]["waiting"], false);
+        assert!(!seen["white"]["clock"].as_str().unwrap().is_empty());
+        assert_eq!(seen["headline"], Value::Null, "nothing to announce yet");
+        // One board, the one it started from.
+        assert_eq!(seen["frames"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_page_needs_no_session_and_offers_no_way_to_move() {
+        let (id, _, _) = live_game();
+        let (status, body) = hit("GET", &format!("/chess/watch/{}", id), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let page = body.as_str().unwrap_or_default();
+        assert!(page.contains("/assets/chess-watch.js"));
+        assert!(!page.contains("Resign") && !page.contains("Offer draw"), "no way to play from here");
+        // And moving through a watching address simply isn't a route: "watch"
+        // is not a game number, so nothing there can ever play a move.
+        let (status, _) = hit("POST", &format!("/chess/watch/{}/move", id), Some(json!({"move": "e2e4"}))).await;
+        assert!(status.is_client_error(), "a watcher cannot move: {}", status);
+        let (status, _) = hit("POST", &format!("/chess/watch/{}/resign", id), None).await;
+        assert!(status.is_client_error(), "nor resign for someone: {}", status);
+    }
+
+    #[tokio::test]
+    async fn a_finished_game_becomes_a_replay_with_every_board_in_it() {
+        let (id, white, _) = live_game();
+        for m in ["e2e4", "e7e5", "d1h5", "b8c6", "f1c4", "g8f6", "h5f7"] {
+            // Both sides move through the one player's link only because the
+            // helper hands the turn straight back: the page itself checks.
+            let token = if m == "e7e5" || m == "b8c6" || m == "g8f6" { black_token(id) } else { white.clone() };
+            let (_, answer) = hit("POST", &format!("/chess/{}/{}/move", id, token), Some(json!({"move": m}))).await;
+            assert_eq!(answer["ok"], true, "{} refused: {}", m, answer);
+        }
+        chess::finish(id, "checkmate", Some(111), false);
+        let (status, seen) = hit("GET", &format!("/chess/watch/{}/state", id), None).await;
+        assert_eq!(status, StatusCode::OK, "a finished game is still watchable: it is the replay");
+        assert_eq!(seen["running"], false);
+        assert_eq!(seen["headline"], "🏁 Checkmate");
+        assert_eq!(seen["winner"], "white");
+        assert_eq!(seen["moves"].as_array().unwrap().len(), 7, "the whole move list, for stepping through");
+        let frames = seen["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 8, "one board before the first move, then one per move");
+        assert_eq!(frames[0]["san"], "");
+        assert_eq!(frames[1]["san"], "e4");
+        assert_eq!(frames[7]["san"], "Qxf7#");
+        assert_eq!(frames[7]["check"], "e8");
+        assert_eq!(frames[7]["last"], "h5f7");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_or_aged_out_game_is_refused_politely() {
+        let (status, body) = hit("GET", "/chess/watch/999999/state", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "There's no game with that number.");
+
+        // The window is counted from when the game finished.
+        let day = 86_400;
+        assert!(chess::replay_open(Some(1_000), 1_000 + 29 * day, 30));
+        assert!(chess::replay_open(Some(1_000), 1_000 + 30 * day, 30));
+        assert!(!chess::replay_open(Some(1_000), 1_000 + 31 * day, 30), "past the window");
+        assert!(chess::replay_open(None, 1_000_000, 30), "a running game is always watchable");
+        assert!(!chess::replay_open(None, 1_000, 0), "zero days turns replays off altogether");
+        assert!(!chess::replay_open(Some(1_000), 1_001, 0));
+        assert_eq!(NoWatch::AgedOut.words(), "This game has aged out — its replay is no longer kept.");
+    }
+
     /// Serves one real board page so it can be looked at in a browser:
     /// `cargo test chess_board_demo -- --ignored --nocapture`, then open the
     /// links it prints. `CHESS_DEMO_SECS` says how long it stays up.
@@ -492,10 +691,26 @@ mod tests {
             let now = chrono::Utc::now().timestamp();
             store::play_move(&conn, id, &[], &replay.sans.join(" "), &replay.fen(), now - 18 * 60).expect("the moves");
         }
+        // A second game, played out to a mate, so the replay can be looked at too.
+        let (over, _, _) = live_game();
+        if let Some(db) = store::db() {
+            let conn = db.lock();
+            let mut replay = Replay::new();
+            for text in ["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qxf7#"] {
+                let m = rules::read_move(&replay.position, text).expect("a legal scholar's mate");
+                replay.push(m);
+            }
+            let now = chrono::Utc::now().timestamp();
+            store::play_move(&conn, over, &[], &replay.sans.join(" "), &replay.fen(), now - 5 * 60).expect("the moves");
+            store::finish_game(&conn, over, "checkmate", Some(111), false, now - 60).expect("mated");
+            store::record_payout(&conn, over, 4, 0, "").expect("paid");
+        }
         let app = super::super::tests::panel();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:8797").await.expect("a port");
         println!("chess demo: http://127.0.0.1:8797/chess/{}/{} (white)", id, white);
         println!("chess demo: http://127.0.0.1:8797/chess/{}/{} (black)", id, black);
+        println!("chess demo: http://127.0.0.1:8797/chess/watch/{} (watching a live game)", id);
+        println!("chess demo: http://127.0.0.1:8797/chess/watch/{} (the replay of a finished one)", over);
         let secs: u64 = std::env::var("CHESS_DEMO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
         tokio::select! {
             _ = async { axum::serve(listener, app.into_make_service()).await } => {}

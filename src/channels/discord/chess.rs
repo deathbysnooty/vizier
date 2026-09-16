@@ -59,6 +59,16 @@ pub const NUDGE_SECS: i64 = 2 * 3600;
 /// How often the active card is redrawn so its clock moves: live games tick fast.
 const LIVE_REFRESH_SECS: i64 = 30;
 const CASUAL_REFRESH_SECS: i64 = 300;
+/// How often the bot writes down that it is still here. A restart reads the
+/// last one to work out how long the clocks ran unwatched.
+const HEARTBEAT_SECS: i64 = 30;
+/// Downtime shorter than this is not worth giving back.
+pub const MIN_DOWNTIME_SECS: i64 = 10;
+/// Downtime longer than this is not believed: a machine that was off for days
+/// should not hand every game most of a week.
+pub const MAX_DOWNTIME_SECS: i64 = 6 * 3600;
+/// The meta row a deploy script reads: when the earliest live game needs a move.
+pub const LIVE_UNTIL_KEY: &str = "chess_live_move_until";
 /// Characters the move list may use on a card.
 const MOVE_LIST_WIDTH: usize = 52;
 const MOVE_LIST_LINES: usize = 6;
@@ -102,6 +112,17 @@ fn max_active() -> i64 {
     control::number("VIZIER_CHESS_MAX_ACTIVE", 8).clamp(1, 50) as i64
 }
 
+/// How long a finished game's replay stays readable. Zero turns replays off.
+fn replay_days() -> i64 {
+    control::number("VIZIER_CHESS_REPLAY_DAYS", 30).min(365) as i64
+}
+
+/// How long after the bot wakes up before anyone can lose on time. A player
+/// must have a real chance to move, not be flagged the moment the bot returns.
+fn grace_secs() -> i64 {
+    control::number("VIZIER_CHESS_GRACE_SECONDS", 60).min(3600) as i64
+}
+
 fn min_plies() -> i64 {
     control::number("VIZIER_CHESS_MIN_MOVES", 10).min(200) as i64
 }
@@ -137,6 +158,7 @@ pub fn chess_rules(cap: Option<i64>) -> ChessRules {
         live_seconds: live_seconds(),
         max_games: max_games(),
         max_active: max_active(),
+        replay_days: replay_days(),
         min_plies: min_plies(),
         win: win_points(),
         draw: draw_points(),
@@ -148,6 +170,25 @@ pub fn chess_rules(cap: Option<i64>) -> ChessRules {
 pub fn live_rules() -> ChessRules {
     chess_rules(daily_cap())
 }
+
+// --- being away ---------------------------------------------------------------------------
+
+/// How much time a restart owes the clocks: the gap since the bot last wrote
+/// that it was here. A blink is not worth giving back, and a gap of days is not
+/// believed at all - the machine was off, not the game - so both ends are
+/// ignored and the caller says so in the log.
+pub fn forgiveness(last_seen: Option<i64>, now: i64, min: i64, max: i64) -> Option<i64> {
+    let gap = now - last_seen?;
+    (gap >= min && gap <= max).then_some(gap)
+}
+
+/// Whether a clock may be judged yet: not within `grace` of the bot waking up.
+pub fn may_flag(now: i64, woke_at: i64, grace: i64) -> bool {
+    now - woke_at >= grace
+}
+
+/// When the bot came up, so the grace window can be worked out.
+static WOKE_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 // --- shared state ------------------------------------------------------------------------
 
@@ -370,6 +411,9 @@ pub fn game_text(game: &Game, secs_left: i64, now: i64, win: i64, draw: i64, cap
         rules::span_words(now - game.started_at),
         worth_words(game.same_house(), win, draw, cap)
     );
+    if game.given_back > 0 {
+        text.push_str(&format!("\n-# ⏸️ {} given back after an update — nobody loses time to a restart.", rules::span_words(game.given_back)));
+    }
     if let Some(who) = game.draw_offer {
         text.push_str(&format!("\n🤝 <@{}> has offered a draw.", who));
     }
@@ -393,18 +437,24 @@ fn running_count() -> usize {
 }
 
 fn game_rows(game_id: i64) -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(vec![
+    let mut buttons = vec![
         CreateButton::new(format!("chessopen:{}", game_id)).label("♟️ Open board").style(ButtonStyle::Success),
         CreateButton::new(format!("chesstype:{}", game_id)).label("✍️ Type move").style(ButtonStyle::Primary),
         CreateButton::new(format!("chessresign:{}", game_id)).label("🏳️ Resign").style(ButtonStyle::Secondary),
         CreateButton::new(format!("chessdraw:{}", game_id)).label("🤝 Offer draw").style(ButtonStyle::Secondary),
-    ])]
+    ];
+    // Anyone may watch, so this one is a plain link rather than a button only
+    // the two players' presses reach.
+    if let Some(link) = watch_link(game_id) {
+        buttons.push(CreateButton::new_link(link).label("👀 Watch"));
+    }
+    vec![CreateActionRow::Buttons(buttons)]
 }
 
 /// What the board picture for a game should show.
 pub fn view_of(game: &Game, flipped: bool) -> View {
     let replay = Replay::from_sans(&game.moves).unwrap_or_default();
-    let last = last_move_squares(&game.moves).unwrap_or_default();
+    let last = rules::last_move_squares(&game.moves).unwrap_or_default();
     let check = if replay.position.is_check() {
         replay
             .position
@@ -416,15 +466,6 @@ pub fn view_of(game: &Game, flipped: bool) -> View {
         String::new()
     };
     View { placement: game.fen.clone(), last, check, flipped }
-}
-
-/// The squares the last move went between, as "e2e4", by replaying up to it.
-fn last_move_squares(sans: &[String]) -> Option<String> {
-    let last = sans.last()?;
-    let before = Replay::from_sans(&sans[..sans.len() - 1]).ok()?;
-    let m = last.parse::<shakmaty::san::San>().ok()?.to_move(&before.position).ok()?;
-    let (from, to) = rules::highlight(m);
-    Some(format!("{}{}", from, to))
 }
 
 async fn board_attachment(game: &Game, flipped: bool) -> Option<CreateAttachment> {
@@ -465,18 +506,9 @@ fn idle_message() -> CreateMessage {
 
 // --- the result card ---------------------------------------------------------------------------
 
-/// What a result card says. `paid` is what the ledger actually credited.
-#[allow(clippy::too_many_arguments)]
-pub fn result_text(
-    game: &Game,
-    result: &str,
-    winner: Option<u64>,
-    plies: usize,
-    lasted: i64,
-    paid: (i64, i64),
-    why_nothing: &str,
-) -> (String, String) {
-    let headline = match result {
+/// How a finished game is announced, in three or four words.
+pub fn result_headline(result: &str) -> &'static str {
+    match result {
         "checkmate" => "🏁 Checkmate",
         "resign" => "🏳️ Resignation",
         "timeout" => "⌛ Out of time",
@@ -487,8 +519,39 @@ pub fn result_text(
         "material" => "🤝 Draw — neither side can mate",
         "cancelled" => "🛑 Cancelled by a mod",
         _ => "🏁 Game over",
-    };
-    let title = format!("{} · Game #{}", headline, game.id);
+    }
+}
+
+/// Whether a finished game's replay is still readable: `days` of 0 turns
+/// replays off altogether, and after that many days a game ages out.
+pub fn replay_open(finished_at: Option<i64>, now: i64, days: i64) -> bool {
+    if days <= 0 {
+        return false;
+    }
+    match finished_at {
+        None => true,
+        Some(at) => now - at <= days * 86_400,
+    }
+}
+
+/// How long a finished game's replay stays readable, as the settings have it.
+pub fn replay_window_days() -> i64 {
+    replay_days()
+}
+
+/// What a result card says. `paid` is what the ledger actually credited.
+#[allow(clippy::too_many_arguments)]
+pub fn result_text(
+    game: &Game,
+    result: &str,
+    winner: Option<u64>,
+    plies: usize,
+    lasted: i64,
+    paid: (i64, i64),
+    why_nothing: &str,
+    replay: Option<&str>,
+) -> (String, String) {
+    let title = format!("{} · Game #{}", result_headline(result), game.id);
     let moves = plural((plies as i64 + 1) / 2, "move", "moves");
     let mut body = match (winner, result) {
         (Some(who), "timeout") => {
@@ -519,7 +582,11 @@ pub fn result_text(
     } else {
         body.push_str(&format!("\n🏠 House points: {}", awarded.join(" · ")));
     }
-    body.push_str(&format!("\n-# The game lasted {}", rules::span_words(lasted)));
+    let mut tail = format!("The game lasted {}", rules::span_words(lasted));
+    if let Some(link) = replay {
+        tail.push_str(&format!(" · [replay the moves]({})", link));
+    }
+    body.push_str(&format!("\n-# {}", tail));
     (title, body)
 }
 
@@ -935,6 +1002,13 @@ pub fn my_games_text(user: u64, guild: Option<u64>) -> String {
 /// The address of a game's card in the channel, so `/chess` can point at it.
 pub fn jump_link(guild: Option<u64>, game: &Game) -> Option<String> {
     Some(format!("https://discord.com/channels/{}/{}/{}", guild?, game.channel, game.message?))
+}
+
+/// The public address anyone can watch a game at - and read its replay from
+/// once it is over. No link of a player's is in it: it is only the game's
+/// number, which the card shows anyway.
+pub fn watch_link(game_id: i64) -> Option<String> {
+    Some(format!("{}/chess/watch/{}", control::web::panel_base()?, game_id))
 }
 
 /// The private board address for one player in one game.
@@ -1445,6 +1519,7 @@ async fn post_result(ctx: &Context, game_id: i64) {
         game.finished_at.unwrap_or(now) - game.started_at,
         (game.points_white, game.points_black),
         &game.why_nothing,
+        watch_link(game.id).filter(|_| replay_days() > 0).as_deref(),
     );
     let mut message = CreateMessage::new()
         .embed(
@@ -1523,6 +1598,24 @@ pub fn spawn(ctx: Context) {
 /// After a start: games a restart left unpaid are paid and announced, and the
 /// channel's newest message is noted so the active card isn't moved at once.
 async fn recover(ctx: &Context) {
+    let now = Utc::now().timestamp();
+    WOKE_AT.store(now, Ordering::SeqCst);
+    let last_seen = meta_get("heartbeat").and_then(|v| v.parse::<i64>().ok());
+    match forgiveness(last_seen, now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS) {
+        Some(gap) => {
+            let given = with_db(|conn| store::give_time_back(conn, gap)).and_then(|r| r.ok()).unwrap_or(0);
+            tracing::info!("chess: down for {}s, so {} running games got that time back", gap, given);
+        }
+        None => match last_seen.map(|seen| now - seen) {
+            None => tracing::info!("chess: no heartbeat to compare against, so no time was given back"),
+            Some(gap) if gap < MIN_DOWNTIME_SECS => tracing::info!("chess: away {}s, too short to be worth giving back", gap),
+            Some(gap) => tracing::warn!(
+                "chess: the last heartbeat was {}s ago, more than the {}s that is believable, so no time was given back",
+                gap,
+                MAX_DOWNTIME_SECS
+            ),
+        },
+    }
     settle_finished(ctx).await;
     let old_card = meta_get("card").and_then(|v| {
         let (c, m) = v.split_once(':')?;
@@ -1547,14 +1640,16 @@ async fn run(ctx: Context) {
     // Positions already looked at for an ending, as (game, how many moves it
     // had), so a quiet game is not replayed every second.
     let mut checked: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut last_beat = 0i64;
     loop {
         tokio::time::sleep(TICK).await;
         let now = Utc::now().timestamp();
         let channel = active_channel(&ctx);
         expire_challenges(&ctx, now).await;
         let running = with_db(store::running_games).unwrap_or_default();
+        beat(now, &mut last_beat);
         finish_ended_games(&running, &mut checked);
-        time_out_games(&running, now);
+        time_out_games(&running, now, WOKE_AT.load(Ordering::SeqCst), grace_secs());
         settle_finished(&ctx).await;
         let Some(channel) = channel else {
             if SHARED.lock().card.is_some() {
@@ -1623,8 +1718,25 @@ async fn expire_challenges(ctx: &Context, now: i64) {
     }
 }
 
-/// Games whose side to move has run out of time.
-fn time_out_games(running: &[Game], now: i64) {
+/// Writes down that the bot is still here, and when the earliest live game
+/// needs a move, so a deploy script can wait rather than cost somebody a game.
+fn beat(now: i64, last_beat: &mut i64) {
+    if now - *last_beat < HEARTBEAT_SECS {
+        return;
+    }
+    *last_beat = now;
+    meta_set("heartbeat", &now.to_string());
+    let until = with_db(store::live_move_until).flatten();
+    meta_set(LIVE_UNTIL_KEY, &until.map(|t| t.to_string()).unwrap_or_default());
+}
+
+/// Games whose side to move has run out of time. Nothing is flagged in the
+/// first moments after the bot wakes: the clocks have just been put right and a
+/// player has to have a chance to see them.
+fn time_out_games(running: &[Game], now: i64, woke_at: i64, grace: i64) {
+    if !may_flag(now, woke_at, grace) {
+        return;
+    }
     for game in running {
         if !rules::flagged(game.last_move_ts, game.per_move_secs, now) {
             continue;
@@ -1748,6 +1860,7 @@ mod tests {
             draw_announced: false,
             nudged_white: false,
             nudged_black: false,
+            given_back: 0,
         }
     }
 
@@ -1767,7 +1880,8 @@ mod tests {
         let mate = game(&["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qxf7"]);
         let challenge = challenge_text(111, 222, TimeControl::Casual, 43_200, false, 4, 1, Some(8), 1_790_000_000);
         let playing = game_text(&live, 42_120, live.started_at + 1_200, 4, 1, Some(8));
-        let (result_title, result_body) = result_text(&mate, "checkmate", Some(111), 7, 22_320, (4, 0), "");
+        let (result_title, result_body) =
+            result_text(&mate, "checkmate", Some(111), 7, 22_320, (4, 0), "", Some("https://panel.example/chess/watch/42"));
         let same = Game { black_house: "ravenclaw".into(), ..game(&["d4", "d5"]) };
         let same_text = game_text(&same, 41_000, same.started_at + 60, 4, 1, Some(8));
         let idle = idle_text(&super::super::rules_text::tests::chess_defaults());
@@ -1975,30 +2089,33 @@ mod tests {
     #[test]
     fn every_way_a_game_can_end_reads_properly() {
         let g = game(&["f3", "e5", "g4", "Qh4"]);
-        let (title, body) = result_text(&g, "checkmate", Some(222), 4, 22_320, (0, 4), "");
+        let replay = "https://panel/chess/watch/42";
+        let (title, body) = result_text(&g, "checkmate", Some(222), 4, 22_320, (0, 4), "", Some(replay));
         assert_eq!(title, "🏁 Checkmate · Game #42");
         assert!(body.contains("<@222>") && body.contains("beat <@111>"), "{}", body);
         assert!(body.contains("in **2 moves**"), "{}", body);
         assert!(body.contains("House points: <@222> **+4**"), "{}", body);
         assert!(body.contains("lasted 6 h 12 m"), "{}", body);
+        assert!(body.contains("[replay the moves](https://panel/chess/watch/42)"), "{}", body);
 
-        let (title, body) = result_text(&g, "resign", Some(111), 30, 60, (0, 0), "it was given up too early to count");
+        let (title, body) = result_text(&g, "resign", Some(111), 30, 60, (0, 0), "it was given up too early to count", None);
         assert!(title.starts_with("🏳️ Resignation"));
         assert!(body.contains("resigned"), "{}", body);
         assert!(body.contains("no House Cup points: it was given up too early"), "{}", body);
+        assert!(!body.contains("replay"), "no replay line when replays are off: {}", body);
 
-        let (title, body) = result_text(&g, "timeout", Some(111), 9, 90_000, (4, 0), "");
+        let (title, body) = result_text(&g, "timeout", Some(111), 9, 90_000, (4, 0), "", None);
         assert!(title.starts_with("⌛ Out of time"));
         assert!(body.contains("on time"), "{}", body);
         assert!(body.contains("**5 moves**"), "nine plies is five moves: {}", body);
 
-        let (title, body) = result_text(&g, "draw", None, 60, 600, (1, 1), "");
+        let (title, body) = result_text(&g, "draw", None, 60, 600, (1, 1), "", None);
         assert!(title.starts_with("🤝 Draw agreed"));
         assert!(body.contains("drew after **30 moves**"), "{}", body);
         assert!(body.contains("<@111> **+1**") && body.contains("<@222> **+1**"), "{}", body);
 
         for (key, head) in [("stalemate", "🤝 Stalemate"), ("threefold", "🤝 Draw by repetition"), ("fifty", "🤝 Draw by the fifty-move rule"), ("material", "🤝 Draw — neither side can mate"), ("cancelled", "🛑 Cancelled by a mod")] {
-            assert!(result_text(&g, key, None, 10, 10, (0, 0), "").0.starts_with(head), "{} should read as {}", key, head);
+            assert!(result_text(&g, key, None, 10, 10, (0, 0), "", None).0.starts_with(head), "{} should read as {}", key, head);
         }
     }
 
@@ -2053,6 +2170,44 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_gives_the_clocks_back_the_time_it_cost_them() {
+        let now = 1_000_000i64;
+        // A normal restart: a couple of minutes, handed straight back.
+        assert_eq!(forgiveness(Some(now - 120), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), Some(120));
+        assert_eq!(forgiveness(Some(now - MIN_DOWNTIME_SECS), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), Some(MIN_DOWNTIME_SECS));
+        assert_eq!(forgiveness(Some(now - MAX_DOWNTIME_SECS), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), Some(MAX_DOWNTIME_SECS));
+        // A blink between two ticks is not worth the bookkeeping.
+        assert_eq!(forgiveness(Some(now - 3), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), None);
+        // Days off is a machine that was switched off, not a game that was paused.
+        assert_eq!(forgiveness(Some(now - 3 * 86_400), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), None);
+        assert_eq!(forgiveness(Some(now - MAX_DOWNTIME_SECS - 1), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), None);
+        // A first ever start has nothing to compare against.
+        assert_eq!(forgiveness(None, now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), None);
+        // A clock from the future (the machine's own was wrong) is not believed.
+        assert_eq!(forgiveness(Some(now + 500), now, MIN_DOWNTIME_SECS, MAX_DOWNTIME_SECS), None);
+    }
+
+    #[test]
+    fn nobody_is_flagged_in_the_moments_after_the_bot_wakes() {
+        let woke = 5_000i64;
+        assert!(!may_flag(woke, woke, 60), "not the instant it comes up");
+        assert!(!may_flag(woke + 59, woke, 60));
+        assert!(may_flag(woke + 60, woke, 60));
+        assert!(may_flag(woke + 600, woke, 60));
+        // With the grace turned off, the clock is judged at once.
+        assert!(may_flag(woke, woke, 0));
+    }
+
+    #[test]
+    fn a_game_given_time_back_says_so_until_it_is_played_on() {
+        let given = Game { given_back: 135, ..game(&["e4", "e5"]) };
+        let text = game_text(&given, 43_000, 2_000, 4, 1, Some(8));
+        assert!(text.contains("⏸️ 2 m given back after an update"), "{}", text);
+        let quiet = game(&["e4", "e5"]);
+        assert!(!game_text(&quiet, 43_000, 2_000, 4, 1, Some(8)).contains("given back"));
+    }
+
+    #[test]
     fn a_casual_game_nudges_once_and_a_live_one_never() {
         assert!(nudge_due(TimeControl::Casual, 6_000, false, NUDGE_SECS));
         assert!(!nudge_due(TimeControl::Casual, 6_000, true, NUDGE_SECS), "only once per move");
@@ -2083,6 +2238,7 @@ mod tests {
             max_games: 3,
             max_active: 8,
             min_plies: 10,
+            replay_days: 30,
             win: 4,
             draw: 1,
             cap: Some(8),

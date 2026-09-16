@@ -124,6 +124,8 @@ pub struct ChessRules {
     pub max_active: i64,
     /// Plies under which a resignation pays nothing.
     pub min_plies: i64,
+    /// How long a finished game's replay is kept; 0 for no replays.
+    pub replay_days: i64,
     /// House points for winning, and for each side of a draw.
     pub win: i64,
     pub draw: i64,
@@ -901,6 +903,15 @@ pub fn chess_help_text(c: &ChessRules) -> String {
     t.push_str("• Anything wrong or unclear is refused with the reason, and it stays your move.\n");
     t.push_str("• Only the two players' buttons work; nobody types in the chess channel.\n");
 
+    t.push_str("\n**👀 Watching**\n");
+    t.push_str("• Every game card has a **👀 Watch** link. It opens a page anyone can read: the board, the clock and the moves as they happen. No sign-in, no way to move a piece, and nobody's private board link is on it.\n");
+    if c.replay_days > 0 {
+        t.push_str(&format!(
+            "• When the game ends that same link becomes a **replay** you can step through move by move, kept for **{}**.\n",
+            plural(c.replay_days, "day", "days")
+        ));
+    }
+
     t.push_str("\n**🏳️ Ending it**\n");
     t.push_str("• Normal chess: checkmate, stalemate, the same position three times, fifty moves with nothing taken, and too little material left to mate.\n");
     t.push_str("• **🏳️ Resign** gives the game up, and **🤝 Offer draw** asks the other side, who gets Accept or Play on.\n");
@@ -999,6 +1010,7 @@ pub(crate) mod tests {
             max_games: 3,
             max_active: 8,
             min_plies: 10,
+            replay_days: 30,
             win: 4,
             draw: 1,
             cap: Some(8),
@@ -1072,7 +1084,7 @@ pub(crate) mod tests {
                 cap: Some(99),
                 min_scored: 50,
             },
-            chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, win: 100, draw: 100, cap: Some(99), ..chess_defaults() },
+            chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, replay_days: 365, win: 100, draw: 100, cap: Some(99), ..chess_defaults() },
             ..defaults()
         }
     }
@@ -1252,6 +1264,9 @@ pub(crate) mod tests {
         assert!(text.contains("Up to **8 house points** a day"), "{}", text);
         assert!(text.contains("`Nf3`") && text.contains("`g1f3`"), "both notations: {}", text);
         assert!(text.contains("/chesshelp"), "{}", text);
+        assert!(text.contains("👀 Watch"), "anyone can follow a game: {}", text);
+        assert!(text.contains("kept for **30 days**"), "{}", text);
+        assert!(!chess_help_text(&ChessRules { replay_days: 0, ..c.clone() }).contains("replay"), "no replays, no promise of one");
         assert!(text.chars().count() <= DESCRIPTION_LIMIT, "it has to fit an embed: {} characters", text.chars().count());
 
         // Turned off, or with the rules loosened, the words follow.

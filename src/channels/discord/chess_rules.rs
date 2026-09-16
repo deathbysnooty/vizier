@@ -300,6 +300,50 @@ pub fn highlight(m: Move) -> (Square, Square) {
     }
 }
 
+/// One position of a game, for a board to be drawn from: the watching page
+/// steps through these rather than working the moves out for itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub fen: String,
+    /// The squares the move into this position went between, as "e2e4"; empty
+    /// for the position the game started from.
+    pub last: String,
+    /// The square of a king in check, or empty.
+    pub check: String,
+    /// The move in SAN, or empty for the starting position.
+    pub san: String,
+}
+
+/// Every position a move list passed through, oldest first, starting with the
+/// board before a piece was touched.
+pub fn frames<S: AsRef<str>>(sans: &[S]) -> Vec<Frame> {
+    let mut replay = Replay::new();
+    let mut out = vec![Frame { fen: replay.fen(), last: String::new(), check: String::new(), san: String::new() }];
+    for text in sans {
+        let Ok(san) = text.as_ref().parse::<San>() else { break };
+        let Ok(m) = san.to_move(&replay.position) else { break };
+        let (from, to) = highlight(m);
+        replay.push(m);
+        let check = if replay.position.is_check() {
+            replay.position.board().king_of(replay.position.turn()).map(|sq| sq.to_string()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        out.push(Frame {
+            fen: replay.fen(),
+            last: format!("{}{}", from, to),
+            check,
+            san: replay.sans.last().cloned().unwrap_or_default(),
+        });
+    }
+    out
+}
+
+/// The squares the last move of a list went between, as "e2e4".
+pub fn last_move_squares<S: AsRef<str>>(sans: &[S]) -> Option<String> {
+    frames(sans).pop().map(|f| f.last).filter(|l| !l.is_empty())
+}
+
 // --- the clock -------------------------------------------------------------------------
 
 /// How long a side has per move.
@@ -630,6 +674,32 @@ mod tests {
         assert_eq!(replay.turn(), Color::Black);
         assert!(Replay::from_sans(&["e4", "e5", "Nf9"]).is_err());
         assert!(Replay::from_sans(&["e4", "e4"]).unwrap_err().contains("legal"));
+    }
+
+    #[test]
+    fn a_game_is_broken_into_the_positions_it_passed_through() {
+        let sans: Vec<String> = ["e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7#"].iter().map(|s| s.to_string()).collect();
+        let played = frames(&sans);
+        assert_eq!(played.len(), sans.len() + 1, "the board before the first move counts");
+        assert_eq!(played[0].san, "");
+        assert_eq!(played[0].last, "");
+        assert_eq!(played[0].check, "");
+        assert!(played[0].fen.starts_with("rnbqkbnr/pppppppp"));
+        assert_eq!(played[1].san, "e4");
+        assert_eq!(played[1].last, "e2e4");
+        let last = played.last().unwrap();
+        assert_eq!(last.san, "Qxf7#");
+        assert_eq!(last.last, "h5f7");
+        assert_eq!(last.check, "e8", "the mated king is lit");
+        assert_eq!(last_move_squares(&sans).as_deref(), Some("h5f7"));
+
+        // Castling is drawn on the king's squares, and a game with no moves has none.
+        let castled: Vec<String> = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "O-O"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(last_move_squares(&castled).as_deref(), Some("e1g1"));
+        assert_eq!(frames(&Vec::<String>::new()).len(), 1);
+        assert_eq!(last_move_squares(&Vec::<String>::new()), None);
+        // A broken list stops where it breaks rather than panicking.
+        assert_eq!(frames(&["e4".to_string(), "Nf9".to_string()]).len(), 2);
     }
 
     #[test]
