@@ -360,7 +360,7 @@ fn too_late_text(winner: &str) -> String {
 }
 
 const HOPPED: &str = "This frog hopped away";
-const HOUSE_ONLY: &str = "Only house members can catch frogs";
+const HOUSE_ONLY: &str = "Only house members and mods can catch frogs";
 const OUT_OF_TRIES: &str = "You've used your 3 tries on this frog";
 
 /// What the winner is told. `granted` is what the ledger actually paid.
@@ -724,7 +724,11 @@ pub fn modal_mode() -> &'static str {
 }
 
 fn house_member(user: u64) -> bool {
-    super::house::house_of(user).is_some() && !super::house::opted_out(user)
+    if super::house::opted_out(user) {
+        return false;
+    }
+    // Mods are in no house, but they may still play; the ledger refuses their points.
+    super::house::house_of(user).is_some() || super::admin_ids().contains(&user)
 }
 
 /// A wizard's picture ready to attach - shrunk, never the full-size original -

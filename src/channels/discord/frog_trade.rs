@@ -459,7 +459,11 @@ pub fn trades_command_builder() -> CreateCommand {
 }
 
 fn house_member(user: u64) -> bool {
-    super::house::house_of(user).is_some() && !super::house::opted_out(user)
+    if super::house::opted_out(user) {
+        return false;
+    }
+    // Mods are in no house, but they may still play; the ledger refuses their points.
+    super::house::house_of(user).is_some() || super::admin_ids().contains(&user)
 }
 
 fn whisper(text: impl Into<String>) -> CreateInteractionResponse {

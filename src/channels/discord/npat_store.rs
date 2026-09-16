@@ -26,6 +26,9 @@ use super::npat_judge::{Judged, LetterScore, Prizes, Scored, Standing, Verdict};
 pub const GRACE_SECS: i64 = 3;
 /// What `submissions.house` holds for someone who stepped out of the houses.
 pub const MUGGLE: &str = "muggle";
+/// A mod plays like a Muggle: they are in no house, so they never take house
+/// points, and they don't count towards the "two houses" rule.
+pub const MODERATOR: &str = "mod";
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -250,7 +253,7 @@ pub fn letter_scores(conn: &Connection, game_id: i64, through: i64) -> Vec<Vec<L
             };
             stmt.query_map(params![round.id], |r| {
                 let house: String = r.get(3)?;
-                Ok(LetterScore { user: r.get::<_, i64>(0)? as u64, score: r.get(1)?, at: r.get(2)?, in_house: !house.is_empty() && house != MUGGLE })
+                Ok(LetterScore { user: r.get::<_, i64>(0)? as u64, score: r.get(1)?, at: r.get(2)?, in_house: !house.is_empty() && house != MUGGLE && house != MODERATOR })
             })
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
@@ -556,7 +559,7 @@ pub fn judged(conn: &Connection, round_id: i64) -> Vec<Judged> {
         Ok(mut stmt) => stmt
             .query_map(params![round_id], |r| {
                 let house: String = r.get(2)?;
-                Ok(Judged { user: r.get::<_, i64>(0)? as u64, at: r.get(1)?, in_house: !house.is_empty() && house != MUGGLE, answers: [None, None, None, None] })
+                Ok(Judged { user: r.get::<_, i64>(0)? as u64, at: r.get(1)?, in_house: !house.is_empty() && house != MUGGLE && house != MODERATOR, answers: [None, None, None, None] })
             })
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default(),

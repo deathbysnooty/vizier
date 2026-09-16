@@ -38,7 +38,7 @@ use serenity::all::{
 
 use super::control;
 use super::npat_judge::{self as judge, CATEGORIES, KEYS, Mark, Points, Prizes};
-use super::npat_store::{self as store, GRACE_SECS, GameStatus, MUGGLE, Round, Status, Submit};
+use super::npat_store::{self as store, GRACE_SECS, GameStatus, MODERATOR, MUGGLE, Round, Status, Submit};
 use super::points::{Outcome, Source};
 use super::rules_text::{self, NpatRules};
 
@@ -192,7 +192,7 @@ pub type Player = (u64, &'static str);
 /// but not as a house.
 pub fn house_count(players: &[Player]) -> usize {
     let mut seen: Vec<&str> = Vec::new();
-    for (_, house) in players.iter().filter(|(_, h)| *h != MUGGLE) {
+    for (_, house) in players.iter().filter(|(_, h)| *h != MUGGLE && *h != MODERATOR) {
         if !seen.contains(house) {
             seen.push(house);
         }
@@ -211,13 +211,17 @@ fn player_house(user: u64) -> Option<&'static str> {
     if super::house::opted_out(user) {
         return Some(MUGGLE);
     }
-    super::house::house_of(user).map(|h| h.key)
+    // Mods stay out of the houses, but they can still play for the fun of it.
+    super::house::house_of(user).map(|h| h.key).or_else(|| super::admin_ids().contains(&user).then_some(MODERATOR))
 }
 
 /// How a player shows on results: a crest, or "🧙 Muggle".
 pub fn badge(house: &str) -> String {
     if house == MUGGLE {
         return "🧙 Muggle".to_string();
+    }
+    if house == MODERATOR {
+        return "🛡️ Mod".to_string();
     }
     super::house::house(house).map(|h| h.crest.to_string()).unwrap_or_default()
 }
@@ -479,7 +483,7 @@ pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules, now: i64)
     }
     if !joined.is_empty() {
         let mut crests: Vec<&str> = Vec::new();
-        for (_, key) in joined.iter().filter(|(_, h)| *h != MUGGLE) {
+        for (_, key) in joined.iter().filter(|(_, h)| *h != MUGGLE && *h != MODERATOR) {
             let crest = super::house::house(key).map(|h| h.crest).unwrap_or("🏠");
             if !crests.contains(&crest) {
                 crests.push(crest);
@@ -1619,7 +1623,7 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     }
 }
 
-const HOUSE_ONLY: &str = "🏠 Join a house first — only house members and Muggles can play Name Place Animal Thing.";
+const HOUSE_ONLY: &str = "🏠 Join a house first — house members, Muggles and mods can play Name Place Animal Thing.";
 
 async fn join_pressed(ctx: &Context, component: &ComponentInteraction) {
     if live_channel().is_none() {
