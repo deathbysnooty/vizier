@@ -40,6 +40,7 @@ pub const ACTIVITIES: &[(&str, &[&str])] = &[
     ("snitch", &["snitch", "golden_snitch"]),
     ("frog", &["frog"]),
     ("npat", &["npat"]),
+    ("sudoku", &["sudoku"]),
 ];
 
 pub fn activity_label(key: &str) -> String {
@@ -47,6 +48,7 @@ pub fn activity_label(key: &str) -> String {
         "snitch" => "🪽 Snitch".to_string(),
         "frog" => "🐸 Frogs".to_string(),
         "npat" => "🔤 Name Place Animal Thing".to_string(),
+        "sudoku" => "🔢 Sudoku".to_string(),
         other => Source::from_key(other).map(|s| s.label().to_string()).unwrap_or_else(|| other.to_string()),
     }
 }
@@ -109,11 +111,12 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
 /// Activities whose top is the most wins or catches rather than the most
 /// points: their daily limits leave many people level on points, and a capped
 /// win is still in the ledger as a zero.
-const COUNTED: &[&str] = &["quiz", "koto", "anagram", "cat", "arena", "snitch"];
+const COUNTED: &[&str] = &["quiz", "koto", "anagram", "cat", "arena", "snitch", "sudoku"];
 
 /// The top of each activity from a day's rows (in ledger order). Wordle and
-/// frogs: the most points. Quiz, Koto, Anagram, Cat Bot, fights and the Snitch:
-/// the most wins or catches, capped ones included, then the most points. Chat
+/// frogs: the most points. Quiz, Koto, Anagram, Cat Bot, fights, the Snitch and
+/// sudoku: the most wins, catches or puzzles solved, capped ones included, then
+/// the most points. Chat
 /// and voice here are by points; `run_daily_top` swaps in messages and voice
 /// time. Ties go to whoever got there first.
 pub fn daily_tops(rows: &[LedgerRow]) -> Vec<(&'static str, u64, i64)> {

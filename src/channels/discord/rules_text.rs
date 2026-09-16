@@ -80,6 +80,29 @@ pub struct Rules {
     pub royale_cards: bool,
 
     pub npat: NpatRules,
+    pub sudoku: SudokuRules,
+}
+
+/// Sudoku's live settings, for its rules post, `/sudokuhelp` and the lines
+/// about it in the House Cup posts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SudokuRules {
+    /// The game's channel, only while the game is on.
+    pub channel: Option<u64>,
+    /// What easy, medium and hard are worth.
+    pub points: [i64; 3],
+    pub cap: Option<i64>,
+    /// What one hint takes off that puzzle, and how many a player may have.
+    pub hint_cost: i64,
+    pub max_hints: i64,
+    /// Codes a player may send for one puzzle.
+    pub max_tries: i64,
+    /// How long an old puzzle's code is still checked.
+    pub late_hours: i64,
+    /// How often each level comes up.
+    pub mix: [u32; 3],
+    /// Whether the panel has an address, so the web page works.
+    pub has_page: bool,
 }
 
 /// Name Place Animal Thing's live settings, for its rules post and the lines
@@ -211,6 +234,7 @@ impl Rules {
             royale_cards: frogs_on && control::on("VIZIER_FROG_ROYALE_CARDS", true),
 
             npat: super::npat::npat_rules(limit(Source::Npat.cap())),
+            sudoku: super::sudoku::sudoku_rules(),
         }
     }
 }
@@ -574,6 +598,16 @@ fn game_lines(r: &Rules) -> Vec<String> {
             max_words(r.npat.cap)
         ));
     }
+    if let Some(c) = channel(r.sudoku.channel).filter(|_| r.sudoku.points.iter().any(|p| *p > 0)) {
+        lines.push(format!(
+            "🔢 **Sudoku** in {} — one is always waiting; the first correct code wins 🟢 **{}** · 🟡 **{}** · 🔴 **{}** {}",
+            c,
+            r.sudoku.points[0],
+            r.sudoku.points[1],
+            r.sudoku.points[2],
+            max_words(r.sudoku.cap)
+        ));
+    }
     if r.arena_win > 0 {
         lines.push(format!("⚔️ **1v1 fights** — `/fight` someone, win **{}** {}", r.arena_win, max_words(r.arena_cap)));
     }
@@ -705,6 +739,14 @@ pub fn earn_text(r: &Rules) -> String {
     if r.npat.channel.is_some() && r.npat.prizes.iter().any(|p| *p > 0) {
         more.push(format!("🔤 NPAT game 1st +{} · 2nd +{} {}", r.npat.prizes[0], r.npat.prizes[1], max_words(r.npat.cap)));
     }
+    if r.sudoku.channel.is_some() && r.sudoku.points.iter().any(|p| *p > 0) {
+        more.push(format!(
+            "🔢 Sudoku {}–{} first solver {}",
+            r.sudoku.points.iter().min().copied().unwrap_or(0),
+            r.sudoku.points.iter().max().copied().unwrap_or(0),
+            max_words(r.sudoku.cap)
+        ));
+    }
     if !more.is_empty() {
         lines.push(more.join(" · "));
     }
@@ -827,6 +869,90 @@ pub fn npat_rules_text(n: &NpatRules) -> String {
     t
 }
 
+// --- the Sudoku rules post and `/sudokuhelp` ------------------------------------------
+
+pub const SUDOKU_RULES_TITLE: &str = "🔢 How Sudoku works";
+
+/// "🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6**".
+fn sudoku_points_words(points: &[i64; 3]) -> String {
+    format!("🟢 Easy **{}** · 🟡 Medium **{}** · 🔴 Hard **{}**", points[0], points[1], points[2])
+}
+
+/// "up to **20 points** a day", or nothing when there's no limit.
+fn sudoku_cap_words(cap: Option<i64>) -> String {
+    match cap {
+        Some(n) => format!("up to **{}** a day", plural(n, "point", "points")),
+        None => "no daily limit".to_string(),
+    }
+}
+
+fn sudoku_where(id: Option<u64>) -> String {
+    match channel(id) {
+        Some(c) => format!("in {}", c),
+        None => "in its own channel".to_string(),
+    }
+}
+
+/// What `/sudokuhelp` says: the whole game in one private message, from the
+/// settings as they are now. Kept under one Discord message.
+pub fn sudoku_help_text(s: &SudokuRules) -> String {
+    let mut t = String::new();
+    t.push_str(&format!(
+        "**🔢 What it is**\nA sudoku is always waiting {}. Solve it before anyone else and your house scores.\n\n",
+        sudoku_where(s.channel)
+    ));
+    t.push_str("**▶️ How to play**\n");
+    if s.has_page {
+        t.push_str("• Press **▶️ Play** on the puzzle card — the bot sends you a private link, just for you.\n");
+        t.push_str("• Fill the grid on that page: tap a square, tap a number. **Notes**, **Undo**, **Check** and **Reset** are there to help, and your work is saved on that device.\n");
+        t.push_str("• Press **Copy code**, come back here, press **📋 Submit code** and paste it.\n\n");
+    } else {
+        t.push_str("• Press **▶️ Play** on the puzzle card. The web page isn't set up yet, so the bot sends you the grid as text.\n");
+        t.push_str("• Solve it wherever you like, then press **📋 Submit code** and type all **81 digits**, row by row.\n\n");
+    }
+    t.push_str(&format!(
+        "**🏆 Points**\n{} — to the **first** correct code only, {}. The moment one is solved the next puzzle appears.\n\n",
+        sudoku_points_words(&s.points),
+        sudoku_cap_words(s.cap)
+    ));
+    t.push_str(&format!(
+        "**💡 Hints**\n**💡 Hint** shows you one square and takes **{}** off what that puzzle is worth to you, {} per puzzle. It's a button here, so the bot knows whose hint it was.\n\n",
+        plural(s.hint_cost, "point", "points"),
+        plural(s.max_hints, "hint", "hints")
+    ));
+    t.push_str(&format!(
+        "**🕰️ Too late?**\nCodes still work for **{}** after a puzzle goes up. You'll be told whether your grid was right, but the points go to whoever was first. `/sudoku` lists the ones you haven't finished.\n\n",
+        plural(s.late_hours, "hour", "hours")
+    ));
+    t.push_str("**🔒 Nothing to cheat**\nThe page never knows the answer — only the bot does, and it checks your code.\n\n");
+    t.push_str("-# `/sudoku` your puzzles and links · `/sudokuhelp` this · mods: `/sudokunew` for a fresh puzzle");
+    t
+}
+
+/// The rules post that sits at the top of the sudoku channel: everything in
+/// `/sudokuhelp`, and the small print about tries as well.
+pub fn sudoku_rules_text(s: &SudokuRules) -> String {
+    let mut t = sudoku_help_text(s);
+    let mix = ["easy", "medium", "hard"];
+    let total: u32 = s.mix.iter().sum();
+    let shares: Vec<String> = mix
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| s.mix[*i] > 0)
+        .map(|(i, name)| format!("{} {}%", name, (s.mix[i] as u64 * 100 / total.max(1) as u64)))
+        .collect();
+    let small = format!(
+        "\n\n**📋 The small print**\n\
+         • **{}** per puzzle, with a few seconds between them; a wrong code tells you HOW MANY squares are wrong, never which.\n\
+         • How often each level comes up: {}.\n\
+         • Nobody types in this channel — everything happens with the buttons on the card, which always sits at the bottom.",
+        plural(s.max_tries, "try", "tries"),
+        if shares.is_empty() { "as the panel sets it".to_string() } else { and_list(&shares, "and") }
+    );
+    t.push_str(&small);
+    t
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -887,6 +1013,21 @@ pub(crate) mod tests {
             daily_top_cards: true,
             royale_cards: true,
             npat: npat_defaults(),
+            sudoku: sudoku_defaults(),
+        }
+    }
+
+    pub(crate) fn sudoku_defaults() -> SudokuRules {
+        SudokuRules {
+            channel: Some(1544347052090327040),
+            points: [2, 4, 6],
+            cap: Some(20),
+            hint_cost: 1,
+            max_hints: 3,
+            max_tries: 10,
+            late_hours: 24,
+            mix: [40, 40, 20],
+            has_page: true,
         }
     }
 
@@ -956,6 +1097,17 @@ pub(crate) mod tests {
                 prizes: [100, 100],
                 cap: Some(99),
                 min_scored: 50,
+            },
+            sudoku: SudokuRules {
+                channel: Some(u64::MAX),
+                points: [100, 100, 100],
+                cap: Some(99),
+                hint_cost: 100,
+                max_hints: 80,
+                max_tries: 100,
+                late_hours: 720,
+                mix: [1000, 1000, 1000],
+                has_page: true,
             },
             ..defaults()
         }
@@ -1069,6 +1221,72 @@ pub(crate) mod tests {
             assert!(embed_chars(&panels) < EMBEDS_LIMIT, "{} chars", embed_chars(&panels));
             assert!(panels.iter().all(|p| p.body.chars().count() <= DESCRIPTION_LIMIT && p.title.chars().count() <= 256));
         }
+    }
+
+    #[test]
+    fn the_guide_and_the_earn_button_carry_sudoku_from_its_live_settings() {
+        let games = &guide(&defaults(), true)[2].body;
+        assert!(
+            games.contains("🔢 **Sudoku** in <#1544347052090327040> — one is always waiting; the first correct code wins 🟢 **2** · 🟡 **4** · 🔴 **6** (max 20)"),
+            "{}",
+            games
+        );
+        let earn = earn_text(&defaults());
+        assert!(earn.contains("🔢 Sudoku 2–6 first solver (max 20)"), "{}", earn);
+        // Off, or with no channel set, it is left out of both.
+        let off = Rules { sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, ..defaults() };
+        assert!(!guide(&off, true)[2].body.contains("Sudoku"));
+        assert!(!earn_text(&off).contains("Sudoku"));
+        let free = Rules { sudoku: SudokuRules { points: [0, 0, 0], ..sudoku_defaults() }, ..defaults() };
+        assert!(!guide(&free, true)[2].body.contains("Sudoku"), "a game worth nothing isn't advertised");
+    }
+
+    #[test]
+    fn sudokuhelp_explains_the_game_from_the_settings_and_fits_one_message() {
+        let text = sudoku_help_text(&sudoku_defaults());
+        for part in [
+            "always waiting in <#1544347052090327040>",
+            "**▶️ Play** on the puzzle card",
+            "**Copy code**",
+            "📋 Submit code",
+            "🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6**",
+            "up to **20 points** a day",
+            "takes **1 point** off",
+            "3 hints per puzzle",
+            "**24 hours**",
+            "never knows the answer",
+            "`/sudoku`",
+            "`/sudokunew`",
+        ] {
+            assert!(text.contains(part), "missing “{}” in:\n{}", part, text);
+        }
+        assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
+        // Every setting at its highest, and with no web page set up.
+        let big = SudokuRules { has_page: false, ..huge().sudoku };
+        let text = sudoku_help_text(&big);
+        assert!(text.contains("81 digits") && text.contains("isn't set up yet"), "{}", text);
+        assert!(text.contains("720 hours") && text.contains("80 hints"));
+        assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars at the maximum", text.chars().count());
+        // No channel set at all still reads.
+        let nowhere = SudokuRules { channel: None, cap: None, hint_cost: 1, ..sudoku_defaults() };
+        let text = sudoku_help_text(&nowhere);
+        assert!(text.contains("in its own channel") && text.contains("no daily limit"), "{}", text);
+    }
+
+    #[test]
+    fn the_sudoku_rules_post_adds_the_small_print_and_fits_an_embed() {
+        let text = sudoku_rules_text(&sudoku_defaults());
+        assert!(text.starts_with(&sudoku_help_text(&sudoku_defaults())), "the post is the help plus more");
+        assert!(text.contains("**10 tries** per puzzle"), "{}", text);
+        assert!(text.contains("easy 40%, medium 40% and hard 20%"), "{}", text);
+        assert!(text.contains("never which"));
+        assert!(SUDOKU_RULES_TITLE.contains("Sudoku"));
+        for r in [sudoku_defaults(), huge().sudoku] {
+            assert!(sudoku_rules_text(&r).chars().count() < DESCRIPTION_LIMIT);
+        }
+        // A mix with only one level in it.
+        let one = SudokuRules { mix: [0, 0, 5], ..sudoku_defaults() };
+        assert!(sudoku_rules_text(&one).contains("hard 100%"));
     }
 
     #[test]

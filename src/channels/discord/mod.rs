@@ -45,6 +45,11 @@ mod msglog;
 mod npat;
 mod npat_judge;
 mod npat_store;
+mod sudoku;
+mod sudoku_card;
+mod sudoku_code;
+mod sudoku_gen;
+mod sudoku_store;
 mod house_card;
 mod house_draft;
 mod points;
@@ -106,6 +111,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = npat_store::open(&self.deps.config.workspace) {
             tracing::warn!("npat: store not opened: {}", err);
+        }
+        if let Err(err) = sudoku_store::open(&self.deps.config.workspace) {
+            tracing::warn!("sudoku: store not opened: {}", err);
         }
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
@@ -1234,6 +1242,7 @@ impl EventHandler for Handler {
         // A deleted House Cup post goes back up, in order.
         scoreboard::on_delete(&ctx, channel_id, deleted_message_id);
         npat::on_delete(channel_id, deleted_message_id);
+        sudoku::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1471,6 +1480,9 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(npat::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(sudoku::new_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), sudoku::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), sudoku::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1549,6 +1561,8 @@ impl EventHandler for Handler {
         frog::spawn(ctx.clone());
         // Name Place Animal Thing: resumes or judges a round a restart left, then the lobby.
         npat::spawn(ctx.clone());
+        // Sudoku: picks up the puzzle a restart left in its channel, or posts one.
+        sudoku::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1599,6 +1613,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("npat") {
                 npat::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("sudoku") {
+                sudoku::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -1812,6 +1830,10 @@ impl EventHandler for Handler {
             }
             if modal.data.custom_id.starts_with("npatans:") {
                 npat::on_modal(&ctx, modal).await;
+                return;
+            }
+            if modal.data.custom_id.starts_with("sudokuans:") {
+                sudoku::on_modal(&ctx, modal).await;
                 return;
             }
             if let Some(orig_id) = modal.data.custom_id.strip_prefix("lrmodal:") {
@@ -2113,6 +2135,18 @@ impl EventHandler for Handler {
             }
             if command.data.name == "npatstop" {
                 npat::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "sudokunew" {
+                sudoku::new_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "sudoku" {
+                sudoku::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "sudokuhelp" {
+                sudoku::help_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -2887,6 +2921,8 @@ impl EventHandler for Handler {
         scoreboard::on_message(&ctx, &msg);
         // Anything posted in the Name Place Animal Thing channel moves its card back down.
         npat::note_message(&ctx, &msg);
+        // And anything in the sudoku channel moves the puzzle card back down.
+        sudoku::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {

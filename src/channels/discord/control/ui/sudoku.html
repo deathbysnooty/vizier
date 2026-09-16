@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark">
+<title>Sudoku #{{ID}} · MLCI</title>
+<link rel="stylesheet" href="/sudoku/app.css">
+<script src="/sudoku/app.js" defer></script>
+</head>
+<body>
+<main class="wrap"
+      id="game"
+      data-id="{{ID}}"
+      data-givens="{{GIVENS}}"
+      data-points="{{POINTS}}"
+      data-level="{{LEVEL_KEY}}"
+      data-posted="{{POSTED}}"
+      data-open="{{OPEN}}">
+  <header>
+    <h1>Sudoku #{{ID}}</h1>
+    <span class="chip chip-{{LEVEL_KEY}}">{{LEVEL_EMOJI}} {{LEVEL_NAME}} · {{POINTS_WORDS}}</span>
+  </header>
+  <p class="sub">{{HEADLINE}} · <span id="timer" class="timer">⏱️ 0:00</span></p>
+
+  <div class="board" id="board" role="grid" aria-label="Sudoku grid"></div>
+
+  <div class="pad" id="pad" aria-label="Numbers"></div>
+  <div class="tools">
+    <button type="button" class="tool" id="notes" aria-pressed="false">✏️ Notes</button>
+    <button type="button" class="tool" id="undo">↩️ Undo</button>
+    <button type="button" class="tool" id="check">🔍 Check</button>
+    <button type="button" class="tool" id="reset">🔄 Reset</button>
+  </div>
+
+  <p class="status" id="status">81 squares to go</p>
+
+  <div class="submit">
+    <div class="code">
+      <input id="code" readonly spellcheck="false" aria-label="Your code" value="">
+      <button type="button" class="copy" id="copy">Copy code</button>
+    </div>
+    <p class="how">Finished? Press <b>Copy code</b>, then in <b>#sudoku</b> press <b>📋 Submit code</b> on the puzzle card and paste it. The bot checks it and, if it is right, you win the points and a new puzzle appears.</p>
+  </div>
+
+  <footer>Puzzle #{{ID}} · one solution · no login needed</footer>
+  <noscript><p class="how">This page needs JavaScript. The grid above is the puzzle; you can also type all 81 digits into <b>📋 Submit code</b> in Discord.</p></noscript>
+</main>
+</body>
+</html>

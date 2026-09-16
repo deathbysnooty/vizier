@@ -1049,6 +1049,16 @@ pub fn store() {
             .collect();
         std::fs::write(bank.join("test.jsonl"), lines.join("\n")).unwrap();
         super::super::super::frog_store::open(dir.path().to_str().unwrap()).expect("frog store");
+        // One puzzle of each difficulty, for the public sudoku page.
+        super::super::super::sudoku_store::open(dir.path().to_str().unwrap()).expect("sudoku store");
+        if let Some(db) = super::super::super::sudoku_store::db() {
+            use super::super::super::sudoku_gen::{Level, Rng, generate};
+            let conn = db.lock();
+            for (level, points) in [(Level::Easy, 2i64), (Level::Medium, 4), (Level::Hard, 6)] {
+                let puzzle = generate(level, &mut Rng::seeded(2_026 + points as u64));
+                super::super::super::sudoku_store::add_puzzle(&conn, &puzzle, points, 31, 1_700_000_000).expect("puzzle");
+            }
+        }
         dir
     });
 }
@@ -3903,4 +3913,91 @@ async fn demo_server() {
         _ = async { serve_b.await } => {}
         _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => {}
     }
+}
+
+// --- the public sudoku page -----------------------------------------------------------
+
+/// The puzzles `store()` put in, newest first.
+fn puzzles() -> Vec<super::super::super::sudoku_store::Row> {
+    store();
+    let db = super::super::super::sudoku_store::db().expect("sudoku store");
+    let conn = db.lock();
+    super::super::super::sudoku_store::recent(&conn, 10)
+}
+
+async fn fetch(app: &Router, path: &str) -> (StatusCode, String, axum::http::HeaderMap) {
+    let req = Request::builder().method("GET").uri(path).body(Body::empty()).unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = axum::body::to_bytes(res.into_body(), 10 << 20).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string(), headers)
+}
+
+#[tokio::test]
+async fn the_sudoku_page_is_open_to_anyone_and_shows_the_right_puzzle() {
+    super::sudoku::forget_all();
+    let app = panel();
+    let puzzle = puzzles().into_iter().next().expect("a puzzle");
+    let (status, html, headers) = fetch(&app, &format!("/sudoku/{}", puzzle.id)).await;
+    assert_eq!(status, StatusCode::OK, "the page must need no sign-in at all");
+    assert_eq!(headers.get("content-type").unwrap(), "text/html; charset=utf-8");
+    assert!(headers.get("set-cookie").is_none(), "the page must not set a cookie");
+    let givens = super::super::super::sudoku_gen::grid_to_str(&puzzle.givens);
+    assert!(html.contains(&givens), "the page is not showing this puzzle's squares");
+    assert!(html.contains(&format!("Sudoku #{}", puzzle.id)));
+    // The answer is nowhere on it, in any shape.
+    let answer = super::super::super::sudoku_gen::grid_to_str(&puzzle.solution);
+    assert!(!html.contains(&answer), "the answer is on the page");
+    for start in 0..50 {
+        let piece: String = answer.chars().skip(start).take(20).collect();
+        assert!(!html.contains(&piece), "a piece of the answer is on the page");
+    }
+    // Its two files are public too, and carry no puzzle of their own.
+    let (status, js, headers) = fetch(&app, "/sudoku/app.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("content-type").unwrap(), "text/javascript; charset=utf-8");
+    assert!(js.contains("sudokuCode"));
+    let (status, css, _) = fetch(&app, "/sudoku/app.css").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(css.contains(".board"));
+    // A number that is nobody's puzzle.
+    let (status, html, _) = fetch(&app, "/sudoku/999999").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(html.contains("No puzzle"));
+}
+
+#[tokio::test]
+async fn the_public_page_does_not_open_the_rest_of_the_panel() {
+    super::sudoku::forget_all();
+    let app = panel();
+    // Everything else still needs a session, sudoku page or no sudoku page.
+    for path in ["/api/me", "/api/status", "/api/catalog", "/api/houses/scorers"] {
+        let (status, _, _) = call(&app, "GET", path, None, None, false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    // And the page lives outside /api: there is no sudoku endpoint in there to find.
+    let (status, body, _) = call(&app, "GET", "/api/sudoku/1", None, None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "No such endpoint.");
+}
+
+#[tokio::test]
+async fn hammering_the_sudoku_page_is_slowed_down() {
+    super::sudoku::forget_all();
+    let app = panel();
+    let puzzle = puzzles().into_iter().next().expect("a puzzle");
+    let path = format!("/sudoku/{}", puzzle.id);
+    let mut refused = false;
+    for _ in 0..(super::sudoku::PER_MINUTE + 5) {
+        let req = Request::builder().method("GET").uri(path.clone()).header("x-forwarded-for", "198.51.100.7").body(Body::empty()).unwrap();
+        if app.clone().oneshot(req).await.unwrap().status() == StatusCode::TOO_MANY_REQUESTS {
+            refused = true;
+        }
+    }
+    assert!(refused, "the page can be hammered");
+    // Someone else is unaffected.
+    let req = Request::builder().method("GET").uri(path).header("x-forwarded-for", "198.51.100.8").body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    super::sudoku::forget_all();
 }

@@ -38,6 +38,8 @@ pub enum Source {
     Frog,
     /// Name Place Animal Thing: a letter, four answers, points for unique ones.
     Npat,
+    /// Sudoku: the first correct code for the puzzle in the sudoku channel.
+    Sudoku,
 }
 
 /// How much one person may earn from a source.
@@ -53,7 +55,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 15] = [
+    pub const ALL: [Source; 16] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -69,6 +71,7 @@ impl Source {
         Source::Wordle,
         Source::Frog,
         Source::Npat,
+        Source::Sudoku,
     ];
 
     pub fn key(self) -> &'static str {
@@ -88,6 +91,7 @@ impl Source {
             Source::Wordle => "wordle",
             Source::Frog => "frog",
             Source::Npat => "npat",
+            Source::Sudoku => "sudoku",
         }
     }
 
@@ -112,6 +116,7 @@ impl Source {
             Source::Wordle => "🟩 Wordle",
             Source::Frog => "🐸 Chocolate Frog",
             Source::Npat => "🔤 Name Place Animal Thing",
+            Source::Sudoku => "🔢 Sudoku",
         }
     }
 
@@ -132,6 +137,7 @@ impl Source {
             // No limit unless the owner sets one: a frog is a riddle won outright.
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
+            Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.
@@ -531,6 +537,33 @@ mod tests {
         assert_eq!(write(&conn, &entry(1, Source::Snitch, 2), MON).unwrap(), Outcome::Capped);
         assert_eq!(write(&conn, &entry(1, Source::GoldenSnitch, 6), MON).unwrap(), Outcome::Granted(6));
         assert_eq!(write(&conn, &entry(1, Source::GoldenSnitch, 6), MON).unwrap(), Outcome::Granted(6));
+    }
+
+    #[test]
+    fn sudoku_wins_stop_at_the_daily_limit_and_a_replay_never_pays_twice() {
+        let conn = db();
+        // Each win names its puzzle, so the same puzzle can only ever pay once.
+        let win = |puzzle: i64, points: i64| {
+            let mut e = entry(1, Source::Sudoku, points);
+            e.dedupe = Some(format!("sudoku:{}", puzzle));
+            e
+        };
+        for puzzle in 1..=3 {
+            assert_eq!(write(&conn, &win(puzzle, 6), MON).unwrap(), Outcome::Granted(6));
+        }
+        // 18 of 20 used: the next 6 is trimmed to the 2 that fit, then nothing.
+        assert_eq!(write(&conn, &win(4, 6), MON).unwrap(), Outcome::Granted(2));
+        assert_eq!(write(&conn, &win(5, 4), MON).unwrap(), Outcome::Capped);
+        assert_eq!(write(&conn, &win(1, 6), MON).unwrap(), Outcome::Duplicate, "the same puzzle again pays nothing");
+        // A whole day's sudoku comes to the limit, and a fresh day starts again.
+        let today: i64 = conn
+            .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE source = 'sudoku' AND day = ?1", params![ist_day(MON)], |r| r.get(0))
+            .unwrap();
+        assert_eq!(today, 20);
+        assert_eq!(write(&conn, &win(9, 6), MON + DAY).unwrap(), Outcome::Granted(6));
+        // A finish is never written at all: nothing outside those wins is there.
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM ledger WHERE source = 'sudoku'", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 6, "only the wins, one row each, the capped one included as a zero");
     }
 
     #[test]

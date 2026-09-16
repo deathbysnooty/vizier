@@ -267,6 +267,7 @@ mod profiles;
 mod rules;
 mod scorers;
 mod search;
+mod sudoku;
 mod welcomes;
 
 // --- the live implementation ------------------------------------------------------
@@ -704,13 +705,20 @@ pub fn command() -> CreateCommand {
     CreateCommand::new("panel").description("admin only: a sign-in link for the Loduchand control panel")
 }
 
+/// The address the panel is reached at, without a trailing slash: the sign-in
+/// link's home, and the front of every sudoku puzzle's page link. `None` until
+/// `VIZIER_PANEL_URL` is set in the environment.
+pub fn panel_url() -> Option<String> {
+    super::var("VIZIER_PANEL_URL").map(|u| u.trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
+}
+
 pub async fn on_command(ctx: &Context, command: &CommandInteraction) {
     let user = command.user.id.get();
     let mut message = CreateInteractionResponseMessage::new().ephemeral(true);
     if !super::super::admin_ids().contains(&user) {
         message = message.content("The control panel is for server admins only.");
     } else {
-        match super::var("VIZIER_PANEL_URL").map(|u| u.trim_end_matches('/').to_string()) {
+        match panel_url() {
             None => {
                 message = message.content("The panel has no public address yet: set `VIZIER_PANEL_URL`.");
             }
@@ -894,12 +902,22 @@ pub fn router(panel: Panel) -> Router {
         .layer(middleware::from_fn(require_panel_header))
         .layer(middleware::from_fn(no_store));
 
+    // The one public corner: a puzzle's page, open to any member who was sent
+    // the link. No session, no cookie, no X-Panel header — just a small bucket
+    // per address so it can't be hammered.
+    let puzzles = Router::new()
+        .route("/sudoku/{id}", get(sudoku::page))
+        .route("/sudoku/app.css", get(sudoku::css))
+        .route("/sudoku/app.js", get(sudoku::js))
+        .route_layer(middleware::from_fn(sudoku::rate_limit));
+
     Router::new()
         .route("/", get(page))
         .route("/login", get(page))
         .route("/assets/app.css", get(|| async { asset("text/css; charset=utf-8", APP_CSS) }))
         .route("/assets/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", FAVICON) }))
+        .merge(puzzles)
         .nest("/api", api)
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))

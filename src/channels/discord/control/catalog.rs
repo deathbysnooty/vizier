@@ -246,6 +246,7 @@ pub fn sections() -> Vec<Section> {
                 ),
                 setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
+                setting("VIZIER_CAP_SUDOKU", "Sudoku points a day", "Most house points one person can win from sudoku puzzles in a day. Only the first correct code for a puzzle pays, and hints come off that puzzle's points before this limit is applied. 100 means no limit.", number(0, 100, "points"), "20"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
                     "Weekly scan points",
@@ -452,6 +453,47 @@ pub fn sections() -> Vec<Section> {
                     "/npatstop",
                     "Stops the Name Place Animal Thing game that is running (or the countdown) with no house points, and puts the lobby back.",
                 ),
+            ],
+        },
+        Section {
+            id: "sudoku",
+            title: "Sudoku",
+            icon: "🔢",
+            about: "A sudoku is always waiting in its own channel (Game channel below), and the first person to solve \
+                    it wins house points. Members can't type there, so deny Send Messages for @everyone and let the \
+                    bot send, embed, attach files, read history and manage messages. The card sits at the bottom with \
+                    a picture of the grid and four buttons: Play, Submit code, Hint and Today's solvers. Play sends \
+                    that member a private link to a web page (the panel's own address plus /sudoku/<number>) where \
+                    they fill the grid in a browser, with pencil marks, Undo, Check and Reset; the page never learns \
+                    the answer, it only turns a finished grid into a short code. Pasting a correct code into Submit \
+                    code wins the puzzle: the card turns into a Solved card and the next puzzle goes up at once, at a \
+                    new difficulty. Puzzles are made by the bot itself, always with exactly one answer. Someone who \
+                    was still working when the channel moved on can still paste their code: they are told whether it \
+                    was right and it counts as a finish, but the points went to whoever was first. Never runs in \
+                    #safe-corner.",
+            settings: vec![
+                setting("VIZIER_SUDOKU", "Game on", "Run the sudoku game in its channel. Off takes the card down and stops new puzzles; the one that was up is kept, and comes back when you switch it on again.", Kind::Toggle, "off"),
+                setting("VIZIER_SUDOKU_CHANNEL", "Game channel", "The channel the puzzle card lives in. Empty means the game is off. Never #safe-corner.", Kind::Channel, ""),
+                toggle("VIZIER_SUDOKU_RULES", "Rules post", "Keep a How it works post at the top of the sudoku channel, written from these settings and edited by itself when they change. Put back if deleted."),
+                setting("VIZIER_SUDOKU_MIX", "Difficulty mix", "How often each difficulty comes up, as name:weight pairs. The weights are shares, not percentages: easy:40,medium:40,hard:20 means easy and medium twice as often as hard. Easy puzzles start with 36-40 squares filled in, medium 30-34 and hard 26-29.", Kind::Text, "easy:40,medium:40,hard:20"),
+                setting("VIZIER_POINTS_SUDOKU_EASY", "Easy puzzle points", "House points for the first correct code on an easy puzzle.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_SUDOKU_MEDIUM", "Medium puzzle points", "House points for the first correct code on a medium puzzle.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_SUDOKU_HARD", "Hard puzzle points", "House points for the first correct code on a hard puzzle.", number(0, 100, "points"), "6"),
+                setting("VIZIER_SUDOKU_HINT_COST", "What a hint costs", "How many points one hint takes off that puzzle for the person who asked for it. Their score never goes below nothing, and it only affects them.", number(0, 100, "points"), "1"),
+                setting("VIZIER_SUDOKU_MAX_HINTS", "Hints per puzzle", "How many squares one person may have given away on the same puzzle.", number(0, 80, "hints"), "3"),
+                setting("VIZIER_SUDOKU_MAX_TRIES", "Codes per puzzle", "How many codes one person may send for the same puzzle before it is closed to them. A wrong code says how many squares are wrong, never which, and there are ten seconds between tries.", number(1, 100, "tries"), "10"),
+                setting("VIZIER_SUDOKU_LATE_HOURS", "Late codes accepted for", "How long after a puzzle goes up its code is still checked, so someone who was still solving is told whether they were right. It pays no points: those went to whoever was first. The last ten puzzles are always checked, however old.", number(1, 720, "hours"), "24"),
+            ],
+            commands: vec![
+                command(
+                    "Play · Submit code · Hint",
+                    EVERYONE,
+                    "Buttons on the sudoku card",
+                    "Play sends you a private link to the puzzle's page, Submit code takes the code you copied from it, Hint gives away one square (and takes a point off that puzzle for you), and Today's solvers lists the day's wins and finishes.",
+                ),
+                command("sudoku", EVERYONE, "/sudoku", "Your sudoku links: the puzzle that is up now and any from the last day that you started and never finished, each with its own link, and a Submit code button."),
+                command("sudokuhelp", EVERYONE, "/sudokuhelp", "How the sudoku game works, written from the settings as they are right now: how to play, what each difficulty pays, what a hint costs and how long a late code is still checked. Only you see it."),
+                command("sudokunew", ADMINS, "/sudokunew", "Skips the puzzle that is up, with no points for anyone, and posts a fresh one at once."),
             ],
         },
         Section {
