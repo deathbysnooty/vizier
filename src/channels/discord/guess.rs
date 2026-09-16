@@ -464,6 +464,9 @@ struct Shared {
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(|| Mutex::new(Shared::default()));
 
+/// TEMPORARY, with the card watch in `tend_card`: when it last said anything.
+static LAST_WATCH: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
+
 /// Every message in the game's channel, the bot's own included. Only other
 /// people's messages count towards burying the card: the bot's own winner lines
 /// must never push its own card down.
@@ -835,14 +838,36 @@ pub fn card_plan(has_card: bool, right_channel: bool, gone: bool, dirty: bool, o
 /// back if someone deleted it. The only place in the game that posts a card for
 /// a round that is already up.
 async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64) -> (CardAction, Option<u64>) {
-    let (card, plan) = {
+    let (card, plan, watch) = {
         let s = SHARED.lock();
         let since_bump = Utc::now().timestamp_millis() - s.last_bump_ms;
         let right = s.card.map(|(c, _)| c) == Some(channel);
         // A hint comes once to a round, so the second drawing goes up at once
         // rather than waiting on any redraw pace.
-        (s.card, card_plan(s.card.is_some(), right, s.card_gone, s.dirty, s.others_since_card, since_bump, bump_messages(), bump_seconds()))
+        let plan = card_plan(s.card.is_some(), right, s.card_gone, s.dirty, s.others_since_card, since_bump, bump_messages(), bump_seconds());
+        (s.card, plan, (s.card.is_some(), right, s.card_gone, s.others_since_card, since_bump))
     };
+    // TEMPORARY: the card was not following chat down and the state could not be
+    // read from outside. Once every ten seconds, say what the decision saw.
+    {
+        let now_ms = Utc::now().timestamp_millis();
+        let mut last = LAST_WATCH.lock();
+        if now_ms - *last >= 10_000 {
+            *last = now_ms;
+            let (has_card, right, gone, others, since_bump) = watch;
+            tracing::info!(
+                "guess: card watch - plan={:?} has_card={} right={} gone={} others={} since_bump={}ms needed={} every={}s",
+                plan,
+                has_card,
+                right,
+                gone,
+                others,
+                since_bump,
+                bump_messages(),
+                bump_seconds()
+            );
+        }
+    }
     match plan {
         CardAction::Nothing => (CardAction::Nothing, None),
         CardAction::Edit => {
