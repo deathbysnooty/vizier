@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      all_targets:
+        description: 'Build every platform (slow); off builds only the Linux x86_64 binary the server runs'
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       version:
@@ -20,6 +25,11 @@ on:
         type: string
       dry_run:
         description: 'Dry run mode'
+        required: false
+        type: boolean
+        default: false
+      all_targets:
+        description: 'Build every platform (slow); off builds only the Linux x86_64 binary the server runs'
         required: false
         type: boolean
         default: false
@@ -45,6 +55,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       changelog: ${{ steps.changelog.outputs.changelog }}
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,6 +77,21 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Choose build targets
+        id: targets
+        run: |
+          # The server only ever installs x86_64-unknown-linux-gnu, and the
+          # release is published once every build has finished — so by default
+          # that one target is all this builds. Tick `all_targets` for the
+          # (much slower) full set of platforms.
+          if [[ "${{ inputs.all_targets }}" == "true" ]]; then
+            TARGETS='[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","cross":false},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-24.04-arm","cross":false},{"target":"x86_64-apple-darwin","os":"macos-latest","cross":false},{"target":"aarch64-apple-darwin","os":"macos-latest","cross":false}]'
+          else
+            TARGETS='[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest","cross":false}]'
+          fi
+          echo "targets=$TARGETS" >> $GITHUB_OUTPUT
+          echo "Building: $TARGETS"
 
       - name: Update Cargo.toml versions
         run: |
@@ -121,24 +147,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Chosen by the `all_targets` input: the single Linux x86_64 entry the
+      # server runs, or all four platforms. See "Choose build targets" above.
       matrix:
-        include:
-          # Linux x86_64 (native)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: false
-          # Linux ARM64 (native on ARM64 runner)
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            cross: false
-          # macOS x86_64 (cross-compile from ARM64 runner)
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            cross: false
-          # macOS ARM64 (native on ARM64 runner)
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            cross: false
+        include: ${{ fromJSON(needs.prepare-release.outputs.targets) }}
 
     steps:
       - name: Checkout
