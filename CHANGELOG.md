@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.40] - 2026-09-16
+
+### 💼 Other
+
+- Take the sherpa-onnx speech engine out of the default build
+- Take the PDF/DOCX/XLSX parsers out of the default build
+- Take the Docker shell backend out of the default build
 ## [0.11.39] - 2026-09-16
 
 ### 🚀 Features
@@ -11,6 +18,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(release)* Build only the Linux binary the server runs, by default
+- Bump version to 0.11.39
 ## [0.11.38] - 2026-09-16
 
 ### 🚀 Features
