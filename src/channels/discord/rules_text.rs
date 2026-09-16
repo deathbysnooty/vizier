@@ -1149,7 +1149,10 @@ pub fn anagram_help_text(a: &AnagramRules) -> String {
         Some(n) => format!("Up to **{}** a day from anagrams.", plural(n, "house point", "house points")),
         None => "No daily limit from anagrams.".to_string(),
     }));
-    t.push_str("• Muggles and anyone not yet sorted earn nothing, here as everywhere — mods are welcome to play, they just can't score.\n");
+    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    t.push_str("\n**🔀 Anagram points**\n");
+    t.push_str("• Every solve also scores **anagram points**: what the round was worth, the hint taken off, with no daily limit at all. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str("• `/anagramtop` shows the board for today or this month, and the day's top scorer is the one the frog card goes to.\n");
     if a.no_repeat_days > 0 {
         t.push_str(&format!("• The same set of letters doesn't come round again for **{}**.\n", plural(a.no_repeat_days, "day", "days")));
     }
@@ -1158,7 +1161,7 @@ pub fn anagram_help_text(a: &AnagramRules) -> String {
     }
 
     t.push_str("\n**⌨️ Commands**\n");
-    t.push_str("`/anagram` the round that's up · `/anagramhelp` this card · mods: `/anagramskip` for a fresh word, `/anagramstop` to switch it off");
+    t.push_str("`/anagram` the round that's up · `/anagramtop` the anagram points board · `/anagramhelp` this card · mods: `/anagramskip` for a fresh word, `/anagramstop` to switch it off");
     t
 }
 

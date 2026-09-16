@@ -1504,6 +1504,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), anagram::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), anagram::top_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), anagram::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::stop_builder())).await;
@@ -2199,6 +2200,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "anagram" {
                 anagram::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "anagramtop" {
+                anagram::top_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "anagramhelp" {

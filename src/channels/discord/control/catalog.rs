@@ -544,6 +544,7 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("anagram", EVERYONE, "/anagram", "The round that is up now: its letters, how long the word is, what it is worth and whether the hint has gone. Only you see it."),
+                command("anagramtop", EVERYONE, "/anagramtop", "The anagram points board, today or this month: the top 10 and, if you are not on it, your own line. Anagram points are the game's own score - every solve at what the round was worth, hint taken off but no daily limit - so they keep counting after the house-points limit is full, and mods and Muggles have them too. Only you see it."),
                 command("anagramhelp", EVERYONE, "/anagramhelp", "How the anagrams game works, written from the settings as they are right now: how to answer, what each length pays, and what !hint and !skip do. Only you see it."),
                 command("anagramskip", ADMINS, "/anagramskip", "Drops the round that is up, with no points for anyone, reveals the word and sets a fresh one at once. Unlike !skip, no hint is needed first."),
                 command("anagramstop", ADMINS, "/anagramstop", "Switches the anagrams game off: the card comes down, the channel topic is cleared and no new rounds are set. Switch Game on back on to play again."),

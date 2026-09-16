@@ -113,6 +113,10 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
 /// Activities whose top is the most wins or catches rather than the most
 /// points: their daily limits leave many people level on points, and a capped
 /// win is still in the ledger as a zero.
+///
+/// Anagrams is here only as the fallback for a day the anagram store knows
+/// nothing about: `with_anagram_measured` decides a real day on the game's own
+/// uncapped anagram points instead.
 const COUNTED: &[&str] = &["quiz", "koto", "anagram", "cat", "arena", "snitch", "sudoku"];
 
 /// The top of each activity from a day's rows (in ledger order). Wordle and
@@ -232,6 +236,51 @@ pub fn chess_top(rows: &[LedgerRow], wins: &[(u64, i64)]) -> Option<(u64, i64)> 
         .map(|(user, won, reached)| (user, won, points(user), reached))
         .min_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0)))
         .map(|(user, won, _, _)| (user, won))
+}
+
+/// Anagrams' top: the most ANAGRAM points that day — every solve at its full
+/// value, so ten four-letter words no longer beat five eight-letter ones and a
+/// day spent past the house-points cap still counts. Level on points, the most
+/// rounds won; level on both, whoever got there first.
+///
+/// Eligibility is unchanged: only people the ledger paid for anagrams that day
+/// can win the card, which keeps mods, Muggles and the unsorted out of it. Their
+/// anagram points are still kept and still shown to them — they are simply not
+/// in the running for a card. `tally` is the store's day.
+pub fn anagram_top(rows: &[LedgerRow], tally: &[super::anagram_store::Tally]) -> Option<(u64, i64)> {
+    let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "anagram");
+    let mut mine: Vec<super::anagram_store::Tally> = tally.iter().filter(|t| t.solves > 0 && paid(t.user)).cloned().collect();
+    super::anagram_store::rank(&mut mine);
+    mine.first().map(|t| (t.user, t.points))
+}
+
+/// Swaps anagrams' count-of-rows top for the store's uncapped anagram points. A
+/// day the store knows nothing about — one before this was built, or a run with
+/// no store open — keeps the ledger's answer, so old days still resolve.
+fn with_anagram_measured(tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let Some(db) = super::anagram_store::db() else {
+        return tops;
+    };
+    let tally = super::anagram_store::day_tally(&db.lock(), day);
+    with_anagram_tally(tops, rows, &tally)
+}
+
+/// The swap itself, with the day's tally already read. An EMPTY tally means the
+/// store has nothing for that day, and the ledger's answer is left exactly as it
+/// was.
+pub fn with_anagram_tally(
+    mut tops: Vec<(&'static str, u64, i64)>,
+    rows: &[LedgerRow],
+    tally: &[super::anagram_store::Tally],
+) -> Vec<(&'static str, u64, i64)> {
+    if tally.is_empty() {
+        return tops;
+    }
+    tops.retain(|(a, _, _)| *a != "anagram");
+    if let Some((user, points)) = anagram_top(rows, tally) {
+        tops.push(("anagram", user, points));
+    }
+    tops
 }
 
 /// Swaps chess's points-based top for games won.
@@ -354,7 +403,11 @@ fn give(key: &str, user: u64, origin: &str, what: &AwardFor) -> Option<Award> {
 /// Hands out a day's top cards and posts the summary.
 pub async fn run_daily_top(ctx: &Context, day: &str) {
     let rows = day_rows(day);
-    let tops = order_like_activities(with_chess_measured(with_npat_measured(with_chat_and_voice_measured(daily_tops(&rows), &rows, day), &rows, day), &rows, day));
+    let tops = daily_tops(&rows);
+    let tops = with_chat_and_voice_measured(tops, &rows, day);
+    let tops = with_npat_measured(tops, &rows, day);
+    let tops = with_chess_measured(tops, &rows, day);
+    let tops = order_like_activities(with_anagram_measured(tops, &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -602,6 +655,68 @@ mod tests {
         assert_eq!(chess_top(&even, &[(9, 100)]), None, "a win by someone chess never paid");
         assert_eq!(activity_label("chess"), "♟️ Chess");
         assert!(ACTIVITIES.iter().any(|(a, s)| *a == "chess" && s.contains(&"chess")));
+    }
+
+    fn tally(user: u64, points: i64, solves: i64, reached: i64) -> super::super::anagram_store::Tally {
+        super::super::anagram_store::Tally { user, points, solves, reached }
+    }
+
+    #[test]
+    fn the_anagram_card_goes_to_the_most_uncapped_points_not_the_most_solves() {
+        // The whole point of the change: 1 wins ten four-letter rounds and is
+        // stopped by the cap; 2 wins five eight-letter ones. Counting rows made
+        // 1 the winner; counting what the rounds were worth makes it 2.
+        // Two rounds paid, the next eight capped to zero but still in the ledger.
+        let mut rows: Vec<LedgerRow> = (0..10).map(|i| row(1, "anagram", if i < 2 { 1 } else { 0 }, 100 + i)).collect();
+        rows.extend((0..5).map(|i| row(2, "anagram", 3, 200 + i)));
+        assert_eq!(daily_tops(&rows), vec![("anagram", 1, 10)], "the old rule: ten rows beat five");
+        let scores = vec![tally(1, 10, 10, 109), tally(2, 15, 5, 204)];
+        assert_eq!(anagram_top(&rows, &scores), Some((2, 15)));
+        // And the swap puts that answer in the day's tops in place of the count.
+        assert_eq!(with_anagram_tally(daily_tops(&rows), &rows, &scores), vec![("anagram", 2, 15)]);
+        // Level on points: the one who won more rounds. Level on both: first there.
+        let even = vec![tally(1, 12, 4, 109), tally(2, 12, 3, 204)];
+        assert_eq!(anagram_top(&rows, &even), Some((1, 12)));
+        let dead_heat = vec![tally(1, 12, 3, 300), tally(2, 12, 3, 204)];
+        assert_eq!(anagram_top(&rows, &dead_heat), Some((2, 12)), "whoever got there first");
+    }
+
+    #[test]
+    fn a_mod_can_out_score_the_channel_and_still_never_take_the_card() {
+        // 9 is a mod: no house, so no ledger row at all. Their anagram points are
+        // kept and shown to them, but the card is the house cup's and stays with
+        // a housed player — the owner was explicit about that.
+        let rows = vec![row(1, "anagram", 2, 100), row(1, "anagram", 0, 110)];
+        let scores = vec![tally(9, 40, 9, 90), tally(1, 4, 2, 110)];
+        assert_eq!(anagram_top(&rows, &scores), Some((1, 4)));
+        // Nobody housed played: no card, rather than one for the mod.
+        assert_eq!(anagram_top(&[], &scores), None);
+        assert_eq!(anagram_top(&rows, &[]), None);
+        // A capped day is still a paid day: the zero rows keep 1 eligible.
+        let all_capped = vec![row(1, "anagram", 0, 100)];
+        assert_eq!(anagram_top(&all_capped, &[tally(1, 9, 5, 150)]), Some((1, 9)));
+        // And a row for some other game is not an anagram row.
+        assert_eq!(anagram_top(&[row(1, "quiz", 5, 100)], &[tally(1, 9, 5, 150)]), None);
+    }
+
+    #[test]
+    fn a_day_the_anagram_store_knows_nothing_about_falls_back_to_the_ledger() {
+        // Days older than this change have no store rows; the counted-rows rule
+        // still resolves them, so no old day is left without a card.
+        let rows = vec![row(1, "anagram", 1, 100), row(1, "anagram", 0, 110), row(2, "anagram", 3, 120)];
+        let ledgers_answer = daily_tops(&rows);
+        assert_eq!(ledgers_answer, vec![("anagram", 1, 2)], "the count of rows, capped ones included");
+        assert_eq!(with_anagram_tally(ledgers_answer.clone(), &rows, &[]), ledgers_answer, "an empty day keeps it");
+        // The same when the store isn't open at all, as in this test run.
+        assert!(super::super::anagram_store::db().is_none());
+        assert_eq!(with_anagram_measured(ledgers_answer.clone(), &rows, "2026-09-13"), ledgers_answer);
+        // Once the store does have the day, its answer replaces the count — and
+        // a day nobody housed played takes the anagram card off the list.
+        assert_eq!(with_anagram_tally(ledgers_answer.clone(), &rows, &[tally(2, 3, 1, 120)]), vec![("anagram", 2, 3)]);
+        assert!(with_anagram_tally(ledgers_answer, &rows, &[tally(9, 30, 8, 120)]).is_empty());
+        // Every other activity is left exactly alone.
+        let mixed = vec![("quiz", 5, 4), ("anagram", 1, 2), ("chess", 7, 3)];
+        assert_eq!(with_anagram_tally(mixed, &rows, &[tally(2, 3, 1, 120)]), vec![("quiz", 5, 4), ("chess", 7, 3), ("anagram", 2, 3)]);
     }
 
     #[test]
