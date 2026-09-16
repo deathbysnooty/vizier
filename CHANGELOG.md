@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.45] - 2026-09-16
+
+### 🚀 Features
+
+- *(guess)* Guess points, an uncapped score the cap can't hide
 ## [0.11.44] - 2026-09-16
 
 ### 💼 Other
 
 - The doodle game, a twin of anagrams in its own channel
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.44
 ## [0.11.43] - 2026-09-16
 
 ### 🚀 Features
