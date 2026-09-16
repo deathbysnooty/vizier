@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(feature = "documents")]
 use calamine::Reader;
 use chrono::Utc;
 use schemars::JsonSchema;
@@ -110,11 +111,13 @@ fn extract_text(mime_type: &str, content: Vec<u8>) -> Result<String, VizierError
                 .map_err(|e| VizierError(format!("Invalid UTF-8: {}", e)))?;
             Ok(text)
         }
+        #[cfg(feature = "documents")]
         "application/pdf" => {
             let text = pdf_extract::extract_text_from_mem(&content)
                 .map_err(|e| VizierError(format!("Failed to extract PDF: {}", e)))?;
             Ok(text)
         }
+        #[cfg(feature = "documents")]
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
             let docx = docx_rs::read_docx(&content)
                 .map_err(|e| VizierError(format!("Failed to read DOCX: {}", e)))?;
@@ -141,6 +144,7 @@ fn extract_text(mime_type: &str, content: Vec<u8>) -> Result<String, VizierError
             }
             Ok(text)
         }
+        #[cfg(feature = "documents")]
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
             let mut workbook = calamine::open_workbook_from_rs::<calamine::Xlsx<_>, _>(
                 std::io::Cursor::new(content),
@@ -174,6 +178,18 @@ fn extract_text(mime_type: &str, content: Vec<u8>) -> Result<String, VizierError
             }
             Ok(csv)
         }
+        #[cfg(not(feature = "documents"))]
+        "application/pdf"
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            Err(VizierError(format!(
+                "This build can't read binary office documents, so '{}' cannot be extracted. \
+                 Build with --features documents to enable PDF, DOCX and XLSX parsing, or ask \
+                 for the file as plain text, CSV, JSON, Markdown or another text format, which \
+                 this build reads fine.",
+                mime_type
+            )))
+        }
         _ => {
             // Try as UTF-8 text, fall back to error
             match String::from_utf8(content) {
@@ -194,7 +210,14 @@ impl VizierTool for ReadDocumentFile {
     }
 
     fn description(&self) -> String {
-        "Read a textual document from the current session (plain text, JSON, YAML, CSV, Markdown, HTML, CSS, JavaScript, XML, TOML, PDF, DOCX, XLSX). Returns the extracted text content. For images, use read_image_file.".to_string()
+        #[cfg(feature = "documents")]
+        {
+            "Read a textual document from the current session (plain text, JSON, YAML, CSV, Markdown, HTML, CSS, JavaScript, XML, TOML, PDF, DOCX, XLSX). Returns the extracted text content. For images, use read_image_file.".to_string()
+        }
+        #[cfg(not(feature = "documents"))]
+        {
+            "Read a textual document from the current session (plain text, JSON, YAML, CSV, Markdown, HTML, CSS, JavaScript, XML, TOML). Returns the extracted text content. PDF, DOCX and XLSX are supported by vizier but not compiled into this build - it would need to be built with --features documents - so reading one returns an error rather than text. For images, use read_image_file.".to_string()
+        }
     }
 
     async fn call(
