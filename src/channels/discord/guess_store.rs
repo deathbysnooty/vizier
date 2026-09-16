@@ -35,14 +35,45 @@ pub const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS rounds_word ON rounds (word_key, posted_ts);
     CREATE TABLE IF NOT EXISTS solves (
         day TEXT NOT NULL, user_id INTEGER NOT NULL, round_id INTEGER NOT NULL,
-        points INTEGER NOT NULL DEFAULT 0, guess TEXT NOT NULL DEFAULT '',
+        points INTEGER NOT NULL DEFAULT 0, worth INTEGER NOT NULL DEFAULT 0, guess TEXT NOT NULL DEFAULT '',
         seconds INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, round_id));
     CREATE INDEX IF NOT EXISTS solves_day ON solves (day);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
+/// Columns added after the first release, for a database made before them. The
+/// game is live, so they go on with `ALTER TABLE`: nothing is ever rewritten or
+/// dropped under a running round.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("solves", "worth", "INTEGER NOT NULL DEFAULT 0")];
+
+/// What the solves written before `worth` existed were worth, worked out from
+/// the round each was for: the round's value, a point off it if the hint had
+/// gone, exactly as `worth_after_hint` figures it. Rows whose round has gone
+/// keep the zero, which is all that can honestly be said about them. Run once,
+/// the moment the column is added.
+const BACKFILL_WORTH: &str = "
+    UPDATE solves SET worth = (
+        SELECT CASE WHEN r.hint_by IS NULL THEN MAX(r.points, 0) ELSE MAX(r.points - 1, 1) END
+        FROM rounds r WHERE r.id = solves.round_id)
+    WHERE worth = 0 AND round_id IN (SELECT id FROM rounds);";
+
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    for (table, column, kind) in ADDED_COLUMNS {
+        let has: bool = conn
+            .prepare(&format!("PRAGMA table_info({})", table))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .flatten()
+            .any(|name| name == *column);
+        if has {
+            continue;
+        }
+        conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, kind))?;
+        if *column == "worth" {
+            conn.execute_batch(BACKFILL_WORTH)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -277,7 +308,14 @@ pub fn expire(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<bool> {
 pub struct Solve {
     pub user: u64,
     pub round: i64,
+    /// The HOUSE points the ledger actually paid: nothing once the day's cap is
+    /// full, and nothing at all for someone with no house.
     pub points: i64,
+    /// The GUESS points the solve was worth: the round's value with the hint
+    /// already taken off, before the cap touched it. Every solver gets these,
+    /// mods and the unsorted included — they are the game's own score, not the
+    /// house cup's.
+    pub worth: i64,
     /// What they typed.
     pub guess: String,
     pub seconds: i64,
@@ -285,11 +323,23 @@ pub struct Solve {
 }
 
 /// Writes a win. A player counts once per round.
-pub fn add_solve(conn: &Connection, day: &str, user: u64, round: i64, points: i64, guess: &str, seconds: i64, ts: i64) -> rusqlite::Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn add_solve(
+    conn: &Connection,
+    day: &str,
+    user: u64,
+    round: i64,
+    points: i64,
+    worth: i64,
+    guess: &str,
+    seconds: i64,
+    ts: i64,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO solves (day, user_id, round_id, points, guess, seconds, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(user_id, round_id) DO UPDATE SET points = MAX(solves.points, excluded.points)",
-        params![day, user as i64, round, points, guess, seconds, ts],
+        "INSERT INTO solves (day, user_id, round_id, points, worth, guess, seconds, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(user_id, round_id) DO UPDATE SET points = MAX(solves.points, excluded.points),
+             worth = MAX(solves.worth, excluded.worth)",
+        params![day, user as i64, round, points, worth, guess, seconds, ts],
     )
     .map(|_| ())
 }
@@ -299,19 +349,64 @@ fn solve_row(r: &rusqlite::Row) -> rusqlite::Result<Solve> {
         user: r.get::<_, i64>(0)? as u64,
         round: r.get(1)?,
         points: r.get(2)?,
-        guess: r.get(3)?,
-        seconds: r.get(4)?,
-        ts: r.get(5)?,
+        worth: r.get(3)?,
+        guess: r.get(4)?,
+        seconds: r.get(5)?,
+        ts: r.get(6)?,
     })
 }
 
 /// A day's wins, first one first. What a `/today` summary - or a panel page -
 /// reads.
 pub fn day_solves(conn: &Connection, day: &str) -> Vec<Solve> {
-    let Ok(mut stmt) = conn.prepare("SELECT user_id, round_id, points, guess, seconds, ts FROM solves WHERE day = ?1 ORDER BY ts, round_id") else {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT user_id, round_id, points, worth, guess, seconds, ts FROM solves WHERE day = ?1 ORDER BY ts, round_id")
+    else {
         return Vec::new();
     };
     stmt.query_map(params![day], solve_row).map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+// --- guess points ----------------------------------------------------------------------
+
+/// One player's guess points over a stretch of days.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tally {
+    pub user: u64,
+    /// Guess points: every solve at its full value, so the house-points cap
+    /// never hides one.
+    pub points: i64,
+    /// How many rounds they won.
+    pub solves: i64,
+    /// When they got to that total — their last solve of the stretch.
+    pub reached: i64,
+}
+
+/// The order a board reads in, and the order the day's card is decided in: most
+/// guess points, then most rounds won, then whoever got there first.
+pub fn rank(rows: &mut [Tally]) {
+    rows.sort_by(|a, b| b.points.cmp(&a.points).then(b.solves.cmp(&a.solves)).then(a.reached.cmp(&b.reached)).then(a.user.cmp(&b.user)));
+}
+
+/// Everyone's guess points between two days, both ends included (YYYY-MM-DD,
+/// which sorts as a date), best first.
+pub fn tally_between(conn: &Connection, from_day: &str, to_day: &str) -> Vec<Tally> {
+    let sql = "SELECT user_id, COALESCE(SUM(worth), 0), COUNT(*), COALESCE(MAX(ts), 0)
+               FROM solves WHERE day >= ?1 AND day <= ?2 GROUP BY user_id";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let mut rows: Vec<Tally> = stmt
+        .query_map(params![from_day, to_day], |r| {
+            Ok(Tally { user: r.get::<_, i64>(0)? as u64, points: r.get(1)?, solves: r.get(2)?, reached: r.get(3)? })
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    rank(&mut rows);
+    rows
+}
+
+/// One day's guess points, best first. What the day's frog card is decided on.
+pub fn day_tally(conn: &Connection, day: &str) -> Vec<Tally> {
+    tally_between(conn, day, day)
 }
 
 /// Whether this player has already won this round.
@@ -411,15 +506,94 @@ pub mod tests {
         let conn = memory();
         let one = put(&conn, "guitar", 1, 2, 10);
         let two = put(&conn, "ice cream", 2, 2, 20);
-        add_solve(&conn, "2026-09-16", 1, one.id, 2, "gitar", 40, 100).unwrap();
-        add_solve(&conn, "2026-09-16", 2, two.id, 1, "icecream", 90, 200).unwrap();
+        add_solve(&conn, "2026-09-16", 1, one.id, 2, 2, "gitar", 40, 100).unwrap();
+        add_solve(&conn, "2026-09-16", 2, two.id, 1, 1, "icecream", 90, 200).unwrap();
         // The same person on the same round doesn't count twice.
-        add_solve(&conn, "2026-09-16", 1, one.id, 0, "guitar", 40, 300).unwrap();
+        add_solve(&conn, "2026-09-16", 1, one.id, 0, 2, "guitar", 40, 300).unwrap();
         let day = day_solves(&conn, "2026-09-16");
         assert_eq!(day.len(), 2);
         assert_eq!((day[0].user, day[0].points, day[0].guess.as_str()), (1, 2, "gitar"));
         assert!(solved_by(&conn, one.id, 1) && !solved_by(&conn, one.id, 2));
         assert!(day_solves(&conn, "2026-09-17").is_empty());
+    }
+
+    #[test]
+    fn what_a_round_was_worth_is_kept_whatever_the_ledger_paid() {
+        let conn = memory();
+        let one = put(&conn, "guitar", 1, 2, 10);
+        let two = put(&conn, "ice cream", 2, 3, 20);
+        // A capped day: the ledger pays nothing, the game still scores it.
+        add_solve(&conn, "2026-09-16", 1, one.id, 0, 2, "gitar", 40, 100).unwrap();
+        // A mod, who has no house and so no ledger row at all.
+        add_solve(&conn, "2026-09-16", 9, two.id, 0, 3, "icecream", 20, 120).unwrap();
+        let day = day_solves(&conn, "2026-09-16");
+        assert_eq!(day.iter().map(|s| (s.user, s.points, s.worth)).collect::<Vec<_>>(), vec![(1, 0, 2), (9, 0, 3)]);
+        let tally = day_tally(&conn, "2026-09-16");
+        assert_eq!(tally.iter().map(|t| (t.user, t.points, t.solves)).collect::<Vec<_>>(), vec![(9, 3, 1), (1, 2, 1)]);
+        assert_eq!(tally[0].reached, 120);
+    }
+
+    #[test]
+    fn the_board_is_points_then_rounds_then_whoever_got_there_first() {
+        let conn = memory();
+        let round = |n: i64, points: i64| put(&conn, "guitar", n, points, n).id;
+        let (a, b, c, d, e) = (round(1, 1), round(2, 1), round(3, 3), round(4, 1), round(5, 1));
+        // 1: two cheap rounds. 2: one dear one — fewer rounds, more points.
+        add_solve(&conn, "2026-09-16", 1, a, 1, 1, "gitar", 5, 100).unwrap();
+        add_solve(&conn, "2026-09-16", 1, b, 1, 1, "guitar", 5, 110).unwrap();
+        add_solve(&conn, "2026-09-16", 2, c, 3, 3, "icecream", 5, 120).unwrap();
+        // 3 ties 1 on points with fewer rounds; 4 ties both and finished later.
+        add_solve(&conn, "2026-09-16", 3, d, 2, 2, "cop car", 5, 130).unwrap();
+        add_solve(&conn, "2026-09-16", 4, e, 2, 2, "police car", 5, 140).unwrap();
+        let tally = day_tally(&conn, "2026-09-16");
+        assert_eq!(tally.iter().map(|t| (t.user, t.points, t.solves)).collect::<Vec<_>>(), vec![(2, 3, 1), (1, 2, 2), (3, 2, 1), (4, 2, 1)]);
+        // A month is the same reading over a stretch of days, and a stretch with
+        // nothing in it is empty rather than wrong.
+        add_solve(&conn, "2026-09-02", 4, round(6, 3), 3, 3, "icecream", 5, 90).unwrap();
+        let month = tally_between(&conn, "2026-09-01", "2026-09-31");
+        assert_eq!(month.first().map(|t| (t.user, t.points, t.solves)), Some((4, 5, 2)));
+        assert!(tally_between(&conn, "2026-08-01", "2026-08-31").is_empty());
+    }
+
+    #[test]
+    fn the_worth_column_goes_onto_a_database_that_is_already_being_played_in() {
+        // Exactly the schema as it shipped, rows and all: the live database.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, word TEXT NOT NULL, word_key TEXT NOT NULL,
+                doodle INTEGER NOT NULL, hint_doodle INTEGER, points INTEGER NOT NULL, posted_ts INTEGER NOT NULL,
+                message_id INTEGER, channel_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+                winner INTEGER, winning_guess TEXT, solved_ts INTEGER, seconds INTEGER,
+                hint_by INTEGER, hint_ts INTEGER, ended_by INTEGER, ended_ts INTEGER);
+             CREATE TABLE solves (
+                day TEXT NOT NULL, user_id INTEGER NOT NULL, round_id INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0, guess TEXT NOT NULL DEFAULT '',
+                seconds INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, round_id));
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO rounds (id, word, word_key, doodle, points, posted_ts, channel_id, status, winner, hint_by)
+                VALUES (1, 'guitar', 'guitar', 3, 2, 10, 77, 'solved', 5, NULL),
+                       (2, 'ice cream', 'icecream', 5, 2, 20, 77, 'solved', 6, 9),
+                       (3, 'police car', 'policecar', 1, 2, 30, 77, 'solved', 7, NULL);
+             INSERT INTO solves (day, user_id, round_id, points, guess, seconds, ts)
+                VALUES ('2026-09-15', 5, 1, 2, 'gitar', 40, 100),
+                       ('2026-09-15', 6, 2, 0, 'icecream', 20, 200),
+                       ('2026-09-15', 7, 9, 2, 'cop car', 15, 300);",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        // Nothing was dropped or rewritten.
+        let kept: i64 = conn.query_row("SELECT COUNT(*) FROM solves", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 3, "every solve survived the migration");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM rounds", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        let day = day_solves(&conn, "2026-09-15");
+        // Worked out from the round: full value, a point off the hinted one, and
+        // nothing claimed for a solve whose round has gone.
+        assert_eq!(day.iter().map(|s| (s.user, s.points, s.worth)).collect::<Vec<_>>(), vec![(5, 2, 2), (6, 0, 1), (7, 2, 0)]);
+        // And running it again changes nothing.
+        init(&conn).unwrap();
+        assert_eq!(day_solves(&conn, "2026-09-15"), day);
     }
 
     #[test]

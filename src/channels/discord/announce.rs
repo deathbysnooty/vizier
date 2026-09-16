@@ -559,18 +559,20 @@ pub const NEWS: &[News] = &[News {
     title: "🔀 Anagrams is here",
     body: "A scrambled word is now always waiting in {anagram} — and this one you play by **typing**.\n\n           • The letters go up spaced out: **T S A B E**. Work out the word and just type it in the channel. No \
            buttons, no commands.\n           • **Any** word that uses all the letters counts, not only the one I scrambled — those letters are taken \
-           by `beast`, `bates` and `tabes` alike.\n           • First right answer gets a ✅ and the points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or more \
-           (up to 10 a day). The next word goes up straight away.\n           • Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
-           letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n           `/anagramhelp` explains the lot, `/anagram` shows the round that's up.",
+           by `beast`, `bates` and `tabes` alike.\n           • First right answer gets a ✅ and the house points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or \
+           more (up to 10 a day). The next word goes up straight away.\n           • That same number is your **anagram points** as well, and those have no daily limit — they keep counting \
+           after your house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for anagrams.\n           • Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
+           letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n           `/anagramhelp` explains the lot, `/anagram` shows the round that's up, `/anagramtop` is the anagram points board.",
 }, News {
     id: "guess-the-word-2026-09",
     title: "🎨 Guess the Word is here",
     body: "There's a doodle waiting in {guess}, and all you have to do is say what it is.\n\n           • Somebody really drew it — every picture comes from Google's Quick, Draw! dataset, so they're quick, wobbly and \
            human.\n           • Just type your guess in the channel. Capitals, spaces and hyphens don't matter (`Ice-Cream`, `ice cream` \
            and `icecream` are all the same answer), and a spelling slip is forgiven on longer words — `gitar` wins a \
-           guitar.\n           • First right guess gets a ✅ and **2** points (up to 10 a day), and the next doodle goes up straight \
-           away.\n           • Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
-           off the round), and **`!skip`** moves on once a hint is out.\n\n           `/guesshelp` explains the lot, `/guess` shows the doodle that's up.",
+           guitar.\n           • First right guess gets a ✅ and **2** house points (up to 10 a day), and the next doodle goes up \
+           straight away.\n           • Those 2 are your **guess points** as well, and those have no daily limit — they keep counting after your \
+           house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for this game.\n           • Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
+           off the round), and **`!skip`** moves on once a hint is out.\n\n           `/guesshelp` explains the lot, `/guess` shows the doodle that's up, `/guesstop` is the guess points board.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,

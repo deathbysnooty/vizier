@@ -1519,6 +1519,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), guess::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), guess::top_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), guess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::stop_builder())).await;
@@ -2236,6 +2237,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "guess" {
                 guess::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "guesstop" {
+                guess::top_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "guesshelp" {

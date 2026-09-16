@@ -202,28 +202,50 @@ pub struct Won {
     /// What they typed, and what the drawing was.
     pub guess: String,
     pub word: String,
+    /// The HOUSE points the ledger paid: zero once the day's cap is full, and
+    /// zero for anyone with no house.
     pub points: i64,
+    /// The GUESS points the round was worth, hint taken off and no cap: what the
+    /// solve scored in the game itself, whatever the ledger did with it.
+    pub worth: i64,
     /// What it would have paid without the hint.
     pub full_points: i64,
+    /// Whether the winner is in a house at all.
+    pub housed: bool,
+    /// Their guess points today, this round included.
+    pub tally: i64,
     pub hinted: bool,
     pub seconds: i64,
     /// "Aarav 3 · Meera 2", the day so far.
     pub today: String,
 }
 
+/// A solve that paid no house points still won the round, and the line says so
+/// as a win: the guess points are the score that always counts.
 pub fn won_text(w: &Won) -> String {
     let badge = if w.badge.is_empty() { String::new() } else { format!(" {}", w.badge) };
-    let points = match w.points {
-        0 => " · **no points**".to_string(),
-        n => format!(" · **+{}**", plural(n, "point", "points")),
+    // Nothing paid is never "no points": the round was won and the guess points
+    // are the winner's either way. The aside says why the ledger sat it out —
+    // the day's house points are full, or there is no house to pay.
+    let why = match (w.points, w.housed) {
+        (0, true) => Some("that's your house points for today, but the guess points still count"),
+        (0, false) => Some("no house to pay, but the guess points still count"),
+        _ => None,
     };
-    let mut text = format!("✅ <@{}>{} had it: **{}**{}", w.winner, badge, w.word.to_uppercase(), points);
+    let (scored, today) = match why {
+        Some(_) => (plural(w.worth, "guess point", "guess points"), format!("{} today", w.tally)),
+        None => (w.points.to_string(), format!("{} guess points today", w.tally)),
+    };
+    let mut text = format!("✅ <@{}>{} had it: **{}** · **+{}** · {}", w.winner, badge, w.word.to_uppercase(), scored, today);
     let mut notes = vec![format!("round #{} in {}", w.round, spent_words(w.seconds))];
     if bank::plain(&w.guess) != bank::plain(&w.word) {
         notes.push(format!("they typed {}", w.guess));
     }
     if w.hinted {
-        notes.push(format!("a hint was out, so {} instead of {}", w.points, w.full_points));
+        notes.push(format!("a hint was out, so {} instead of {}", w.worth, w.full_points));
+    }
+    if let Some(why) = why {
+        notes.push(why.to_string());
     }
     if !w.today.is_empty() {
         notes.push(format!("today: {}", w.today));
@@ -267,23 +289,60 @@ pub fn nag_due(last_ms: i64, now_ms: i64) -> bool {
 pub const SKIP_TOO_SOON: &str = "🚫 `!skip` opens up once somebody has used `!hint` on the round. Try the hint first.";
 
 /// The day's winners as the cards show them: "Aarav 2 (+3) · Meera 1 (+2)".
+/// The number in brackets is GUESS points, which is what the winner line beside
+/// it counts too — house points are capped and would disagree with it.
 pub fn today_line(solves: &[store::Solve], name: impl Fn(u64) -> String) -> String {
     let mut tally: Vec<(u64, i64, i64)> = Vec::new();
     for s in solves {
         match tally.iter_mut().find(|(u, _, _)| *u == s.user) {
             Some((_, wins, points)) => {
                 *wins += 1;
-                *points += s.points;
+                *points += s.worth;
             }
-            None => tally.push((s.user, 1, s.points)),
+            None => tally.push((s.user, 1, s.worth)),
         }
     }
     tally.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
     tally.iter().map(|(u, wins, points)| format!("{} {} (+{})", name(*u), wins, points)).collect::<Vec<_>>().join(" · ")
 }
 
-/// What `/guess` shows whoever ran it. The picture itself goes with it.
-pub fn mine_text(live: Option<&store::Row>, solves: &[store::Solve], me: u64, channel: Option<u64>) -> String {
+/// Where someone stands on a ranked board, counting from one. `None` when they
+/// aren't on it at all.
+pub fn place_of(rows: &[store::Tally], me: u64) -> Option<usize> {
+    rows.iter().position(|t| t.user == me).map(|i| i + 1)
+}
+
+/// "3rd", the way a line reads it.
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{}{}", n, suffix)
+}
+
+/// One person's own line on a board: where they stand out of how many, what
+/// they have and over how many rounds. Nothing at all when they haven't played
+/// that stretch.
+pub fn standing(rows: &[store::Tally], me: u64) -> Option<String> {
+    let place = place_of(rows, me)?;
+    let mine = rows.get(place - 1)?;
+    Some(format!(
+        "{} of {} · **{}** · {}",
+        ordinal(place),
+        rows.len(),
+        plural(mine.points, "guess point", "guess points"),
+        plural(mine.solves, "round", "rounds")
+    ))
+}
+
+/// What `/guess` shows whoever ran it, the picture with it: the round that is
+/// up, and their own guess points today and this month. Guess points are
+/// uncapped, so this is the one tally that never quietly stops moving.
+pub fn mine_text(live: Option<&store::Row>, today: &[store::Tally], month: &[store::Tally], me: u64, channel: Option<u64>) -> String {
     let mut lines = vec!["🎨 **Guess the Word**".to_string()];
     match live {
         Some(row) => {
@@ -296,17 +355,49 @@ pub fn mine_text(live: Option<&store::Row>, solves: &[store::Solve], me: u64, ch
         }
         None => lines.push("No round is up right now — the next one is on its way.".to_string()),
     }
-    let mine: Vec<&store::Solve> = solves.iter().filter(|s| s.user == me).collect();
-    let points: i64 = mine.iter().map(|s| s.points).sum();
-    lines.push(match mine.len() {
-        0 => "-# You haven't won one today. Type your guess straight into the channel.".to_string(),
-        n => format!("-# **You today:** {} · **{}**", plural(n as i64, "round", "rounds"), plural(points, "point", "points")),
+    lines.push(match standing(today, me) {
+        Some(mine) => format!("-# **You today:** {}", mine),
+        None => "-# You haven't won one today. Type your guess straight into the channel.".to_string(),
     });
+    if let Some(mine) = standing(month, me) {
+        lines.push(format!("-# **This month:** {}", mine));
+    }
     if let Some(c) = channel {
-        lines.push(format!("-# The card lives in <#{}> · `/guesshelp` explains the rest.", c));
+        lines.push(format!("-# The card lives in <#{}> · `/guesstop` for the board · `/guesshelp` explains the rest.", c));
     }
     lines.push(format!("-# {}", ATTRIBUTION));
     lines.join("\n")
+}
+
+/// How many names `/guesstop` lists.
+const TOP_LIST: usize = 10;
+
+/// What `/guesstop` says. `rows` is the whole board, already ranked; only the
+/// first [`TOP_LIST`] are listed, and whoever asked gets their own line under
+/// them when they didn't make it.
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+    let mut text = format!("🎨 **Guess points** · {}", period);
+    if rows.is_empty() {
+        text.push_str("\nNobody has named one yet. The card is waiting in the channel.");
+        return text;
+    }
+    for (i, t) in rows.iter().take(TOP_LIST).enumerate() {
+        let rank = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            n => format!("`{:>2}.`", n + 1),
+        };
+        let you = if t.user == me { " ← you" } else { "" };
+        text.push_str(&format!("\n{} <@{}> **{}** · {}{}", rank, t.user, t.points, plural(t.solves, "round", "rounds"), you));
+    }
+    if place_of(rows, me).is_some_and(|p| p > TOP_LIST) {
+        if let Some(mine) = standing(rows, me) {
+            text.push_str(&format!("\n-# **You:** {}", mine));
+        }
+    }
+    text.push_str("\n-# Guess points count every solve at its full value — the daily house-points limit never takes one away.");
+    text
 }
 
 // --- reading what was typed --------------------------------------------------------------
@@ -519,6 +610,27 @@ fn day_solves_now() -> Vec<store::Solve> {
     match store::db() {
         Some(db) => store::day_solves(&db.lock(), &super::points::ist_day(Utc::now().timestamp())),
         None => Vec::new(),
+    }
+}
+
+/// The first and last day of the India month a day falls in. The store's days
+/// are `YYYY-MM-DD`, which sorts as a date, so a month is just a pair of ends —
+/// a 31st that some months don't have is simply never matched.
+pub fn month_ends(day: &str) -> (String, String) {
+    let month = day.get(..7).unwrap_or(day);
+    (format!("{}-01", month), format!("{}-31", month))
+}
+
+/// Today's and this month's guess points, both boards ranked.
+fn boards_now() -> (Vec<store::Tally>, Vec<store::Tally>) {
+    let day = super::points::ist_day(Utc::now().timestamp());
+    let (from, to) = month_ends(&day);
+    match store::db() {
+        Some(db) => {
+            let conn = db.lock();
+            (store::day_tally(&conn, &day), store::tally_between(&conn, &from, &to))
+        }
+        None => (Vec::new(), Vec::new()),
     }
 }
 
@@ -933,7 +1045,9 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
         let Some(winner) = row.winner else { return };
         let guild = ctx.cache.guilds().first().copied();
         let solves = day_solves_now();
-        let paid = solves.iter().find(|s| s.round == row.id && s.user == winner).map(|s| s.points).unwrap_or(0);
+        let mine = solves.iter().find(|s| s.round == row.id && s.user == winner);
+        let paid = mine.map(|s| s.points).unwrap_or(0);
+        let worth = mine.map(|s| s.worth).unwrap_or_else(|| worth_after_hint(row.points, row.hinted()));
         let won = Won {
             round: row.id,
             winner,
@@ -941,7 +1055,10 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
             guess: row.winning_guess.clone().unwrap_or_else(|| row.word.clone()),
             word: row.word.clone(),
             points: paid,
+            worth,
             full_points: row.points,
+            housed: super::house::house_of(winner).is_some(),
+            tally: solves.iter().filter(|s| s.user == winner).map(|s| s.worth).sum(),
             hinted: row.hinted(),
             seconds: row.seconds.unwrap_or(0),
             today: today_line(&solves, |u| display_name(ctx, guild, u)),
@@ -1003,11 +1120,14 @@ async fn guessed(ctx: &Context, msg: &Message, row: &store::Row, guess: &str) {
     } else {
         0
     };
+    // What the round was worth goes down for EVERY winner, cap or no cap, house
+    // or no house: the house points are the ledger's business, the guess points
+    // are the game's.
     {
         let conn = db.lock();
-        let _ = store::add_solve(&conn, &super::points::ist_day(now), user, row.id, granted, guess, seconds, now);
+        let _ = store::add_solve(&conn, &super::points::ist_day(now), user, row.id, granted, worth, guess, seconds, now);
     }
-    tracing::info!("guess: round {} won by {} with {:?} in {}s for {} points", row.id, user, guess, seconds, granted);
+    tracing::info!("guess: round {} won by {} with {:?} in {}s for {} house points ({} guess points)", row.id, user, guess, seconds, granted, worth);
     SHARED.lock().ended = Some(row.id);
 }
 
@@ -1080,6 +1200,16 @@ pub fn mine_builder() -> CreateCommand {
     CreateCommand::new("guess").description("the doodle that's up now, what it's worth and how you've done today")
 }
 
+pub fn top_builder() -> CreateCommand {
+    CreateCommand::new("guesstop")
+        .description("the guess points board, today or this month")
+        .add_option(
+            serenity::all::CreateCommandOption::new(serenity::all::CommandOptionType::String, "period", "which days to count")
+                .add_string_choice("Today", "today")
+                .add_string_choice("This month", "month"),
+        )
+}
+
 pub fn help_builder() -> CreateCommand {
     CreateCommand::new("guesshelp").description("how Guess the Word works, from the settings as they are now")
 }
@@ -1103,7 +1233,8 @@ const OFF: &str = "Guess the Word is switched off right now.";
 /// `/guess` — everyone, shown only to them, the picture with it.
 pub async fn mine_command(ctx: &Context, command: &CommandInteraction) {
     let live = live_row();
-    let text = mine_text(live.as_ref(), &day_solves_now(), command.user.id.get(), live_channel());
+    let (today, month) = boards_now();
+    let text = mine_text(live.as_ref(), &today, &month, command.user.id.get(), live_channel());
     let mut message = CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
     if let Some((picture, _)) = match live.as_ref().filter(|r| r.status == Status::Open) {
         Some(row) => card_picture(row).await,
@@ -1112,6 +1243,32 @@ pub async fn mine_command(ctx: &Context, command: &CommandInteraction) {
         message = message.add_file(picture);
     }
     reply(ctx, command, message).await;
+}
+
+/// `/guesstop [period]` — everyone, shown only to them, like `/housetop`.
+pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
+    let month = command.data.options.iter().any(|o| {
+        o.name == "period" && matches!(&o.value, serenity::all::CommandDataOptionValue::String(v) if v == "month")
+    });
+    let (today_rows, month_rows) = boards_now();
+    let (rows, period) = if month {
+        (month_rows, month_label(&super::points::ist_day(Utc::now().timestamp())))
+    } else {
+        (today_rows, "today".to_string())
+    };
+    let text = top_text(&period, &rows, command.user.id.get());
+    reply(ctx, command, CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
+}
+
+/// "September so far", the heading a month's board carries.
+pub fn month_label(day: &str) -> String {
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let month = day.get(5..7).and_then(|m| m.parse::<usize>().ok()).filter(|m| (1..=12).contains(m));
+    match month {
+        Some(m) => format!("{} so far", MONTHS[m - 1]),
+        None => "this month".to_string(),
+    }
 }
 
 /// The rules as a card, the same words for the command and anything else that
@@ -1230,32 +1387,55 @@ mod tests {
         assert!(CARD_FOOTER.contains("Type your guess") && CARD_FOOTER.contains(HINT_WORD) && CARD_FOOTER.contains(SKIP_WORD));
     }
 
-    #[test]
-    fn the_winner_line_names_the_thing_and_the_points() {
-        let won = Won {
+    fn won() -> Won {
+        Won {
             round: 12,
             winner: 42,
             badge: "🦅 Ravenclaw".into(),
             guess: "gitar".into(),
             word: "guitar".into(),
             points: 2,
+            worth: 2,
             full_points: 2,
+            housed: true,
+            tally: 2,
             hinted: false,
             seconds: 47,
             today: "Aarav 2 (+4)".into(),
-        };
+        }
+    }
+
+    #[test]
+    fn the_winner_line_names_the_thing_and_the_points() {
+        let won = Won { tally: 14, ..won() };
         let text = won_text(&won);
-        assert!(text.contains("✅ <@42> 🦅 Ravenclaw had it: **GUITAR** · **+2 points**"), "{}", text);
+        assert_eq!(text.lines().next().unwrap(), "✅ <@42> 🦅 Ravenclaw had it: **GUITAR** · **+2** · 14 guess points today");
         assert!(text.contains("round #12 in 47 s") && text.contains("they typed gitar"), "{}", text);
         assert!(text.contains("today: Aarav 2 (+4)"), "{}", text);
         // The word typed properly needs no aside; a hinted round says what it cost.
-        let plain = Won { guess: "Guitar!".into(), hinted: true, points: 1, full_points: 2, today: String::new(), ..won };
+        let plain = Won { guess: "Guitar!".into(), hinted: true, points: 1, worth: 1, full_points: 2, today: String::new(), ..won };
         let text = won_text(&plain);
         assert!(!text.contains("they typed"), "the same word, punctuated: {}", text);
         assert!(text.contains("a hint was out, so 1 instead of 2"), "{}", text);
-        // Someone the ledger can't pay (a mod, a Muggle, the day's limit) still wins.
-        let unpaid = Won { points: 0, hinted: false, ..plain };
-        assert!(won_text(&unpaid).contains("**no points**"));
+    }
+
+    #[test]
+    fn a_solve_the_ledger_cant_pay_for_still_reads_as_a_win() {
+        // The day's house points are full: nothing is paid, the round still
+        // scored, and the line says which is which rather than "no points".
+        let capped = Won { points: 0, worth: 2, full_points: 2, housed: true, tally: 12, ..won() };
+        let text = won_text(&capped);
+        assert_eq!(text.lines().next().unwrap(), "✅ <@42> 🦅 Ravenclaw had it: **GUITAR** · **+2 guess points** · 12 today");
+        assert!(text.contains("that's your house points for today, but the guess points still count"), "{}", text);
+        assert!(!text.contains("no points"), "a win is never reported as nothing: {}", text);
+        // A mod or a Muggle, who has no house to pay into at all.
+        let mod_win = Won { badge: String::new(), housed: false, ..capped.clone() };
+        let text = won_text(&mod_win);
+        assert!(text.starts_with("✅ <@42> had it: **GUITAR** · **+2 guess points** · 12 today"), "{}", text);
+        assert!(text.contains("no house to pay, but the guess points still count"), "{}", text);
+        // One point reads as one point.
+        let one = Won { worth: 1, tally: 1, ..capped };
+        assert!(won_text(&one).contains("**+1 guess point** · 1 today"), "{}", won_text(&one));
     }
 
     #[test]
@@ -1311,7 +1491,7 @@ mod tests {
         assert_eq!((after.winner, after.winning_guess.as_deref()), (Some(11), Some("gitar")));
         assert_eq!(after.status, Status::Solved);
         // And the day's list has one winner in it.
-        store::add_solve(&conn, "2026-09-17", 11, row.id, 2, "gitar", 30, 1_030).unwrap();
+        store::add_solve(&conn, "2026-09-17", 11, row.id, 2, 2, "gitar", 30, 1_030).unwrap();
         assert_eq!(store::day_solves(&conn, "2026-09-17").len(), 1);
     }
 
@@ -1394,30 +1574,78 @@ mod tests {
         }
     }
 
+    fn tally(user: u64, points: i64, solves: i64, reached: i64) -> store::Tally {
+        store::Tally { user, points, solves, reached }
+    }
+
     #[test]
     fn the_days_winners_read_as_a_line() {
+        // The day's line counts GUESS points, so the capped solve (paid 0, worth
+        // 1) is in it exactly like the paid ones.
         let solves = vec![
-            store::Solve { user: 1, round: 1, points: 2, guess: "gitar".into(), seconds: 30, ts: 10 },
-            store::Solve { user: 2, round: 2, points: 2, guess: "cop car".into(), seconds: 90, ts: 20 },
-            store::Solve { user: 1, round: 3, points: 1, guess: "icecream".into(), seconds: 40, ts: 30 },
+            store::Solve { user: 1, round: 1, points: 2, worth: 2, guess: "gitar".into(), seconds: 30, ts: 10 },
+            store::Solve { user: 2, round: 2, points: 2, worth: 2, guess: "cop car".into(), seconds: 90, ts: 20 },
+            store::Solve { user: 1, round: 3, points: 0, worth: 1, guess: "icecream".into(), seconds: 40, ts: 30 },
         ];
         assert_eq!(today_line(&solves, |u| format!("P{}", u)), "P1 2 (+3) · P2 1 (+2)");
         assert_eq!(today_line(&[], |u| format!("P{}", u)), "");
         // And what /guess shows one of them.
         let conn = memory();
         let row = put(&conn, "guitar", 0, 2, 1_000);
-        let text = mine_text(Some(&row), &solves, 1, Some(55));
+        let today = vec![tally(2, 5, 2, 20), tally(1, 3, 2, 30)];
+        let month = vec![tally(1, 40, 18, 90), tally(2, 9, 4, 20)];
+        let text = mine_text(Some(&row), &today, &month, 1, Some(55));
         assert!(text.contains("**Round #1** · worth **2 points**"), "{}", text);
-        assert!(text.contains("<#55>") && text.contains("**You today:** 2 rounds · **3 points**"), "{}", text);
+        assert!(text.contains("<#55>") && text.contains("**You today:** 2nd of 2 · **3 guess points** · 2 rounds"), "{}", text);
+        assert!(text.contains("**This month:** 1st of 2 · **40 guess points** · 18 rounds"), "{}", text);
         assert!(!text.contains("guitar"), "the answer is never in it: {}", text);
-        assert!(text.contains("`!hint`") && text.contains("Quick, Draw!"), "the doodles are credited: {}", text);
-        // Somebody who hasn't played, and a moment with no round up.
-        assert!(mine_text(Some(&row), &solves, 99, None).contains("haven't won one today"));
-        assert!(mine_text(None, &[], 1, None).contains("No round is up right now"));
+        assert!(text.contains("`/guesstop`") && text.contains("`!hint`") && text.contains("Quick, Draw!"), "the doodles are credited: {}", text);
+        // Somebody who hasn't played today but has this month, and one who never has.
+        let some = mine_text(Some(&row), &today, &month, 2, None);
+        assert!(some.contains("**You today:** 1st of 2 · **5 guess points**"), "{}", some);
+        let none = mine_text(Some(&row), &today, &month, 99, None);
+        assert!(none.contains("haven't won one today") && !none.contains("This month"), "{}", none);
+        assert!(mine_text(None, &[], &[], 1, None).contains("No round is up right now"));
         // Once the hint is out, /guess carries it too.
         store::take_hint(&conn, row.id, 7, 2, 1_010).unwrap();
         let hinted = store::get(&conn, row.id).unwrap();
-        assert!(mine_text(Some(&hinted), &[], 1, None).contains("<@7> had the hint: it starts with **G**"));
+        assert!(mine_text(Some(&hinted), &[], &[], 1, None).contains("<@7> had the hint: it starts with **G**"));
+    }
+
+    #[test]
+    fn the_guess_points_board_lists_ten_and_finds_the_asker_below_them() {
+        let mut rows: Vec<store::Tally> = (1..=12).map(|i| tally(i, (20 - i) as i64, 3, 100 + i as i64)).collect();
+        store::rank(&mut rows);
+        let text = top_text("today", &rows, 12);
+        assert!(text.starts_with("🎨 **Guess points** · today"), "{}", text);
+        assert!(text.contains("\n🥇 <@1> **19** · 3 rounds"), "{}", text);
+        assert!(text.contains("\n🥈 <@2> **18**") && text.contains("\n🥉 <@3> **17**"), "{}", text);
+        assert!(text.contains("\n`10.` <@10> **10** · 3 rounds"), "{}", text);
+        assert!(!text.contains("<@11>"), "only ten are listed: {}", text);
+        // Outside the ten: their own line, and where they stand.
+        assert!(text.contains("-# **You:** 12th of 12 · **8 guess points** · 3 rounds"), "{}", text);
+        // Inside the ten: marked in place, with no line of their own.
+        let inside = top_text("today", &rows, 3);
+        assert!(inside.contains("🥉 <@3> **17** · 3 rounds ← you"), "{}", inside);
+        assert!(!inside.contains("**You:**"), "{}", inside);
+        // The board says what a guess point is, so nobody reads it as house points.
+        assert!(text.contains("the daily house-points limit never takes one away"), "{}", text);
+        assert!(top_text("September so far", &[], 1).contains("Nobody has named one yet"));
+        // Ordering is the store's: points, then rounds, then who got there first.
+        let mut close = vec![tally(1, 4, 1, 50), tally(2, 4, 2, 90), tally(3, 4, 2, 60)];
+        store::rank(&mut close);
+        assert_eq!(close.iter().map(|t| t.user).collect::<Vec<_>>(), vec![3, 2, 1]);
+        assert_eq!((place_of(&close, 2), place_of(&close, 9)), (Some(2), None));
+        assert_eq!([ordinal(1), ordinal(2), ordinal(3), ordinal(4), ordinal(11), ordinal(21)].join(" "), "1st 2nd 3rd 4th 11th 21st");
+    }
+
+    #[test]
+    fn a_month_is_read_off_the_day_it_is_asked_on() {
+        assert_eq!(month_ends("2026-09-17"), ("2026-09-01".to_string(), "2026-09-31".to_string()));
+        assert_eq!(month_ends("2026-02-01"), ("2026-02-01".to_string(), "2026-02-31".to_string()));
+        assert_eq!(month_label("2026-09-17"), "September so far");
+        assert_eq!(month_label("2026-01-02"), "January so far");
+        assert_eq!(month_label("nonsense"), "this month");
     }
 
     #[test]

@@ -116,9 +116,10 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
 /// points: their daily limits leave many people level on points, and a capped
 /// win is still in the ledger as a zero.
 ///
-/// Anagrams is here only as the fallback for a day the anagram store knows
-/// nothing about: `with_anagram_measured` decides a real day on the game's own
-/// uncapped anagram points instead.
+/// Anagrams and Guess the Word are here only as the fallback for a day their
+/// own store knows nothing about: `with_anagram_measured` and
+/// `with_guess_measured` decide a real day on each game's own uncapped points
+/// instead.
 const COUNTED: &[&str] = &["quiz", "koto", "anagram", "guess", "cat", "arena", "snitch", "sudoku"];
 
 /// The top of each activity from a day's rows (in ledger order). Wordle and
@@ -285,6 +286,52 @@ pub fn with_anagram_tally(
     tops
 }
 
+/// Guess the Word's top: the most GUESS points that day — every solve at its
+/// full value, so ten cheap rounds no longer beat five dear ones and a day spent
+/// past the house-points cap still counts. Level on points, the most rounds won;
+/// level on both, whoever got there first.
+///
+/// Eligibility is unchanged: only people the ledger paid for guessing that day
+/// can win the card, which keeps mods, Muggles and the unsorted out of it. Their
+/// guess points are still kept and still shown to them — they are simply not in
+/// the running for a card. `tally` is the store's day.
+pub fn guess_top(rows: &[LedgerRow], tally: &[super::guess_store::Tally]) -> Option<(u64, i64)> {
+    let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "guess");
+    let mut mine: Vec<super::guess_store::Tally> = tally.iter().filter(|t| t.solves > 0 && paid(t.user)).cloned().collect();
+    super::guess_store::rank(&mut mine);
+    mine.first().map(|t| (t.user, t.points))
+}
+
+/// Swaps Guess the Word's count-of-rows top for the store's uncapped guess
+/// points. A day the store knows nothing about — one before this was built, or a
+/// run with no store open — keeps the ledger's answer, so old days still
+/// resolve.
+fn with_guess_measured(tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let Some(db) = super::guess_store::db() else {
+        return tops;
+    };
+    let tally = super::guess_store::day_tally(&db.lock(), day);
+    with_guess_tally(tops, rows, &tally)
+}
+
+/// The swap itself, with the day's tally already read. An EMPTY tally means the
+/// store has nothing for that day, and the ledger's answer is left exactly as it
+/// was.
+pub fn with_guess_tally(
+    mut tops: Vec<(&'static str, u64, i64)>,
+    rows: &[LedgerRow],
+    tally: &[super::guess_store::Tally],
+) -> Vec<(&'static str, u64, i64)> {
+    if tally.is_empty() {
+        return tops;
+    }
+    tops.retain(|(a, _, _)| *a != "guess");
+    if let Some((user, points)) = guess_top(rows, tally) {
+        tops.push(("guess", user, points));
+    }
+    tops
+}
+
 /// Swaps chess's points-based top for games won.
 fn with_chess_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
     let (Some(db), Some(start)) = (super::chess_store::db(), day_start(day)) else {
@@ -409,7 +456,8 @@ pub async fn run_daily_top(ctx: &Context, day: &str) {
     let tops = with_chat_and_voice_measured(tops, &rows, day);
     let tops = with_npat_measured(tops, &rows, day);
     let tops = with_chess_measured(tops, &rows, day);
-    let tops = order_like_activities(with_anagram_measured(tops, &rows, day));
+    let tops = with_anagram_measured(tops, &rows, day);
+    let tops = order_like_activities(with_guess_measured(tops, &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -719,6 +767,68 @@ mod tests {
         // Every other activity is left exactly alone.
         let mixed = vec![("quiz", 5, 4), ("anagram", 1, 2), ("chess", 7, 3)];
         assert_eq!(with_anagram_tally(mixed, &rows, &[tally(2, 3, 1, 120)]), vec![("quiz", 5, 4), ("chess", 7, 3), ("anagram", 2, 3)]);
+    }
+
+    fn guess_tally(user: u64, points: i64, solves: i64, reached: i64) -> super::super::guess_store::Tally {
+        super::super::guess_store::Tally { user, points, solves, reached }
+    }
+
+    #[test]
+    fn the_guess_card_goes_to_the_most_uncapped_points_not_the_most_solves() {
+        // The whole point of the change: 1 names ten hinted doodles and is
+        // stopped by the cap; 2 names five at their full worth. Counting rows
+        // made 1 the winner; counting what the rounds were worth makes it 2.
+        // Two rounds paid, the next eight capped to zero but still in the ledger.
+        let mut rows: Vec<LedgerRow> = (0..10).map(|i| row(1, "guess", if i < 2 { 1 } else { 0 }, 100 + i)).collect();
+        rows.extend((0..5).map(|i| row(2, "guess", 3, 200 + i)));
+        assert_eq!(daily_tops(&rows), vec![("guess", 1, 10)], "the old rule: ten rows beat five");
+        let scores = vec![guess_tally(1, 10, 10, 109), guess_tally(2, 15, 5, 204)];
+        assert_eq!(guess_top(&rows, &scores), Some((2, 15)));
+        // And the swap puts that answer in the day's tops in place of the count.
+        assert_eq!(with_guess_tally(daily_tops(&rows), &rows, &scores), vec![("guess", 2, 15)]);
+        // Level on points: the one who won more rounds. Level on both: first there.
+        let even = vec![guess_tally(1, 12, 4, 109), guess_tally(2, 12, 3, 204)];
+        assert_eq!(guess_top(&rows, &even), Some((1, 12)));
+        let dead_heat = vec![guess_tally(1, 12, 3, 300), guess_tally(2, 12, 3, 204)];
+        assert_eq!(guess_top(&rows, &dead_heat), Some((2, 12)), "whoever got there first");
+    }
+
+    #[test]
+    fn a_mod_can_out_guess_the_channel_and_still_never_take_the_card() {
+        // 9 is a mod: no house, so no ledger row at all. Their guess points are
+        // kept and shown to them, but the card is the house cup's and stays with
+        // a housed player — the owner was explicit about that.
+        let rows = vec![row(1, "guess", 2, 100), row(1, "guess", 0, 110)];
+        let scores = vec![guess_tally(9, 40, 9, 90), guess_tally(1, 4, 2, 110)];
+        assert_eq!(guess_top(&rows, &scores), Some((1, 4)));
+        // Nobody housed played: no card, rather than one for the mod.
+        assert_eq!(guess_top(&[], &scores), None);
+        assert_eq!(guess_top(&rows, &[]), None);
+        // A capped day is still a paid day: the zero rows keep 1 eligible.
+        let all_capped = vec![row(1, "guess", 0, 100)];
+        assert_eq!(guess_top(&all_capped, &[guess_tally(1, 9, 5, 150)]), Some((1, 9)));
+        // And a row for some other game is not a guess row.
+        assert_eq!(guess_top(&[row(1, "anagram", 5, 100)], &[guess_tally(1, 9, 5, 150)]), None);
+    }
+
+    #[test]
+    fn a_day_the_guess_store_knows_nothing_about_falls_back_to_the_ledger() {
+        // Days older than this change have no store rows; the counted-rows rule
+        // still resolves them, so no old day is left without a card.
+        let rows = vec![row(1, "guess", 2, 100), row(1, "guess", 0, 110), row(2, "guess", 3, 120)];
+        let ledgers_answer = daily_tops(&rows);
+        assert_eq!(ledgers_answer, vec![("guess", 1, 2)], "the count of rows, capped ones included");
+        assert_eq!(with_guess_tally(ledgers_answer.clone(), &rows, &[]), ledgers_answer, "an empty day keeps it");
+        // The same when the store isn't open at all, as in this test run.
+        assert!(super::super::guess_store::db().is_none());
+        assert_eq!(with_guess_measured(ledgers_answer.clone(), &rows, "2026-09-13"), ledgers_answer);
+        // Once the store does have the day, its answer replaces the count — and
+        // a day nobody housed played takes the guess card off the list.
+        assert_eq!(with_guess_tally(ledgers_answer.clone(), &rows, &[guess_tally(2, 3, 1, 120)]), vec![("guess", 2, 3)]);
+        assert!(with_guess_tally(ledgers_answer, &rows, &[guess_tally(9, 30, 8, 120)]).is_empty());
+        // Every other activity is left exactly alone, anagrams included.
+        let mixed = vec![("quiz", 5, 4), ("guess", 1, 2), ("anagram", 7, 3)];
+        assert_eq!(with_guess_tally(mixed, &rows, &[guess_tally(2, 3, 1, 120)]), vec![("quiz", 5, 4), ("anagram", 7, 3), ("guess", 2, 3)]);
     }
 
     #[test]

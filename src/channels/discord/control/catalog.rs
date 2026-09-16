@@ -583,6 +583,7 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("guess", EVERYONE, "/guess", "The doodle that is up now, sent privately with the picture: what it is worth, whether the hint has gone, and how you have done today. Only you see it."),
+                command("guesstop", EVERYONE, "/guesstop", "The guess points board, today or this month: the top 10 and, if you are not on it, your own line. Guess points are the game's own score - every solve at what the round was worth, hint taken off but no daily limit - so they keep counting after the house-points limit is full, and mods and Muggles have them too. Only you see it."),
                 command("guesshelp", EVERYONE, "/guesshelp", "How Guess the Word works, written from the settings as they are right now: how to guess, what a round pays, and what !hint and !skip do. Only you see it."),
                 command("guessskip", ADMINS, "/guessskip", "Drops the doodle that is up, with no points for anyone, says what it was and draws a fresh one at once. Unlike !skip, no hint is needed first."),
                 command("guessstop", ADMINS, "/guessstop", "Switches Guess the Word off: the card comes down and no new doodles go up. Switch Game on back on to play again."),

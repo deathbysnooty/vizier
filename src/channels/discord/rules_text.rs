@@ -1234,7 +1234,10 @@ pub fn guess_help_text(g: &GuessRules) -> String {
         Some(n) => format!("Up to **{}** a day from guessing.", plural(n, "house point", "house points")),
         None => "No daily limit from guessing.".to_string(),
     }));
-    t.push_str("• Muggles and anyone not yet sorted earn nothing, here as everywhere — mods are welcome to play, they just can't score.\n");
+    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    t.push_str("\n**🎨 Guess points**\n");
+    t.push_str("• Every doodle you name also scores **guess points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str("• `/guesstop` shows the board for today or this month, and the day's top scorer takes the frog card.\n");
     if g.no_repeat_days > 0 {
         t.push_str(&format!("• Neither the same word nor the same drawing comes round again for **{}**.\n", plural(g.no_repeat_days, "day", "days")));
     }
@@ -1243,7 +1246,7 @@ pub fn guess_help_text(g: &GuessRules) -> String {
     }
 
     t.push_str("\n**⌨️ Commands**\n");
-    t.push_str("`/guess` the doodle that's up · `/guesshelp` this card · mods: `/guessskip` for a fresh one, `/guessstop` to switch it off\n");
+    t.push_str("`/guess` the doodle that's up · `/guesstop` the board · `/guesshelp` this card · mods: `/guessskip` for a fresh one, `/guessstop` to switch it off\n");
     t.push_str(&format!("-# {}", super::guess_bank::ATTRIBUTION));
     t
 }
