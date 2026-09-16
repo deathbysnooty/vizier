@@ -255,6 +255,7 @@ pub struct EmojiInfo {
 }
 
 mod agent;
+mod chess;
 mod frogs;
 mod houses;
 mod insights;
@@ -706,8 +707,8 @@ pub fn command() -> CreateCommand {
 }
 
 /// The address the panel is reached at, without a trailing slash: the sign-in
-/// link's home, and the front of every sudoku puzzle's page link. `None` until
-/// `VIZIER_PANEL_URL` is set in the environment.
+/// link's home, and the front of every sudoku puzzle's page link and chess
+/// board page. `None` until `VIZIER_PANEL_URL` is set in the environment.
 pub fn panel_url() -> Option<String> {
     super::var("VIZIER_PANEL_URL").map(|u| u.trim_end_matches('/').to_string()).filter(|u| !u.is_empty())
 }
@@ -769,6 +770,12 @@ impl Panel {
             let setting = section.settings.iter().find(|s| s.key == key).cloned()?;
             Some((section, setting))
         })
+    }
+
+    /// A member's display name from the cache only, for pages that name people
+    /// and must not call Discord for each one.
+    pub fn cached_name(&self, id: u64) -> Option<String> {
+        self.data.cached_member(id).map(|m| m.name)
     }
 
     /// True when the address may try another sign-in now.
@@ -918,6 +925,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/assets/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", FAVICON) }))
         .merge(puzzles)
+        .merge(chess::routes())
         .nest("/api", api)
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))

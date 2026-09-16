@@ -1059,6 +1059,7 @@ pub fn store() {
                 super::super::super::sudoku_store::add_puzzle(&conn, &puzzle, points, 31, 1_700_000_000).expect("puzzle");
             }
         }
+        super::super::super::chess_store::open(dir.path().to_str().unwrap()).expect("chess store");
         dir
     });
 }
@@ -1066,6 +1067,13 @@ pub fn store() {
 pub fn panel() -> Router {
     store();
     router(Panel::new(Arc::new(FakeData), fake_catalog))
+}
+
+/// A `Panel` over the fake Discord, for pages whose builders are tested
+/// directly rather than through the router.
+pub fn fake_panel() -> Panel {
+    store();
+    Panel::new(Arc::new(FakeData), fake_catalog)
 }
 
 pub fn session_for(user: u64) -> String {

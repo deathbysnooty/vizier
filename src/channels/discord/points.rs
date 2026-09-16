@@ -40,6 +40,8 @@ pub enum Source {
     Npat,
     /// Sudoku: the first correct code for the puzzle in the sudoku channel.
     Sudoku,
+    /// Chess: a whole game, paid to the winner (or both, for a draw).
+    Chess,
 }
 
 /// How much one person may earn from a source.
@@ -55,7 +57,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 16] = [
+    pub const ALL: [Source; 17] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -72,6 +74,7 @@ impl Source {
         Source::Frog,
         Source::Npat,
         Source::Sudoku,
+        Source::Chess,
     ];
 
     pub fn key(self) -> &'static str {
@@ -92,6 +95,7 @@ impl Source {
             Source::Frog => "frog",
             Source::Npat => "npat",
             Source::Sudoku => "sudoku",
+            Source::Chess => "chess",
         }
     }
 
@@ -117,6 +121,7 @@ impl Source {
             Source::Frog => "🐸 Chocolate Frog",
             Source::Npat => "🔤 Name Place Animal Thing",
             Source::Sudoku => "🔢 Sudoku",
+            Source::Chess => "♟️ Chess",
         }
     }
 
@@ -138,6 +143,7 @@ impl Source {
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
+            Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.

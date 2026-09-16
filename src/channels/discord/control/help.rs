@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn every_command_the_bot_registers_is_explained() {
         let names: Vec<&str> = catalog::sections().iter().flat_map(|s| s.commands.iter().map(|c| c.name)).collect();
-        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "frogdrop", "frogs", "frogcard", "trade", "trades", "sellset", "panel", "guiderefresh", "npatstop", "sudoku", "sudokuhelp", "sudokunew"] {
+        for needed in ["help", "today", "mypoints", "housetop", "fight", "battle", "quiz", "snitchdrop", "frogdrop", "frogs", "frogcard", "trade", "trades", "sellset", "panel", "guiderefresh", "npatstop", "sudoku", "sudokuhelp", "sudokunew", "chess", "chesshelp", "chessstop"] {
             assert!(names.contains(&needed), "/{} is missing from the catalog", needed);
         }
     }

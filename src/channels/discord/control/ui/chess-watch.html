@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Watching a game</title>
+<style>
+  :root {
+    --ground: #15120f;
+    --panel: #221d19;
+    --line: #38302a;
+    --ink: #f3ece2;
+    --dim: #a89b8d;
+    --light: #e9dab9;
+    --dark: #9c7a5b;
+    --accent: #c9a227;
+    --check: #e2564a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  body { padding: 14px 14px calc(22px + env(safe-area-inset-bottom)); }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 19px; margin: 0; }
+  .head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 4px 10px; flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .pace { color: var(--dim); font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+  .seat {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 11px; margin: 6px 0;
+  }
+  .who { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+  .who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { font-size: 12px; color: var(--dim); white-space: nowrap; flex: 0 0 auto; }
+  .seat.turn { border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(201,162,39,.35); }
+  .seat.won { border-color: #3ba55c; }
+  .clock { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .clock.idle { font-weight: 400; opacity: .7; }
+
+  .board {
+    display: grid; grid-template-columns: repeat(8, 1fr);
+    width: 100%; aspect-ratio: 1; margin: 10px 0;
+    border: 6px solid #3e3026; border-radius: 10px; overflow: hidden;
+  }
+  .sq {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    font-size: min(8.6vw, 48px); line-height: 1; background: var(--dark);
+  }
+  .sq.lightsq { background: var(--light); }
+  .sq.moved::before, .sq.check::before { content: ""; position: absolute; inset: 0; }
+  .sq.moved::before { background: rgba(244, 211, 94, .55); }
+  .sq.check::before { background: rgba(226, 86, 74, .6); }
+  .sq .p { position: relative; z-index: 1; }
+  .sq .p.w { color: #faf7f0; text-shadow: 0 0 1px #221, 0 1px 0 #221, 1px 0 0 #221, -1px 0 0 #221, 0 -1px 0 #221; }
+  .sq .p.b { color: #241f1a; text-shadow: 0 0 1px #eee, 0 1px 0 #ddd8cc, -1px 0 0 #ddd8cc, 1px 0 0 #ddd8cc; }
+  .sq .co { position: absolute; font-size: 9px; font-weight: 700; opacity: .8; z-index: 2; color: var(--light); }
+  .sq.lightsq .co { color: var(--dark); }
+  .sq .co.f { right: 3px; bottom: 1px; }
+  .sq .co.r { left: 3px; top: 1px; }
+
+  .note { min-height: 20px; margin: 4px 2px 10px; font-size: 13.5px; color: var(--dim); }
+  .note.bad { color: #ffb4a8; }
+  .result { background: var(--panel); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 12px; margin: 6px 0 10px; }
+  .result b { color: #f7e9b0; }
+  .moves {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 9px 11px; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--dim); max-height: 150px; overflow-y: auto; overflow-wrap: anywhere;
+  }
+  .moves .now { background: var(--accent); color: #1c1710; border-radius: 3px; padding: 0 3px; font-weight: 700; }
+  .steps { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  .steps button {
+    min-width: 54px; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .steps button:hover { border-color: var(--accent); }
+  .steps button[disabled] { opacity: .4; cursor: default; }
+  .steps .at { color: var(--dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .foot { color: var(--dim); font-size: 12px; margin-top: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <h1 id="title">Watching</h1>
+    <div class="pace" id="pace"></div>
+  </div>
+
+  <div class="seat" id="seat-black">
+    <span class="who"><span id="black-crest"></span><b id="black-name">Black</b></span>
+    <span class="chip">&#11035; Black <span class="clock" id="black-clock"></span></span>
+  </div>
+
+  <div class="board" id="board" aria-label="chess board"></div>
+
+  <div class="seat" id="seat-white">
+    <span class="who"><span id="white-crest"></span><b id="white-name">White</b></span>
+    <span class="chip">&#11036; White <span class="clock" id="white-clock"></span></span>
+  </div>
+
+  <p class="note" id="note">Loading the game…</p>
+  <div class="result" id="result" hidden></div>
+
+  <div class="steps" id="steps" hidden>
+    <button type="button" id="first" title="the opening position">&#9198;</button>
+    <button type="button" id="back">&#9664;</button>
+    <button type="button" id="next">&#9654;</button>
+    <button type="button" id="last" title="the final position">&#9197;</button>
+    <span class="at" id="at"></span>
+  </div>
+
+  <div class="moves" id="moves">No moves yet.</div>
+
+  <p class="foot">Anyone can watch. Only the two players can move, from their own private board links.</p>
+</main>
+<script src="/assets/chess-watch.js"></script>
+</body>
+</html>

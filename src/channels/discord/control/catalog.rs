@@ -247,6 +247,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_SUDOKU", "Sudoku points a day", "Most house points one person can win from sudoku puzzles in a day. Only the first correct code for a puzzle pays, and hints come off that puzzle's points before this limit is applied. 100 means no limit.", number(0, 100, "points"), "20"),
+                setting("VIZIER_CAP_CHESS", "Chess points a day", "Most house points one person can win from chess in a day. 100 means no limit.", number(0, 100, "points"), "8"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
                     "Weekly scan points",
@@ -494,6 +495,58 @@ pub fn sections() -> Vec<Section> {
                 command("sudoku", EVERYONE, "/sudoku", "Your sudoku links: the puzzle that is up now and any from the last day that you started and never finished, each with its own link, and a Submit code button."),
                 command("sudokuhelp", EVERYONE, "/sudokuhelp", "How the sudoku game works, written from the settings as they are right now: how to play, what each difficulty pays, what a hint costs and how long a late code is still checked. Only you see it."),
                 command("sudokunew", ADMINS, "/sudokunew", "Skips the puzzle that is up, with no points for anyone, and posts a fresh one at once."),
+            ],
+        },
+        Section {
+            id: "chess",
+            title: "Chess",
+            icon: "♟️",
+            about: "Chess in its own channel (Game channel below), played only with the bot's cards, buttons and \
+                    pop-ups: members can't type there, so deny Send Messages for @everyone and let the bot send, \
+                    embed, attach files, read history and manage messages. `/chess @someone` puts up a challenge \
+                    card; the challenged member presses Accept, colours are drawn at random, and the game card goes \
+                    up with the board drawn on it. Moves come either from a private web page - a link each player \
+                    gets to their own side, which needs the panel's web address to be set - or from the Type move \
+                    pop-up, which takes both `Nf3` and `g1f3`. Full chess: castling, en passant, promotion, \
+                    checkmate, stalemate, threefold repetition, the fifty-move rule, too little material, draw \
+                    offers, resignation, and losing on the clock. One card is always the channel's last message, \
+                    and it moves back to the bottom when anything lands below it: several games can run side by side, each with its own card that keeps working where it is, and the card of whichever game moved last is the one at the bottom. Anyone can follow a game at its 👀 Watch address, a page that needs no sign-in, shows no private link and cannot move a piece; when the game ends the same address becomes a replay to step through. A restart is safe: the bot notes that it is alive every half minute, and on waking it hands every running game back the time it was away, mentions that on the card, and judges no clock at all for the grace below. House points go to the winner, \
+                    or to both on a draw, and ONLY when the two players are in different houses: a game inside one \
+                    house moves nothing between houses, so it pays nothing and the card says so. The same pair is \
+                    paid for one game a day, and a game given up in the first few moves pays nothing at all. Never \
+                    runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_CHESS", "Chess on", "Run chess in its channel. Off stops new challenges and games; games already running keep their cards until they finish.", Kind::Toggle, "off"),
+                setting("VIZIER_CHESS_CHANNEL", "Game channel", "The channel chess lives in. Empty means chess is off. Never #safe-corner.", Kind::Channel, ""),
+                setting("VIZIER_CHESS_CASUAL_HOURS", "Casual: hours per move", "How long each move may take in a casual game, meant to be played over a day or two. The player is tagged once when under two hours are left.", number(1, 72, "hours"), "12"),
+                setting("VIZIER_CHESS_LIVE_SECONDS", "Live: seconds per move", "How long each move may take in a live game, meant to be played out in one sitting.", number(30, 3600, "seconds"), "180"),
+                setting("VIZIER_CHESS_MAX_GAMES", "Games at once", "How many games one member may have running. A challenge to or from someone already at the limit is refused.", number(1, 20, "games"), "3"),
+                setting("VIZIER_CHESS_MAX_ACTIVE", "Games in the channel", "How many games the whole channel may have running at once, whoever is playing. A new challenge is refused politely once it is reached.", number(1, 50, "games"), "8"),
+                setting("VIZIER_CHESS_REPLAY_DAYS", "Keep replays for", "How long a finished game stays readable at its Watch address, where anyone can step through the moves. 0 turns replays off and takes the replay link off the result card.", number(0, 365, "days"), "30"),
+                setting("VIZIER_CHESS_GRACE_SECONDS", "Grace after a restart", "Nobody can lose a game on time within this long of the bot starting up. Time the bot was away is handed back to every running game anyway, so a restart never costs anybody a game.", number(0, 3600, "seconds"), "60"),
+                setting("VIZIER_CHESS_MIN_MOVES", "Half-moves before a resignation pays", "A game given up before this many half-moves have been played pays nobody, so two friends can't farm points by resigning at once. Losing on time always pays the winner. 0 turns the rule off.", number(0, 200, "half-moves"), "10"),
+                setting("VIZIER_POINTS_CHESS_WIN", "House points for winning", "House points for the winner of a game, when the two players are in different houses.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_CHESS_DRAW", "House points for a draw", "House points for each player when a game is drawn, when the two are in different houses.", number(0, 100, "points"), "1"),
+            ],
+            commands: vec![
+                command(
+                    "chess",
+                    EVERYONE,
+                    "/chess member: time:",
+                    "Challenges a member to chess in the chess channel, casual (hours per move) or live (minutes per move). With nobody named it shows your running games and your private board links instead.",
+                ),
+                command(
+                    "chesshelp",
+                    EVERYONE,
+                    "/chesshelp",
+                    "Explains chess from these settings: challenges, the two time controls, the board page and typed moves, resigning and draws, and what a game is worth. Only you see it.",
+                ),
+                command(
+                    "chessstop",
+                    ADMINS,
+                    "/chessstop game:",
+                    "Cancels a chess game that is stuck, by its number. No house points for either player, and the card is replaced with a cancelled result.",
+                ),
             ],
         },
         Section {
