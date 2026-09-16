@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Clear the cached sherpa-onnx prebuilt folder before building
+- Bump version to 0.11.35
 ## [0.11.34] - 2026-09-16
 
 ### ⚙️ Miscellaneous Tasks
