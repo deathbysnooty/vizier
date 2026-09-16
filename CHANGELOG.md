@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.39] - 2026-09-16
+
+### 🚀 Features
+
+- *(panel)* Serve the panel's pages from disk, so a UI change needs no release
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Build only the Linux binary the server runs, by default
 ## [0.11.38] - 2026-09-16
 
 ### 🚀 Features
 
 - *(panel)* "Start a battle royale now" on the Arena page
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.38
 ## [0.11.37] - 2026-09-16
 
 ### 🚀 Features
