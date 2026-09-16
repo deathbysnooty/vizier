@@ -49,13 +49,15 @@
   .clock.low { color: var(--check); }
 
   .board {
-    display: grid; grid-template-columns: repeat(8, 1fr);
+    /* Rows are spelled out as well: left to size themselves, the ranks
+       holding pieces grew taller than the empty ones. */
+    display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
     width: 100%; aspect-ratio: 1; margin: 10px 0;
     border: 6px solid #3e3026; border-radius: 10px; overflow: hidden;
     touch-action: manipulation;
   }
   .sq {
-    position: relative; border: 0; padding: 0; margin: 0;
+    position: relative; border: 0; padding: 0; margin: 0; min-width: 0; min-height: 0; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     font-size: min(8.6vw, 48px); line-height: 1; cursor: pointer;
     background: var(--dark); color: inherit; -webkit-tap-highlight-color: transparent;
@@ -66,7 +68,9 @@
   }
   .sq.moved::before { background: rgba(244, 211, 94, .55); }
   .sq.check::before { background: rgba(226, 86, 74, .6); }
-  .sq .p { position: relative; z-index: 1; }
+  /* A text font, and never the emoji one: iOS has a black-pawn emoji that
+     no colour of ours can reach, which turned white pawns black. */
+  .sq .p { position: relative; z-index: 1; font-family: "Apple Symbols", "Segoe UI Symbol", "Noto Sans Symbols 2", "DejaVu Sans", serif; font-variant-emoji: text; }
   .sq .p.w { color: #faf7f0; text-shadow: 0 0 1px #221, 0 1px 0 #221, 1px 0 0 #221, -1px 0 0 #221, 0 -1px 0 #221; }
   .sq .p.b { color: #241f1a; text-shadow: 0 0 1px #eee, 0 1px 0 #ddd8cc, -1px 0 0 #ddd8cc, 1px 0 0 #ddd8cc; }
   .sq .dot {
@@ -136,10 +140,10 @@
 
   <div class="promo" id="promo" hidden>
     <span>Promote to</span>
-    <button type="button" data-piece="q">&#9819;</button>
-    <button type="button" data-piece="r">&#9820;</button>
-    <button type="button" data-piece="b">&#9821;</button>
-    <button type="button" data-piece="n">&#9822;</button>
+    <button type="button" data-piece="q">&#9819;&#xFE0E;</button>
+    <button type="button" data-piece="r">&#9820;&#xFE0E;</button>
+    <button type="button" data-piece="b">&#9821;&#xFE0E;</button>
+    <button type="button" data-piece="n">&#9822;&#xFE0E;</button>
     <button type="button" data-piece="x" style="font-size:15px;padding:12px 10px">Cancel</button>
   </div>
 
