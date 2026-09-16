@@ -554,9 +554,18 @@ pub const NEWS: &[News] = &[News {
            if you prefer `e4`, `Nf3`, `O-O`.\n           • The card in the channel shows the board after every move, so everyone can follow along, and **👀 Watch** \
            opens a live board for anyone. Finished games can be replayed.\n           • Beat someone from **another house** for **4** points; a draw pays **1** each (up to 8 a day). Games \
            against your own house are just for the fun of it.\n\n           `/chesshelp` explains everything, `/chess` on its own lists your games.",
+}, News {
+    id: "anagrams-2026-09",
+    title: "🔀 Anagrams is here",
+    body: "A scrambled word is now always waiting in {anagram} — and this one you play by **typing**.\n\n           • The letters go up spaced out: **T S A B E**. Work out the word and just type it in the channel. No \
+           buttons, no commands.\n           • **Any** word that uses all the letters counts, not only the one I scrambled — those letters are taken \
+           by `beast`, `bates` and `tabes` alike.\n           • First right answer gets a ✅ and the points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or more \
+           (up to 10 a day). The next word goes up straight away.\n           • Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
+           letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n           `/anagramhelp` explains the lot, `/anagram` shows the round that's up.",
 }];
 
-/// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`, `{npat}`
+/// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
+/// `{anagram}`, `{npat}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -566,6 +575,7 @@ pub fn fill_channels(body: &str) -> String {
     };
     body.replace("{sudoku}", &mention("VIZIER_SUDOKU_CHANNEL", "the sudoku channel"))
         .replace("{chess}", &mention("VIZIER_CHESS_CHANNEL", "the chess channel"))
+        .replace("{anagram}", &mention("VIZIER_ANAGRAM_CHANNEL", "the anagrams channel"))
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
@@ -1083,6 +1093,14 @@ mod tests {
     #[test]
     fn a_release_note_is_posted_once() {
         assert_eq!(fill_channels("play in {sudoku}"), "play in **the sudoku channel**", "no channel set in tests");
+        assert_eq!(fill_channels("type it in {anagram}"), "type it in **the anagrams channel**");
+        // Every note's channel marks are ones fill_channels knows, or a note
+        // would go out with `{anagram}` in it.
+        for note in NEWS {
+            let filled = fill_channels(note.body);
+            assert!(!filled.contains('{'), "{} still has a channel mark in it:\n{}", note.id, filled);
+            assert!(note.body.chars().count() <= NEWS_LIMIT, "{} is too long", note.id);
+        }
         let first = next_news(&[]).expect("a seeded note");
         assert_eq!(first.id, NEWS[0].id);
         let done: Vec<String> = NEWS.iter().map(|n| n.id.to_string()).collect();

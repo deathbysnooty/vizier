@@ -488,8 +488,20 @@ fn sorted_letters(word: &str) -> String {
     letters.into_iter().collect()
 }
 
+/// Whether a solve the old Anagram Bot announced should be paid for. The bot's
+/// own Anagrams game pays for its own channel, so while that game is running
+/// there the watcher keeps out of it: one solve is never two lots of points,
+/// however long the two games overlap.
+pub fn watcher_pays(channel: u64, ours: Option<u64>) -> bool {
+    ours != Some(channel)
+}
+
 fn on_anagram(ctx: &Context, msg: &Message) {
     let channel = msg.channel_id.get();
+    if !watcher_pays(channel, super::anagram::live_channel()) {
+        tracing::debug!("games: anagram bot line in {} left alone — our own game owns that channel", channel);
+        return;
+    }
     match parse_anagram(&all_text(msg)) {
         Some(AnagramLine::Puzzle(letters)) => {
             PUZZLES.lock().insert(channel, letters);
@@ -794,6 +806,23 @@ mod tests {
         let solve = "**zecorinthian!** was correct and has been awarded **145** Points, bringing them up to a total…";
         assert_eq!(parse_anagram(solve), Some(AnagramLine::Solved("zecorinthian".into())));
         assert_eq!(parse_anagram("was correct, apparently"), None);
+    }
+
+    #[test]
+    fn the_old_anagram_bot_is_never_paid_for_our_own_games_channel() {
+        let ours = 1_542_764_196_901_683_231;
+        let elsewhere = 999;
+        // The two games overlap while the old bot is still on the server: a
+        // solve it announces in OUR channel is our game's, and is already paid
+        // for there. Paying here as well would be the same solve twice.
+        assert!(!watcher_pays(ours, Some(ours)), "our own channel, our own game");
+        // Anywhere else the old bot is paid exactly as it always was.
+        assert!(watcher_pays(elsewhere, Some(ours)));
+        // And with our game off - or in no channel at all - nothing changes.
+        assert!(watcher_pays(ours, None));
+        assert!(watcher_pays(elsewhere, None));
+        // In a test run our game is off, so the watcher keeps every channel.
+        assert!(watcher_pays(ours, super::super::anagram::live_channel()));
     }
 
     #[test]

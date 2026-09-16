@@ -246,7 +246,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_VOICE", "Voice points a day", "Most voice points one person can earn in a day (one per full hour, or whatever the voice block is set to).", number(0, 24, "points"), "4"),
                 setting("VIZIER_CAP_QUIZ", "Quiz points a day", "Most points one person can earn from quiz rounds in a day. 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_KOTO", "Koto points a day", "Most points one person can earn from Koto in a day. 100 means no limit.", number(0, 100, "points"), "4"),
-                setting("VIZIER_CAP_ANAGRAM", "Anagram points a day", "Most points one person can earn from Anagram Bot in a day. 100 means no limit.", number(0, 100, "points"), "6"),
+                setting("VIZIER_CAP_ANAGRAM", "Anagram points a day", "Most points one person can earn from anagrams in a day — the bot's own Anagrams game and Anagram Bot together, since they are one kind of word game. 100 means no limit.", number(0, 100, "points"), "10"),
                 setting("VIZIER_CAP_CAT", "Cat Bot points a day", "Most points one person can earn from Cat Bot catches in a day. 100 means no limit.", number(0, 100, "points"), "3"),
                 setting("VIZIER_CAP_ARENA", "Arena points a day", "Most points one person can earn from 1v1 fights in a day. 100 means no limit.", number(0, 100, "points"), "3"),
                 setting(
@@ -510,6 +510,46 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "anagrams",
+            title: "Anagrams",
+            icon: "🔀",
+            about: "A scrambled word is always waiting in its own channel (Game channel below), and the first person to \
+                    unscramble it wins house points. Unlike sudoku and chess, members DO type here: answering is \
+                    typing, so leave Send Messages on for @everyone and let the bot send, embed, read history, add \
+                    reactions and manage messages (and Manage Channels if you want the channel topic used as a \
+                    header). The bot takes a word from the word bank, shuffles its letters into an arrangement that \
+                    gives nothing away, and puts the letters up spaced out and in capitals. ANY word in the \
+                    dictionary that uses ALL of the letters wins - the letters of BEAST are taken by beast, bates and \
+                    tabes alike - so nobody is ever told their perfectly good word was the wrong one. Case and the \
+                    punctuation around a word are forgiven; a message that isn't one word is not a guess. The first \
+                    right answer gets a ✅ on the message, a line naming the winner, and the next scramble at once. \
+                    Wrong guesses are ignored in silence, because a ❌ on every stray message in a chatty channel \
+                    would be noise. Typing !hint gives away the first letter, once a round, and takes a point off \
+                    what the round pays; !skip opens up only after a hint and pays nobody. A round nobody answers is \
+                    replaced by the bot itself, so the channel is never stuck on one word overnight, and the same \
+                    letters don't come round again for a month. The words come from wordbank/puzzles.txt and \
+                    wordbank/dictionary.txt in the bot's workspace, read at start: with no word bank there the game \
+                    simply stays off and says so in the log. Never runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_ANAGRAM", "Game on", "Run the anagrams game in its channel. Off takes the card down and stops new rounds; the round that was up is left as it is. The game also stays off, whatever this says, when there is no word bank to play with.", Kind::Toggle, "off"),
+                setting("VIZIER_ANAGRAM_CHANNEL", "Game channel", "The channel the scramble card lives in. Members need to be able to type there - that is how answers are given. Empty means the game is off. Never #safe-corner.", Kind::Channel, ""),
+                setting("VIZIER_POINTS_ANAGRAM_SHORT", "Short word points", "House points for the first right answer to a 4 or 5 letter word.", number(0, 100, "points"), "1"),
+                setting("VIZIER_POINTS_ANAGRAM_MEDIUM", "Middling word points", "House points for the first right answer to a 6 or 7 letter word.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_ANAGRAM_LONG", "Long word points", "House points for the first right answer to a word of 8 letters or more.", number(0, 100, "points"), "3"),
+                setting("VIZIER_ANAGRAM_IDLE_MINUTES", "Replace a round after", "How long a round nobody answers and nobody skips stays up before the bot reveals the word and sets a new one by itself.", number(1, 1440, "minutes"), "30"),
+                setting("VIZIER_ANAGRAM_NO_REPEAT_DAYS", "Don't repeat letters for", "How long the same set of letters is held back before it can be set again. It goes by the letters, not the word, so LISTEN and SILENT are the same round.", number(0, 365, "days"), "30"),
+                setting("VIZIER_ANAGRAM_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted. The channel is a chatty one, so the card follows the conversation down rather than jumping after every message.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_ANAGRAM_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "120"),
+                toggle("VIZIER_ANAGRAM_TOPIC", "Letters in the channel topic", "Write the round into the channel's topic, so the letters sit at the top of the channel as a header that never scrolls away. Needs Manage Channels for the bot in that channel; Discord only allows a couple of topic edits every ten minutes, so it is best effort and a round never waits for it."),
+            ],
+            commands: vec![
+                command("anagram", EVERYONE, "/anagram", "The round that is up now: its letters, how long the word is, what it is worth and whether the hint has gone. Only you see it."),
+                command("anagramhelp", EVERYONE, "/anagramhelp", "How the anagrams game works, written from the settings as they are right now: how to answer, what each length pays, and what !hint and !skip do. Only you see it."),
+                command("anagramskip", ADMINS, "/anagramskip", "Drops the round that is up, with no points for anyone, reveals the word and sets a fresh one at once. Unlike !skip, no hint is needed first."),
+                command("anagramstop", ADMINS, "/anagramstop", "Switches the anagrams game off: the card comes down, the channel topic is cleared and no new rounds are set. Switch Game on back on to play again."),
+            ],
+        },
+        Section {
             id: "chess",
             title: "Chess",
             icon: "♟️",
@@ -668,7 +708,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_POINTS_WORDLE_CROWN", "Wordle crown bonus", "Extra points for the day's best Wordle score (the 👑 in the results).", number(0, 100, "points"), "1"),
                 setting("VIZIER_POINTS_KOTO_WIN", "Koto solved", "Points for the person who solves a Koto game.", number(0, 100, "points"), "3"),
                 setting("VIZIER_POINTS_KOTO_PLAYED", "Koto played", "Points for each other player whose guesses scored at least one point in a Koto game, solved or not. Guesses that score +0 earn nothing.", number(0, 100, "points"), "1"),
-                setting("VIZIER_POINTS_ANAGRAM", "Anagram solved", "Points for solving an Anagram Bot puzzle.", number(0, 100, "points"), "3"),
+                setting("VIZIER_POINTS_ANAGRAM", "Anagram Bot solved", "Points for solving one of the third-party Anagram Bot's puzzles. The bot's own Anagrams game (its own section) pays by word length instead, and is never paid for twice: while that game is running in a channel, an Anagram Bot solve there pays nothing. Both share the daily anagram limit.", number(0, 100, "points"), "3"),
                 setting("VIZIER_POINTS_CAT_COMMON", "Common cat", "Points for catching a Fine, Nice, Good, Gremlin or unknown cat.", number(0, 100, "points"), "1"),
                 setting("VIZIER_POINTS_CAT_RARE", "Rare cat", "Points for catching a Rare, Sus, Rickroll or Wild cat.", number(0, 100, "points"), "2"),
                 setting("VIZIER_POINTS_CAT_TOP", "Top cat", "Points for catching a Superior, Mythic or Legendary cat.", number(0, 100, "points"), "3"),

@@ -42,6 +42,9 @@ mod frog_store;
 mod frog_trade;
 mod house;
 mod msglog;
+mod anagram;
+mod anagram_store;
+mod anagram_words;
 mod chess;
 mod chess_board;
 mod chess_rules;
@@ -122,6 +125,11 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = chess_store::open(&self.deps.config.workspace) {
             tracing::warn!("chess: store not opened: {}", err);
         }
+        if let Err(err) = anagram_store::open(&self.deps.config.workspace) {
+            tracing::warn!("anagram: store not opened: {}", err);
+        }
+        // The word bank, read once. Missing only means the anagrams game is off.
+        anagram_words::open(&self.deps.config.workspace);
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
         }
@@ -1251,6 +1259,7 @@ impl EventHandler for Handler {
         npat::on_delete(channel_id, deleted_message_id);
         sudoku::on_delete(channel_id, deleted_message_id);
         chess::on_delete(channel_id, deleted_message_id);
+        anagram::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1494,6 +1503,10 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), anagram::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), anagram::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::skip_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1576,6 +1589,8 @@ impl EventHandler for Handler {
         sudoku::spawn(ctx.clone());
         // Chess: pays and announces games a restart left, then keeps the clocks.
         chess::spawn(ctx.clone());
+        // Anagrams: picks up the round a restart left in its channel, or sets one.
+        anagram::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -2180,6 +2195,22 @@ impl EventHandler for Handler {
             }
             if command.data.name == "chessstop" {
                 chess::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "anagram" {
+                anagram::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "anagramhelp" {
+                anagram::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "anagramskip" {
+                anagram::skip_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "anagramstop" {
+                anagram::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -2958,11 +2989,18 @@ impl EventHandler for Handler {
         sudoku::note_message(&ctx, &msg);
         // The same for the chess channel's active card.
         chess::note_message(&ctx, &msg);
+        // Chat in the anagrams channel buries the scramble card, which follows
+        // it down once enough has landed under it.
+        anagram::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
             return;
         }
+
+        // Anagrams is played by typing: a word that fits wins the round, and
+        // !hint / !skip steer it. Everything else in that channel is left alone.
+        anagram::on_message(&ctx, &msg).await;
 
         let agent_id = self.0.clone();
 

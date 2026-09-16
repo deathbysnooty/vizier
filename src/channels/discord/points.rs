@@ -24,6 +24,8 @@ pub enum Source {
     Voice,
     Quiz,
     Koto,
+    /// Anagrams, both kinds: the bot's own scrambled word in its channel, and
+    /// the Anagram Bot's game. One word game to a player, one daily limit.
     Anagram,
     Cat,
     Arena,
@@ -134,7 +136,7 @@ impl Source {
             Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 3)),
             Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 4)),
             Source::Quiz => day(super::control::number("VIZIER_CAP_QUIZ", 6)),
-            Source::Anagram => day(super::control::number("VIZIER_CAP_ANAGRAM", 6)),
+            Source::Anagram => day(super::control::number("VIZIER_CAP_ANAGRAM", 10)),
             Source::Snitch => day(super::control::number("VIZIER_CAP_SNITCH", 6)),
             Source::Koto => day(super::control::number("VIZIER_CAP_KOTO", 4)),
             Source::Cat => day(super::control::number("VIZIER_CAP_CAT", 3)),
@@ -570,6 +572,31 @@ mod tests {
         // A finish is never written at all: nothing outside those wins is there.
         let rows: i64 = conn.query_row("SELECT COUNT(*) FROM ledger WHERE source = 'sudoku'", [], |r| r.get(0)).unwrap();
         assert_eq!(rows, 6, "only the wins, one row each, the capped one included as a zero");
+    }
+
+    #[test]
+    fn anagram_rounds_are_paid_by_length_and_stop_at_ten_a_day() {
+        let conn = db();
+        // Each round names itself, so the same round can only ever pay once.
+        let win = |round: i64, points: i64| {
+            let mut e = entry(1, Source::Anagram, points);
+            e.dedupe = Some(format!("anagrams:round:{}", round));
+            e
+        };
+        // Four long words: 3 + 3 + 3 = 9, then the fourth is trimmed to the 1 that fits.
+        for round in 1..=3 {
+            assert_eq!(write(&conn, &win(round, 3), MON).unwrap(), Outcome::Granted(3));
+        }
+        assert_eq!(write(&conn, &win(4, 3), MON).unwrap(), Outcome::Granted(1));
+        assert_eq!(write(&conn, &win(5, 1), MON).unwrap(), Outcome::Capped);
+        assert_eq!(write(&conn, &win(1, 3), MON).unwrap(), Outcome::Duplicate, "the same round again pays nothing");
+        let today: i64 = conn
+            .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE source = 'anagram' AND day = ?1", params![ist_day(MON)], |r| r.get(0))
+            .unwrap();
+        assert_eq!(today, 10, "the day's anagram limit");
+        // A fresh day starts again, and another game's points are untouched by it.
+        assert_eq!(write(&conn, &win(9, 2), MON + DAY).unwrap(), Outcome::Granted(2));
+        assert_eq!(write(&conn, &entry(1, Source::Sudoku, 6), MON).unwrap(), Outcome::Granted(6));
     }
 
     #[test]

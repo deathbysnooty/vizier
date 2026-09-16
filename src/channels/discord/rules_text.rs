@@ -82,6 +82,25 @@ pub struct Rules {
     pub npat: NpatRules,
     pub sudoku: SudokuRules,
     pub chess: ChessRules,
+    pub anagrams: AnagramRules,
+}
+
+/// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
+/// in the House Cup posts. Not to be confused with `anagram`/`anagram_cap`
+/// above, which are the points paid for the Anagram Bot's own game.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnagramRules {
+    /// The game's channel, only while the game is on and there is a bank.
+    pub channel: Option<u64>,
+    /// What 4-5, 6-7 and 8+ letter words pay.
+    pub points: [i64; 3],
+    pub cap: Option<i64>,
+    /// How long a round nobody answers stays up.
+    pub idle_minutes: i64,
+    /// How long the same letters are held back.
+    pub no_repeat_days: i64,
+    /// Words in the bank, when there is one.
+    pub words: Option<usize>,
 }
 
 /// Sudoku's live settings, for its rules post, `/sudokuhelp` and the lines
@@ -260,6 +279,7 @@ impl Rules {
             npat: super::npat::npat_rules(limit(Source::Npat.cap())),
             sudoku: super::sudoku::sudoku_rules(),
             chess: super::chess::chess_rules(limit(Source::Chess.cap())),
+            anagrams: super::anagram::anagram_rules(),
         }
     }
 }
@@ -369,6 +389,9 @@ pub fn welcome_text(r: &Rules) -> String {
     }
     if let Some(c) = channel(r.chess.channel) {
         action.push(format!("♟️ {} · chess — press ⚔️ Challenge someone on the card", c));
+    }
+    if let Some(c) = channel(r.anagrams.channel) {
+        action.push(format!("🔀 {} · anagrams — unscramble the letters and type the word", c));
     }
     if let Some(c) = channel(r.fight_channel) {
         let what = if r.battle_daily { "fights and the daily Battle Royale" } else { "fights and Battle Royales" };
@@ -645,6 +668,12 @@ fn game_lines(r: &Rules) -> Vec<String> {
             c, r.chess.win, r.chess.draw, max_words(r.chess.cap)
         ));
     }
+    if let Some(c) = channel(r.anagrams.channel).filter(|_| r.anagrams.points.iter().any(|p| *p > 0)) {
+        lines.push(format!(
+            "🔀 **Anagrams** in {} — unscramble the letters and just type the word; any word using all of them counts, **{}** · **{}** · **{}** by length {}",
+            c, r.anagrams.points[0], r.anagrams.points[1], r.anagrams.points[2], max_words(r.anagrams.cap)
+        ));
+    }
     if r.arena_win > 0 {
         lines.push(format!("⚔️ **1v1 fights** — `/fight` someone, win **{}** {}", r.arena_win, max_words(r.arena_cap)));
     }
@@ -786,6 +815,14 @@ pub fn earn_text(r: &Rules) -> String {
     }
     if r.chess.channel.is_some() && (r.chess.win > 0 || r.chess.draw > 0) {
         more.push(format!("♟️ Chess win +{} · draw +{} {}", r.chess.win, r.chess.draw, max_words(r.chess.cap)));
+    }
+    if r.anagrams.channel.is_some() && r.anagrams.points.iter().any(|p| *p > 0) {
+        more.push(format!(
+            "🔀 Anagrams {}–{} first to type it {}",
+            r.anagrams.points.iter().min().copied().unwrap_or(0),
+            r.anagrams.points.iter().max().copied().unwrap_or(0),
+            max_words(r.anagrams.cap)
+        ));
     }
     if !more.is_empty() {
         lines.push(more.join(" · "));
@@ -1074,6 +1111,57 @@ pub fn chess_help_text(c: &ChessRules) -> String {
     t
 }
 
+// --- anagrams -----------------------------------------------------------------------------
+
+pub const ANAGRAM_RULES_TITLE: &str = "🔀 How Anagrams works";
+
+fn anagram_where(id: Option<u64>) -> String {
+    match channel(id) {
+        Some(c) => format!("in {}", c),
+        None => "in its own channel (a mod has to set one)".to_string(),
+    }
+}
+
+/// What `/anagramhelp` says: the whole game in one card, from the settings as
+/// they are now.
+pub fn anagram_help_text(a: &AnagramRules) -> String {
+    let mut t = format!(
+        "**🔀 What it is**\nThe bot shuffles a word's letters and puts them up {}. Be the first to type a word that uses **all** of them and your house scores.\n\n",
+        anagram_where(a.channel)
+    );
+    t.push_str("**⌨️ How to play**\n");
+    t.push_str("• Just type your answer in the channel — no buttons, no commands. Capitals, spaces around it and a `!` on the end are all forgiven.\n");
+    t.push_str("• **Any** word that uses every letter counts, not only the one I scrambled: BEAST's letters are taken by `bates` and `tabes` just as happily.\n");
+    t.push_str("• The first right answer wins, gets a ✅ on the message, and the next scramble goes up at once.\n");
+    t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
+
+    t.push_str("**💡 Stuck?**\n");
+    t.push_str("• `!hint` gives away the **first letter** of the word I scrambled. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!skip` moves on to a new word, but only once a hint has been used. It pays nobody.\n");
+    t.push_str(&format!("• A round nobody answers is replaced after **{}**, so the channel is never stuck on one word.\n\n", plural(a.idle_minutes, "minute", "minutes")));
+
+    t.push_str("**🏠 House points**\n");
+    t.push_str(&format!(
+        "• **{}** for a 4–5 letter word, **{}** for 6–7, **{}** for 8 or more.\n",
+        a.points[0], a.points[1], a.points[2]
+    ));
+    t.push_str(&format!("• {}\n", match a.cap {
+        Some(n) => format!("Up to **{}** a day from anagrams.", plural(n, "house point", "house points")),
+        None => "No daily limit from anagrams.".to_string(),
+    }));
+    t.push_str("• Muggles and anyone not yet sorted earn nothing, here as everywhere — mods are welcome to play, they just can't score.\n");
+    if a.no_repeat_days > 0 {
+        t.push_str(&format!("• The same set of letters doesn't come round again for **{}**.\n", plural(a.no_repeat_days, "day", "days")));
+    }
+    if let Some(words) = a.words {
+        t.push_str(&format!("-# {} in the bank.\n", plural(words as i64, "word", "words")));
+    }
+
+    t.push_str("\n**⌨️ Commands**\n");
+    t.push_str("`/anagram` the round that's up · `/anagramhelp` this card · mods: `/anagramskip` for a fresh word, `/anagramstop` to switch it off");
+    t
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1136,6 +1224,18 @@ pub(crate) mod tests {
             npat: npat_defaults(),
             sudoku: sudoku_defaults(),
             chess: chess_defaults(),
+            anagrams: anagram_defaults(),
+        }
+    }
+
+    pub(crate) fn anagram_defaults() -> AnagramRules {
+        AnagramRules {
+            channel: Some(1542764196901683231),
+            points: [1, 2, 3],
+            cap: Some(10),
+            idle_minutes: 30,
+            no_repeat_days: 30,
+            words: Some(2500),
         }
     }
 
@@ -1247,6 +1347,7 @@ pub(crate) mod tests {
                 has_page: true,
             },
             chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, replay_days: 365, win: 100, draw: 100, cap: Some(99), ..chess_defaults() },
+            anagrams: AnagramRules { channel: Some(u64::MAX), points: [100, 100, 100], cap: Some(99), idle_minutes: 1440, no_repeat_days: 365, words: Some(500_000) },
             ..defaults()
         }
     }
@@ -1278,7 +1379,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 
@@ -1409,6 +1510,57 @@ pub(crate) mod tests {
         let nowhere = SudokuRules { channel: None, cap: None, hint_cost: 1, ..sudoku_defaults() };
         let text = sudoku_help_text(&nowhere);
         assert!(text.contains("in its own channel") && text.contains("no daily limit"), "{}", text);
+    }
+
+    #[test]
+    fn anagramhelp_explains_a_game_played_by_typing_and_fits_one_card() {
+        let text = anagram_help_text(&anagram_defaults());
+        for part in [
+            "puts them up in <#1542764196901683231>",
+            "type your answer in the channel",
+            "`bates` and `tabes`",
+            "first right answer wins",
+            "ignored",
+            "`!hint` gives away the **first letter**",
+            "`!skip` moves on",
+            "**30 minutes**",
+            "**1** for a 4–5 letter word, **2** for 6–7, **3** for 8 or more",
+            "Up to **10 house points** a day",
+            "doesn't come round again for **30 days**",
+            "2500 words in the bank",
+            "`/anagramskip`",
+            "`/anagramstop`",
+        ] {
+            assert!(text.contains(part), "missing “{}” in:\n{}", part, text);
+        }
+        assert!(!text.contains("beast"), "the help never names a live word");
+        assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
+        // Every setting at its highest still fits an embed.
+        assert!(anagram_help_text(&huge().anagrams).chars().count() < DESCRIPTION_LIMIT);
+        // No channel, no limit, no bank read yet, and no no-repeat window.
+        let bare = AnagramRules { channel: None, cap: None, words: None, no_repeat_days: 0, ..anagram_defaults() };
+        let text = anagram_help_text(&bare);
+        assert!(text.contains("in its own channel") && text.contains("No daily limit"), "{}", text);
+        assert!(!text.contains("in the bank") && !text.contains("come round again"), "{}", text);
+        assert!(ANAGRAM_RULES_TITLE.contains("Anagrams"));
+    }
+
+    #[test]
+    fn the_guide_and_the_earn_button_carry_anagrams_from_its_live_settings() {
+        let games = &guide(&defaults(), true)[2].body;
+        assert!(
+            games.contains("🔀 **Anagrams** in <#1542764196901683231> — unscramble the letters and just type the word; any word using all of them counts, **1** · **2** · **3** by length (max 10)"),
+            "{}",
+            games
+        );
+        assert!(earn_text(&defaults()).contains("🔀 Anagrams 1–3 first to type it (max 10)"), "{}", earn_text(&defaults()));
+        // Off, or worth nothing: not advertised at all.
+        let off = Rules { anagrams: AnagramRules { channel: None, ..anagram_defaults() }, ..defaults() };
+        assert!(!guide(&off, true)[2].body.contains("Anagrams") && !earn_text(&off).contains("Anagrams"));
+        let free = Rules { anagrams: AnagramRules { points: [0, 0, 0], ..anagram_defaults() }, ..defaults() };
+        assert!(!guide(&free, true)[2].body.contains("Anagrams"));
+        // And the welcome points people at the channel.
+        assert!(welcome_text(&defaults()).contains("🔀 <#1542764196901683231> · anagrams"));
     }
 
     #[test]
