@@ -1472,6 +1472,43 @@ async fn pages_carry_security_headers() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// A panel file can be replaced on the server without a rebuild or a restart:
+/// a copy in the runtime directory's `ui/` is served in place of the one built
+/// into the binary, and taking it away puts the built-in one back. The favicon
+/// stands in for every page here; the rules themselves are in `control::ui`.
+#[tokio::test]
+async fn a_ui_file_on_disk_is_served_in_place_of_the_built_in_one() {
+    let app = panel();
+    let (status, built_in, _) = call(&app, "GET", "/assets/favicon.svg", None, None, false).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let dir = STORE.get().expect("store").path().join(".runtime").join("ui");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pushed = Value::String("<svg id='from-disk'></svg>".into());
+    std::fs::write(dir.join("favicon.svg"), pushed.as_str().unwrap()).unwrap();
+
+    // Not a disk read per request, so the change lands once the cache looks again.
+    let settled = |want: Value| {
+        let app = app.clone();
+        async move {
+            let mut body = Value::Null;
+            for _ in 0..40 {
+                let (_, served, _) = call(&app, "GET", "/assets/favicon.svg", None, None, false).await;
+                body = served;
+                if body == want {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            body
+        }
+    };
+    assert_eq!(settled(pushed.clone()).await, pushed, "the pushed file is served");
+
+    std::fs::remove_file(dir.join("favicon.svg")).unwrap();
+    assert_eq!(settled(built_in.clone()).await, built_in, "and the built-in copy comes back");
+}
+
 // --- reminders -------------------------------------------------------------------------
 
 fn sample_reminder() -> Value {

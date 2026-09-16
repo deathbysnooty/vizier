@@ -27,7 +27,10 @@ use parking_lot::Mutex;
 
 use super::super::super::sudoku_gen::{Grid, Level, grid_to_str};
 use super::super::super::sudoku_store as store;
+use super::super::ui;
 
+// Built into the binary; a copy in `<runtime>/ui` is served instead when there
+// is one — see [`super::super::ui`].
 const PAGE_HTML: &str = include_str!("../ui/sudoku.html");
 const PAGE_CSS: &str = include_str!("../ui/sudoku.css");
 const PAGE_JS: &str = include_str!("../ui/sudoku.js");
@@ -82,11 +85,11 @@ fn served(kind: &'static str, body: String, status: StatusCode) -> Response {
 }
 
 pub async fn css() -> Response {
-    served("text/css; charset=utf-8", PAGE_CSS.to_string(), StatusCode::OK)
+    served("text/css; charset=utf-8", ui::file("sudoku.css", PAGE_CSS).into_owned(), StatusCode::OK)
 }
 
 pub async fn js() -> Response {
-    served("text/javascript; charset=utf-8", PAGE_JS.to_string(), StatusCode::OK)
+    served("text/javascript; charset=utf-8", ui::file("sudoku.js", PAGE_JS).into_owned(), StatusCode::OK)
 }
 
 /// Text that can't break out of an attribute or a tag.
@@ -131,7 +134,7 @@ pub fn render(row: &store::Row) -> String {
         ("{{OPEN}}", if row.status == store::Status::Open { "1".to_string() } else { "0".to_string() }),
         ("{{HEADLINE}}", headline(row.status)),
     ];
-    let mut page = PAGE_HTML.to_string();
+    let mut page = ui::file("sudoku.html", PAGE_HTML).into_owned();
     for (token, value) in fields {
         page = page.replace(token, &esc(&value));
     }

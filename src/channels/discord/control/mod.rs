@@ -23,6 +23,8 @@ pub mod remind;
 pub mod profiles;
 pub mod reminders;
 pub mod scheduler;
+// The panel's own pages: from the runtime directory when they are there.
+pub mod ui;
 // Special welcomes: a message for one member the moment they join.
 pub mod welcomes;
 pub mod web;
@@ -61,6 +63,9 @@ const SCHEMA: &str = "
 pub fn open(workspace: &str) -> anyhow::Result<()> {
     let dir = crate::utils::build_path(workspace, &[".runtime"]);
     std::fs::create_dir_all(&dir)?;
+    // The panel's pages can come from `<runtime>/ui`, so a change to them needs
+    // no release; this only decides where to look and says so in the log.
+    ui::open(workspace);
     let conn = Connection::open(dir.join("control.db"))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(SCHEMA)?;

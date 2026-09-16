@@ -11,6 +11,7 @@
 //! Only keys the catalog describes can be read or written: the environment also
 //! holds tokens and API keys, and none of those may ever leave the process.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
@@ -33,11 +34,14 @@ use serenity::all::{
 
 use super::catalog::{self, Kind, Section, Setting};
 use super::reminders::{self, Reminder, Schedule};
+use super::ui;
 
 pub const BOT_NAME: &str = "Loduchand";
 const COOKIE: &str = "mlci_panel";
 const LOGIN_PER_MINUTE: usize = 10;
 
+// The panel's pages, built into the binary. A copy in `<runtime>/ui` is served
+// instead when there is one — see [`super::ui`].
 const INDEX_HTML: &str = include_str!("ui/index.html");
 const APP_CSS: &str = include_str!("ui/app.css");
 const APP_JS: &str = include_str!("ui/app.js");
@@ -975,9 +979,12 @@ pub fn router(panel: Panel) -> Router {
     Router::new()
         .route("/", get(page))
         .route("/login", get(page))
-        .route("/assets/app.css", get(|| async { asset("text/css; charset=utf-8", APP_CSS) }))
-        .route("/assets/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
-        .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", FAVICON) }))
+        .route("/assets/app.css", get(|| async { asset("text/css; charset=utf-8", ui::file("app.css", APP_CSS)) }))
+        .route(
+            "/assets/app.js",
+            get(|| async { asset("text/javascript; charset=utf-8", ui::file("app.js", APP_JS)) }),
+        )
+        .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", ui::file("favicon.svg", FAVICON)) }))
         .merge(puzzles)
         .merge(chess::routes())
         .nest("/api", api)
@@ -988,15 +995,24 @@ pub fn router(panel: Panel) -> Router {
 }
 
 async fn page() -> Response {
-    let mut res = Response::new(Body::from(INDEX_HTML));
+    let mut res = Response::new(text_body(ui::file("index.html", INDEX_HTML)));
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     res
 }
 
-fn asset(kind: &'static str, body: &'static str) -> Response {
-    let mut res = Response::new(Body::from(body));
+/// A body from a panel file, whichever copy it came from: the built-in one
+/// costs nothing to send, a disk one is already a string.
+pub(super) fn text_body(text: Cow<'static, str>) -> Body {
+    match text {
+        Cow::Borrowed(text) => Body::from(text),
+        Cow::Owned(text) => Body::from(text),
+    }
+}
+
+fn asset(kind: &'static str, body: Cow<'static, str>) -> Response {
+    let mut res = Response::new(text_body(body));
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));

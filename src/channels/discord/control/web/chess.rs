@@ -13,6 +13,8 @@
 //! needs to be legal is decided here, by the same code the Discord pop-up uses,
 //! so the page can be as wrong as it likes without a bad move ever landing.
 
+use std::borrow::Cow;
+
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -26,8 +28,11 @@ use shakmaty::{Color, Position};
 use super::super::super::chess::{self, DrawMove};
 use super::super::super::chess_rules::{self as rules, Replay, TimeControl};
 use super::super::super::chess_store::{self as store, Game};
+use super::super::ui;
 use super::Panel;
 
+// Built into the binary; a copy in `<runtime>/ui` is served instead when there
+// is one — see [`super::super::ui`].
 const PAGE_HTML: &str = include_str!("../ui/chess.html");
 const PAGE_JS: &str = include_str!("../ui/chess.js");
 const WATCH_HTML: &str = include_str!("../ui/chess-watch.html");
@@ -44,20 +49,26 @@ pub fn routes() -> Router<Panel> {
         .route("/chess/{game}/{token}/draw", post(draw))
         .route("/chess/watch/{game}", get(watch_page))
         .route("/chess/watch/{game}/state", get(watch_state))
-        .route("/assets/chess.js", get(|| async { asset("text/javascript; charset=utf-8", PAGE_JS) }))
-        .route("/assets/chess-watch.js", get(|| async { asset("text/javascript; charset=utf-8", WATCH_JS) }))
+        .route(
+            "/assets/chess.js",
+            get(|| async { asset("text/javascript; charset=utf-8", ui::file("chess.js", PAGE_JS)) }),
+        )
+        .route(
+            "/assets/chess-watch.js",
+            get(|| async { asset("text/javascript; charset=utf-8", ui::file("chess-watch.js", WATCH_JS)) }),
+        )
 }
 
-fn asset(kind: &'static str, body: &'static str) -> Response {
-    let mut res = Response::new(Body::from(body));
+fn asset(kind: &'static str, body: Cow<'static, str>) -> Response {
+    let mut res = Response::new(super::text_body(body));
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, header::HeaderValue::from_static(kind));
     h.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-cache"));
     res
 }
 
-fn html(status: StatusCode, body: &'static str) -> Response {
-    let mut res = Response::new(Body::from(body));
+fn html(status: StatusCode, body: Cow<'static, str>) -> Response {
+    let mut res = Response::new(super::text_body(body));
     *res.status_mut() = status;
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/html; charset=utf-8"));
@@ -99,9 +110,10 @@ pub fn opens(game_id: i64, token: &str) -> Option<(Game, u64)> {
 }
 
 async fn page(Path((game_id, token)): Path<(i64, String)>) -> Response {
+    let page = ui::file("chess.html", PAGE_HTML);
     match opens(game_id, &token) {
-        Some(_) => html(StatusCode::OK, PAGE_HTML),
-        None => html(StatusCode::NOT_FOUND, PAGE_HTML),
+        Some(_) => html(StatusCode::OK, page),
+        None => html(StatusCode::NOT_FOUND, page),
     }
 }
 
@@ -265,9 +277,10 @@ pub fn watch_json(panel: &Panel, game: &Game, now: i64) -> Value {
 }
 
 async fn watch_page(Path(game_id): Path<i64>) -> Response {
+    let page = ui::file("chess-watch.html", WATCH_HTML);
     match watchable(game_id, chrono::Utc::now().timestamp()) {
-        Ok(_) => html(StatusCode::OK, WATCH_HTML),
-        Err(_) => html(StatusCode::NOT_FOUND, WATCH_HTML),
+        Ok(_) => html(StatusCode::OK, page),
+        Err(_) => html(StatusCode::NOT_FOUND, page),
     }
 }
 
