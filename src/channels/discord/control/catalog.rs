@@ -173,6 +173,18 @@ pub fn sections() -> Vec<Section> {
                     "Sort newcomers",
                     "Sort new members into a house as they join. Off leaves them unsorted until a mod uses /sort; returners still get their house back.",
                 ),
+                toggle(
+                    "VIZIER_HOUSE_WAIT_CARD",
+                    "Tell newcomers a mod will sort them",
+                    "With Sort newcomers off, post a card under the welcome saying the house games exist, where the rules are, and that a mod will give them a house.",
+                ),
+                setting(
+                    "VIZIER_HOUSE_WAIT_TEXT",
+                    "Newcomer card text",
+                    "What that card says. {mention} pings them, {name} is their name and {games} becomes the scoreboard channel. Empty uses the bot's own wording.",
+                    Kind::Text,
+                    "",
+                ),
             ],
             commands: vec![
                 command("houses", EVERYONE, "/houses", "The four houses with this month's points, member counts and captains."),
