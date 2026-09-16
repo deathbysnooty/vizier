@@ -368,7 +368,7 @@ pub fn welcome_text(r: &Rules) -> String {
         action.push(format!("🔢 {} · a sudoku always waiting, first to solve it wins", c));
     }
     if let Some(c) = channel(r.chess.channel) {
-        action.push(format!("♟️ {} · chess, one move at a time or all in one sitting", c));
+        action.push(format!("♟️ {} · chess — press ⚔️ Challenge someone on the card", c));
     }
     if let Some(c) = channel(r.fight_channel) {
         let what = if r.battle_daily { "fights and the daily Battle Royale" } else { "fights and Battle Royales" };
@@ -641,7 +641,7 @@ fn game_lines(r: &Rules) -> Vec<String> {
     }
     if let Some(c) = channel(r.chess.channel).filter(|_| r.chess.win > 0 || r.chess.draw > 0) {
         lines.push(format!(
-            "♟️ **Chess** in {} — `/chess @someone`; win **+{}**, draw **+{}** each, only when you're in different houses {}",
+            "♟️ **Chess** in {} — press ⚔️ Challenge someone (or `/chess @member`); win **+{}**, draw **+{}** each, only when you're in different houses {}",
             c, r.chess.win, r.chess.draw, max_words(r.chess.cap)
         ));
     }
@@ -1010,9 +1010,16 @@ pub fn chess_help_text(c: &ChessRules) -> String {
     let mut t = String::new();
     t.push_str("**♟️ Starting a game**\n");
     t.push_str(&format!(
-        "• `/chess @someone` puts a challenge up{}. They press **✅ Accept** (or either of you presses **❌ Decline**);          an offer nobody answers lapses after 30 minutes.\n",
+        "• Press **⚔️ Challenge someone** on the card{} — it is on the idle card and on every game card — then pick a \
+         member and a pace from the menus and press **Send challenge**. Nobody types in that channel, so there is \
+         nothing to type here either.\n",
         place
     ));
+    t.push_str("• Or `/chess @member` from anywhere, which does exactly the same thing.\n");
+    t.push_str(
+        "• Either way the same challenge card goes up. They press **✅ Accept** (or either of you presses \
+         **❌ Decline**); an offer nobody answers lapses after 30 minutes.\n",
+    );
     t.push_str("• Colours are drawn at random when the challenge is accepted.\n");
     t.push_str(&format!(
         "• One open challenge per pair. You can have **{}** on the go, and the channel holds **{}** in all.\n",
@@ -1474,7 +1481,8 @@ pub(crate) mod tests {
     fn the_chess_help_card_reads_from_the_settings() {
         let c = chess_defaults();
         let text = chess_help_text(&c);
-        assert!(text.contains("/chess @someone"), "{}", text);
+        assert!(text.contains("⚔️ Challenge someone"), "the button comes first: {}", text);
+        assert!(text.find("⚔️ Challenge someone") < text.find("`/chess @member`"), "and is named before the command: {}", text);
         assert!(text.contains("<#1549625408004165682>"), "it names the channel: {}", text);
         assert!(text.contains("**12 hours**") && text.contains("**3 minutes**"), "both time controls: {}", text);
         assert!(text.contains("**3 games**") && text.contains("**8 games**"), "both limits: {}", text);
@@ -1504,6 +1512,7 @@ pub(crate) mod tests {
         let on = guide(&defaults(), true);
         let games = on.iter().find(|p| p.title.contains("Play the games")).expect("the games panel");
         assert!(games.body.contains("♟️ **Chess**"), "{}", games.body);
+        assert!(games.body.contains("⚔️ Challenge someone"), "the guide names the button too: {}", games.body);
         assert!(games.body.contains("different houses"), "{}", games.body);
         let off = Rules { chess: ChessRules { channel: None, ..chess_defaults() }, ..defaults() };
         let quiet = guide(&off, true);

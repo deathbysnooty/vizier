@@ -503,8 +503,10 @@ pub fn sections() -> Vec<Section> {
             icon: "♟️",
             about: "Chess in its own channel (Game channel below), played only with the bot's cards, buttons and \
                     pop-ups: members can't type there, so deny Send Messages for @everyone and let the bot send, \
-                    embed, attach files, read history and manage messages. `/chess @someone` puts up a challenge \
-                    card; the challenged member presses Accept, colours are drawn at random, and the game card goes \
+                    embed, attach files, read history and manage messages. Anyone presses the \
+                    ⚔️ Challenge someone button - it sits on the idle card and on every game card - and picks a member \
+                    and a pace from menus, with no typing anywhere; `/chess @member` does the same thing from \
+                    outside the channel. Either way a challenge card goes up; the challenged member presses Accept, colours are drawn at random, and the game card goes \
                     up with the board drawn on it. Moves come either from a private web page - a link each player \
                     gets to their own side, which needs the panel's web address to be set - or from the Type move \
                     pop-up, which takes both `Nf3` and `g1f3`. Full chess: castling, en passant, promotion, \

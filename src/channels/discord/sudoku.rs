@@ -221,7 +221,7 @@ pub fn card_text(live: &Live) -> String {
     )
 }
 
-pub const CARD_FOOTER: &str = "As soon as someone solves it, the next puzzle appears · /sudokuhelp explains everything";
+pub const CARD_FOOTER: &str = "As soon as someone solves it, the next puzzle appears · press ❓ How to play for the rules";
 
 /// Everything the card says once a puzzle is solved.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,14 +313,30 @@ pub fn solver_line(s: &store::Solve) -> String {
 
 // --- the card -------------------------------------------------------------------------------
 
-fn card_row() -> CreateActionRow {
-    CreateActionRow::Buttons(vec![
-        CreateButton::new("sudokuplay").label("▶️ Play").style(ButtonStyle::Success),
-        CreateButton::new("sudokucode").label("📋 Submit code").style(ButtonStyle::Primary),
-        CreateButton::new("sudokuhint").label("💡 Hint").style(ButtonStyle::Secondary),
-        CreateButton::new("sudokutoday").label("📊 Today's solvers").style(ButtonStyle::Secondary),
-    ])
+/// The card's buttons. Members can't type in this channel - the message box
+/// itself is denied them, so a slash command is not even an option there - so
+/// everything the game can do has to be reachable by pressing something,
+/// the rules included.
+pub fn card_rows() -> Vec<CreateActionRow> {
+    vec![
+        CreateActionRow::Buttons(vec![
+            CreateButton::new("sudokuplay").label("▶️ Play").style(ButtonStyle::Success),
+            CreateButton::new("sudokucode").label("📋 Submit code").style(ButtonStyle::Primary),
+            CreateButton::new("sudokuhint").label("💡 Hint").style(ButtonStyle::Secondary),
+            CreateButton::new("sudokutoday").label("📊 Today's solvers").style(ButtonStyle::Secondary),
+        ]),
+        CreateActionRow::Buttons(vec![help_button()]),
+    ]
 }
+
+/// The button that explains the game, for a channel where nobody can type
+/// `/sudokuhelp`.
+pub fn help_button() -> CreateButton {
+    CreateButton::new(HELP_ID).label("❓ How to play").style(ButtonStyle::Secondary)
+}
+
+/// The button that opens the rules.
+pub const HELP_ID: &str = "sudokuhelp";
 
 fn live_of(row: &store::Row, playing: i64, now: i64) -> Live {
     Live { level: row.level, points: row.points, playing, open_secs: now - row.posted_ts, hint_cost: hint_cost() }
@@ -494,7 +510,7 @@ async fn drop_card(ctx: &Context) {
 
 /// Builds the message for a live puzzle, picture and all.
 async fn card_message(row: &store::Row, playing: i64, now: i64) -> CreateMessage {
-    let message = CreateMessage::new().embed(card_embed(row, playing, now)).components(vec![card_row()]).allowed_mentions(CreateAllowedMentions::new());
+    let message = CreateMessage::new().embed(card_embed(row, playing, now)).components(card_rows()).allowed_mentions(CreateAllowedMentions::new());
     match sudoku_card::png(row.id, row.givens).await {
         Some(png) => message.add_file(CreateAttachment::bytes(png.to_vec(), sudoku_card::file_name(row.id))),
         None => message,
@@ -534,7 +550,7 @@ async fn edit_card(ctx: &Context, row: &store::Row, playing: i64, now: i64) {
     let Some((channel, message)) = SHARED.lock().card else { return };
     let edit = EditMessage::new()
         .embed(card_embed(row, playing, now))
-        .components(vec![card_row()])
+        .components(card_rows())
         .allowed_mentions(CreateAllowedMentions::new());
     if let Err(err) = call(ChannelId::new(channel).edit_message(&ctx.http, MessageId::new(message), edit)).await {
         if is_gone(&err) {
@@ -939,6 +955,7 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         "sudokucode" => code_pressed(ctx, component).await,
         "sudokuhint" => hint_pressed(ctx, component).await,
         "sudokutoday" => today_pressed(ctx, component).await,
+        HELP_ID => help_pressed(ctx, component).await,
         _ => {}
     }
 }
@@ -964,7 +981,7 @@ pub fn play_text(puzzle_id: i64, level: Level, points: i64, link: Option<&str>, 
             "▶️ **Puzzle #{}** · {} {} · worth **{}**\n{}\n\
              -# Tap a square, tap a number. **Notes**, **Undo**, **Check** and **Reset** are there to help, and your work is saved on that device.\n\
              When every square is filled, press **Copy code** on the page, come back here, press 📋 **Submit code** and paste it.\n\
-             -# The page never knows the answer — the bot checks it. `/sudoku` finds this link again, `/sudokuhelp` explains everything.",
+             -# The page never knows the answer — the bot checks it. `/sudoku` finds this link again, and ❓ How to play on the card explains the rest.",
             puzzle_id,
             level.emoji(),
             level.name(),
@@ -1407,7 +1424,7 @@ pub fn mine_text(live: Option<&store::Row>, mine: &[(store::Row, bool)], base: O
         lines.push("-# The web page isn't set up yet — a mod needs to set **VIZIER_PANEL_URL** in the panel.".to_string());
     }
     if let Some(c) = channel {
-        lines.push(format!("-# The puzzle card lives in <#{}> · `/sudokuhelp` explains the game.", c));
+        lines.push(format!("-# The puzzle card lives in <#{}> · press ❓ How to play on it for the rules.", c));
     }
     lines.join("\n")
 }
@@ -1439,18 +1456,53 @@ pub async fn mine_command(ctx: &Context, command: &CommandInteraction) {
     reply_command(ctx, command, message).await;
 }
 
-/// `/sudokuhelp` — everyone.
-pub async fn help_command(ctx: &Context, command: &CommandInteraction) {
-    let embed = CreateEmbed::new()
+/// The rules as a card, for both the command and the ❓ How to play button:
+/// one set of words, written from the settings as they are now.
+fn help_embed() -> CreateEmbed {
+    CreateEmbed::new()
         .title(rules_text::SUDOKU_RULES_TITLE)
         .description(rules_text::sudoku_help_text(&sudoku_rules()))
-        .colour(COLOUR);
-    reply_command(ctx, command, CreateInteractionResponseMessage::new().embed(embed)).await;
+        .colour(COLOUR)
+}
+
+/// `/sudokuhelp` — everyone.
+pub async fn help_command(ctx: &Context, command: &CommandInteraction) {
+    reply_command(ctx, command, CreateInteractionResponseMessage::new().embed(help_embed())).await;
+}
+
+/// ❓ How to play, from the puzzle card. The same words the command gives,
+/// shown only to whoever pressed it.
+async fn help_pressed(ctx: &Context, component: &ComponentInteraction) {
+    let message = CreateInteractionResponseMessage::new().embed(help_embed()).ephemeral(true);
+    if let Err(err) = component.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await {
+        tracing::warn!("sudoku: the rules weren't shown to {}: {}", component.user.id, err);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_puzzle_card_can_be_played_and_explained_without_typing_a_word() {
+        // Members can't type in that channel - the message box itself is denied
+        // them, so /sudokuhelp cannot be run there - which is why the rules are
+        // a button like everything else.
+        let rows = serde_json::to_value(card_rows()).expect("rows");
+        let rows = rows.as_array().expect("two rows");
+        assert_eq!(rows.len(), 2);
+        let ids = |row: &serde_json::Value| -> Vec<String> {
+            row["components"].as_array().expect("buttons").iter().filter_map(|b| b["custom_id"].as_str().map(String::from)).collect()
+        };
+        assert_eq!(ids(&rows[0]), vec!["sudokuplay", "sudokucode", "sudokuhint", "sudokutoday"], "the four it had are untouched");
+        assert!(rows[0]["components"].as_array().unwrap().len() <= 5, "Discord allows five to a row");
+        assert_eq!(ids(&rows[1]), vec![HELP_ID]);
+        assert_eq!(rows[1]["components"][0]["label"], "❓ How to play");
+        // And the card points at the button rather than at a command nobody
+        // in that channel can run.
+        assert!(CARD_FOOTER.contains("❓ How to play"), "{}", CARD_FOOTER);
+        assert!(!CARD_FOOTER.contains("/sudokuhelp"), "{}", CARD_FOOTER);
+    }
     use crate::channels::discord::sudoku_gen::{Rng, generate};
     use crate::channels::discord::sudoku_store::tests::{memory, put};
 

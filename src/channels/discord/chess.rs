@@ -24,6 +24,7 @@
 //! to the database, and the task posts, edits and pays, so two presses can
 //! never make two result cards.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -32,10 +33,11 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use serenity::all::{
-    ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
-    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
-    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    EditAttachments, EditMessage, GetMessages, Message, MessageId, ModalInteraction, UserId,
+    ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction,
+    ComponentInteractionDataKind, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton,
+    CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateSelectMenu, CreateSelectMenuKind, EditAttachments,
+    EditMessage, GetMessages, Message, MessageId, ModalInteraction, UserId,
 };
 use shakmaty::{Color, Position};
 
@@ -344,6 +346,9 @@ fn challenge_rows(id: i64) -> Vec<CreateActionRow> {
     vec![CreateActionRow::Buttons(vec![
         CreateButton::new(format!("chessyes:{}", id)).label("✅ Accept").style(ButtonStyle::Success),
         CreateButton::new(format!("chessno:{}", id)).label("❌ Decline").style(ButtonStyle::Secondary),
+        // Being challenged is where a beginner meets this game, and it is the
+        // one moment they most want the rules. They can't type to ask for them.
+        help_button(),
     ])]
 }
 
@@ -436,6 +441,21 @@ fn running_count() -> usize {
     with_db(|conn| store::running_games(conn).len()).unwrap_or(0)
 }
 
+/// The button that opens the pop-up picker. Nobody can type in the chess
+/// channel, so this is how a challenge starts without a slash command: it is on
+/// the idle card AND on every game card, so somebody watching a game can start
+/// one of their own without going anywhere.
+pub fn challenge_button() -> CreateButton {
+    CreateButton::new(PICK_ID).label("⚔️ Challenge someone").style(ButtonStyle::Secondary)
+}
+
+/// The button that explains the game. Members can't type in the chess channel -
+/// the message box itself is denied them, so `/chesshelp` cannot be run there at
+/// all - which is why the rules have to be a button like everything else.
+pub fn help_button() -> CreateButton {
+    CreateButton::new(HELP_ID).label("❓ How to play").style(ButtonStyle::Secondary)
+}
+
 fn game_rows(game_id: i64) -> Vec<CreateActionRow> {
     let mut buttons = vec![
         CreateButton::new(format!("chessopen:{}", game_id)).label("♟️ Open board").style(ButtonStyle::Success),
@@ -448,7 +468,9 @@ fn game_rows(game_id: i64) -> Vec<CreateActionRow> {
     if let Some(link) = watch_link(game_id) {
         buttons.push(CreateButton::new_link(link).label("👀 Watch"));
     }
-    vec![CreateActionRow::Buttons(buttons)]
+    // A row of its own: the first is full, and this one is for everybody else
+    // in the channel rather than the two playing.
+    vec![CreateActionRow::Buttons(buttons), CreateActionRow::Buttons(vec![challenge_button(), help_button()])]
 }
 
 /// What the board picture for a game should show.
@@ -478,7 +500,7 @@ async fn board_attachment(game: &Game, flipped: bool) -> Option<CreateAttachment
 
 pub fn idle_text(rules: &ChessRules) -> String {
     let mut text = String::from(
-        "♟️ **No game running** — use `/chess @someone` to challenge a member.\n\
+        "♟️ **No game running** — press **⚔️ Challenge someone** below, or use `/chess @member`.\n\
          Pick your pace: **casual** for a move every few hours, or **live** to play it out now.",
     );
     if rules.win > 0 {
@@ -492,7 +514,7 @@ pub fn idle_text(rules: &ChessRules) -> String {
             }
         ));
     }
-    text.push_str("\n-# `/chesshelp` explains the whole thing.");
+    text.push_str("\n-# Press **❓ How to play** for the rules.");
     text
 }
 
@@ -500,8 +522,14 @@ fn idle_embed() -> CreateEmbed {
     CreateEmbed::new().title("♟️ Chess").description(idle_text(&live_rules())).colour(IDLE_COLOUR)
 }
 
+/// The idle card's buttons: start a game, or find out how. Nothing else is
+/// reachable in that channel, so these two are all there is.
+pub fn idle_rows() -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![challenge_button(), help_button()])]
+}
+
 fn idle_message() -> CreateMessage {
-    CreateMessage::new().embed(idle_embed()).allowed_mentions(CreateAllowedMentions::new())
+    CreateMessage::new().embed(idle_embed()).components(idle_rows()).allowed_mentions(CreateAllowedMentions::new())
 }
 
 // --- the result card ---------------------------------------------------------------------------
@@ -851,6 +879,303 @@ pub fn may_challenge(
     Ok(())
 }
 
+// --- challenging with a button ----------------------------------------------------------------
+
+/// The button that opens the picker, and the prefixes its own parts carry.
+pub const PICK_ID: &str = "chesspick";
+/// The button that opens the rules, on the idle card and on every game card.
+pub const HELP_ID: &str = "chesshelp";
+pub const PICK_WHO: &str = "chesswho:";
+/// The pace buttons carry the pace in the id itself: `chesstime:<draft>:live`.
+pub const PICK_TIME: &str = "chesstime:";
+pub const PICK_SEND: &str = "chesssend:";
+pub const PICK_DROP: &str = "chesscancel:";
+
+/// How long a half-filled picker is remembered. It only holds who was chosen
+/// and at what pace, and it is thrown away the moment the challenge goes out.
+pub const DRAFT_SECS: i64 = 15 * 60;
+/// Drafts kept at once, so a jammed button cannot fill the machine's memory.
+pub const DRAFT_MAX: usize = 500;
+const DRAFT_ALPHABET: &[u8] = b"bcdfghjkmnpqrstvwxyz23456789";
+pub const DRAFT_ID_LEN: usize = 8;
+
+/// A challenge half made: who is making it, who they have picked so far, and
+/// the pace. It lives in memory only - there is nothing here worth a database
+/// row, and a restart losing one costs a press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Draft {
+    pub by: u64,
+    pub target: Option<u64>,
+    pub time: TimeControl,
+    pub made_at: i64,
+}
+
+static DRAFTS: LazyLock<Mutex<HashMap<String, Draft>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Forgets drafts older than `life`, and the oldest of them if somebody has
+/// been leaning on the button. Returns how many were thrown away.
+pub fn sweep_drafts(drafts: &mut HashMap<String, Draft>, now: i64, life: i64, max: usize) -> usize {
+    let before = drafts.len();
+    drafts.retain(|_, d| now - d.made_at < life);
+    while drafts.len() > max {
+        let Some(oldest) = drafts.iter().min_by_key(|(id, d)| (d.made_at, (*id).clone())).map(|(id, _)| id.clone()) else {
+            break;
+        };
+        drafts.remove(&oldest);
+    }
+    before - drafts.len()
+}
+
+/// A short random name for a draft, from the caller's own random numbers. No
+/// vowels, so no word can turn up in one by accident.
+pub fn draft_id(mut roll: impl FnMut() -> f64) -> String {
+    (0..DRAFT_ID_LEN)
+        .map(|_| {
+            let n = (roll().clamp(0.0, 0.999_999) * DRAFT_ALPHABET.len() as f64) as usize;
+            DRAFT_ALPHABET[n.min(DRAFT_ALPHABET.len() - 1)] as char
+        })
+        .collect()
+}
+
+/// Starts a draft and returns its name.
+fn open_draft(by: u64, now: i64) -> String {
+    let id = draft_id(|| rand::random::<f64>());
+    let mut drafts = DRAFTS.lock();
+    sweep_drafts(&mut drafts, now, DRAFT_SECS, DRAFT_MAX);
+    drafts.insert(id.clone(), Draft { by, target: None, time: TimeControl::Casual, made_at: now });
+    id
+}
+
+/// A draft, if it is still there and belongs to the person pressing.
+fn my_draft(id: &str, by: u64, now: i64) -> Option<Draft> {
+    let mut drafts = DRAFTS.lock();
+    sweep_drafts(&mut drafts, now, DRAFT_SECS, DRAFT_MAX);
+    drafts.get(id).copied().filter(|d| d.by == by)
+}
+
+/// Changes a draft in place; `None` when it has been forgotten or is not theirs.
+fn edit_draft(id: &str, by: u64, now: i64, change: impl FnOnce(&mut Draft)) -> Option<Draft> {
+    let mut drafts = DRAFTS.lock();
+    sweep_drafts(&mut drafts, now, DRAFT_SECS, DRAFT_MAX);
+    let draft = drafts.get_mut(id).filter(|d| d.by == by)?;
+    change(draft);
+    Some(*draft)
+}
+
+const DRAFT_GONE: &str = "That picker has timed out. Press ⚔️ Challenge someone again.";
+
+/// What the picker says while it is being filled in. `problem` is the reason
+/// the chosen member can't be challenged, and `note` something worth knowing
+/// that is not a refusal - both are worked out before this is called, so the
+/// words can be read on their own.
+pub fn picker_text(chosen: Option<u64>, time: TimeControl, per_move: i64, problem: Option<&str>, note: Option<&str>) -> String {
+    let mut text = String::from("⚔️ **Challenge someone to chess**\nPick a member, choose the pace, then press **Send challenge**.\n");
+    match chosen {
+        None => text.push_str("\n👤 Nobody picked yet."),
+        Some(them) => text.push_str(&format!("\n👤 <@{}> {}", them, crest(them))),
+    }
+    text.push_str(&format!("\n🕰️ {}", control_words(time, per_move)));
+    if let Some(problem) = problem {
+        text.push_str(&format!("\n\n🚫 {}", problem));
+    } else if let Some(note) = note {
+        text.push_str(&format!("\n\n{}", note));
+    }
+    text.push_str("\n-# Only you can see this, and it forgets itself after 15 minutes.");
+    text
+}
+
+/// Something worth telling the challenger that is not a reason to refuse: a
+/// game inside one house, or against somebody the ledger cannot pay.
+pub fn picker_note(them: u64, my_house: &str, their_house: &str) -> Option<String> {
+    if their_house.is_empty() {
+        return Some(format!("🧙 <@{}> isn't in a house, so this one wins no House Cup points. Still a game, though.", them));
+    }
+    if my_house.is_empty() {
+        return Some("🧙 You're not in a house, so this one wins no House Cup points. Still a game, though.".to_string());
+    }
+    if my_house == their_house {
+        let name = super::house::house(my_house).map(|h| format!("{} {}", h.crest, h.name)).unwrap_or_else(|| my_house.to_string());
+        return Some(format!("🏠 You're both {} — a game inside one house is just for the fun of it, and pays nothing.", name));
+    }
+    None
+}
+
+/// The picker's three rows: who, how fast, and send. Send stays dead until a
+/// member has been chosen and nothing is in the way.
+pub fn picker_rows(id: &str, chosen: Option<u64>, time: TimeControl, ready: bool, casual: i64, live: i64) -> Vec<CreateActionRow> {
+    let who = CreateSelectMenu::new(
+        format!("{}{}", PICK_WHO, id),
+        CreateSelectMenuKind::User { default_users: chosen.map(|u| vec![UserId::new(u)]) },
+    )
+    .placeholder("Who do you want to play?")
+    .min_values(1)
+    .max_values(1);
+    // The pace is two buttons rather than a menu: a menu is one more thing to
+    // open, and a button says which one is chosen just by being lit.
+    let pace = |what: TimeControl, secs: i64, label: &str| {
+        CreateButton::new(format!("{}{}:{}", PICK_TIME, id, what.key()))
+            .label(format!("{} {} · {}", label, what.label(), rules::clock_words(secs)))
+            .style(if time == what { ButtonStyle::Primary } else { ButtonStyle::Secondary })
+    };
+    vec![
+        CreateActionRow::SelectMenu(who),
+        CreateActionRow::Buttons(vec![
+            pace(TimeControl::Casual, casual, "🕰️"),
+            pace(TimeControl::Live, live, "⚡"),
+        ]),
+        CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("{}{}", PICK_SEND, id))
+                .label("⚔️ Send challenge")
+                .style(ButtonStyle::Success)
+                .disabled(!ready),
+            CreateButton::new(format!("{}{}", PICK_DROP, id)).label("Cancel").style(ButtonStyle::Secondary),
+        ]),
+    ]
+}
+
+/// Whether the member a picker has landed on can be challenged, and what to say
+/// if not. The same checks `/chess` runs, so neither way in is easier than the
+/// other.
+fn picker_problem(ctx: &Context, me: u64, them: u64, them_is_bot: bool) -> Option<String> {
+    if active_channel(ctx).is_none() {
+        return Some(Refusal::Off.words(them));
+    }
+    let now = Utc::now().timestamp();
+    let checks = with_db(|conn| {
+        (
+            store::games_of(conn, me).len(),
+            store::games_of(conn, them).len(),
+            store::running_games(conn).len(),
+            store::open_between(conn, me, them, now).is_some(),
+        )
+    });
+    let Some((mine, theirs, running, already)) = checks else {
+        return Some("Chess isn't ready yet — try again in a moment.".to_string());
+    };
+    may_challenge(me, them, them_is_bot, mine, theirs, running, already, max_games(), max_active())
+        .err()
+        .map(|refusal| refusal.words(them))
+}
+
+/// The whole picker as a fresh ephemeral reply or an update to the one already
+/// on screen.
+fn picker_message(ctx: &Context, id: &str, draft: &Draft) -> (String, Vec<CreateActionRow>) {
+    let problem = draft.target.and_then(|them| picker_problem(ctx, draft.by, them, is_bot(ctx, them)));
+    let note = draft
+        .target
+        .filter(|_| problem.is_none())
+        .and_then(|them| picker_note(them, &house_key(draft.by), &house_key(them)));
+    let ready = draft.target.is_some() && problem.is_none();
+    let text = picker_text(draft.target, draft.time, per_move_secs(draft.time), problem.as_deref(), note.as_deref());
+    (text, picker_rows(id, draft.target, draft.time, ready, per_move_secs(TimeControl::Casual), per_move_secs(TimeControl::Live)))
+}
+
+fn is_bot(ctx: &Context, user: u64) -> bool {
+    ctx.cache.user(UserId::new(user)).map(|u| u.bot).unwrap_or(false)
+}
+
+async fn show_picker(ctx: &Context, component: &ComponentInteraction, id: &str, draft: &Draft, fresh: bool) {
+    let (text, rows) = picker_message(ctx, id, draft);
+    let message = CreateInteractionResponseMessage::new()
+        .content(text)
+        .components(rows)
+        .ephemeral(true)
+        .allowed_mentions(CreateAllowedMentions::new());
+    let response =
+        if fresh { CreateInteractionResponse::Message(message) } else { CreateInteractionResponse::UpdateMessage(message) };
+    if let Err(err) = component.create_response(&ctx.http, response).await {
+        tracing::warn!("chess: the challenge picker wasn't shown to {}: {}", component.user.id, err);
+    }
+}
+
+/// ⚔️ Challenge someone, from the idle card or any game card.
+async fn start_picker(ctx: &Context, component: &ComponentInteraction) {
+    if active_channel(ctx).is_none() {
+        return whisper(ctx, component, Refusal::Off.words(0)).await;
+    }
+    let now = Utc::now().timestamp();
+    let id = open_draft(component.user.id.get(), now);
+    let draft = Draft { by: component.user.id.get(), target: None, time: TimeControl::Casual, made_at: now };
+    show_picker(ctx, component, &id, &draft, true).await;
+}
+
+/// The member chosen in the user menu.
+fn picked_user(component: &ComponentInteraction) -> Option<u64> {
+    match &component.data.kind {
+        ComponentInteractionDataKind::UserSelect { values } => values.first().map(|u| u.get()),
+        _ => None,
+    }
+}
+
+/// A pace button's id, split into the draft it belongs to and the pace it sets.
+pub fn pace_pressed(custom_id: &str) -> Option<(&str, TimeControl)> {
+    let rest = custom_id.strip_prefix(PICK_TIME)?;
+    let (draft, pace) = rest.rsplit_once(':')?;
+    (!draft.is_empty() && matches!(pace, "casual" | "live")).then(|| (draft, TimeControl::from_key(pace)))
+}
+
+async fn picker_chose(ctx: &Context, component: &ComponentInteraction, id: &str) {
+    let by = component.user.id.get();
+    let now = Utc::now().timestamp();
+    let Some(them) = picked_user(component) else { return };
+    let Some(draft) = edit_draft(id, by, now, |d| d.target = Some(them)) else {
+        return whisper(ctx, component, DRAFT_GONE).await;
+    };
+    show_picker(ctx, component, id, &draft, false).await;
+}
+
+async fn picker_paced(ctx: &Context, component: &ComponentInteraction, id: &str, time: TimeControl) {
+    let by = component.user.id.get();
+    let now = Utc::now().timestamp();
+    let Some(draft) = edit_draft(id, by, now, |d| d.time = time) else {
+        return whisper(ctx, component, DRAFT_GONE).await;
+    };
+    show_picker(ctx, component, id, &draft, false).await;
+}
+
+/// ❓ How to play, from the idle card or any game card: the same words
+/// `/chesshelp` gives, shown only to whoever pressed it.
+async fn show_help(ctx: &Context, component: &ComponentInteraction) {
+    let message = CreateInteractionResponseMessage::new().embed(help_embed()).ephemeral(true);
+    if let Err(err) = component.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await {
+        tracing::warn!("chess: the rules weren't shown to {}: {}", component.user.id, err);
+    }
+}
+
+async fn picker_cancelled(ctx: &Context, component: &ComponentInteraction, id: &str) {
+    DRAFTS.lock().remove(id);
+    let message = CreateInteractionResponseMessage::new()
+        .content("Nothing sent.")
+        .components(Vec::new())
+        .allowed_mentions(CreateAllowedMentions::new());
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(message)).await;
+}
+
+async fn picker_sent(ctx: &Context, component: &ComponentInteraction, id: &str) {
+    let by = component.user.id.get();
+    let now = Utc::now().timestamp();
+    let Some(draft) = my_draft(id, by, now) else {
+        return whisper(ctx, component, DRAFT_GONE).await;
+    };
+    let Some(them) = draft.target else {
+        return show_picker(ctx, component, id, &draft, false).await;
+    };
+    // Everything is checked again here: a picker can sit open while the other
+    // player starts games of their own.
+    let text = match send_challenge(ctx, by, them, is_bot(ctx, them), draft.time).await {
+        Ok(sent) => {
+            DRAFTS.lock().remove(id);
+            sent
+        }
+        Err(why) => why,
+    };
+    let message = CreateInteractionResponseMessage::new()
+        .content(text)
+        .components(Vec::new())
+        .allowed_mentions(CreateAllowedMentions::new());
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::UpdateMessage(message)).await;
+}
+
 // --- commands -------------------------------------------------------------------------------------
 
 pub fn command() -> CreateCommand {
@@ -877,6 +1202,63 @@ pub fn stop_builder() -> CreateCommand {
         )
 }
 
+/// Whether two members are in the same house, which is what decides whether a
+/// game is worth anything.
+fn same_house(a: u64, b: u64) -> bool {
+    let (one, other) = (house_key(a), house_key(b));
+    !one.is_empty() && one == other
+}
+
+/// Puts a challenge up in the chess channel and says what to tell the person
+/// who asked for it. The ONE door both `/chess` and the ⚔️ Challenge someone
+/// button go through, so the card that lands is the same card either way, and
+/// neither way in is easier than the other.
+async fn send_challenge(ctx: &Context, me: u64, them: u64, them_is_bot: bool, time: TimeControl) -> Result<String, String> {
+    let Some(channel) = active_channel(ctx) else {
+        return Err(Refusal::Off.words(them));
+    };
+    let now = Utc::now().timestamp();
+    let checks = with_db(|conn| {
+        (
+            store::games_of(conn, me).len(),
+            store::games_of(conn, them).len(),
+            store::running_games(conn).len(),
+            store::open_between(conn, me, them, now).is_some(),
+        )
+    });
+    let Some((mine, theirs, running, already)) = checks else {
+        return Err("Chess isn't ready yet — try again in a moment.".to_string());
+    };
+    if let Err(refusal) = may_challenge(me, them, them_is_bot, mine, theirs, running, already, max_games(), max_active()) {
+        return Err(refusal.words(them));
+    }
+    let made = with_db(|conn| store::create_challenge(conn, channel, me, them, time.key(), now, now + CHALLENGE_SECS))
+        .and_then(|r| r.ok());
+    let Some(challenge) = made else {
+        return Err("Couldn't put that challenge up. Try again.".to_string());
+    };
+    let message = CreateMessage::new()
+        .embed(challenge_embed(&challenge, same_house(me, them)))
+        .components(challenge_rows(challenge.id))
+        .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(them)]));
+    match call(ChannelId::new(channel).send_message(&ctx.http, message)).await {
+        Ok(posted) => {
+            let _ = with_db(|conn| store::set_challenge_message(conn, challenge.id, posted.id.get()));
+            {
+                let mut s = SHARED.lock();
+                s.latest = s.latest.max(posted.id.get());
+                s.dirty = true;
+            }
+            Ok(format!("♟️ Challenge sent in <#{}> — {}", channel, posted.link()))
+        }
+        Err(err) => {
+            tracing::warn!("chess: challenge {} not posted: {}", challenge.id, err);
+            let _ = with_db(|conn| store::close_challenge(conn, challenge.id, ChallengeStatus::Expired));
+            Err("Couldn't post in the chess channel.".to_string())
+        }
+    }
+}
+
 /// `/chess` - everyone.
 pub async fn command_handler(ctx: &Context, command: &CommandInteraction) {
     let me = command.user.id.get();
@@ -892,63 +1274,19 @@ pub async fn command_handler(ctx: &Context, command: &CommandInteraction) {
         .and_then(|o| o.value.as_str())
         .map(TimeControl::from_key)
         .unwrap_or(TimeControl::Casual);
-    let Some(channel) = active_channel(ctx) else {
+    if active_channel(ctx).is_none() {
         let _ = command.create_response(&ctx.http, whisper_command(Refusal::Off.words(0))).await;
         return;
-    };
+    }
     let Some(them) = target else {
         let _ = command.create_response(&ctx.http, whisper_command(my_games_text(me, command.guild_id.map(|g| g.get())))).await;
         return;
     };
-    let them_is_bot = ctx.cache.user(UserId::new(them)).map(|u| u.bot).unwrap_or(false);
-    let now = Utc::now().timestamp();
-    let checks = with_db(|conn| {
-        (
-            store::games_of(conn, me).len(),
-            store::games_of(conn, them).len(),
-            store::running_games(conn).len(),
-            store::open_between(conn, me, them, now).is_some(),
-        )
-    });
-    let Some((mine, theirs, running, already)) = checks else {
-        let _ = command.create_response(&ctx.http, whisper_command("Chess isn't ready yet — try again in a moment.")).await;
-        return;
+    let text = match send_challenge(ctx, me, them, is_bot(ctx, them), time).await {
+        Ok(sent) => sent,
+        Err(why) => why,
     };
-    if let Err(refusal) = may_challenge(me, them, them_is_bot, mine, theirs, running, already, max_games(), max_active()) {
-        let _ = command.create_response(&ctx.http, whisper_command(refusal.words(them))).await;
-        return;
-    }
-    let made = with_db(|conn| store::create_challenge(conn, channel, me, them, time.key(), now, now + CHALLENGE_SECS)).and_then(|r| r.ok());
-    let Some(challenge) = made else {
-        let _ = command.create_response(&ctx.http, whisper_command("Couldn't put that challenge up. Try again.")).await;
-        return;
-    };
-    let same_house = {
-        let (a, b) = (house_key(me), house_key(them));
-        !a.is_empty() && a == b
-    };
-    let message = CreateMessage::new()
-        .embed(challenge_embed(&challenge, same_house))
-        .components(challenge_rows(challenge.id))
-        .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(them)]));
-    match call(ChannelId::new(channel).send_message(&ctx.http, message)).await {
-        Ok(posted) => {
-            let _ = with_db(|conn| store::set_challenge_message(conn, challenge.id, posted.id.get()));
-            {
-                let mut s = SHARED.lock();
-                s.latest = s.latest.max(posted.id.get());
-                s.dirty = true;
-            }
-            let _ = command
-                .create_response(&ctx.http, whisper_command(format!("♟️ Challenge sent in <#{}> — {}", channel, posted.link())))
-                .await;
-        }
-        Err(err) => {
-            tracing::warn!("chess: challenge {} not posted: {}", challenge.id, err);
-            let _ = with_db(|conn| store::close_challenge(conn, challenge.id, ChallengeStatus::Expired));
-            let _ = command.create_response(&ctx.http, whisper_command("Couldn't post in the chess channel.")).await;
-        }
-    }
+    let _ = command.create_response(&ctx.http, whisper_command(text)).await;
 }
 
 /// One line of the ephemeral list `/chess` gives when nobody is named: who it
@@ -1019,10 +1357,18 @@ pub fn board_link(game_id: i64, user: u64) -> Option<String> {
     Some(format!("{}/chess/{}/{}", base, game_id, token))
 }
 
+/// The rules as a card, for both `/chesshelp` and the ❓ How to play button:
+/// one set of words, written from the settings as they are now.
+fn help_embed() -> CreateEmbed {
+    CreateEmbed::new()
+        .title("♟️ How chess works here")
+        .description(super::rules_text::chess_help_text(&live_rules()))
+        .colour(COLOUR)
+}
+
 /// `/chesshelp` - everyone, shown only to them.
 pub async fn help_command(ctx: &Context, command: &CommandInteraction) {
-    let embed = CreateEmbed::new().title("♟️ How chess works here").description(super::rules_text::chess_help_text(&live_rules())).colour(COLOUR);
-    let message = CreateInteractionResponseMessage::new().embed(embed).ephemeral(true).allowed_mentions(CreateAllowedMentions::new());
+    let message = CreateInteractionResponseMessage::new().embed(help_embed()).ephemeral(true).allowed_mentions(CreateAllowedMentions::new());
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await;
 }
 
@@ -1051,7 +1397,20 @@ pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let id = component.data.custom_id.clone();
     let rest = |prefix: &str| id.strip_prefix(prefix).and_then(|r| r.parse::<i64>().ok());
-    if let Some(challenge) = rest("chessyes:") {
+    let draft = |prefix: &str| id.strip_prefix(prefix).filter(|d| !d.is_empty() && d.len() <= 32);
+    if id == PICK_ID {
+        start_picker(ctx, component).await;
+    } else if let Some(draft) = draft(PICK_WHO) {
+        picker_chose(ctx, component, &draft.to_string()).await;
+    } else if let Some((draft, time)) = pace_pressed(&id) {
+        picker_paced(ctx, component, &draft.to_string(), time).await;
+    } else if id == HELP_ID {
+        show_help(ctx, component).await;
+    } else if let Some(draft) = draft(PICK_SEND) {
+        picker_sent(ctx, component, &draft.to_string()).await;
+    } else if let Some(draft) = draft(PICK_DROP) {
+        picker_cancelled(ctx, component, &draft.to_string()).await;
+    } else if let Some(challenge) = rest("chessyes:") {
         answer_challenge(ctx, component, challenge, true).await;
     } else if let Some(challenge) = rest("chessno:") {
         answer_challenge(ctx, component, challenge, false).await;
@@ -1997,6 +2356,226 @@ mod tests {
         assert!(challenge_closed_text(&store::Challenge { status: ChallengeStatus::Expired, ..c.clone() }, None).contains("lapsed"));
     }
 
+    // --- challenging with the button ---------------------------------------------
+
+    /// The picker's components as Discord will actually be sent them.
+    fn rows_json(chosen: Option<u64>, time: TimeControl, ready: bool) -> Value {
+        serde_json::to_value(picker_rows("bcdfgh23", chosen, time, ready, 43_200, 180)).expect("rows")
+    }
+
+    /// Writes the picker's components out when `CHESS_SHOTS` names a
+    /// directory, so the shape Discord will be sent can be read with human
+    /// eyes. Writes nothing otherwise.
+    #[test]
+    fn the_picker_can_be_written_out_to_be_looked_at() {
+        let Ok(dir) = std::env::var("CHESS_SHOTS") else { return };
+        std::fs::create_dir_all(&dir).expect("a place to put it");
+        let shown = json!({
+            "empty": {
+                "text": picker_text(None, TimeControl::Casual, 43_200, None, None),
+                "components": rows_json(None, TimeControl::Casual, false),
+            },
+            "ready": {
+                "text": picker_text(Some(222), TimeControl::Live, 180, None, Some("🏠 You're both 🦅 Ravenclaw — a game inside one house is just for the fun of it, and pays nothing.")),
+                "components": rows_json(Some(222), TimeControl::Live, true),
+            },
+            "refused": {
+                "text": picker_text(Some(222), TimeControl::Casual, 43_200, Some(&Refusal::TooManyTheirs(3).words(222)), None),
+                "components": rows_json(Some(222), TimeControl::Casual, false),
+            },
+        });
+        std::fs::write(format!("{}/picker.json", dir), serde_json::to_string_pretty(&shown).expect("json")).expect("written");
+    }
+
+    #[test]
+    fn the_picker_asks_with_menus_and_never_with_the_keyboard() {
+        let rows = rows_json(None, TimeControl::Casual, false);
+        let rows = rows.as_array().expect("three rows");
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert_eq!(row["type"], 1, "every one is an action row");
+        }
+        // Who: a USER select, so there is nothing to type and nothing to spell.
+        let who = &rows[0]["components"][0];
+        assert_eq!(who["type"], 5, "a user select, not a text box");
+        assert_eq!(who["custom_id"], "chesswho:bcdfgh23");
+        assert_eq!(who["min_values"], 1);
+        assert_eq!(who["max_values"], 1);
+        // The pace: two buttons, the chosen one lit. No menu to open, and
+        // nothing to type.
+        let pace = rows[1]["components"].as_array().expect("two paces");
+        assert_eq!(pace.len(), 2);
+        assert_eq!(pace[0]["custom_id"], "chesstime:bcdfgh23:casual");
+        assert_eq!(pace[0]["label"], "🕰️ Casual · 12 h 00 m");
+        assert_eq!(pace[0]["style"], 1, "the chosen pace is lit");
+        assert_eq!(pace[1]["custom_id"], "chesstime:bcdfgh23:live");
+        assert_eq!(pace[1]["label"], "⚡ Live · 3 m 00 s");
+        assert_eq!(pace[1]["style"], 2);
+        let live = rows_json(None, TimeControl::Live, false);
+        assert_eq!(live[1]["components"][0]["style"], 2, "and the other one is not");
+        assert_eq!(live[1]["components"][1]["style"], 1);
+        // Nothing anywhere in the picker is a text input: a text input is
+        // component type 4, and there is not one in any of the three rows.
+        for rows in [rows_json(None, TimeControl::Casual, false), rows_json(Some(222), TimeControl::Live, true)] {
+            for row in rows.as_array().unwrap() {
+                for part in row["components"].as_array().unwrap() {
+                    assert_ne!(part["type"], 4, "no typing at any step: {}", part);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn send_is_dead_until_somebody_has_been_picked() {
+        let idle = rows_json(None, TimeControl::Casual, false);
+        let send = &idle[2]["components"][0];
+        assert_eq!(send["custom_id"], "chesssend:bcdfgh23");
+        assert_eq!(send["disabled"], true, "nothing to send yet");
+        let ready = rows_json(Some(222), TimeControl::Live, true);
+        assert_eq!(ready[2]["components"][0]["disabled"], false);
+        // Picked, but something is in the way: still dead.
+        assert_eq!(rows_json(Some(222), TimeControl::Live, false)[2]["components"][0]["disabled"], true);
+        // Cancel is always there, and the choice made so far is remembered.
+        assert_eq!(ready[2]["components"][1]["custom_id"], "chesscancel:bcdfgh23");
+        assert_eq!(ready[2]["components"][1]["disabled"], false, "cancel is always live");
+        assert_eq!(ready[1]["components"][1]["style"], 1, "live stays picked");
+        assert_eq!(ready[0]["components"][0]["default_values"][0]["id"], 222, "and so does the member");
+    }
+
+    #[test]
+    fn the_picker_says_what_has_been_chosen_and_what_is_in_the_way() {
+        let empty = picker_text(None, TimeControl::Casual, 43_200, None, None);
+        assert!(empty.contains("Nobody picked yet"), "{}", empty);
+        assert!(empty.contains("Casual · 12 h 00 m per move"), "{}", empty);
+        assert!(empty.contains("forgets itself after 15 minutes"), "{}", empty);
+
+        let chosen = picker_text(Some(222), TimeControl::Live, 180, None, None);
+        assert!(chosen.contains("<@222>"), "{}", chosen);
+        assert!(chosen.contains("Live · 3 m 00 s per move"), "{}", chosen);
+
+        // A refusal is shown in the picker, never posted in the channel.
+        let refused = picker_text(Some(222), TimeControl::Casual, 43_200, Some(&Refusal::Bot.words(222)), None);
+        assert!(refused.contains("🚫"), "{}", refused);
+        assert!(refused.contains("Pick a human"), "{}", refused);
+        // A note is only shown when there is nothing to refuse.
+        let noted = picker_text(Some(222), TimeControl::Casual, 43_200, None, Some("🏠 same house"));
+        assert!(noted.contains("🏠 same house"), "{}", noted);
+        let both = picker_text(Some(222), TimeControl::Casual, 43_200, Some("no"), Some("🏠 same house"));
+        assert!(!both.contains("🏠 same house"), "the refusal is the thing that matters: {}", both);
+    }
+
+    #[test]
+    fn the_picker_warns_about_games_that_cannot_pay_without_refusing_them() {
+        let same = picker_note(222, "ravenclaw", "ravenclaw").expect("a note");
+        assert!(same.contains("Ravenclaw") && same.contains("pays nothing"), "{}", same);
+        let theirs = picker_note(222, "ravenclaw", "").expect("a note");
+        assert!(theirs.contains("<@222>") && theirs.contains("no House Cup points"), "{}", theirs);
+        let mine = picker_note(222, "", "gryffindor").expect("a note");
+        assert!(mine.starts_with("🧙 You're not in a house"), "{}", mine);
+        assert_eq!(picker_note(222, "ravenclaw", "gryffindor"), None, "two houses: nothing to warn about");
+    }
+
+    #[test]
+    fn a_half_filled_picker_is_forgotten_after_a_quarter_of_an_hour() {
+        let mut drafts = HashMap::new();
+        let draft = |made_at| Draft { by: 111, target: None, time: TimeControl::Casual, made_at };
+        drafts.insert("aaa".to_string(), draft(1_000));
+        drafts.insert("bbb".to_string(), draft(1_000 + DRAFT_SECS - 1));
+        assert_eq!(sweep_drafts(&mut drafts, 1_000 + DRAFT_SECS - 1, DRAFT_SECS, DRAFT_MAX), 0, "both still young");
+        assert_eq!(sweep_drafts(&mut drafts, 1_000 + DRAFT_SECS, DRAFT_SECS, DRAFT_MAX), 1, "the first has timed out");
+        assert!(drafts.contains_key("bbb") && !drafts.contains_key("aaa"));
+        assert_eq!(sweep_drafts(&mut drafts, 1_000 + 2 * DRAFT_SECS, DRAFT_SECS, DRAFT_MAX), 1);
+        assert!(drafts.is_empty());
+
+        // Somebody leaning on the button loses their oldest, not the machine's memory.
+        for n in 0..10 {
+            drafts.insert(format!("id{}", n), draft(1_000 + n));
+        }
+        assert_eq!(sweep_drafts(&mut drafts, 1_005, DRAFT_SECS, 4), 6);
+        assert_eq!(drafts.len(), 4);
+        assert!(drafts.contains_key("id9") && !drafts.contains_key("id0"), "the newest are the ones kept");
+    }
+
+    #[test]
+    fn a_drafts_name_is_short_random_and_has_no_vowels_in_it() {
+        let mut n = 0u64;
+        let mut roll = || {
+            n = n.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (n >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let one = draft_id(&mut roll);
+        let two = draft_id(&mut roll);
+        assert_eq!(one.len(), DRAFT_ID_LEN);
+        assert_ne!(one, two);
+        assert!(one.bytes().all(|b| DRAFT_ALPHABET.contains(&b)), "{}", one);
+        assert!(!one.chars().any(|c| "aeiou".contains(c)), "{}", one);
+        // It has to fit inside a custom id with its prefix, well under Discord's 100.
+        assert!(PICK_WHO.len() + DRAFT_ID_LEN < 100);
+        assert_eq!(draft_id(|| 0.0), "b".repeat(DRAFT_ID_LEN), "the bottom of the range is in range");
+        assert_eq!(draft_id(|| 1.0), "9".repeat(DRAFT_ID_LEN), "and so is the top");
+    }
+
+    #[test]
+    fn a_pace_button_says_which_draft_and_which_pace_it_is() {
+        assert_eq!(pace_pressed("chesstime:bcdfgh23:casual"), Some(("bcdfgh23", TimeControl::Casual)));
+        assert_eq!(pace_pressed("chesstime:bcdfgh23:live"), Some(("bcdfgh23", TimeControl::Live)));
+        assert_eq!(pace_pressed("chesstime:bcdfgh23:blitz"), None, "only the two paces there are");
+        assert_eq!(pace_pressed("chesstime::live"), None, "a draft has to be named");
+        assert_eq!(pace_pressed("chesstime:bcdfgh23"), None);
+        assert_eq!(pace_pressed("chesstype:42"), None, "not the pop-up button, which reads alike");
+        assert_eq!(pace_pressed("chesstime:"), None);
+    }
+
+    #[test]
+    fn the_button_that_opens_the_picker_is_on_both_cards() {
+        // Nobody can type in that channel - the message box itself is denied
+        // them - so both cards have to offer a way to START a game and a way to
+        // find out HOW, with no slash command anywhere in it.
+        let idle = serde_json::to_value(idle_rows()).expect("rows");
+        let game = serde_json::to_value(game_rows(42)).expect("rows");
+        let ids = |row: &Value| -> Vec<String> {
+            row["components"].as_array().expect("buttons").iter().filter_map(|b| b["custom_id"].as_str().map(String::from)).collect()
+        };
+        assert_eq!(ids(&idle[0]), vec![PICK_ID, HELP_ID]);
+        assert_eq!(idle[0]["components"][0]["label"], "⚔️ Challenge someone");
+        assert_eq!(idle[0]["components"][1]["label"], "❓ How to play");
+
+        // A game card keeps its own four buttons and puts these in a row of
+        // their own, because a row holds five and the Watch link may be a fifth.
+        let rows = game.as_array().expect("two rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(ids(&rows[0]), vec!["chessopen:42", "chesstype:42", "chessresign:42", "chessdraw:42"]);
+        assert!(rows[0]["components"].as_array().unwrap().len() <= 5, "Discord allows five to a row");
+        assert_eq!(ids(&rows[1]), vec![PICK_ID, HELP_ID], "someone watching can start their own, and read the rules");
+
+        // And the card a beginner meets first offers the rules beside the answer.
+        let challenge = serde_json::to_value(challenge_rows(7)).expect("rows");
+        assert_eq!(ids(&challenge[0]), vec!["chessyes:7", "chessno:7", HELP_ID]);
+    }
+
+    #[test]
+    fn both_ways_in_are_refused_for_exactly_the_same_reasons() {
+        // `may_challenge` is the only judge, and the picker and the command
+        // both ask it; this pins the shape so neither can quietly grow a rule
+        // the other doesn't have.
+        for (mine, theirs, running, already, bot, expected) in [
+            (0usize, 0usize, 0usize, false, true, Some(Refusal::Bot)),
+            (0, 0, 0, true, false, Some(Refusal::AlreadyAsked)),
+            (3, 0, 3, false, false, Some(Refusal::TooManyYours(3))),
+            (0, 3, 3, false, false, Some(Refusal::TooManyTheirs(3))),
+            (0, 0, 8, false, false, Some(Refusal::ChannelFull(8))),
+            (0, 0, 0, false, false, None),
+        ] {
+            assert_eq!(may_challenge(111, 222, bot, mine, theirs, running, already, 3, 8).err(), expected);
+        }
+        assert_eq!(may_challenge(111, 111, false, 0, 0, 0, false, 3, 8).err(), Some(Refusal::Self_), "not yourself");
+        // And every refusal reads as a sentence a member can act on.
+        for refusal in [Refusal::Off, Refusal::Self_, Refusal::Bot, Refusal::AlreadyAsked, Refusal::TooManyYours(3), Refusal::TooManyTheirs(3), Refusal::ChannelFull(8)] {
+            let words = refusal.words(222);
+            assert!(words.ends_with('.') && words.chars().count() > 20, "{:?}: {}", refusal, words);
+        }
+    }
+
     #[test]
     fn a_challenge_is_refused_for_the_reasons_it_should_be() {
         // (mine, theirs, running, already) against limits of 3 each and 8 in the channel.
@@ -2244,9 +2823,11 @@ mod tests {
             cap: Some(8),
         });
         assert!(text.contains("No game running"), "{}", text);
-        assert!(text.contains("/chess @someone"), "{}", text);
+        assert!(text.contains("⚔️ Challenge someone"), "the button comes first: {}", text);
+        assert!(text.contains("`/chess @member`"), "and the command still works: {}", text);
+        assert!(text.find("⚔️").unwrap() < text.find("/chess").unwrap(), "the button is named first: {}", text);
         assert!(text.contains("+4") && text.contains("+1") && text.contains("max 8 a day"), "{}", text);
-        assert!(text.contains("/chesshelp"));
+        assert!(text.contains("❓ How to play"), "and the rules are a button too: {}", text);
     }
 
     #[test]
