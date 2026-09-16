@@ -643,6 +643,40 @@ async fn drop_card(ctx: &Context) {
     }
 }
 
+/// Takes away the card of the round that has just ended - and ONLY that one.
+///
+/// An answer closes its round in the store straight away, so the next round's
+/// card can already be up by the time the win is finished and announced. A
+/// blind `drop_card` then deleted the NEW card and left the channel with no
+/// puzzle at all, which is exactly what happened on round 16. A card that
+/// belongs to some other round is left where it is.
+async fn drop_card_of(ctx: &Context, ended: Option<u64>) {
+    let card = {
+        let mut s = SHARED.lock();
+        match card_to_drop(s.card, ended) {
+            Some(card) => {
+                s.card = None;
+                Some(card)
+            }
+            None => None,
+        }
+    };
+    if let Some((c, m)) = card {
+        meta_set("card", "");
+        delete(ctx, c, m).await;
+    }
+}
+
+/// Which card an ending round may take away: its own, and only if that is still
+/// the card the channel is showing. `None` for the round whose card was never
+/// recorded - guessing would cost the next round its card.
+pub fn card_to_drop(current: Option<(u64, u64)>, ended: Option<u64>) -> Option<(u64, u64)> {
+    match (current, ended) {
+        (Some((channel, card)), Some(ended)) if card == ended => Some((channel, card)),
+        _ => None,
+    }
+}
+
 /// Sets a fresh round and puts its card up.
 async fn post_round(ctx: &Context, channel: u64) -> Option<store::Row> {
     let bank = words::bank()?;
@@ -930,10 +964,11 @@ async fn run(ctx: Context) {
 
         if let Some(id) = ending {
             let row = store::db().and_then(|db| store::get(&db.lock(), id));
+            let ended_card = row.as_ref().and_then(|r| r.message);
             if let Some(row) = row.filter(|r| r.status != Status::Open) {
                 announce_end(&ctx, channel, &row).await;
             }
-            drop_card(&ctx).await;
+            drop_card_of(&ctx, ended_card).await;
             live = None;
         }
 
@@ -960,8 +995,18 @@ async fn run(ctx: Context) {
             };
             live = match existing {
                 Some(row) => {
+                    // Taking a round over, its card is only ours to keep if it
+                    // is still in the channel: a delete that crossed with the
+                    // round starting would otherwise leave the game believing
+                    // in a card nobody can see, and no puzzle would show up
+                    // until the next bump.
+                    let there = match row.message {
+                        Some(id) => exists(&ctx, channel, id).await,
+                        None => false,
+                    };
                     let mut s = SHARED.lock();
-                    s.card = row.message.map(|m| (channel, m));
+                    s.card = row.message.filter(|_| there).map(|m| (channel, m));
+                    s.card_gone = !there;
                     // Taking a card over: nothing has buried THIS one yet.
                     s.others_since_card = 0;
                     s.last_bump_ms = Utc::now().timestamp_millis();
@@ -1215,6 +1260,30 @@ mod tests {
     use super::*;
     use crate::channels::discord::anagram_store::tests::{memory, put};
     use crate::channels::discord::anagram_words::tests::fixture;
+
+    /// Round 16 went up, then round 15's win finished and took the new card
+    /// away with it, leaving the channel with no puzzle at all.
+    #[test]
+    fn an_ending_round_only_ever_takes_away_its_own_card() {
+        let showing = Some((99, 1_000));
+        // Its own card, still up: that one goes.
+        assert_eq!(card_to_drop(showing, Some(1_000)), Some((99, 1_000)));
+        // The next round's card is already up - leave it alone.
+        assert_eq!(card_to_drop(showing, Some(900)), None);
+        // A round whose card was never written down guesses at nothing.
+        assert_eq!(card_to_drop(showing, None), None);
+        assert_eq!(card_to_drop(None, Some(1_000)), None);
+    }
+
+    /// With no card of our own in the channel there is nothing to wait for:
+    /// the next tick puts one up, which is what rescues a card that was
+    /// deleted while its round was being handed over.
+    #[test]
+    fn a_missing_card_is_posted_again_at_once() {
+        assert_eq!(card_plan(false, true, false, false, 0, 0, 5, 120), CardAction::Bump);
+        assert_eq!(card_plan(true, true, true, false, 0, 0, 5, 120), CardAction::Bump);
+        assert_eq!(card_plan(true, true, false, false, 0, 0, 5, 120), CardAction::Nothing);
+    }
 
     #[test]
     fn what_a_word_pays_goes_by_its_length() {
