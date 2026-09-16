@@ -15,7 +15,9 @@ const BASE = '/chess/' + encodeURIComponent(GAME) + '/' + encodeURIComponent(TOK
 
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 // The solid glyphs for both sides; colour and an outline tell them apart.
-const GLYPH = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
+// U+FE0E after each is the "draw this as text, not emoji" mark: without it
+// iOS draws the pawn as a black emoji, so a white pawn came out black.
+const GLYPH = { k: '♚\uFE0E', q: '♛\uFE0E', r: '♜\uFE0E', b: '♝\uFE0E', n: '♞\uFE0E', p: '♟\uFE0E' };
 
 const el = (id) => document.getElementById(id);
 const board = el('board');

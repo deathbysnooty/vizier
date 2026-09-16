@@ -1691,6 +1691,45 @@ fn is_mod_with(roles: &HashMap<RoleId, serenity::all::Role>, member: &Member) ->
     member.roles.iter().any(|id| roles.get(id).is_some_and(|role| role.permissions.intersects(powers)))
 }
 
+/// What a newcomer sees when the hat is off duty: the house games exist, the
+/// rules live in the game updates channel, and a mod hands out the house.
+///
+/// `{mention}`, `{name}` and `{games}` are filled in; `{games}` becomes the
+/// scoreboard channel's mention, or plain words if no channel is set.
+const WAITING_TEXT: &str = "Everyone here plays for a house, {mention} - the Snitch, chocolate frogs, Wordle, \
+    Sudoku, chess, quizzes, and even chatting and sitting in voice all earn points for one of the four.\n\n\
+    Have a read of {games} first - every game and what it pays is written up there.\n\n\
+    You haven't got a house yet: **a mod will give you one.** Say hello in the meantime.";
+
+/// Fills in the placeholders of the waiting card's text.
+fn waiting_text(template: &str, mention: &str, name: &str, games: &str) -> String {
+    template.replace("{mention}", mention).replace("{name}", name).replace("{games}", games)
+}
+
+/// Posted where the hat's card would have gone, when newcomers are left for a
+/// mod to sort.
+async fn waiting_card(ctx: &Context, member: &Member, welcome: ChannelId) {
+    if !super::control::on("VIZIER_HOUSE_WAIT_CARD", true) {
+        return;
+    }
+    let games = match super::control::id("VIZIER_SCOREBOARD_CHANNEL").filter(|id| *id != 0) {
+        Some(id) => format!("<#{}>", id),
+        None => "the game updates channel".to_string(),
+    };
+    let custom = super::control::var("VIZIER_HOUSE_WAIT_TEXT");
+    let template = custom.as_deref().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(WAITING_TEXT);
+    let text = waiting_text(template, &format!("<@{}>", member.user.id.get()), &display(member), &games);
+    let embed = CreateEmbed::new()
+        .title("🏰 The House Cup")
+        .description(text)
+        .colour(0xC9A227)
+        .footer(CreateEmbedFooter::new("Midlyf Crisis India - House Cup"));
+    let message = CreateMessage::new().embed(embed).allowed_mentions(CreateAllowedMentions::new().users(vec![member.user.id]));
+    if let Err(err) = welcome.send_message(&ctx.http, message).await {
+        tracing::warn!("house: waiting card not posted: {}", err);
+    }
+}
+
 /// A new arrival gets sorted straight away, card and all. Someone who left and
 /// came back keeps the house they already had - their row outlives the leaving.
 pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
@@ -1715,13 +1754,20 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
         tracing::info!("house: {} came back, {} role restored", member.user.name, house.name);
         return;
     }
-    // `VIZIER_HOUSE_SORT_NEW` off leaves arrivals unsorted until a mod uses
-    // `/sort` or the next draft; a returner above still gets their house back.
-    if !sorting_open() || !super::control::on("VIZIER_HOUSE_SORT_NEW", true) {
+    if !sorting_open() {
         return;
     }
     if is_mod(ctx, member.guild_id, member).await {
         tracing::info!("house: {} is a mod, left unsorted", member.user.name);
+        return;
+    }
+    // `VIZIER_HOUSE_SORT_NEW` off leaves arrivals unsorted until a mod uses
+    // `/sort` or the next draft; a returner above still gets their house back.
+    // They get a card of their own instead of the hat's, so the wait is
+    // explained rather than silent.
+    if !super::control::on("VIZIER_HOUSE_SORT_NEW", true) {
+        waiting_card(ctx, member, welcome).await;
+        tracing::info!("house: {} left for a mod to sort", member.user.name);
         return;
     }
     // The card goes where the welcome just went. An arrival is a moment for
@@ -1733,6 +1779,18 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_waiting_card_names_the_member_the_rules_channel_and_who_sorts_them() {
+        let text = waiting_text(WAITING_TEXT, "<@7>", "Lucky", "<#99>");
+        assert!(text.contains("<@7>"), "it should ping them: {}", text);
+        assert!(text.contains("<#99>"), "it should point at the rules channel: {}", text);
+        assert!(text.to_lowercase().contains("a mod will give you one"), "it should say a mod sorts them: {}", text);
+        assert!(!text.contains('{'), "a placeholder was left behind: {}", text);
+        // A card written on the panel gets the same fill-ins, name included.
+        let custom = waiting_text("{name} ({mention}), read {games}.", "<@7>", "Lucky", "the game updates channel");
+        assert_eq!(custom, "Lucky (<@7>), read the game updates channel.");
+    }
 
     #[test]
     fn four_houses_each_with_a_crest_a_colour_and_verdicts() {
