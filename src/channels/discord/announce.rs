@@ -539,7 +539,28 @@ pub const NEWS: &[News] = &[News {
            • A game nobody solves still pays out: your scoring guesses count even when the board runs out of guesses.\n\
            • Solving the word still pays the solve on top.\n\n\
            Nothing you have to do differently - play as you were, and the points follow the guesses that actually helped.",
+}, News {
+    id: "sudoku-2026-09",
+    title: "🔢 Sudoku is here",
+    body: "A sudoku is now always waiting in {sudoku}, and solving it first scores for your house.\n\n           • Press **▶️ Play** on the puzzle card and the bot gives you a private link to fill the grid in - tap a \
+           square, tap a number.\n           • When it's full, press **Copy code** on the page, come back and press **📋 Submit code**.\n           • The first correct code wins: 🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6** points. A new puzzle appears \
+           the moment one is solved.\n           • Stuck? **💡 Hint** fills one square and costs a point off that puzzle. Beaten to it? Your code still \
+           works for a day, so you can see whether you had it right.\n\n           `/sudokuhelp` explains the lot, `/sudoku` finds your puzzles again.",
 }];
+
+/// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`, `{npat}`
+/// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
+/// set, so a note never shows a broken link.
+pub fn fill_channels(body: &str) -> String {
+    let mention = |key: &str, name: &str| match super::control::id(key).filter(|id| *id != 0) {
+        Some(id) => format!("<#{}>", id),
+        None => format!("**{}**", name),
+    };
+    body.replace("{sudoku}", &mention("VIZIER_SUDOKU_CHANNEL", "the sudoku channel"))
+        .replace("{chess}", &mention("VIZIER_CHESS_CHANNEL", "the chess channel"))
+        .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
+        .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
+}
 
 /// The oldest note nobody has been told about yet.
 pub fn next_news(done: &[String]) -> Option<&'static News> {
@@ -734,7 +755,7 @@ async fn news(ctx: &Context, channels: &[u64]) -> bool {
     let Some(entry) = next_news(&done) else {
         return false;
     };
-    let post = Post::new(entry.title, entry.body);
+    let post = Post::new(entry.title, &fill_channels(entry.body));
     let said = deliver(ctx, channels, &post, 0).await;
     // Recorded either way: a note nobody could be told is still yesterday's news.
     done.push(entry.id.to_string());
@@ -1053,6 +1074,7 @@ mod tests {
 
     #[test]
     fn a_release_note_is_posted_once() {
+        assert_eq!(fill_channels("play in {sudoku}"), "play in **the sudoku channel**", "no channel set in tests");
         let first = next_news(&[]).expect("a seeded note");
         assert_eq!(first.id, NEWS[0].id);
         let done: Vec<String> = NEWS.iter().map(|n| n.id.to_string()).collect();
