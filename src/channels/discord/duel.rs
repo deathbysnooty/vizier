@@ -123,7 +123,7 @@ fn max_players() -> usize {
 }
 
 fn turn_secs() -> i64 {
-    control::number("VIZIER_DUEL_TURN_SECS", 90).clamp(20, 3600) as i64
+    control::number("VIZIER_DUEL_TURN_SECS", 240).clamp(20, 3600) as i64
 }
 
 fn win_points() -> i64 {
@@ -1839,8 +1839,11 @@ fn beat(now: i64, last_beat: &mut i64) {
 /// Everything the private page draws, for ONE player. Nobody else's rack is in
 /// here, and neither is anything else of theirs but their name.
 pub fn state_json(game: &Game, me: u64, name: impl Fn(u64) -> String, now: i64) -> Value {
-    let seat = game.seat_of(me).unwrap_or(0);
-    let mine = game.player(seat);
+    // Someone with no seat in this game is shown the board and nothing else.
+    // This used to fall back to seat 0, which handed them the first player's
+    // rack and told them it was their turn whenever it was seat 0's.
+    let seat = game.seat_of(me);
+    let mine = seat.and_then(|s| game.player(s));
     let turn = with_db(|conn| store::last_turn(conn, game.id)).flatten();
     let seats: Vec<Value> = game
         .players
@@ -1867,7 +1870,7 @@ pub fn state_json(game: &Game, me: u64, name: impl Fn(u64) -> String, now: i64) 
         "size": rules::SIZE,
         "centre": rules::CENTRE,
         "rack": mine.map(|p| p.rack.clone()).unwrap_or_default(),
-        "your_turn": game.turn == seat && mine.is_some_and(|p| !p.dropped),
+        "your_turn": seat == Some(game.turn) && mine.is_some_and(|p| !p.dropped),
         "dropped": mine.is_some_and(|p| p.dropped),
         "seats": seats,
         "bag": game.bag_left(),
