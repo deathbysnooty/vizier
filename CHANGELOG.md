@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.49] - 2026-09-17
+
+### 💼 Other
+
+- Messages stop paying points, and the note that says why
 ## [0.11.48] - 2026-09-17
 
 ### 🚀 Features
 
 - Automatic moderation — delete spam, only ever flag suspected AI writing
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.48
 ## [0.11.47] - 2026-09-17
 
 ### ⚙️ Miscellaneous Tasks
