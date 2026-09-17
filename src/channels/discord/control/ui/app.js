@@ -562,6 +562,7 @@
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/search', icon('search'), 'Search messages'),
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
+      navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
@@ -610,6 +611,8 @@
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
+      ['Moderation', '#/automod', 'shield', 'Spam the bot removed, and messages it has asked a moderator to look at'],
+      ['Possibly AI flags', '#/automod?kind=ai', 'bot', 'Messages that might have been written by an AI — flagged only, never deleted'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
       ['Scorers today', '#/houses/scorers', 'zap', 'Today’s points and daily limits'],
       ['Commands', '#/commands', 'slash', 'Every slash command'],
@@ -750,6 +753,7 @@
       case 'search': renderSearch(page, r.q); break;
       case 'deleted': renderDeleted(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
+      case 'automod': renderAutomod(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
     }
@@ -2088,6 +2092,245 @@
     if (day === istDay(Date.now())) return 'today';
     if (day === istDay(Date.now() - 86400000)) return 'yesterday';
     return 'on ' + dayMonth(ts);
+  }
+
+  // --- moderation ---------------------------------------------------------------------
+
+  const MOD_PERIODS = [['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['all', 'All']];
+  const MOD_KINDS = [['', 'Everything'], ['spam', 'Spam'], ['ai', 'Possibly AI']];
+  const MOD_OUTCOMES = [['', 'Any'], ['deleted', 'Deleted'], ['dismissed', 'Said not AI'], ['untouched', 'Nothing done']];
+
+  const MOD_OUTCOME_WORDS = {
+    deleted: 'deleted',
+    dismissed: 'a mod said this was wrong',
+    untouched: 'nobody has decided',
+  };
+
+  function renderAutomod(page, rq) {
+    document.title = 'Moderation · Loduchand';
+    const days = rq.get('days'), kind = rq.get('kind') || '', outcome = rq.get('outcome') || '';
+    const st = {
+      days: MOD_PERIODS.some((x) => x[0] === days) ? days : '30',
+      kind: MOD_KINDS.some((x) => x[0] === kind) ? kind : '',
+      outcome: MOD_OUTCOMES.some((x) => x[0] === outcome) ? outcome : '',
+      member: (rq.get('member') || '').replace(/\D/g, '').slice(0, 20),
+    };
+    const hashFor = (over) => {
+      const s = Object.assign({}, st, over || {});
+      const p = new URLSearchParams();
+      if (s.days !== '30') p.set('days', s.days);
+      if (s.kind) p.set('kind', s.kind);
+      if (s.outcome) p.set('outcome', s.outcome);
+      if (s.member) p.set('member', s.member);
+      const qs = p.toString();
+      return '#/automod' + (qs ? '?' + qs : '');
+    };
+    const apply = (over) => navigate(hashFor(over));
+
+    page.appendChild(pageHead('Moderation', 'What the bot removed by itself, and what it has asked a moderator to look at.',
+      sectionById('automod') ? h('a', { class: 'btn', href: '#/s/automod', 'aria-label': 'Moderation settings' }, icon('sliders'), h('span', { class: 'hide-sm' }, 'Settings')) : null));
+
+    // The rule, said plainly, above everything else on the page.
+    page.appendChild(h('div', { class: 'banner info inline automod-rule', role: 'note' }, icon('shield'),
+      h('p', null, h('b', null, 'Spam is deleted. A suspicion of AI writing never is. '),
+        h('span', null, 'There is no reliable way to tell whether a person or a machine wrote something, and detectors are wrong most often about people writing English as a second language. An AI flag only ever asks a moderator to look; no setting changes that.'))));
+
+    const headline = h('div', { class: 'automod-headline' });
+    page.appendChild(headline);
+
+    const switches = h('div', { class: 'automod-state' });
+    page.appendChild(switches);
+
+    const memberBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Member' });
+    const drawMember = (m) => {
+      clear(memberBtn);
+      append(memberBtn, [st.member && m ? avatar(m.avatar, m.name, 'xs') : icon(st.member ? 'user' : 'users'),
+        h('span', { class: 'value' + (st.member ? '' : ' placeholder') }, st.member ? (m ? m.name : 'Member ' + st.member) : 'Any member'), icon('chevron')]);
+    };
+    drawMember(null);
+    if (st.member) memberById(st.member).then((m) => { if (memberBtn.isConnected) drawMember(m); });
+    memberBtn.addEventListener('click', () => openPicker(memberBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180,
+      load: async (q) => (q ? [] : [{ id: '', label: 'Any member', lead: icon('users'), trail: !st.member ? icon('check', 'check-mark') : null }]).concat(await memberItems(q)),
+      onPick: (it) => apply({ member: it.id }) }));
+
+    page.appendChild(h('div', { class: 'card msg-search automod-filters' },
+      h('div', { class: 'msg-search-filters' },
+        segmented(MOD_KINDS, st.kind, 'Kind', (v) => apply({ kind: v })),
+        memberBtn,
+        segmented(MOD_OUTCOMES, st.outcome, 'What happened', (v) => apply({ outcome: v })),
+        segmented(MOD_PERIODS, st.days, 'Period', (v) => apply({ days: v })))));
+
+    const summary = h('div', { class: 'msg-summary', 'aria-live': 'polite' });
+    const list = h('div', { class: 'msg-list' });
+    const foot = h('div', { class: 'msg-foot' });
+    const box = h('div', { class: 'card msg-results automod-results' }, list, foot);
+    page.appendChild(summary);
+    page.appendChild(box);
+    const people = h('div', { class: 'automod-people' });
+    page.appendChild(people);
+
+    let items = [], next = null, last = null, busy = false, failed = null, failedStatus = 0;
+    const periodWords = () => st.days === 'all' ? 'since the bot started watching' : 'in the last ' + st.days + ' days';
+    const filterWords = () => {
+      const bits = [];
+      if (st.kind) bits.push(st.kind === 'ai' ? 'possibly AI' : 'spam');
+      if (st.member) { const m = S.members.get(st.member); bits.push('from ' + (m ? m.name : 'that member')); }
+      if (st.outcome) bits.push(MOD_OUTCOME_WORDS[st.outcome]);
+      return bits.length ? ' (' + bits.join(', ') + ')' : '';
+    };
+
+    const drawHeadline = () => {
+      clear(headline);
+      if (!last) return;
+      const n = last.not_ai || {};
+      const judged = n.decided || 0;
+      const card = h('div', { class: 'automod-wrong' + (judged && n.pct >= 25 ? ' bad' : '') });
+      if (!judged) {
+        append(card, [h('span', { class: 'automod-wrong-num' }, '—'),
+          h('div', null, h('b', null, 'No AI flag has been judged yet.'),
+            h('span', null, 'Until a moderator presses Not AI or Delete it on one, this feature has no measured accuracy at all — and a zero here would be flattering it.'))]);
+      } else {
+        append(card, [h('span', { class: 'automod-wrong-num' }, Math.round(n.pct) + '%'),
+          h('div', null, h('b', null, 'Moderators said “not AI” on ' + n.dismissed + ' of the ' + plural(judged, 'flag') + ' they judged.'),
+            h('span', null, 'This is the only honest measure of whether the AI half is worth keeping. If it stays high, switch it off.'))]);
+      }
+      headline.appendChild(card);
+      const t = last.totals || {};
+      headline.appendChild(h('div', { class: 'automod-tiles' },
+        h('div', { class: 'automod-tile' }, h('b', null, numberFmt.format(t.spam || 0)), h('span', null, 'spam removals')),
+        h('div', { class: 'automod-tile' }, h('b', null, numberFmt.format(t.ai || 0)), h('span', null, 'AI flags')),
+        h('div', { class: 'automod-tile' }, h('b', null, numberFmt.format(t.untouched || 0)), h('span', null, 'still waiting on a mod'))));
+    };
+
+    const drawState = () => {
+      clear(switches);
+      if (!last) return;
+      const chip = (on, label, why) => h('span', { class: 'automod-chip' + (on ? ' on' : ''), title: why }, icon(on ? 'check' : 'pause'), label + (on ? ' on' : ' off'));
+      if (!last.enabled) {
+        switches.appendChild(h('div', { class: 'banner inline', role: 'status' }, icon('pause'),
+          h('p', null, h('b', null, 'Moderation is switched off. '), h('span', null, 'Nothing is being watched, removed or flagged.')),
+          sectionById('automod') ? h('a', { class: 'btn sm', href: '#/s/automod' }, 'Settings') : null));
+        return;
+      }
+      append(switches, [chip(last.spam_on, 'Deleting spam', 'The objective rules that remove messages'),
+        chip(last.ai_on, 'Flagging AI', 'Puts long messages in front of a moderator; never deletes'),
+        h('span', { class: 'automod-chip quiet', title: 'How high the free score has to be before a moderator is asked' }, icon('target'), 'flags at ' + (last.threshold || 0)),
+        h('span', { class: 'automod-chip quiet', title: 'After this the words are cleared; the record of what happened stays' }, icon('clock'), 'text kept ' + plural(last.keep_days || 30, 'day'))]);
+    };
+
+    const drawPeople = () => {
+      clear(people);
+      if (!last || !(last.by_member || []).length) return;
+      const rows = last.by_member.map((m) => h('li', null,
+        h('a', { class: 'inline-ref', href: '#/members/' + m.member.id }, avatar(m.member.avatar, m.member.name, 'xs'), m.member.name),
+        h('span', { class: 'grow' }),
+        m.spam ? h('span', { class: 'badge' }, plural(m.spam, 'spam removal') ) : null,
+        m.ai ? h('span', { class: 'badge' }, plural(m.ai, 'AI flag')) : null,
+        m.dismissed ? h('span', { class: 'badge good', title: 'A moderator said the flag was wrong' }, m.dismissed + ' wrong') : null));
+      people.appendChild(card('automod-people', 'Who has been flagged', 'Counted ' + periodWords() + '. A row here is not a verdict about anybody.', h('ul', { class: 'pins' }, rows)));
+    };
+
+    const draw = () => {
+      clear(summary); clear(list); clear(foot);
+      box.classList.toggle('is-empty', !items.length);
+      drawHeadline();
+      drawState();
+      drawPeople();
+      if (!items.length && busy) { list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); foot.hidden = true; return; }
+      if (failed && !items.length) {
+        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the moderation log'), h('p', null, failed),
+          failedStatus === 0 || failedStatus >= 500 ? h('p', { style: 'margin-top:12px' }, h('button', { class: 'btn', type: 'button', onclick: () => load() }, icon('restart'), 'Try again')) : null));
+        foot.hidden = true;
+        return;
+      }
+      summary.appendChild(h('span', null, h('b', null, numberFmt.format(items.length) + ' ' + plural(items.length, 'flag').replace(/^\d+\s/, '')), next ? ' so far' : '', ' ' + periodWords() + filterWords()));
+      if (!items.length) {
+        const filtered = st.kind || st.member || st.outcome;
+        list.appendChild(h('div', { class: 'empty' }, icon('shield'), h('h3', null, 'Nothing flagged'),
+          h('p', null, 'Nothing was removed or questioned ' + periodWords() + filterWords() + '.'),
+          filtered ? h('p', { class: 'hint' }, h('a', { href: hashFor({ kind: '', member: '', outcome: '' }) }, 'Clear the filters')) : null));
+      }
+      items.forEach((r) => list.appendChild(flagRow(r)));
+      foot.hidden = !items.length;
+      if (failed) foot.appendChild(h('span', { class: 'msg-foot-error' }, icon('alert'), failed));
+      if (next) foot.appendChild(h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() }, busy ? h('span', { class: 'spinner' }) : icon('down'), 'Load more'));
+      else if (items.length) foot.appendChild(h('span', null, 'That’s everything ' + periodWords()));
+    };
+
+    const load = async () => {
+      if (busy) return;
+      busy = true; failed = null;
+      if (items.length) { const b = foot.querySelector('.btn'); if (b) { b.disabled = true; b.replaceChild(h('span', { class: 'spinner' }), b.firstChild); } } else draw();
+      const p = new URLSearchParams({ days: st.days });
+      if (st.kind) p.set('kind', st.kind);
+      if (st.member) p.set('member', st.member);
+      if (st.outcome) p.set('outcome', st.outcome);
+      if (next) p.set('before', String(next));
+      try {
+        const data = await api('GET', '/automod?' + p.toString());
+        if (!box.isConnected) return;
+        if (data.member && data.member.name && !S.members.has(data.member.id)) S.members.set(data.member.id, { id: data.member.id, name: data.member.name });
+        items = items.concat(data.results);
+        next = data.next_before;
+        last = data;
+      } catch (e) {
+        if (!box.isConnected) return;
+        failed = e.message;
+        failedStatus = e.status || 0;
+      }
+      busy = false;
+      draw();
+      refreshAudit();
+    };
+    load();
+  }
+
+  function flagRow(r) {
+    const ai = r.kind === 'ai';
+    const m = r.member || {};
+    const href = '#/members/' + m.id;
+    const badge = ai
+      ? h('span', { class: 'badge automod-kind ai', title: 'Only flagged for a human. Nothing was deleted for this.' }, icon('bot'), 'possibly AI')
+      : h('span', { class: 'badge automod-kind spam', title: 'An objective rule. These messages were removed.' }, icon('trash'), 'spam');
+    const outcome = h('span', { class: 'badge automod-outcome ' + r.outcome, title: ai && r.outcome === 'dismissed' ? 'Counted against this feature' : null },
+      MOD_OUTCOME_WORDS[r.outcome] || r.outcome,
+      r.decided_by ? h('small', null, ' · ' + r.decided_by.name) : null);
+
+    const facts = [h('span', null, r.rule_label)];
+    if (r.messages > 1) facts.push(h('span', null, plural(r.messages, 'message') + ' removed'));
+    if (ai && r.score !== null && r.score !== undefined) facts.push(h('span', null, 'score ' + r.score.toFixed(2)));
+    if (ai && !r.had_baseline) facts.push(h('span', { class: 'quiet', title: 'The bot had not seen enough of their writing to compare this with their usual style' }, 'no style baseline'));
+    const line = h('p', { class: 'msglog-times' });
+    const when = new Date(r.ts * 1000);
+    append(line, h('time', { datetime: when.toISOString(), title: fmtFull.format(when) + ' IST' }, msgWhen(r.ts)));
+    facts.forEach((f) => { append(line, h('span', { class: 'sep', 'aria-hidden': 'true' }, ' · ')); append(line, f); });
+
+    const reasons = (r.reasons || []).length
+      ? h('ul', { class: 'automod-reasons' }, r.reasons.map((why) => h('li', null, why)))
+      : null;
+    const model = r.model
+      ? h('p', { class: 'automod-model' }, icon('bot'),
+          h('span', null, r.model.unjudgeable
+            ? r.model.name + ' said this text can’t be judged either way'
+            : r.model.name + ' was ' + r.model.confidence.toFixed(2) + ' sure' + (r.model.reasons ? ' — ' + r.model.reasons : '')))
+      : (ai ? h('p', { class: 'automod-model quiet' }, icon('bot'), h('span', null, 'no second opinion was asked for')) : null);
+
+    const body = r.text_cleared
+      ? h('p', { class: 'msglog-missing' }, icon('info'), 'The words were cleared when this got old. What happened is still on the record.')
+      : (r.text ? longText(r.text, 'msg-hit-text') : h('p', { class: 'msglog-missing' }, '(no text)'));
+
+    return h('article', { class: 'msg-hit automod-row' + (ai ? ' is-ai' : '') },
+      h('a', { class: 'msg-hit-avatar', href, tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.avatar, m.name, 'lg')),
+      h('div', { class: 'msg-hit-main' },
+        h('div', { class: 'msg-hit-head' },
+          h('a', { class: 'msg-hit-name', href }, m.name),
+          badge,
+          h('span', { class: 'msg-hit-chan' }, h('span', { class: 'glyph' }, '#'), (r.channel || {}).name),
+          outcome),
+        line, body, reasons, model),
+      h('div', { class: 'msg-hit-actions' }, r.url
+        ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open the conversation in Discord', title: 'Opens where it happened; a deleted message is gone' }, h('span', { class: 'hide-sm' }, 'In Discord'), h('span', { class: 'show-sm' }, 'Open'), icon('external'))
+        : null));
   }
 
   // --- panel settings ---------------------------------------------------------------

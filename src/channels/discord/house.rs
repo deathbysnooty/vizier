@@ -1678,9 +1678,13 @@ async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
 /// The same test against a role map fetched once. The draft walks hundreds of
 /// members and must not ask Discord for the role list each time.
 fn is_mod_with(roles: &HashMap<RoleId, serenity::all::Role>, member: &Member) -> bool {
-    if super::admin_ids().contains(&member.user.id.get()) {
-        return true;
-    }
+    super::admin_ids().contains(&member.user.id.get()) || has_mod_powers(roles, &member.roles)
+}
+
+/// Whether any of these roles can moderate. Split out so automatic moderation,
+/// which only ever sees the role ids on a gateway event, can ask the same
+/// question without a `Member` and without calling Discord.
+pub(super) fn has_mod_powers(roles: &HashMap<RoleId, serenity::all::Role>, worn: &[RoleId]) -> bool {
     let powers = Permissions::ADMINISTRATOR
         | Permissions::MANAGE_GUILD
         | Permissions::MANAGE_ROLES
@@ -1688,7 +1692,7 @@ fn is_mod_with(roles: &HashMap<RoleId, serenity::all::Role>, member: &Member) ->
         | Permissions::KICK_MEMBERS
         | Permissions::BAN_MEMBERS
         | Permissions::MODERATE_MEMBERS;
-    member.roles.iter().any(|id| roles.get(id).is_some_and(|role| role.permissions.intersects(powers)))
+    worn.iter().any(|id| roles.get(id).is_some_and(|role| role.permissions.intersects(powers)))
 }
 
 /// What a newcomer sees when the hat is off duty: the house games exist, the

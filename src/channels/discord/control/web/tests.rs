@@ -383,6 +383,19 @@ impl PanelData for FakeData {
         super::super::super::msglog::deleted_file(store.conn(), store.root(), message, n)
     }
 
+    // Automatic moderation reads its own store, which `store()` seeds.
+    async fn automod_flags(&self, filter: super::super::super::automod_store::ListFilter) -> Option<super::super::super::automod_store::Page> {
+        automod::read(move |conn| super::super::super::automod_store::list(conn, &filter).ok()).await.flatten()
+    }
+
+    async fn automod_totals(&self, since: i64) -> Option<super::super::super::automod_store::Totals> {
+        automod::read(move |conn| super::super::super::automod_store::totals(conn, since).ok()).await.flatten()
+    }
+
+    async fn automod_by_member(&self, since: i64, limit: usize) -> Option<Vec<super::super::super::automod_store::MemberCount>> {
+        automod::read(move |conn| super::super::super::automod_store::by_member(conn, since, limit).ok()).await.flatten()
+    }
+
     fn member_house(&self, id: u64) -> Option<&'static super::super::super::house::House> {
         // Some of those who left still have their row in the house store.
         if (3000..3100).contains(&id) {
@@ -1175,8 +1188,62 @@ pub fn store() {
             }
         }
         super::super::super::chess_store::open(dir.path().to_str().unwrap()).expect("chess store");
+        // Automatic moderation, with a few flags to draw the Moderation page.
+        super::super::super::automod_store::start(dir.path().to_str().unwrap()).expect("automod store");
+        seed_automod();
         dir
     });
+}
+
+/// A spam removal, two AI flags (one of them dismissed by a moderator) and one
+/// old flag outside the shortest period.
+fn seed_automod() {
+    use super::super::super::automod_store::{Kind, ModelSay, NewFlag, Outcome, add_flag, db, decide};
+    let Some(store) = db() else { return };
+    let conn = store.lock();
+    let now = chrono::Utc::now().timestamp();
+    let flag = |kind: Kind, rule: &str, member: u64, name: &str, message: u64, ago: i64, text: &str| NewFlag {
+        kind,
+        rule: rule.into(),
+        member_id: member,
+        member_name: name.into(),
+        channel_id: 21,
+        channel_name: "general".into(),
+        guild_id: 900,
+        message_id: message,
+        ts: now - ago,
+        text: text.into(),
+        messages: 1,
+        score: None,
+        reasons: vec![],
+        model: None,
+        model_asked: false,
+        had_baseline: false,
+        outcome: Outcome::Untouched,
+    };
+    // Oldest first, as they really arrive.
+    let old = flag(Kind::Spam, "invite", MEMBER, "Rohan", 70_004, 60 * 86_400, "discord.gg/somewhere");
+    let _ = add_flag(&conn, &old);
+
+    let mut wrong = flag(Kind::Ai, "ai", 1005, "Arjun", 70_003, 9000, "Respected seniors, I would like to bring to your kind attention...");
+    wrong.score = Some(0.66);
+    wrong.reasons = vec!["no comparison with their usual writing: the bot hasn't seen enough of it yet".into()];
+    if let Ok(Some(id)) = add_flag(&conn, &wrong) {
+        let _ = decide(&conn, id, Outcome::Dismissed, ADMIN, now - 8000);
+    }
+
+    let mut ai = flag(Kind::Ai, "ai", 1004, "Zoya", 70_002, 7200, "Moreover, it is worth noting that this is a multifaceted issue.");
+    ai.score = Some(0.78);
+    ai.had_baseline = true;
+    ai.reasons = vec!["headings and a bulleted list — the shape of a document, not of chat".into()];
+    ai.model = Some(ModelSay { model: "google/gemini-2.5-flash-lite".into(), confidence: 0.66, reasons: "Uniform register.".into(), unjudgeable: false });
+    let _ = add_flag(&conn, &ai);
+
+    let mut spam = flag(Kind::Spam, "repeat", MEMBER, "Rohan", 70_001, 3600, "FREE NITRO claim yours before it's gone");
+    spam.messages = 3;
+    spam.outcome = Outcome::Deleted;
+    spam.reasons = vec!["The same message over and over — 3 near-identical messages in 47 seconds, across 3 channels".into()];
+    let _ = add_flag(&conn, &spam);
 }
 
 pub fn panel() -> Router {
@@ -3066,7 +3133,9 @@ async fn chocolate_frogs_round_trip() {
     let (status, _, _) = call(&app, "GET", "/api/frogs/sales", None, None, false).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=5", Some(&session), None, false).await;
+    // The whole log, not the last few: every test shares one store, so another
+    // one running alongside can easily push this entry past a short limit.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
     let last = audit.as_array().unwrap().iter().find(|e| e["key"] == format!("frog:trade:{}", gift.id)).cloned().expect("logged");
     assert_eq!(last["change"], "Cancelled the offer from Zoya to Arjun");
 }
@@ -3723,6 +3792,129 @@ async fn looks_at_who_left_are_in_the_activity_log_once() {
     let all = mine(&audit, None);
     assert_eq!(all.len(), 2);
     assert!(all.iter().any(|e| e["change"] == "all time · any name"), "{audit}");
+}
+
+// --- moderation flags ------------------------------------------------------------------
+
+async fn automod_api(app: &Router, session: &str, query: &str) -> (StatusCode, Value) {
+    let (status, body, _) = call(app, "GET", &format!("/api/automod?{}", query), Some(session), None, false).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn the_moderation_page_lists_flags_newest_first_with_what_a_mod_decided() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = automod_api(&app, &session, "days=30").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = body["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "the 60-day-old flag is outside the period: {body}");
+    assert!(rows[0]["ts"].as_i64() > rows[1]["ts"].as_i64(), "newest first");
+
+    let spam = rows.iter().find(|r| r["kind"] == "spam").expect("the spam row");
+    assert_eq!(spam["rule"], "repeat");
+    assert_eq!(spam["rule_label"], "The same message over and over");
+    assert_eq!(spam["outcome"], "deleted");
+    assert_eq!(spam["messages"], 3);
+    assert_eq!(spam["member"]["name"], "Rohan");
+    assert_eq!(spam["channel"]["name"], "general");
+    assert!(spam["text"].as_str().unwrap().contains("FREE NITRO"));
+    assert!(spam["url"].as_str().unwrap().ends_with("/900/21/70001"), "a jump link: {}", spam["url"]);
+    assert!(spam["score"].is_null(), "spam has no AI score");
+
+    let ai = rows.iter().find(|r| r["member"]["name"] == "Zoya").expect("the AI row");
+    assert_eq!(ai["kind"], "ai");
+    assert_eq!(ai["outcome"], "untouched", "an AI flag starts out with nothing done about it");
+    assert_eq!(ai["score"], 0.78);
+    assert_eq!(ai["had_baseline"], true);
+    assert_eq!(ai["model"]["name"], "google/gemini-2.5-flash-lite");
+    assert_eq!(ai["model"]["confidence"], 0.66);
+    assert!(ai["reasons"].as_array().unwrap()[0].as_str().unwrap().contains("shape of a document"));
+
+    let wrong = rows.iter().find(|r| r["member"]["name"] == "Arjun").expect("the dismissed row");
+    assert_eq!(wrong["outcome"], "dismissed");
+    assert_eq!(wrong["decided_by"]["name"], "Kabir");
+    assert_eq!(wrong["had_baseline"], false);
+
+    assert_eq!(body["keep_days"], 30);
+    assert_eq!(body["threshold"], 0.62);
+}
+
+#[tokio::test]
+async fn the_page_puts_the_not_ai_count_where_it_cannot_be_missed() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (_, body) = automod_api(&app, &session, "days=30").await;
+    // One AI flag judged wrong out of two judged... only one has been judged.
+    assert_eq!(body["not_ai"]["dismissed"], 1);
+    assert_eq!(body["not_ai"]["decided"], 1);
+    assert_eq!(body["not_ai"]["pct"], 100.0, "a mod said the only judged flag was wrong");
+    assert_eq!(body["totals"]["spam"], 1);
+    assert_eq!(body["totals"]["ai"], 2);
+    assert_eq!(body["totals"]["untouched"], 1);
+
+    // Per-member counts come with it.
+    let people = body["by_member"].as_array().unwrap();
+    assert!(people.iter().any(|p| p["member"]["name"] == "Rohan" && p["spam"] == 1));
+    assert!(people.iter().any(|p| p["member"]["name"] == "Arjun" && p["ai"] == 1 && p["dismissed"] == 1));
+}
+
+#[tokio::test]
+async fn the_moderation_filters_narrow_the_list() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let count = |b: &Value| b["results"].as_array().unwrap().len();
+
+    let (_, ai) = automod_api(&app, &session, "days=30&kind=ai").await;
+    assert_eq!(count(&ai), 2);
+    let (_, spam) = automod_api(&app, &session, "days=30&kind=spam").await;
+    assert_eq!(count(&spam), 1);
+    let (_, one) = automod_api(&app, &session, &format!("days=30&member={}", MEMBER)).await;
+    assert_eq!(count(&one), 1);
+    assert_eq!(one["member"]["name"], "Rohan");
+    let (_, dismissed) = automod_api(&app, &session, "days=30&outcome=dismissed").await;
+    assert_eq!(count(&dismissed), 1);
+    let (_, untouched) = automod_api(&app, &session, "days=30&outcome=untouched").await;
+    assert_eq!(count(&untouched), 1);
+    // All time reaches the old one; a page can be cut short and carried on.
+    let (_, all) = automod_api(&app, &session, "days=all").await;
+    assert_eq!(count(&all), 4);
+    let (_, first) = automod_api(&app, &session, "days=all&limit=2").await;
+    assert_eq!(count(&first), 2);
+    let carry = first["next_before"].as_i64().expect("another page");
+    let (_, second) = automod_api(&app, &session, &format!("days=all&limit=2&before={}", carry)).await;
+    assert_eq!(count(&second), 2);
+    assert!(second["next_before"].is_null(), "that was the last page");
+
+    // Nonsense is refused rather than quietly ignored.
+    for bad in ["days=5", "days=30&kind=maybe", "days=30&outcome=burned", "days=30&member=notanid"] {
+        let (status, _) = automod_api(&app, &session, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn the_moderation_page_is_admin_only_and_every_look_is_logged() {
+    let app = panel();
+    // A member with no session, and a member who isn't an admin.
+    let (status, _, _) = call(&app, "GET", "/api/automod?days=30", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = automod_api(&app, &session_for(MEMBER), "days=30").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let session = session_for(ADMIN_TWO);
+    let (status, _) = automod_api(&app, &session, "days=7&kind=ai").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["key"] == "automod:flags" && e["user_id"] == ADMIN_TWO.to_string())
+        .collect();
+    assert_eq!(mine.len(), 1, "{audit}");
+    assert_eq!(mine[0]["label"], "Looked at the moderation flags");
+    assert_eq!(mine[0]["change"], "last 7 days · possibly AI");
 }
 
 // --- the demo ----------------------------------------------------------------------------

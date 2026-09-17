@@ -1171,6 +1171,215 @@ pub fn sections() -> Vec<Section> {
             commands: vec![],
         },
         Section {
+            id: "automod",
+            title: "Moderation",
+            icon: "🚨",
+            about: "Two quite different things, and it matters which is which.\n\n\
+                    SPAM is objective - the same message over and over, twenty messages in four seconds, a mass \
+                    ping, an @everyone from someone who isn't a mod, an invite to another server, a wall of one \
+                    repeated character. That is counted, not guessed at, so those messages are deleted and one \
+                    entry goes to the moderation log saying who, which rule, where, what it said and a link to \
+                    the conversation. A whole flood is one entry, not twenty.\n\n\
+                    AI-WRITTEN TEXT is not objective, and this is the important part: there is NO reliable way to \
+                    tell whether a person or a machine wrote something. Every detector gets it wrong often, and it \
+                    gets it wrong hardest on people writing English as a second language - which is most of this \
+                    server. Careful, formal, correctly punctuated English written by someone who learned it at \
+                    school reads exactly like what a detector calls AI. So a suspicion here NEVER deletes anything \
+                    and never punishes anybody, and there is no setting that changes that: it posts a flag in the \
+                    log with the reasons in plain words, and a moderator decides with the buttons on it. Every time \
+                    a moderator presses Not AI that is counted, and the Moderation page shows how often they have - \
+                    which is the only honest measure of whether this half is worth keeping.\n\n\
+                    Only messages long enough to judge are scored at all, on free signals first (document-like \
+                    layout in chat, em dashes, essay vocabulary, unnaturally even sentences, and how far the \
+                    message is from how that member themselves normally writes). A cheap model is asked for a \
+                    second opinion only when that score is already high, never twice about the same message, and \
+                    never more than a set number of times an hour.\n\n\
+                    Nothing here ever touches moderators, bot admins, bots, DMs, #safe-corner, or the game \
+                    channels - anagram, guess-the-word, word-chain, sudoku, chess and Name Place Animal Thing - \
+                    where people fire the same short word off all day and a flood rule would eat the game. Those \
+                    are left alone whatever the exempt list says.",
+            settings: vec![
+                setting(
+                    "VIZIER_AUTOMOD",
+                    "Moderation on",
+                    "The master switch for both halves below. Off by default, so nothing starts watching until you \
+                     say so. While it is on, the bot also quietly learns how each member normally writes, which is \
+                     what the AI half compares against - so it is worth switching this on a while before that one.",
+                    Kind::Toggle,
+                    "off",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_SPAM",
+                    "Delete spam",
+                    "The objective rules below: repeats, floods, mass pings, invites and walls. These DO delete the \
+                     messages they catch and log what they did. Off by default.",
+                    Kind::Toggle,
+                    "off",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_AI",
+                    "Flag possibly AI-written messages",
+                    "Put long messages that might have been written by an AI in front of a moderator. This NEVER \
+                     deletes anything and never punishes anybody, whatever the score - only a moderator pressing \
+                     the button on the flag deletes. Off by default.",
+                    Kind::Toggle,
+                    "off",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_LOG_CHANNEL",
+                    "Moderation log",
+                    "Where spam removals and AI flags are posted. Keep it mods-only: it quotes what people wrote. \
+                     Empty means nothing is posted anywhere, and only the Moderation page shows what happened.",
+                    Kind::Channel,
+                    "1516779799865987101",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_EXEMPT_CHANNELS",
+                    "More channels to leave alone",
+                    "Extra channels no rule ever acts in. The game channels (anagram, guess-the-word, word-chain, \
+                     sudoku, chess, Name Place Animal Thing) and #safe-corner are always left alone and do not need \
+                     listing - this only adds to them. The quiz channel is worth adding if members type a lot of \
+                     repeated short answers there.",
+                    Kind::Channels,
+                    "",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_REPEAT_COUNT",
+                    "Repeats before it's spam",
+                    "How many near-identical messages from one member inside the window below count as spam - the \
+                     classic posting of the same thing in ten channels. All of them are deleted, not just the last. \
+                     Messages under 12 characters never count, because \"haan\", \"same\" and \"lol\" repeat \
+                     perfectly innocently. 0 switches this rule off.",
+                    number(0, 50, "messages"),
+                    "3",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_REPEAT_WINDOW_SECS",
+                    "Repeat window",
+                    "How far back the repeat rule looks. Repeats spread wider apart than this are not counted \
+                     together.",
+                    number(5, 3600, "seconds"),
+                    "60",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_BURST_COUNT",
+                    "Messages before it's a flood",
+                    "How many messages from one member inside the burst window count as a flood, whatever they say. \
+                     Keep it high enough that a fast typer having an argument is never caught - someone excited \
+                     can fire off six \"lol\"s in a few seconds and must not lose them. 0 switches this rule off.",
+                    number(0, 100, "messages"),
+                    "8",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_BURST_SECS",
+                    "Flood window",
+                    "The few seconds the flood rule counts over. Eight messages in five seconds is a paste or a \
+                     script, not typing.",
+                    number(1, 600, "seconds"),
+                    "5",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_MAX_MENTIONS",
+                    "Mentions before it's a mass ping",
+                    "How many different members and roles one message may ping before it is deleted. 0 switches this \
+                     rule off.",
+                    number(0, 50, "mentions"),
+                    "6",
+                ),
+                toggle(
+                    "VIZIER_AUTOMOD_EVERYONE",
+                    "Delete @everyone from non-mods",
+                    "Delete a message from someone who isn't a moderator that says @everyone or @here. Whether \
+                     Discord actually let the ping through doesn't matter: typing it is the same act.",
+                ),
+                toggle(
+                    "VIZIER_AUTOMOD_INVITES",
+                    "Delete invites to other servers",
+                    "Delete discord.gg and discord.com/invite links posted by anyone who isn't a moderator. Talking \
+                     about invites without posting one is left alone.",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_WALL_CHARS",
+                    "Wall length",
+                    "How long a message has to be before it can count as a wall of one repeated character or word. \
+                     An ordinary long message is never a wall - it is the repetition that makes one. 0 switches this \
+                     rule off.",
+                    number(0, 4000, "characters"),
+                    "400",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_WALL_PCT",
+                    "Wall sameness",
+                    "How much of that message has to be the same character (or the same short word) for it to count \
+                     as a wall.",
+                    number(10, 100, "%"),
+                    "70",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_QUIET_SECS",
+                    "One log entry per member every",
+                    "After an entry about a member, messages caught in the next stretch are still deleted but don't \
+                     each get their own post - so one flood is one entry in the log instead of twenty.",
+                    number(0, 3600, "seconds"),
+                    "60",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_AI_MIN_CHARS",
+                    "Shortest message judged",
+                    "Messages shorter than this are never scored for AI writing at all. Short text carries no \
+                     evidence either way, and pretending otherwise is how detectors end up accusing people who \
+                     simply write briefly.",
+                    number(120, 4000, "characters"),
+                    "280",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_AI_THRESHOLD",
+                    "Flag at",
+                    "How high the free score has to be before a message is put in front of a moderator, from 0 to 1. \
+                     At least two different kinds of signal must agree as well, so one em dash never flags anybody. \
+                     Lower means more flags and more of them wrong; the Moderation page shows how often moderators \
+                     said so.",
+                    Kind::Decimal { min: 0.2, max: 1.0, unit: "" },
+                    "0.62",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_MODEL",
+                    "Second-opinion model",
+                    "The model asked to look again at a message that already crossed the threshold, on the bot's own \
+                     provider. It is given the message, samples of that member's own normal writing, and a rubric \
+                     telling it plainly that second-language English is not evidence and short text cannot be \
+                     judged. Type agent to use the bot's usual model, or none to skip the second opinion entirely.",
+                    Kind::Text,
+                    "google/gemini-2.5-flash-lite",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_AI_MAX_HOUR",
+                    "Second opinions an hour",
+                    "The most times an hour the model is asked, so a bad day can't run up a bill. Past it, flags \
+                     still go up with the free signals alone and say the model wasn't asked. The same message is \
+                     never sent twice.",
+                    number(0, 10_000, "calls"),
+                    "30",
+                ),
+                setting(
+                    "VIZIER_AUTOMOD_KEEP_DAYS",
+                    "Keep flagged text for",
+                    "How long the words of a flagged message are kept. After this the text is cleared but the row \
+                     stays, so what the feature did - and how often a moderator said it was wrong - is never lost.",
+                    number(1, 365, "days"),
+                    "30",
+                ),
+            ],
+            commands: vec![command(
+                "🗑️ Delete it · ✅ Not AI · 👤 This member's flags",
+                ADMINS,
+                "Buttons under a flag in the moderation log",
+                "Delete it removes the message and records that a human decided to; Not AI dismisses the flag and \
+                 records that this feature got it wrong, which is counted on the Moderation page; This member's \
+                 flags shows their last ten, privately. Only moderators can press them.",
+            )],
+        },
+        Section {
             id: "announce",
             title: "Announcements",
             icon: "📣",

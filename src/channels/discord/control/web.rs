@@ -266,6 +266,18 @@ pub trait PanelData: Send + Sync + 'static {
     async fn msglog_file(&self, _message: u64, _n: usize) -> Option<(Vec<u8>, &'static str)> {
         None
     }
+    /// Automatic moderation's flags, a page at a time.
+    async fn automod_flags(&self, _filter: super::super::automod_store::ListFilter) -> Option<super::super::automod_store::Page> {
+        None
+    }
+    /// The counts over a period, the "not AI" one included.
+    async fn automod_totals(&self, _since: i64) -> Option<super::super::automod_store::Totals> {
+        None
+    }
+    /// Who has been flagged over a period, most flags first.
+    async fn automod_by_member(&self, _since: i64, _limit: usize) -> Option<Vec<super::super::automod_store::MemberCount>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -278,6 +290,7 @@ pub struct EmojiInfo {
 
 mod agent;
 mod arena;
+mod automod;
 mod chess;
 mod frogs;
 mod houses;
@@ -574,6 +587,18 @@ impl PanelData for LiveData {
     async fn msglog_file(&self, message: u64, n: usize) -> Option<(Vec<u8>, &'static str)> {
         let reader = super::super::msglog::reader()?;
         tokio::task::spawn_blocking(move || super::super::msglog::deleted_file(&reader.conn.lock(), &reader.root, message, n)).await.ok().flatten()
+    }
+
+    async fn automod_flags(&self, filter: super::super::automod_store::ListFilter) -> Option<super::super::automod_store::Page> {
+        automod::read(move |conn| super::super::automod_store::list(conn, &filter).ok()).await.flatten()
+    }
+
+    async fn automod_totals(&self, since: i64) -> Option<super::super::automod_store::Totals> {
+        automod::read(move |conn| super::super::automod_store::totals(conn, since).ok()).await.flatten()
+    }
+
+    async fn automod_by_member(&self, since: i64, limit: usize) -> Option<Vec<super::super::automod_store::MemberCount>> {
+        automod::read(move |conn| super::super::automod_store::by_member(conn, since, limit).ok()).await.flatten()
     }
 
     fn thread_parent(&self, channel: u64) -> Option<u64> {
@@ -951,6 +976,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/msglog/deleted", get(msglog::deleted))
         .route("/msglog/edited", get(msglog::edited))
         .route("/msglog/file/{id}/{n}", get(msglog::file))
+        .route("/automod", get(automod::list))
         .route("/members", get(members::search))
         .route("/members/left", get(left::list))
         .route("/members/notes", get(members::noted))
@@ -1682,6 +1708,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(msglog::audit_entry(e));
             } else if e.key == "members:left" {
                 obj.extend(left::audit_entry(e));
+            } else if e.key == "automod:flags" {
+                obj.extend(automod::audit_entry(e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("battle:now:") {

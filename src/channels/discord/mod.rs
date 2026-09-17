@@ -28,6 +28,8 @@ use crate::transport::VizierTransport;
 use crate::utils::remove_think_tags;
 
 mod announce;
+mod automod;
+mod automod_store;
 mod awards;
 mod battle;
 mod battle_bracket;
@@ -148,6 +150,11 @@ impl VizierChannel for DiscordChannelReader {
         // Deleted and edited messages for the panel. Not opening only means no log.
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
             tracing::warn!("msglog: store not opened: {}", err);
+        }
+        // Automatic moderation: spam removals and AI flags. Not opening only
+        // means the feature stays off, which is also what it defaults to.
+        if let Err(err) = automod::start(&self.deps.config.workspace) {
+            tracing::warn!("automod: store not opened: {}", err);
         }
 
         let intents = GatewayIntents::all();
@@ -1685,6 +1692,10 @@ impl EventHandler for Handler {
                 weekly::on_component(&ctx, component).await;
                 return;
             }
+            if id.starts_with("automod:") {
+                automod::on_component(&ctx, component).await;
+                return;
+            }
             if id.starts_with("battle") || id.starts_with("fight") {
                 battle::on_component(&ctx, component).await;
                 return;
@@ -3020,6 +3031,11 @@ impl EventHandler for Handler {
         // and notes bots' message ids so their deletions aren't logged. First,
         // before anything can return, and before the allowlist. Queued, never blocks.
         msglog::on_message(&ctx, &msg);
+        // Automatic moderation: spam is removed, and a message that might have
+        // been written by an AI is put in front of a moderator - never deleted
+        // for that reason, whatever any setting says. Before the allowlist,
+        // since spam lands wherever it likes. Cheap, and never blocks.
+        automod::on_message(&ctx, &msg);
         // Koto, Anagram and Cat Bot results pay house points; these come from bots.
         games::on_message(&ctx, &msg);
         // Anything new in the scoreboard channel - bots and announcements

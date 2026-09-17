@@ -2224,3 +2224,63 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .left-stats { gap: 5px; }
   .left-stat { font-size: 12px; padding: 2px 8px; }
 }
+
+/* --- moderation ------------------------------------------------------------ */
+
+.automod-rule p b { color: var(--text); }
+
+.automod-headline { display: grid; gap: var(--gap); grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); margin-bottom: var(--gap); }
+@media (max-width: 900px) { .automod-headline { grid-template-columns: 1fr; } }
+
+/* The "was wrong" figure. It is the point of the page, so it is the biggest
+   thing on it, and it turns amber rather than green when it climbs. */
+.automod-wrong {
+  display: flex; align-items: center; gap: 18px;
+  background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: var(--r-lg); padding: var(--pad-card); box-shadow: var(--shadow-sm);
+}
+.automod-wrong.bad { border-left-color: var(--warn); }
+.automod-wrong-num { font-size: 40px; font-weight: 700; line-height: 1; color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.automod-wrong.bad .automod-wrong-num { color: var(--warn); }
+.automod-wrong b { display: block; font-size: 15px; margin-bottom: 4px; }
+.automod-wrong span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
+.automod-tiles { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.automod-tile {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 12px 14px; display: flex; flex-direction: column; justify-content: center; min-width: 0;
+}
+.automod-tile b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.automod-tile span { color: var(--muted); font-size: 12px; }
+
+.automod-state { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: var(--gap); }
+.automod-state .banner { width: 100%; }
+.automod-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px;
+}
+.automod-chip.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.automod-chip svg { width: 14px; height: 14px; }
+
+.automod-filters .msg-search-filters { flex-wrap: wrap; }
+.automod-people { margin-top: var(--gap); }
+.automod-people .pins li { gap: 8px; }
+
+.automod-row.is-ai { border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); }
+.automod-kind { display: inline-flex; align-items: center; gap: 5px; }
+.automod-kind svg { width: 13px; height: 13px; }
+.automod-kind.spam { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.automod-kind.ai { color: var(--accent-text); border-color: var(--accent-line); }
+.automod-outcome { margin-left: auto; }
+.automod-outcome.deleted { color: var(--danger); }
+.automod-outcome.dismissed { color: var(--ok); }
+.automod-outcome.untouched { color: var(--warn); }
+.automod-outcome small { color: var(--faint); }
+.badge.good { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+
+.automod-reasons { margin: 8px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.6; }
+.automod-reasons li { margin: 2px 0; }
+.automod-model { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; color: var(--text-2); font-size: 13px; }
+.automod-model.quiet { color: var(--faint); }
+.automod-model svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.msglog-times .quiet { color: var(--faint); }
