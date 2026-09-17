@@ -576,8 +576,8 @@ pub const NEWS: &[News] = &[News {
     body: "Challenge anyone to a game of chess in {chess}.\n\n           • `/chess @someone` sends a challenge; they press **Accept**. Pick **casual** (hours per move) or \
            **live** (play it out there and then).\n           • Press **♟️ Open board** for your own board - tap a piece, tap where it goes - or **✍️ Type move** \
            if you prefer `e4`, `Nf3`, `O-O`.\n           • The card in the channel shows the board after every move, so everyone can follow along, and **👀 Watch** \
-           opens a live board for anyone. Finished games can be replayed.\n           • Beat someone from **another house** for **4** points; a draw pays **1** each (up to 8 a day). Games \
-           against your own house are just for the fun of it.\n\n           `/chesshelp` explains everything, `/chess` on its own lists your games.",
+           opens a live board for anyone. Finished games can be replayed.\n           • Winning scores **chess points** — the game's own score, which has no daily limit and is nothing to do \
+           with the House Cup. Whichever houses you are both in.\n\n           `/chesshelp` explains everything, `/chess` on its own lists your games, `/chesstop` is the board.",
 }, News {
     id: "anagrams-2026-09",
     title: "🔀 Anagrams is here",

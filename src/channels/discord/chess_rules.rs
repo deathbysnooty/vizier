@@ -470,7 +470,7 @@ pub fn move_list(sans: &[String], width: usize, max_lines: usize) -> String {
 /// What a finished game is worth, before the ledger's own cap and rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Payout {
-    /// House points for white and for black.
+    /// Chess points for white and for black.
     pub white: i64,
     pub black: i64,
     /// Why nothing is paid, for the result card. Empty when it does pay.
@@ -494,27 +494,17 @@ pub enum Result_ {
     Cancelled,
 }
 
-/// What the two players earn.
+/// What the two players score.
 ///
-/// Only games across two different houses count for the House Cup - a game
-/// inside one house moves no points between houses, so it is played for fun.
-/// A resignation inside the first `min_plies` is worth nothing either, so two
-/// friends can't farm points by resigning at move two; a game lost on TIME does
-/// pay, however short, because the winner did nothing wrong.
-pub fn payout(
-    result: Result_,
-    by_resignation: bool,
-    plies: usize,
-    same_house: bool,
-    min_plies: usize,
-    win: i64,
-    draw: i64,
-) -> Payout {
+/// Chess points belong to the game, not to the House Cup, so who is in which
+/// house makes no difference here any more: two friends in one house play for
+/// the same score as anyone else. A resignation inside the first `min_plies` is
+/// still worth nothing, so two friends can't farm a board by resigning at move
+/// two; a game lost on TIME does score, however short, because the winner did
+/// nothing wrong.
+pub fn payout(result: Result_, by_resignation: bool, plies: usize, min_plies: usize, win: i64, draw: i64) -> Payout {
     if matches!(result, Result_::Cancelled) {
         return Payout { why_nothing: "the game was cancelled", ..Payout::NOTHING };
-    }
-    if same_house {
-        return Payout { why_nothing: "both players are in the same house", ..Payout::NOTHING };
     }
     if by_resignation && plies < min_plies {
         return Payout { why_nothing: "it was given up too early to count", ..Payout::NOTHING };
@@ -740,21 +730,19 @@ mod tests {
     }
 
     #[test]
-    fn only_games_across_houses_pay_and_a_quick_resignation_pays_nothing() {
-        let win = |same, plies, resigned| payout(Result_::Win { winner: Color::White }, resigned, plies, same, 10, 4, 1);
-        assert_eq!(win(false, 40, false), Payout { white: 4, black: 0, why_nothing: "" });
-        assert_eq!(win(false, 40, true), Payout { white: 4, black: 0, why_nothing: "" }, "a real game given up still pays");
-        assert!(!win(false, 6, true).pays());
-        assert_eq!(win(false, 6, true).why_nothing, "it was given up too early to count");
-        assert!(win(false, 6, false).pays(), "a six-ply MATE is a win, however silly");
-        assert!(!win(true, 40, false).pays());
-        assert_eq!(win(true, 40, false).why_nothing, "both players are in the same house");
+    fn every_real_game_scores_and_a_quick_resignation_scores_nothing() {
+        let win = |plies, resigned| payout(Result_::Win { winner: Color::White }, resigned, plies, 10, 4, 1);
+        assert_eq!(win(40, false), Payout { white: 4, black: 0, why_nothing: "" });
+        assert_eq!(win(40, true), Payout { white: 4, black: 0, why_nothing: "" }, "a real game given up still scores");
+        assert!(!win(6, true).pays());
+        assert_eq!(win(6, true).why_nothing, "it was given up too early to count");
+        assert!(win(6, false).pays(), "a six-ply MATE is a win, however silly");
 
-        let drawn = payout(Result_::Draw, false, 80, false, 10, 4, 1);
+        let drawn = payout(Result_::Draw, false, 80, 10, 4, 1);
         assert_eq!((drawn.white, drawn.black), (1, 1));
-        assert!(!payout(Result_::Draw, false, 80, true, 10, 4, 1).pays());
-        assert!(!payout(Result_::Cancelled, false, 80, false, 10, 4, 1).pays());
-        // A timeout is not a resignation, so even a short one pays.
-        assert!(payout(Result_::Win { winner: Color::Black }, false, 3, false, 10, 4, 1).pays());
+        assert!(!payout(Result_::Cancelled, false, 80, 10, 4, 1).pays());
+        assert_eq!(payout(Result_::Cancelled, false, 80, 10, 4, 1).why_nothing, "the game was cancelled");
+        // A timeout is not a resignation, so even a short one scores.
+        assert!(payout(Result_::Win { winner: Color::Black }, false, 3, 10, 4, 1).pays());
     }
 }

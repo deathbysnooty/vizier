@@ -37,6 +37,7 @@ pub const SCHEMA: &str = "
         per_move_secs INTEGER NOT NULL, started_at INTEGER NOT NULL, last_move_ts INTEGER NOT NULL,
         message_id INTEGER, result TEXT, winner INTEGER, by_resignation INTEGER NOT NULL DEFAULT 0,
         finished_at INTEGER, points_white INTEGER NOT NULL DEFAULT 0, points_black INTEGER NOT NULL DEFAULT 0,
+        worth_white INTEGER NOT NULL DEFAULT 0, worth_black INTEGER NOT NULL DEFAULT 0,
         paid_out INTEGER NOT NULL DEFAULT 0, why_nothing TEXT NOT NULL DEFAULT '',
         draw_offer INTEGER, draw_announced INTEGER NOT NULL DEFAULT 0, given_back INTEGER NOT NULL DEFAULT 0,
         nudged_white INTEGER NOT NULL DEFAULT 0, nudged_black INTEGER NOT NULL DEFAULT 0,
@@ -51,10 +52,24 @@ pub const SCHEMA: &str = "
         PRIMARY KEY (day, low, high));
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
-/// Columns added after the first build, for a database made before them.
+/// Columns added after the first build, for a database made before them. The
+/// game is live, so they go on with `ALTER TABLE`: nothing is ever rewritten or
+/// dropped under a running game.
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("games", "draw_announced", "INTEGER NOT NULL DEFAULT 0"),
     ("games", "given_back", "INTEGER NOT NULL DEFAULT 0"),
+    ("games", "worth_white", "INTEGER NOT NULL DEFAULT 0"),
+    ("games", "worth_black", "INTEGER NOT NULL DEFAULT 0"),
+];
+
+/// What the games played before chess points existed were worth. The only
+/// honest number for them is the one the ledger wrote at the time, so a settled
+/// game keeps exactly that and nothing is invented: a game the house-points cap
+/// had already swallowed stays at zero, because nobody recorded what it would
+/// have been. Run once, the moment each column is added.
+const BACKFILL_WORTH: &[(&str, &str)] = &[
+    ("worth_white", "UPDATE games SET worth_white = points_white WHERE paid_out = 1 AND worth_white = 0"),
+    ("worth_black", "UPDATE games SET worth_black = points_black WHERE paid_out = 1 AND worth_black = 0"),
 ];
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -65,8 +80,14 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             .query_map([], |r| r.get::<_, String>(1))?
             .flatten()
             .any(|name| name == *column);
-        if !has {
-            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, kind))?;
+        if has {
+            continue;
+        }
+        conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, kind))?;
+        for (which, sql) in BACKFILL_WORTH {
+            if which == column {
+                conn.execute_batch(sql)?;
+            }
         }
     }
     Ok(())
@@ -254,8 +275,15 @@ pub struct Game {
     pub winner: Option<u64>,
     pub by_resignation: bool,
     pub finished_at: Option<i64>,
+    /// The HOUSE points the ledger paid when chess still moved the House Cup.
+    /// Nothing is ever written here now; the rows that have it keep it.
     pub points_white: i64,
     pub points_black: i64,
+    /// The CHESS points the game was worth to each side: the win or draw value
+    /// as the settings had it, with no limit of any kind over it. Every finished
+    /// game scores these, whatever house either player is in.
+    pub worth_white: i64,
+    pub worth_black: i64,
     pub paid_out: bool,
     pub why_nothing: String,
     /// Who has a draw on offer that the other side hasn't answered.
@@ -305,7 +333,7 @@ fn split_moves(text: &str) -> Vec<String> {
 const GAME_COLUMNS: &str = "id, channel_id, white, black, white_house, black_house, fen, moves, status, time_control, \
      per_move_secs, started_at, last_move_ts, message_id, result, winner, by_resignation, finished_at, \
      points_white, points_black, paid_out, why_nothing, draw_offer, nudged_white, nudged_black, draw_announced, \
-     given_back";
+     given_back, worth_white, worth_black";
 
 fn game_from(row: &rusqlite::Row) -> rusqlite::Result<Game> {
     Ok(Game {
@@ -336,6 +364,8 @@ fn game_from(row: &rusqlite::Row) -> rusqlite::Result<Game> {
         nudged_black: row.get::<_, i64>(24)? != 0,
         draw_announced: row.get::<_, i64>(25)? != 0,
         given_back: row.get(26)?,
+        worth_white: row.get(27)?,
+        worth_black: row.get(28)?,
     })
 }
 
@@ -461,6 +491,10 @@ pub fn finish_game(
     Ok(changed > 0)
 }
 
+/// Settles a finished game: what each side scored, and why nothing if nothing.
+/// `white`/`black` are the CHESS points the game was worth to each player -
+/// uncapped, and no longer anything to do with the House Cup, whose old rows
+/// stay in `points_white`/`points_black` exactly as they were written.
 pub fn record_payout(
     conn: &Connection,
     id: i64,
@@ -469,10 +503,53 @@ pub fn record_payout(
     why_nothing: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE games SET points_white = ?2, points_black = ?3, why_nothing = ?4, paid_out = 1 WHERE id = ?1",
+        "UPDATE games SET worth_white = ?2, worth_black = ?3, why_nothing = ?4, paid_out = 1 WHERE id = ?1",
         params![id, white, black, why_nothing],
     )
     .map(|_| ())
+}
+
+// --- chess points ---------------------------------------------------------------------
+
+/// One player's chess points over a stretch of time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub user: u64,
+    /// Chess points: every finished game at what it was worth, with no limit
+    /// over it, so mods, Muggles and the unsorted have them like everyone else.
+    pub points: i64,
+    /// How many finished games they played in the stretch, scoring or not.
+    pub games: i64,
+    /// When they got to that total - their last finished game of the stretch.
+    pub reached: i64,
+}
+
+/// The order a board reads in, and the order the day's card is decided in: most
+/// chess points, then most games played, then whoever got there first.
+pub fn rank(rows: &mut [Tally]) {
+    rows.sort_by(|a, b| b.points.cmp(&a.points).then(b.games.cmp(&a.games)).then(a.reached.cmp(&b.reached)).then(a.user.cmp(&b.user)));
+}
+
+/// Everyone's chess points between two moments, `from` included and `until`
+/// excluded, best first. A game counts to the player on each side of it, so the
+/// two halves of the table are read as one list and then grouped.
+pub fn tally_between(conn: &Connection, from: i64, until: i64) -> Vec<Tally> {
+    let sql = "SELECT user_id, COALESCE(SUM(worth), 0), COUNT(*), COALESCE(MAX(finished_at), 0) FROM (
+                   SELECT white AS user_id, worth_white AS worth, finished_at FROM games
+                   WHERE status = 'done' AND finished_at >= ?1 AND finished_at < ?2
+                   UNION ALL
+                   SELECT black AS user_id, worth_black AS worth, finished_at FROM games
+                   WHERE status = 'done' AND finished_at >= ?1 AND finished_at < ?2)
+               GROUP BY user_id";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let mut rows: Vec<Tally> = stmt
+        .query_map(params![from, until], |r| {
+            Ok(Tally { user: r.get::<_, i64>(0)? as u64, points: r.get(1)?, games: r.get(2)?, reached: r.get(3)? })
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    rank(&mut rows);
+    rows
 }
 
 /// Puts a draw on offer from `user`, unless one is already open.
@@ -646,6 +723,88 @@ mod tests {
         let conn = Connection::open_in_memory().expect("memory db");
         init(&conn).expect("schema");
         conn
+    }
+
+
+    #[test]
+    fn a_finished_game_records_what_it_was_worth_in_chess_points() {
+        let conn = conn();
+        let a = game(&conn);
+        finish_game(&conn, a.id, "checkmate", Some(1), false, 5_000).unwrap();
+        record_payout(&conn, a.id, 4, 0, "").unwrap();
+        let done = get_game(&conn, a.id).unwrap();
+        assert_eq!((done.worth_white, done.worth_black), (4, 0), "the game's own score");
+        assert_eq!((done.points_white, done.points_black), (0, 0), "and nothing at all in house points");
+        // Both sides of one game land on the board, the loser included.
+        let day = tally_between(&conn, 0, 10_000);
+        assert_eq!(day.iter().map(|t| (t.user, t.points, t.games)).collect::<Vec<_>>(), vec![(1, 4, 1), (2, 0, 1)]);
+        assert_eq!(day[0].reached, 5_000);
+        // A draw scores for both, and a stretch with nothing in it is empty.
+        let b = start_game(&conn, 5, 1, 3, "gryffindor", "ravenclaw", "fen", "casual", 43_200, 6_000, "2026-09-16").unwrap();
+        finish_game(&conn, b.id, "draw", None, false, 6_500).unwrap();
+        record_payout(&conn, b.id, 1, 1, "").unwrap();
+        let both = tally_between(&conn, 0, 10_000);
+        assert_eq!(both.first().map(|t| (t.user, t.points, t.games)), Some((1, 5, 2)));
+        assert!(tally_between(&conn, 20_000, 30_000).is_empty());
+        // A game still running is nobody's score yet.
+        let _running = start_game(&conn, 5, 4, 5, "", "", "fen", "casual", 43_200, 7_000, "2026-09-16").unwrap();
+        assert!(!tally_between(&conn, 0, 10_000).iter().any(|t| t.user == 4));
+    }
+
+    #[test]
+    fn the_board_is_points_then_games_then_whoever_got_there_first() {
+        let mut rows = vec![
+            Tally { user: 1, points: 4, games: 1, reached: 50 },
+            Tally { user: 2, points: 4, games: 2, reached: 90 },
+            Tally { user: 3, points: 9, games: 1, reached: 10 },
+            Tally { user: 4, points: 4, games: 2, reached: 60 },
+        ];
+        rank(&mut rows);
+        assert_eq!(rows.iter().map(|t| t.user).collect::<Vec<_>>(), vec![3, 4, 2, 1]);
+    }
+
+    #[test]
+    fn the_worth_columns_go_onto_a_database_that_is_already_being_played_in() {
+        // Exactly the schema as it shipped, rows and all: the live database.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL,
+                white INTEGER NOT NULL, black INTEGER NOT NULL,
+                white_house TEXT NOT NULL DEFAULT '', black_house TEXT NOT NULL DEFAULT '',
+                fen TEXT NOT NULL, moves TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'running', time_control TEXT NOT NULL,
+                per_move_secs INTEGER NOT NULL, started_at INTEGER NOT NULL, last_move_ts INTEGER NOT NULL,
+                message_id INTEGER, result TEXT, winner INTEGER, by_resignation INTEGER NOT NULL DEFAULT 0,
+                finished_at INTEGER, points_white INTEGER NOT NULL DEFAULT 0, points_black INTEGER NOT NULL DEFAULT 0,
+                paid_out INTEGER NOT NULL DEFAULT 0, why_nothing TEXT NOT NULL DEFAULT '',
+                draw_offer INTEGER, draw_announced INTEGER NOT NULL DEFAULT 0, given_back INTEGER NOT NULL DEFAULT 0,
+                nudged_white INTEGER NOT NULL DEFAULT 0, nudged_black INTEGER NOT NULL DEFAULT 0,
+                day TEXT NOT NULL DEFAULT '');
+             INSERT INTO games (id, channel_id, white, black, fen, moves, status, time_control, per_move_secs,
+                                started_at, last_move_ts, result, winner, finished_at,
+                                points_white, points_black, paid_out)
+                VALUES (1, 5, 11, 22, 'fen', 'e4 e5', 'done', 'casual', 43200, 100, 200, 'checkmate', 11, 900, 4, 0, 1),
+                       (2, 5, 11, 33, 'fen', 'd4 d5', 'done', 'casual', 43200, 300, 400, 'draw', NULL, 950, 0, 0, 1),
+                       (3, 5, 22, 33, 'fen', 'c4', 'running', 'casual', 43200, 500, 600, NULL, NULL, NULL, 0, 0, 0);",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        // Nothing was dropped or rewritten.
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM games", [], |r| r.get::<_, i64>(0)).unwrap(), 3, "every game survived");
+        let one = get_game(&conn, 1).unwrap();
+        assert_eq!((one.points_white, one.points_black), (4, 0), "what the ledger paid is left exactly as it was");
+        assert_eq!((one.worth_white, one.worth_black), (4, 0), "and is the only honest number for what it was worth");
+        assert_eq!(one.moves, vec!["e4", "e5"]);
+        // A settled game the cap had swallowed stays at nothing: nobody wrote
+        // down what it would have been, so nothing is invented for it.
+        let two = get_game(&conn, 2).unwrap();
+        assert_eq!((two.worth_white, two.worth_black), (0, 0));
+        // The running game is untouched and still running.
+        assert!(get_game(&conn, 3).unwrap().running());
+        // And running it again changes nothing.
+        init(&conn).unwrap();
+        assert_eq!(get_game(&conn, 1).unwrap().worth_white, 4);
     }
 
     fn game(conn: &Connection) -> Game {

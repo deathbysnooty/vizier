@@ -215,30 +215,21 @@ pub fn npat_top(rows: &[LedgerRow], places: &[(u64, u8, i64)]) -> Option<(u64, i
         .map(|(user, wins, _, _)| (user, wins))
 }
 
-/// Chess's top: the most games WON, then the most points, then whoever got
-/// there first (their last win earliest). `wins` is every win of the day as
-/// (user, when); only people the ledger paid for chess that day can win, so
-/// Muggles, the unsorted and same-house games can't. Returns the winner and
-/// their wins.
-pub fn chess_top(rows: &[LedgerRow], wins: &[(u64, i64)]) -> Option<(u64, i64)> {
+/// Chess's top: the most CHESS points that day — every finished game at what it
+/// was worth, with no limit over it. Level on points, the most games; level on
+/// both, whoever got there first.
+///
+/// Eligibility is unchanged. Chess pays no house points any more, but it still
+/// writes its zero row through the same door, and only someone with a row can
+/// win the card — so mods, Muggles and the unsorted are tallied, shown their
+/// chess points, and stay out of the running, exactly as before. `tally` is the
+/// chess store's day.
+pub fn chess_top(rows: &[LedgerRow], tally: &[super::chess_store::Tally]) -> Option<(u64, i64)> {
     let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "chess");
-    let points = |u: u64| rows.iter().filter(|r| r.user == u && r.source == "chess").map(|r| r.points).sum::<i64>();
-    // (user, wins, latest win)
-    let mut tally: Vec<(u64, i64, i64)> = Vec::new();
-    for (user, at) in wins.iter().filter(|(u, _)| paid(*u)) {
-        match tally.iter_mut().find(|(u, _, _)| u == user) {
-            Some(t) => {
-                t.1 += 1;
-                t.2 = t.2.max(*at);
-            }
-            None => tally.push((*user, 1, *at)),
-        }
-    }
-    tally
-        .into_iter()
-        .map(|(user, won, reached)| (user, won, points(user), reached))
-        .min_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.3.cmp(&b.3)).then(a.0.cmp(&b.0)))
-        .map(|(user, won, _, _)| (user, won))
+    let mut mine: Vec<super::chess_store::Tally> =
+        tally.iter().filter(|t| t.games > 0 && t.points > 0 && paid(t.user)).cloned().collect();
+    super::chess_store::rank(&mut mine);
+    mine.first().map(|t| (t.user, t.points))
 }
 
 /// Anagrams' top: the most ANAGRAM points that day — every solve at its full
@@ -379,15 +370,32 @@ pub fn with_sudoku_tally(
     tops
 }
 
-/// Swaps chess's points-based top for games won.
-fn with_chess_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+/// Swaps chess's count-of-rows top for the store's uncapped chess points. A day
+/// the store knows nothing about — one before chess kept a score of its own, or
+/// a run with no store open — keeps the ledger's answer, so old days still
+/// resolve.
+fn with_chess_measured(tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
     let (Some(db), Some(start)) = (super::chess_store::db(), day_start(day)) else {
         return tops;
     };
-    let wins = super::chess_store::wins_between(&db.lock(), start, start + DAY);
+    let tally = super::chess_store::tally_between(&db.lock(), start, start + DAY);
+    with_chess_tally(tops, rows, &tally)
+}
+
+/// The swap itself, with the day's tally already read. An EMPTY tally means the
+/// store has nothing for that day, and the ledger's answer is left exactly as it
+/// was.
+pub fn with_chess_tally(
+    mut tops: Vec<(&'static str, u64, i64)>,
+    rows: &[LedgerRow],
+    tally: &[super::chess_store::Tally],
+) -> Vec<(&'static str, u64, i64)> {
+    if tally.is_empty() {
+        return tops;
+    }
     tops.retain(|(a, _, _)| *a != "chess");
-    if let Some((user, won)) = chess_top(rows, &wins) {
-        tops.push(("chess", user, won));
+    if let Some((user, points)) = chess_top(rows, tally) {
+        tops.push(("chess", user, points));
     }
     tops
 }
@@ -738,21 +746,59 @@ mod tests {
         assert_eq!(activity_label("npat"), "🔤 Name Place Animal Thing");
     }
 
+    fn chess_tally(user: u64, points: i64, games: i64, reached: i64) -> super::super::chess_store::Tally {
+        super::super::chess_store::Tally { user, points, games, reached }
+    }
+
     #[test]
-    fn the_days_chess_card_goes_to_the_most_wins_then_the_most_points() {
-        let rows = vec![row(1, "chess", 4, 10), row(2, "chess", 4, 20), row(2, "chess", 1, 30), row(3, "quiz", 5, 5)];
-        let wins = vec![(1u64, 100i64), (2, 110), (2, 120)];
-        assert_eq!(chess_top(&rows, &wins), Some((2, 2)), "two wins beat one");
-        // Level on wins: the one with more chess points that day.
-        assert_eq!(chess_top(&rows, &[(1, 100), (2, 110)]), Some((2, 1)));
-        // Level on both: whoever finished their last win first.
-        let even = vec![row(1, "chess", 4, 10), row(2, "chess", 4, 20)];
-        assert_eq!(chess_top(&even, &[(2, 200), (1, 100)]), Some((1, 1)));
-        assert_eq!(chess_top(&even, &[]), None, "nobody won");
-        assert_eq!(chess_top(&[], &wins), None, "the ledger paid nobody for chess");
-        assert_eq!(chess_top(&even, &[(9, 100)]), None, "a win by someone chess never paid");
+    fn the_days_chess_card_goes_to_the_most_chess_points_then_the_most_games() {
+        // Chess pays no house points now, but it still writes the zero row that
+        // says who played, and the card is decided on the game's own uncapped
+        // score rather than on wins.
+        let rows = vec![row(1, "chess", 0, 100), row(2, "chess", 0, 110)];
+        let scores = vec![chess_tally(1, 4, 1, 100), chess_tally(2, 8, 2, 120)];
+        assert_eq!(chess_top(&rows, &scores), Some((2, 8)), "eight chess points beat four");
+        // Level on points: the one who played more games.
+        let even = vec![chess_tally(1, 8, 1, 100), chess_tally(2, 8, 3, 120)];
+        assert_eq!(chess_top(&rows, &even), Some((2, 8)));
+        // Level on both: whoever finished their last game first.
+        let dead_heat = vec![chess_tally(1, 8, 2, 300), chess_tally(2, 8, 2, 120)];
+        assert_eq!(chess_top(&rows, &dead_heat), Some((2, 8)), "whoever got there first");
+        assert_eq!(chess_top(&rows, &[]), None, "nobody played");
+        // A game that scored nothing — a rematch, or one given up at move two —
+        // never wins the card on its own.
+        assert_eq!(chess_top(&rows, &[chess_tally(1, 0, 3, 100)]), None);
         assert_eq!(activity_label("chess"), "♟️ Chess");
         assert!(ACTIVITIES.iter().any(|(a, s)| *a == "chess" && s.contains(&"chess")));
+    }
+
+    #[test]
+    fn a_mod_can_out_play_the_channel_at_chess_and_still_never_take_the_card() {
+        // 9 is a mod or a Muggle: the ledger turns them away at the door, so they
+        // have no row and take no card — exactly as before. The chess points are
+        // still theirs and still shown to them.
+        let rows = vec![row(1, "chess", 0, 110)];
+        let scores = vec![chess_tally(9, 40, 9, 90), chess_tally(1, 4, 1, 110)];
+        assert_eq!(chess_top(&rows, &scores), Some((1, 4)));
+        assert_eq!(chess_top(&rows, &[chess_tally(9, 40, 9, 90)]), None, "nobody the ledger knows played");
+        assert_eq!(chess_top(&[], &scores), None, "and a day with no chess row at all has no card");
+    }
+
+    #[test]
+    fn a_day_the_chess_store_knows_nothing_about_falls_back_to_the_ledger() {
+        let rows = vec![row(1, "chess", 4, 10), row(2, "chess", 1, 20)];
+        let ledgers_answer = daily_tops(&rows);
+        assert_eq!(ledgers_answer, vec![("chess", 1, 4)], "the ledger's own points");
+        assert_eq!(with_chess_tally(ledgers_answer.clone(), &rows, &[]), ledgers_answer, "an empty day keeps it");
+        // Once the store does have the day, its answer replaces the ledger's.
+        let scores = vec![chess_tally(2, 9, 3, 120)];
+        assert_eq!(with_chess_tally(ledgers_answer.clone(), &rows, &scores), vec![("chess", 2, 9)]);
+        // And every other activity is left exactly alone.
+        let mixed = vec![("quiz", 5, 4), ("chess", 1, 4), ("anagram", 7, 3)];
+        assert_eq!(with_chess_tally(mixed, &rows, &scores), vec![("quiz", 5, 4), ("anagram", 7, 3), ("chess", 2, 9)]);
+        // A day with no finished game in the store — whether or not the store is
+        // open at all in this run — leaves the ledger's answer alone.
+        assert_eq!(with_chess_measured(ledgers_answer.clone(), &rows, "2019-01-01"), ledgers_answer);
     }
 
     fn tally(user: u64, points: i64, solves: i64, reached: i64) -> super::super::anagram_store::Tally {

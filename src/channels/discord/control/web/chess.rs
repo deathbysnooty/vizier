@@ -360,6 +360,8 @@ mod tests {
             finished_at: None,
             points_white: 0,
             points_black: 0,
+            worth_white: 0,
+            worth_black: 0,
             paid_out: false,
             why_nothing: String::new(),
             draw_offer: None,

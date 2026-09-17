@@ -290,7 +290,8 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_SUDOKU", "Sudoku house-points limit (no longer used)", "Left from when sudoku paid house points. It does not any more - it keeps its own score, sudoku points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the sudoku house points people earned before the change, and those are untouched.", number(0, 100, "points"), "20"),
-                setting("VIZIER_CAP_CHESS", "Chess points a day", "Most house points one person can win from chess in a day. 100 means no limit.", number(0, 100, "points"), "8"),
+                setting("VIZIER_CAP_CHESS", "Chess house-points limit (no longer used)", "Left from when chess paid house points. It does not any more - it keeps its own score, chess points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the chess house points people earned before the change, and those are untouched.", number(0, 100, "points"), "8"),
+                setting("VIZIER_CAP_PUZZLE", "Chess puzzle points a day", "Most house points one person can win from chess puzzles in a day. Only the FIRST person to crack each puzzle earns one at all. Nought - the default - means chess puzzles pay no house points whatever: an engine solves any of them instantly, so this is deliberately off until you decide otherwise. Puzzle points themselves are never capped and are not affected by this. 100 means no limit.", number(0, 100, "points"), "0"),
                 setting("VIZIER_CAP_DUEL", "Letter Duel points a day", "Most house points one person can win from Letter Duel in a day. Duel points themselves are never capped. 100 means no limit.", number(0, 100, "points"), "8"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
@@ -637,11 +638,11 @@ pub fn sections() -> Vec<Section> {
                     pop-up, which takes both `Nf3` and `g1f3`. Full chess: castling, en passant, promotion, \
                     checkmate, stalemate, threefold repetition, the fifty-move rule, too little material, draw \
                     offers, resignation, and losing on the clock. One card is always the channel's last message, \
-                    and it moves back to the bottom when anything lands below it: several games can run side by side, each with its own card that keeps working where it is, and the card of whichever game moved last is the one at the bottom. Anyone can follow a game at its 👀 Watch address, a page that needs no sign-in, shows no private link and cannot move a piece; when the game ends the same address becomes a replay to step through. A restart is safe: the bot notes that it is alive every half minute, and on waking it hands every running game back the time it was away, mentions that on the card, and judges no clock at all for the grace below. House points go to the winner, \
-                    or to both on a draw, and ONLY when the two players are in different houses: a game inside one \
-                    house moves nothing between houses, so it pays nothing and the card says so. The same pair is \
-                    paid for one game a day, and a game given up in the first few moves pays nothing at all. Never \
-                    runs in #safe-corner.",
+                    and it moves back to the bottom when anything lands below it: several games can run side by side, each with its own card that keeps working where it is, and the card of whichever game moved last is the one at the bottom. Anyone can follow a game at its 👀 Watch address, a page that needs no sign-in, shows no private link and cannot move a piece; when the game ends the same address becomes a replay to step through. A restart is safe: the bot notes that it is alive every half minute, and on waking it hands every running game back the time it was away, mentions that on the card, and judges no clock at all for the grace below. Chess pays NO house points: it keeps chess \
+                    points of its own, which nothing limits at all. The winner takes them, or both sides on a draw, \
+                    whichever houses the two are in, and mods and anyone not yet sorted score them like everybody \
+                    else; `/chesstop` is the board. The same pair is scored for one game a day, and a game given up \
+                    in the first few moves scores nothing at all. Never runs in #safe-corner.",
             settings: vec![
                 setting("VIZIER_CHESS", "Chess on", "Run chess in its channel. Off stops new challenges and games; games already running keep their cards until they finish.", Kind::Toggle, "off"),
                 setting("VIZIER_CHESS_CHANNEL", "Game channel", "The channel chess lives in. Empty means chess is off. Never #safe-corner.", Kind::Channel, ""),
@@ -651,9 +652,9 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CHESS_MAX_ACTIVE", "Games in the channel", "How many games the whole channel may have running at once, whoever is playing. A new challenge is refused politely once it is reached.", number(1, 50, "games"), "8"),
                 setting("VIZIER_CHESS_REPLAY_DAYS", "Keep replays for", "How long a finished game stays readable at its Watch address, where anyone can step through the moves. 0 turns replays off and takes the replay link off the result card.", number(0, 365, "days"), "30"),
                 setting("VIZIER_CHESS_GRACE_SECONDS", "Grace after a restart", "Nobody can lose a game on time within this long of the bot starting up. Time the bot was away is handed back to every running game anyway, so a restart never costs anybody a game.", number(0, 3600, "seconds"), "60"),
-                setting("VIZIER_CHESS_MIN_MOVES", "Half-moves before a resignation pays", "A game given up before this many half-moves have been played pays nobody, so two friends can't farm points by resigning at once. Losing on time always pays the winner. 0 turns the rule off.", number(0, 200, "half-moves"), "10"),
-                setting("VIZIER_POINTS_CHESS_WIN", "House points for winning", "House points for the winner of a game, when the two players are in different houses.", number(0, 100, "points"), "4"),
-                setting("VIZIER_POINTS_CHESS_DRAW", "House points for a draw", "House points for each player when a game is drawn, when the two are in different houses.", number(0, 100, "points"), "1"),
+                setting("VIZIER_CHESS_MIN_MOVES", "Half-moves before a resignation pays", "A game given up before this many half-moves have been played scores for nobody, so two friends can't farm chess points by resigning at once. Losing on time always scores for the winner. 0 turns the rule off.", number(0, 200, "half-moves"), "10"),
+                setting("VIZIER_POINTS_CHESS_WIN", "Chess points for winning", "Chess points for the winner of a game. Chess points are the game's own score, never capped and never part of the House Cup.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_CHESS_DRAW", "Chess points for a draw", "Chess points for each player when a game is drawn. Chess points are the game's own score, never capped and never part of the House Cup.", number(0, 100, "points"), "1"),
             ],
             commands: vec![
                 command(
@@ -661,6 +662,12 @@ pub fn sections() -> Vec<Section> {
                     EVERYONE,
                     "/chess member: time:",
                     "Challenges a member to chess in the chess channel, casual (hours per move) or live (minutes per move). With nobody named it shows your running games and your private board links instead.",
+                ),
+                command(
+                    "chesstop",
+                    EVERYONE,
+                    "/chesstop",
+                    "The chess points board, today or this month: the top 10 and, if you are not on it, your own line. Chess points are the game's own score - a win or a draw at what it was worth, with no daily limit - and they are not house points, so mods and Muggles have them too. Only you see it.",
                 ),
                 command(
                     "chesshelp",
@@ -672,8 +679,42 @@ pub fn sections() -> Vec<Section> {
                     "chessstop",
                     ADMINS,
                     "/chessstop game:",
-                    "Cancels a chess game that is stuck, by its number. No house points for either player, and the card is replaced with a cancelled result.",
+                    "Cancels a chess game that is stuck, by its number. No chess points for either player, and the card is replaced with a cancelled result.",
                 ),
+            ],
+        },
+        Section {
+            id: "puzzle",
+            title: "Chess puzzle",
+            icon: "🧩",
+            about: "A real position from a real game, always waiting in the CHESS channel (the puzzle has no channel of \
+                    its own - it goes wherever chess is). One side has just blundered; members press 🧩 Solve it, get a \
+                    private board page of their own, and play the winning line move by move. A wrong move is refused - \
+                    \"that's not it\" - and they try again, as often as they like; the puzzle is solved when the whole \
+                    line is played, or when they find a mate of their own, because any move that mates is the right \
+                    move. The FIRST person to crack each puzzle takes a house point, if house points are switched on \
+                    for this at all - by default they are NOT, because a chess engine would find any of these \
+                    instantly and the bot cannot tell whether one was used. Everybody who solves it, first or not, \
+                    scores PUZZLE POINTS: this game's own score, which nothing limits and everyone has, mods and \
+                    Muggles included. `/puzzletop` is the board. Once somebody cracks it the puzzle stays up a while \
+                    longer so the rest still get their go; one nobody solves is replaced with its answer shown. The \
+                    puzzles come from the Lichess puzzle database (CC0), shipped in `puzzlebank/`: no bank, no \
+                    puzzle, and the rest of chess is unaffected. The card lives below chess's own and never runs in \
+                    #safe-corner.",
+            settings: vec![
+                setting("VIZIER_PUZZLE", "Puzzle on", "Run the chess puzzle in the chess channel. Off takes the card down and sets no more puzzles; chess itself is unaffected either way.", Kind::Toggle, "off"),
+                setting("VIZIER_POINTS_PUZZLE", "House points for cracking it first", "House points for the FIRST person to solve each puzzle. Nobody else ever earns house points from one. The daily limit above decides whether any of this is paid at all - it is nought by default, which means none is.", number(0, 100, "points"), "1"),
+                setting("VIZIER_PUZZLE_NEXT_MINUTES", "Stays up after the first solve", "How long a cracked puzzle stays up before the next one takes its place, so everybody else still gets their go at it.", number(1, 1440, "minutes"), "10"),
+                setting("VIZIER_PUZZLE_IDLE_MINUTES", "Replace an unsolved one after", "How long a puzzle nobody has solved stays up. When it goes, its card shows the answer.", number(5, 10080, "minutes"), "60"),
+                setting("VIZIER_PUZZLE_NO_REPEAT_DAYS", "Don't repeat a puzzle for", "How long before the same puzzle may be set again. 0 turns the rule off.", number(0, 3650, "days"), "60"),
+                setting("VIZIER_PUZZLE_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the puzzle card before it follows the conversation down. The bot's own messages never count.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_PUZZLE_BUMP_SECONDS", "Wait between moves of the card", "The shortest time between two moves of the puzzle card, however busy the channel is.", number(10, 3600, "seconds"), "120"),
+            ],
+            commands: vec![
+                command("puzzle", EVERYONE, "/puzzle", "The puzzle that is up now: whose move it is, how long the line is, who cracked it first, and your own puzzle points today and this month. Only you see it."),
+                command("puzzletop", EVERYONE, "/puzzletop", "The puzzle points board, today or this month: the top 10 and, if you are not on it, your own line. Puzzle points are the game's own score - every solve, first or not, with no daily limit - so mods and Muggles have them too. Only you see it."),
+                command("puzzlehelp", EVERYONE, "/puzzlehelp", "How the chess puzzle works, written from the settings as they are right now: the private board, what a solve scores, the pace, and where the puzzles come from. Only you see it."),
+                command("puzzleskip", ADMINS, "/puzzleskip", "Drops the puzzle that is up, shows its answer on its card and sets a fresh one at once."),
             ],
         },
         Section {

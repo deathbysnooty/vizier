@@ -48,6 +48,8 @@ pub enum Source {
     Guess,
     /// Letter Duel: a whole game of tiles, paid by where each player finished.
     Duel,
+    /// The chess puzzle: the FIRST person to crack each one, and nobody else.
+    Puzzle,
 }
 
 /// How much one person may earn from a source.
@@ -63,7 +65,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 19] = [
+    pub const ALL: [Source; 20] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -83,6 +85,7 @@ impl Source {
         Source::Chess,
         Source::Guess,
         Source::Duel,
+        Source::Puzzle,
     ];
 
     pub fn key(self) -> &'static str {
@@ -106,6 +109,7 @@ impl Source {
             Source::Chess => "chess",
             Source::Guess => "guess",
             Source::Duel => "duel",
+            Source::Puzzle => "puzzle",
         }
     }
 
@@ -134,6 +138,7 @@ impl Source {
             Source::Chess => "♟️ Chess",
             Source::Guess => "🎨 Guess the Word",
             Source::Duel => "🔠 Letter Duel",
+            Source::Puzzle => "🧩 Chess puzzle",
         }
     }
 
@@ -158,6 +163,11 @@ impl Source {
             Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
             Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
+            // Nought by default: the puzzle ships paying NO house points at all.
+            // An engine solves any of them instantly, so the owner turns this on
+            // only when they are happy with it. The puzzle points it scores
+            // alongside are never capped and never touched by this.
+            Source::Puzzle => day(super::control::number("VIZIER_CAP_PUZZLE", 0)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.
@@ -224,6 +234,13 @@ fn ist() -> chrono::FixedOffset {
 /// The India calendar day a moment falls on, as the caps count days.
 pub fn ist_day(ts: i64) -> String {
     ist().timestamp_opt(ts, 0).single().map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
+}
+
+/// The moment an India day begins, from the day's own name. The inverse of
+/// [`ist_day`], for the stores that keep timestamps rather than day names.
+pub fn ist_day_start(day: &str) -> Option<i64> {
+    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp() - (5 * 3600 + 30 * 60))
 }
 
 /// The Monday that starts a moment's India week.
@@ -660,6 +677,38 @@ mod tests {
         let mut runner_up = entry(1, Source::Duel, 4);
         runner_up.dedupe = Some("duel:10:1".into());
         assert_eq!(write(&conn, &runner_up, MON + DAY).unwrap(), Outcome::Granted(2), "only the two that fit");
+    }
+
+    #[test]
+    fn the_puzzle_pays_nothing_at_all_until_its_limit_is_turned_up() {
+        let conn = db();
+        let first = |puzzle: i64, points: i64| {
+            let mut e = entry(1, Source::Puzzle, points);
+            e.dedupe = Some(format!("puzzle:{}:1", puzzle));
+            e
+        };
+        // As it ships: VIZIER_CAP_PUZZLE is NOUGHT, so the first solver's point
+        // is trimmed to nothing every time. An engine solves any of these
+        // instantly, and the owner turned this off on purpose.
+        assert_eq!(Source::Puzzle.cap(), Cap::PerDay(0), "VIZIER_CAP_PUZZLE, unset");
+        assert_eq!(write(&conn, &first(1, 1), MON).unwrap(), Outcome::Capped);
+        assert_eq!(write(&conn, &first(2, 1), MON).unwrap(), Outcome::Capped);
+        let today: i64 = conn
+            .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE source = 'puzzle' AND day = ?1", params![ist_day(MON)], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(today, 0, "no house points at all while the limit is nought");
+        // A capped solve is still written as a zero row, so turning the limit up
+        // tomorrow cannot turn yesterday's solves into points.
+        assert_eq!(write(&conn, &first(1, 1), MON).unwrap(), Outcome::Duplicate);
+
+        // With a limit of three, three solves a day are paid and the fourth is not.
+        let capped = |used: i64, asked: i64| match Cap::PerDay(3) {
+            Cap::PerDay(limit) => asked.min(limit - used).max(0),
+            _ => asked,
+        };
+        assert_eq!((capped(0, 1), capped(2, 1), capped(3, 1)), (1, 1, 0));
     }
 
     #[test]
