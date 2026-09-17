@@ -582,6 +582,10 @@ pub const NEWS: &[News] = &[News {
     id: "chat-points-off-2026-09",
     title: "💬 Chatting no longer earns points",
     body: "From now on, **text messages do not earn house points**. People were spamming to hit the message count \u{2014}            \"6 msgs, 5 to go\" \u{2014} and that is not what this server is for.\n\n           \u{2022} Everything else pays exactly as before: the games, voice, the 🪄 Snitch, 🐸 frogs, the arena, all of it.\n           \u{2022} Your messages are **still counted** \u{2014} the panel, the most-active lists and the day's 🐸 frog card for chat all work the same.\n           \u{2022} Spam is now taken down automatically, and the mods can see what was removed.\n\n           Talk because you want to talk. Play the games for points.",
+}, News {
+    id: "sudoku-solver-points-back-2026-09",
+    title: "⚖️ Sudoku: some points have been taken back",
+    body: "A few sudoku puzzles have been solved in times that are not humanly possible. A medium puzzle has about fifty            empty squares, and some were handed in **14 to 19 seconds** after the page was first opened \u{2014} faster than the            digits can be typed, never mind worked out. A solver app does that. A person doesn\u{2019}t.\n\n           \u{2022} **66 points have been taken back**, from the members and from their house.\n           \u{2022} This is checked, not guessed: the bot records when each player opened a puzzle and when their code arrived.\n           \u{2022} Nobody is named here, one of them owned up when asked, and solves that merely look quick have been left            alone \u{2014} being good at sudoku is not cheating.\n\n           Use a solver for fun if you like. Just don\u{2019}t hand the code in for points.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
