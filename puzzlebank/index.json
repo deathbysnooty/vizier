@@ -1,0 +1,44 @@
+{
+ "format": "PZTSV1",
+ "pack": "puzzles.tsv",
+ "source": "Lichess puzzle database (https://database.lichess.org/#puzzles), CC0 1.0",
+ "attribution": "Puzzles from the Lichess puzzle database (https://database.lichess.org/#puzzles), CC0 1.0.",
+ "columns": [
+  "id",
+  "fen",
+  "moves",
+  "rating",
+  "band",
+  "themes"
+ ],
+ "puzzles": 4000,
+ "bands": [
+  {
+   "band": "easy",
+   "line": 0,
+   "count": 1800,
+   "offset": 0,
+   "bytes": 229576,
+   "rating_min": 800,
+   "rating_max": 1299
+  },
+  {
+   "band": "medium",
+   "line": 1800,
+   "count": 1400,
+   "offset": 229576,
+   "bytes": 183007,
+   "rating_min": 1300,
+   "rating_max": 1699
+  },
+  {
+   "band": "hard",
+   "line": 3200,
+   "count": 800,
+   "offset": 412583,
+   "bytes": 104029,
+   "rating_min": 1700,
+   "rating_max": 2099
+  }
+ ]
+}
