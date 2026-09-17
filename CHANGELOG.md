@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.52] - 2026-09-17
+
+### 🚀 Features
+
+- *(discord)* Letter Duel, a tile game for two to four players
 ## [0.11.51] - 2026-09-17
 
 ### 💼 Other
 
 - Tell the server why some points went back
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.51
 ## [0.11.50] - 2026-09-17
 
 ### 💼 Other
