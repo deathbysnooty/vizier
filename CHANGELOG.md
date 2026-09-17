@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.56] - 2026-09-17
+
+### 🚀 Features
+
+- *(sudoku)* Sudoku points, and the House Cup left out of it
 ## [0.11.55] - 2026-09-17
 
 ### 🚀 Features
 
 - *(quiz)* Carry a round in progress across a restart
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.55
 ## [0.11.54] - 2026-09-17
 
 ### 💼 Other
