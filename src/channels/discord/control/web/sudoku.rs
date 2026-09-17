@@ -121,7 +121,7 @@ pub fn headline(status: store::Status) -> String {
 
 /// The page for one puzzle. Only the givens go in: the answer never does.
 pub fn render(row: &store::Row) -> String {
-    let points = plural(row.points, "point", "points");
+    let points = plural(row.points, "sudoku point", "sudoku points");
     let fields: [(&str, String); 10] = [
         ("{{ID}}", row.id.to_string()),
         ("{{GIVENS}}", grid_to_str(&row.givens)),
@@ -197,7 +197,7 @@ mod tests {
         let html = render(&row);
         assert!(html.contains(&format!("data-givens=\"{}\"", grid_to_str(&row.givens))), "the givens are missing");
         assert!(html.contains("Sudoku #1"), "{}", &html[..200]);
-        assert!(html.contains("🟡 Medium · 4 points"));
+        assert!(html.contains("🟡 Medium · 4 sudoku points"));
         assert!(html.contains("data-posted=\"1700000000\""));
         let answer = grid_to_str(&row.solution);
         assert!(!html.contains(&answer), "the answer is on the page");

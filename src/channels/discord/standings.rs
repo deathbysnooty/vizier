@@ -431,8 +431,11 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
         format!("{} {}/{} · {} min{}, next point at {}", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company, next)
     });
     let mut left = 0;
+    // Sudoku is not here: it pays sudoku points now, its own score, and nothing
+    // to the House Cup. Whatever it paid before is still in the ledger and still
+    // in the month's `/mypoints` breakdown.
     for s in
-        [Source::Quiz, Source::Koto, Source::Anagram, Source::Guess, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat, Source::Sudoku, Source::Chess]
+        [Source::Quiz, Source::Koto, Source::Anagram, Source::Guess, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat, Source::Chess]
     {
         match s.cap() {
             ledger::Cap::PerDay(cap) if pts(s) >= cap => lines.push(format!("{} ✅ maxed {}/{}", s.label(), pts(s), cap)),

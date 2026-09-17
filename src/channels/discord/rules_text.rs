@@ -127,9 +127,9 @@ pub struct AnagramRules {
 pub struct SudokuRules {
     /// The game's channel, only while the game is on.
     pub channel: Option<u64>,
-    /// What easy, medium and hard are worth.
+    /// What easy, medium and hard are worth in SUDOKU points. Sudoku pays no
+    /// house points at all, so there is no daily limit to describe.
     pub points: [i64; 3],
-    pub cap: Option<i64>,
     /// What one hint takes off that puzzle, and how many a player may have.
     pub hint_cost: i64,
     pub max_hints: i64,
@@ -676,12 +676,8 @@ fn game_lines(r: &Rules) -> Vec<String> {
     }
     if let Some(c) = channel(r.sudoku.channel).filter(|_| r.sudoku.points.iter().any(|p| *p > 0)) {
         lines.push(format!(
-            "🔢 **Sudoku** in {} — one is always waiting; the first correct code wins 🟢 **{}** · 🟡 **{}** · 🔴 **{}** {}",
-            c,
-            r.sudoku.points[0],
-            r.sudoku.points[1],
-            r.sudoku.points[2],
-            max_words(r.sudoku.cap)
+            "🔢 **Sudoku** in {} — one is always waiting; the first correct code wins 🟢 **{}** · 🟡 **{}** · 🔴 **{}** **sudoku points**, the game's own score (no house points, no daily limit — `/sudokutop` is the board)",
+            c, r.sudoku.points[0], r.sudoku.points[1], r.sudoku.points[2]
         ));
     }
     if let Some(c) = channel(r.chess.channel).filter(|_| r.chess.win > 0 || r.chess.draw > 0) {
@@ -835,14 +831,9 @@ pub fn earn_text(r: &Rules) -> String {
     if r.npat.channel.is_some() && r.npat.prizes.iter().any(|p| *p > 0) {
         more.push(format!("🔤 NPAT game 1st +{} · 2nd +{} {}", r.npat.prizes[0], r.npat.prizes[1], max_words(r.npat.cap)));
     }
-    if r.sudoku.channel.is_some() && r.sudoku.points.iter().any(|p| *p > 0) {
-        more.push(format!(
-            "🔢 Sudoku {}–{} first solver {}",
-            r.sudoku.points.iter().min().copied().unwrap_or(0),
-            r.sudoku.points.iter().max().copied().unwrap_or(0),
-            max_words(r.sudoku.cap)
-        ));
-    }
+    // Sudoku is not in this list. It pays no house points at all any more — it
+    // keeps its own score — so it drops out of "how to earn" the same way the
+    // chat line does once its limit is nought. Its own line is below.
     if r.chess.channel.is_some() && (r.chess.win > 0 || r.chess.draw > 0) {
         more.push(format!("♟️ Chess win +{} · draw +{} {}", r.chess.win, r.chess.draw, max_words(r.chess.cap)));
     }
@@ -885,6 +876,15 @@ pub fn earn_text(r: &Rules) -> String {
     }
     if r.frogs_on && r.set_bonus > 0 {
         lines.push(format!("🏆 `/sellset` a full card set +{}", r.set_bonus));
+    }
+    // Said once, apart from the list, so nobody hunts for the sudoku line that
+    // used to be in it.
+    if r.sudoku.channel.is_some() && r.sudoku.points.iter().any(|p| *p > 0) {
+        lines.push(format!(
+            "-# 🔢 Sudoku pays **sudoku points** ({}–{} a puzzle, no limit), not house points · `/sudokutop`",
+            r.sudoku.points.iter().min().copied().unwrap_or(0),
+            r.sudoku.points.iter().max().copied().unwrap_or(0)
+        ));
     }
     lines.push("-# Limits reset at midnight India time · the full guide sits above the scoreboard".into());
     lines.join("\n")
@@ -988,14 +988,6 @@ fn sudoku_points_words(points: &[i64; 3]) -> String {
     format!("🟢 Easy **{}** · 🟡 Medium **{}** · 🔴 Hard **{}**", points[0], points[1], points[2])
 }
 
-/// "up to **20 points** a day", or nothing when there's no limit.
-fn sudoku_cap_words(cap: Option<i64>) -> String {
-    match cap {
-        Some(n) => format!("up to **{}** a day", plural(n, "point", "points")),
-        None => "no daily limit".to_string(),
-    }
-}
-
 fn sudoku_where(id: Option<u64>) -> String {
     match channel(id) {
         Some(c) => format!("in {}", c),
@@ -1008,7 +1000,7 @@ fn sudoku_where(id: Option<u64>) -> String {
 pub fn sudoku_help_text(s: &SudokuRules) -> String {
     let mut t = String::new();
     t.push_str(&format!(
-        "**🔢 What it is**\nA sudoku is always waiting {}. Solve it before anyone else and your house scores.\n\n",
+        "**🔢 What it is**\nA sudoku is always waiting {}. Solve it before anyone else and it's yours.\n\n",
         sudoku_where(s.channel)
     ));
     t.push_str("**▶️ How to play**\n");
@@ -1021,21 +1013,23 @@ pub fn sudoku_help_text(s: &SudokuRules) -> String {
         t.push_str("• Solve it wherever you like, then press **📋 Submit code** and type all **81 digits**, row by row.\n\n");
     }
     t.push_str(&format!(
-        "**🏆 Points**\n{} — to the **first** correct code only, {}. The moment one is solved the next puzzle appears.\n\n",
-        sudoku_points_words(&s.points),
-        sudoku_cap_words(s.cap)
+        "**🧩 Sudoku points**\n{} — to the **first** correct code only. The moment one is solved the next puzzle appears.\n\
+         • Sudoku pays **sudoku points**, this game's own score. They are **not** house points: solving a puzzle doesn't move the House Cup, and nothing here is capped.\n\
+         • Everyone has them — houses or no houses, mods included.\n\
+         • `/sudokutop` is the board for today or this month, `/sudoku` shows where you stand, and the day's top scorer is the one the 🐸 frog card goes to.\n\n",
+        sudoku_points_words(&s.points)
     ));
     t.push_str(&format!(
         "**💡 Hints**\n**💡 Hint** shows you one square and takes **{}** off what that puzzle is worth to you, {} per puzzle. It's a button here, so the bot knows whose hint it was.\n\n",
-        plural(s.hint_cost, "point", "points"),
+        plural(s.hint_cost, "sudoku point", "sudoku points"),
         plural(s.max_hints, "hint", "hints")
     ));
     t.push_str(&format!(
-        "**🕰️ Too late?**\nCodes still work for **{}** after a puzzle goes up. You'll be told whether your grid was right, but the points go to whoever was first. `/sudoku` lists the ones you haven't finished.\n\n",
+        "**🕰️ Too late?**\nCodes still work for **{}** after a puzzle goes up. You'll be told whether your grid was right, but the sudoku points go to whoever was first. `/sudoku` lists the ones you haven't finished.\n\n",
         plural(s.late_hours, "hour", "hours")
     ));
     t.push_str("**🔒 Nothing to cheat**\nThe page never knows the answer — only the bot does, and it checks your code.\n\n");
-    t.push_str("-# `/sudoku` your puzzles and links · `/sudokuhelp` this · mods: `/sudokunew` for a fresh puzzle");
+    t.push_str("-# `/sudoku` your puzzles and links · `/sudokutop` the board · `/sudokuhelp` this · mods: `/sudokunew` for a fresh puzzle");
     t
 }
 
@@ -1344,7 +1338,6 @@ pub(crate) mod tests {
         SudokuRules {
             channel: Some(1544347052090327040),
             points: [2, 4, 6],
-            cap: Some(20),
             hint_cost: 1,
             max_hints: 3,
             max_tries: 10,
@@ -1439,7 +1432,6 @@ pub(crate) mod tests {
             sudoku: SudokuRules {
                 channel: Some(u64::MAX),
                 points: [100, 100, 100],
-                cap: Some(99),
                 hint_cost: 100,
                 max_hints: 80,
                 max_tries: 100,
@@ -1564,22 +1556,42 @@ pub(crate) mod tests {
         }
     }
 
+    /// Sudoku is advertised as its own score now, never as house points: it
+    /// pays the House Cup nothing, so it drops out of the "how to earn" list
+    /// the way the chat line does once its limit is nought, and says what it
+    /// does pay in a line of its own.
     #[test]
     fn the_guide_and_the_earn_button_carry_sudoku_from_its_live_settings() {
         let games = &guide(&defaults(), true)[2].body;
         assert!(
-            games.contains("🔢 **Sudoku** in <#1544347052090327040> — one is always waiting; the first correct code wins 🟢 **2** · 🟡 **4** · 🔴 **6** (max 20)"),
+            games.contains(
+                "🔢 **Sudoku** in <#1544347052090327040> — one is always waiting; the first correct code wins 🟢 **2** · 🟡 **4** · 🔴 **6** **sudoku points**, the game's own score (no house points, no daily limit — `/sudokutop` is the board)"
+            ),
             "{}",
             games
         );
         let earn = earn_text(&defaults());
-        assert!(earn.contains("🔢 Sudoku 2–6 first solver (max 20)"), "{}", earn);
+        // Not in the list of things that pay a house, and no limit is claimed.
+        assert!(!earn.contains("🔢 Sudoku 2–6 first solver"), "{}", earn);
+        assert!(!earn.contains("(max 20)"), "{}", earn);
+        assert!(earn.contains("-# 🔢 Sudoku pays **sudoku points** (2–6 a puzzle, no limit), not house points · `/sudokutop`"), "{}", earn);
+        // The list it left still reads as a list, with no gap where it was.
+        let more = earn.lines().find(|l| l.contains("🔤 NPAT")).expect("the games line");
+        assert!(!more.contains("Sudoku") && !more.contains(" ·  · ") && !more.ends_with(" · "), "{}", more);
+        assert!(more.contains("🔤 NPAT game 1st +2 · 2nd +1 (max 6) · ♟️ Chess win"), "{}", more);
         // Off, or with no channel set, it is left out of both.
         let off = Rules { sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, ..defaults() };
         assert!(!guide(&off, true)[2].body.contains("Sudoku"));
         assert!(!earn_text(&off).contains("Sudoku"));
         let free = Rules { sudoku: SudokuRules { points: [0, 0, 0], ..sudoku_defaults() }, ..defaults() };
         assert!(!guide(&free, true)[2].body.contains("Sudoku"), "a game worth nothing isn't advertised");
+        assert!(!earn_text(&free).contains("Sudoku"));
+        // And nowhere in the whole guide, or the earn card, is sudoku a house-point source.
+        let everything = guide(&defaults(), true).iter().map(|p| p.body.clone()).collect::<Vec<_>>().join("\n");
+        for line in everything.lines().chain(earn.lines()).filter(|l| l.contains("Sudoku")) {
+            let claims = line.to_lowercase().contains("house point") && !line.contains("no house points") && !line.contains("not house points");
+            assert!(!claims, "sudoku is advertised as paying a house: {}", line);
+        }
     }
 
     #[test]
@@ -1591,8 +1603,10 @@ pub(crate) mod tests {
             "**Copy code**",
             "📋 Submit code",
             "🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6**",
-            "up to **20 points** a day",
-            "takes **1 point** off",
+            "Sudoku pays **sudoku points**, this game's own score",
+            "They are **not** house points",
+            "`/sudokutop` is the board",
+            "takes **1 sudoku point** off",
             "3 hints per puzzle",
             "**24 hours**",
             "never knows the answer",
@@ -1600,6 +1614,11 @@ pub(crate) mod tests {
             "`/sudokunew`",
         ] {
             assert!(text.contains(part), "missing “{}” in:\n{}", part, text);
+        }
+        // Nothing in the card claims a house point or a daily limit.
+        assert!(!text.contains("a day"), "sudoku has no daily limit to name:\n{}", text);
+        for line in text.lines().filter(|l| l.to_lowercase().contains("house point")) {
+            assert!(line.contains("**not** house points"), "{}", line);
         }
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
         // Every setting at its highest, and with no web page set up.
@@ -1609,9 +1628,9 @@ pub(crate) mod tests {
         assert!(text.contains("720 hours") && text.contains("80 hints"));
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars at the maximum", text.chars().count());
         // No channel set at all still reads.
-        let nowhere = SudokuRules { channel: None, cap: None, hint_cost: 1, ..sudoku_defaults() };
+        let nowhere = SudokuRules { channel: None, hint_cost: 1, ..sudoku_defaults() };
         let text = sudoku_help_text(&nowhere);
-        assert!(text.contains("in its own channel") && text.contains("no daily limit"), "{}", text);
+        assert!(text.contains("in its own channel") && text.contains("nothing here is capped"), "{}", text);
     }
 
     #[test]

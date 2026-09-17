@@ -116,10 +116,10 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
 /// points: their daily limits leave many people level on points, and a capped
 /// win is still in the ledger as a zero.
 ///
-/// Anagrams and Guess the Word are here only as the fallback for a day their
-/// own store knows nothing about: `with_anagram_measured` and
-/// `with_guess_measured` decide a real day on each game's own uncapped points
-/// instead.
+/// Anagrams, Guess the Word and sudoku are here only as the fallback for a day
+/// their own store knows nothing about: `with_anagram_measured`,
+/// `with_guess_measured` and `with_sudoku_measured` decide a real day on each
+/// game's own uncapped points instead.
 const COUNTED: &[&str] = &["quiz", "koto", "anagram", "guess", "cat", "arena", "snitch", "sudoku"];
 
 /// The top of each activity from a day's rows (in ledger order). Wordle and
@@ -332,6 +332,53 @@ pub fn with_guess_tally(
     tops
 }
 
+/// Sudoku's top: the most SUDOKU points that day — every puzzle won at what it
+/// was worth to that solver, hints taken off and nothing capped, so three easy
+/// puzzles no longer beat two hard ones. Level on points, the most puzzles won;
+/// level on both, whoever got there first.
+///
+/// Eligibility is unchanged. Sudoku pays no house points any more, but it still
+/// writes its zero row through the same door, and only someone with a row can
+/// win the card — so mods, Muggles and the unsorted are tallied, shown their
+/// sudoku points, and stay out of the running, exactly as before. `tally` is the
+/// sudoku store's day.
+pub fn sudoku_top(rows: &[LedgerRow], tally: &[super::sudoku_store::Tally]) -> Option<(u64, i64)> {
+    let paid = |u: u64| rows.iter().any(|r| r.user == u && r.source == "sudoku");
+    let mut mine: Vec<super::sudoku_store::Tally> = tally.iter().filter(|t| t.solves > 0 && paid(t.user)).cloned().collect();
+    super::sudoku_store::rank(&mut mine);
+    mine.first().map(|t| (t.user, t.points))
+}
+
+/// Swaps sudoku's count-of-rows top for the store's uncapped sudoku points. A
+/// day the store knows nothing about — one before this was built, or a run with
+/// no store open — keeps the ledger's answer, so old days still resolve and the
+/// `frogtop:<day>:sudoku` key is unchanged.
+fn with_sudoku_measured(tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
+    let Some(db) = super::sudoku_store::db() else {
+        return tops;
+    };
+    let tally = super::sudoku_store::day_tally(&db.lock(), day);
+    with_sudoku_tally(tops, rows, &tally)
+}
+
+/// The swap itself, with the day's tally already read. An EMPTY tally means the
+/// store has nothing for that day, and the ledger's answer is left exactly as it
+/// was.
+pub fn with_sudoku_tally(
+    mut tops: Vec<(&'static str, u64, i64)>,
+    rows: &[LedgerRow],
+    tally: &[super::sudoku_store::Tally],
+) -> Vec<(&'static str, u64, i64)> {
+    if tally.is_empty() {
+        return tops;
+    }
+    tops.retain(|(a, _, _)| *a != "sudoku");
+    if let Some((user, points)) = sudoku_top(rows, tally) {
+        tops.push(("sudoku", user, points));
+    }
+    tops
+}
+
 /// Swaps chess's points-based top for games won.
 fn with_chess_measured(mut tops: Vec<(&'static str, u64, i64)>, rows: &[LedgerRow], day: &str) -> Vec<(&'static str, u64, i64)> {
     let (Some(db), Some(start)) = (super::chess_store::db(), day_start(day)) else {
@@ -457,7 +504,8 @@ pub async fn run_daily_top(ctx: &Context, day: &str) {
     let tops = with_npat_measured(tops, &rows, day);
     let tops = with_chess_measured(tops, &rows, day);
     let tops = with_anagram_measured(tops, &rows, day);
-    let tops = order_like_activities(with_guess_measured(tops, &rows, day));
+    let tops = with_guess_measured(tops, &rows, day);
+    let tops = order_like_activities(with_sudoku_measured(tops, &rows, day));
     let mut lines = Vec::new();
     for (activity, user, total) in &tops {
         let what = AwardFor { kind: "daily_top", day: day.to_string(), activity: activity.to_string(), total: *total, ..Default::default() };
@@ -829,6 +877,68 @@ mod tests {
         // Every other activity is left exactly alone, anagrams included.
         let mixed = vec![("quiz", 5, 4), ("guess", 1, 2), ("anagram", 7, 3)];
         assert_eq!(with_guess_tally(mixed, &rows, &[guess_tally(2, 3, 1, 120)]), vec![("quiz", 5, 4), ("anagram", 7, 3), ("guess", 2, 3)]);
+    }
+
+    fn sudoku_tally(user: u64, points: i64, solves: i64, reached: i64) -> super::super::sudoku_store::Tally {
+        super::super::sudoku_store::Tally { user, points, solves, reached }
+    }
+
+    #[test]
+    fn the_sudoku_card_goes_to_the_most_sudoku_points_not_the_most_puzzles() {
+        // Sudoku pays no house points now, so every row is a zero receipt and
+        // counting rows says whoever solved the MOST: 1, with five easy puzzles.
+        // Counting what the puzzles were worth says 2, with three hard ones.
+        let mut rows: Vec<LedgerRow> = (0..5).map(|i| row(1, "sudoku", 0, 100 + i)).collect();
+        rows.extend((0..3).map(|i| row(2, "sudoku", 0, 200 + i)));
+        assert_eq!(daily_tops(&rows), vec![("sudoku", 1, 5)], "the old rule: five rows beat three");
+        let scores = vec![sudoku_tally(1, 10, 5, 104), sudoku_tally(2, 18, 3, 202)];
+        assert_eq!(sudoku_top(&rows, &scores), Some((2, 18)));
+        // And the swap puts that answer in the day's tops in place of the count.
+        assert_eq!(with_sudoku_tally(daily_tops(&rows), &rows, &scores), vec![("sudoku", 2, 18)]);
+        // Level on points: the one who solved more puzzles. Level on both: first there.
+        let even = vec![sudoku_tally(1, 12, 4, 104), sudoku_tally(2, 12, 3, 202)];
+        assert_eq!(sudoku_top(&rows, &even), Some((1, 12)));
+        let dead_heat = vec![sudoku_tally(1, 12, 3, 300), sudoku_tally(2, 12, 3, 202)];
+        assert_eq!(sudoku_top(&rows, &dead_heat), Some((2, 12)), "whoever got there first");
+    }
+
+    #[test]
+    fn a_mod_can_out_solve_the_channel_and_still_never_take_the_sudoku_card() {
+        // 9 is a mod: no house, so no ledger row at all. Their sudoku points are
+        // kept and shown to them, but the card is the house cup's and stays with
+        // a housed player — eligibility is exactly what it was.
+        let rows = vec![row(1, "sudoku", 0, 100), row(1, "sudoku", 0, 110)];
+        let scores = vec![sudoku_tally(9, 40, 9, 90), sudoku_tally(1, 6, 2, 110)];
+        assert_eq!(sudoku_top(&rows, &scores), Some((1, 6)));
+        // Nobody housed played: no card, rather than one for the mod.
+        assert_eq!(sudoku_top(&[], &scores), None);
+        assert_eq!(sudoku_top(&rows, &[]), None);
+        // Every sudoku row is a zero now, and a zero row still makes 1 eligible.
+        assert_eq!(sudoku_top(&[row(1, "sudoku", 0, 100)], &[sudoku_tally(1, 9, 3, 150)]), Some((1, 9)));
+        // And a row for some other game is not a sudoku row.
+        assert_eq!(sudoku_top(&[row(1, "quiz", 5, 100)], &[sudoku_tally(1, 9, 3, 150)]), None);
+    }
+
+    #[test]
+    fn a_day_the_sudoku_store_knows_nothing_about_falls_back_to_the_ledger() {
+        // Days older than this change have no `worth` at all; the counted-rows
+        // rule still resolves them, so no old day is left without a card and the
+        // frogtop:<day>:sudoku key is unchanged.
+        let rows = vec![row(1, "sudoku", 4, 100), row(1, "sudoku", 0, 110), row(2, "sudoku", 6, 120)];
+        let ledgers_answer = daily_tops(&rows);
+        assert_eq!(ledgers_answer, vec![("sudoku", 1, 2)], "the count of rows, capped ones included");
+        assert_eq!(with_sudoku_tally(ledgers_answer.clone(), &rows, &[]), ledgers_answer, "an empty day keeps it");
+        // And through the real reader: a day the store has nothing for — one from
+        // before this was built, or a run with no store open at all — is left
+        // exactly as the ledger decided it.
+        assert_eq!(with_sudoku_measured(ledgers_answer.clone(), &rows, "2026-09-13"), ledgers_answer);
+        // Once the store does have the day, its answer replaces the count — and
+        // a day nobody housed played takes the sudoku card off the list.
+        assert_eq!(with_sudoku_tally(ledgers_answer.clone(), &rows, &[sudoku_tally(2, 6, 1, 120)]), vec![("sudoku", 2, 6)]);
+        assert!(with_sudoku_tally(ledgers_answer, &rows, &[sudoku_tally(9, 30, 8, 120)]).is_empty());
+        // Every other activity is left exactly alone.
+        let mixed = vec![("quiz", 5, 4), ("sudoku", 1, 2), ("anagram", 7, 3)];
+        assert_eq!(with_sudoku_tally(mixed, &rows, &[sudoku_tally(2, 6, 1, 120)]), vec![("quiz", 5, 4), ("anagram", 7, 3), ("sudoku", 2, 6)]);
     }
 
     #[test]

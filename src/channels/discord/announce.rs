@@ -401,6 +401,25 @@ const FIELDS: &[Field] = &[
         },
         under: Some("npat_on"),
     },
+    Field {
+        key: "sudoku",
+        read: |r| vec![num(r.sudoku.points[0]), num(r.sudoku.points[1]), num(r.sudoku.points[2])],
+        say: |o, n| {
+            // There is no cap clause here on purpose. Sudoku pays SUDOKU points,
+            // its own uncapped score, and no house points at all, so the note has
+            // to name the currency — and say, every time, that what was earned
+            // back when it did pay is still there.
+            if row(n, 0, 3) == "0 · 0 · 0" {
+                return "🔢 **Sudoku** no longer scores at all — the puzzles stay, they just stop counting. The sudoku points already earned stay where they are."
+                    .to_string();
+            }
+            format!(
+                "🔢 **Sudoku** now pays {} sudoku points for an easy · medium · hard puzzle — sudoku points, not house points, so nothing here moves the House Cup. What anyone has already earned stays exactly where it is. `/sudokutop` is the board.",
+                shift(row(n, 0, 3), row(o, 0, 3))
+            )
+        },
+        under: None,
+    },
 ];
 
 // --- writing the values down ------------------------------------------------------------
@@ -595,6 +614,15 @@ pub const NEWS: &[News] = &[News {
     id: "sudoku-solver-points-back-2026-09",
     title: "⚖️ Sudoku: some points have been taken back",
     body: "A few sudoku puzzles have been solved in times that are not humanly possible. A medium puzzle has about fifty            empty squares, and some were handed in **14 to 19 seconds** after the page was first opened \u{2014} faster than the            digits can be typed, never mind worked out. A solver app does that. A person doesn\u{2019}t.\n\n           \u{2022} **66 points have been taken back**, from the members and from their house.\n           \u{2022} This is checked, not guessed: the bot records when each player opened a puzzle and when their code arrived.\n           \u{2022} Nobody is named here, one of them owned up when asked, and solves that merely look quick have been left            alone \u{2014} being good at sudoku is not cheating.\n\n           Use a solver for fun if you like. Just don\u{2019}t hand the code in for points.",
+}, News {
+    id: "sudoku-sudoku-points-2026-09",
+    title: "🧩 Sudoku keeps its own score now",
+    body: "Sudoku in {sudoku} has stopped paying house points. The puzzles, the difficulties, the hints, the codes and \
+           the late window are all exactly as they were — what changes is what a solve is worth: **sudoku points**, \
+           the game's own score, which doesn't move the House Cup.\n\n           • A solve scores the puzzle's value with your own hints taken off, and **nothing is capped** — a good day \
+           keeps counting all the way.\n           • **Everyone** has sudoku points, houses or no houses. Mods and Muggles score too.\n           • **The house points already earned stay exactly where they are.** Nothing is taken back by this.\n           • `/sudokutop` is the new board, today or this month; `/sudoku` shows where you stand; the day's top \
+           scorer still gets the 🐸 frog card.\n\n           Why: a grid handed to a solver app was paying a house the same as a grid worked out by a person. Sudoku is \
+           still here to play — it just doesn't decide the House Cup any more.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,

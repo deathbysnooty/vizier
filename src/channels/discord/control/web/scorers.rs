@@ -199,7 +199,9 @@ pub fn activity_chips(sources: &HashMap<String, i64>, messages: i64, voice_secs:
         "with_company": activity::voice_company_rule(),
         "reached": voice_cap > 0 && voice_pts >= voice_cap,
     }));
-    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Guess, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat, Source::Sudoku] {
+    // Sudoku is not here: it keeps its own score, sudoku points, and pays the
+    // House Cup nothing. The old rows stay in the ledger and in the totals.
+    for s in [Source::Quiz, Source::Koto, Source::Anagram, Source::Guess, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat] {
         let (icon, name) = label(s);
         let cap = match s.cap() {
             Cap::PerDay(n) => Some(n),

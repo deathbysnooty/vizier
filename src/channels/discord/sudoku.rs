@@ -8,10 +8,17 @@
 //! The first person to paste a correct code wins the puzzle's points, the card
 //! turns into a "Solved!" card, and the next puzzle goes up at once.
 //!
+//! Sudoku keeps its OWN score. A solve is worth SUDOKU POINTS — the puzzle's
+//! value with that player's hints taken off — and nothing else: no house points,
+//! no daily limit, and the same score for everyone, houses or no houses. The
+//! House Cup was being moved by puzzles a solver app had done, so the game was
+//! taken out of it; every house point earned from sudoku before that stays
+//! exactly where it is.
+//!
 //! Someone who was still working when the channel moved on isn't cut off: a
 //! code carries the number of the puzzle it belongs to, so codes for the last
 //! day's puzzles are still checked and still told "yes, that's right" — they
-//! just count as a finish rather than a win, and pay nothing.
+//! just count as a finish rather than a win, and score nothing.
 //!
 //! One task does all the posting ([`run`]), the way Name Place Animal Thing
 //! does: the buttons only touch the database and some shared state, so two
@@ -33,7 +40,7 @@ use serenity::all::{
 };
 
 use super::control;
-use super::points::{Cap, Outcome, Source};
+use super::points::Source;
 use super::rules_text::{self, SudokuRules};
 use super::sudoku_card;
 use super::sudoku_code::{self, CodeError};
@@ -112,13 +119,6 @@ fn late_hours() -> i64 {
     control::number("VIZIER_SUDOKU_LATE_HOURS", 24).clamp(1, 720) as i64
 }
 
-fn daily_cap() -> Option<i64> {
-    match Source::Sudoku.cap() {
-        Cap::PerDay(n) => Some(n),
-        _ => None,
-    }
-}
-
 /// The page's address, when the panel has one. Read through the panel so there
 /// is one place that knows where the bot lives.
 fn page_base() -> Option<String> {
@@ -135,7 +135,6 @@ pub fn sudoku_rules() -> SudokuRules {
     SudokuRules {
         channel: live_channel(),
         points: level_points(),
-        cap: daily_cap(),
         hint_cost: hint_cost(),
         max_hints: max_hints(),
         max_tries: max_tries(),
@@ -171,14 +170,20 @@ fn plural(n: i64, one: &str, many: &str) -> String {
     format!("{} {}", n, if n == 1 { one } else { many })
 }
 
+/// "4 sudoku points", "1 sudoku point".
+pub fn score_words(n: i64) -> String {
+    plural(n, "sudoku point", "sudoku points")
+}
+
 /// What a puzzle is worth to someone who has taken hints, never below nothing.
 pub fn worth_after_hints(points: i64, hints: i64, cost: i64) -> i64 {
     (points - hints.max(0) * cost.max(0)).max(0)
 }
 
-/// What a correct grid is worth in house points: a win, less what that
-/// player's hints cost them; a finish is worth nothing at all, and the ledger
-/// is never asked about one.
+/// What a correct grid scores in SUDOKU points: a win, less what that player's
+/// hints cost them; a finish is worth nothing at all, because somebody else had
+/// already solved it. No cap of any kind touches this — sudoku points are the
+/// game's own score and the House Cup is not in it.
 pub fn payout(kind: Kind, points: i64, hints: i64, cost: i64) -> i64 {
     match kind {
         Kind::Win => worth_after_hints(points, hints, cost),
@@ -206,7 +211,7 @@ pub fn card_text(live: &Live) -> String {
         n => format!("🧑‍💻 **{}** playing", plural(n, "person", "people")),
     };
     let hint = if live.hint_cost > 0 {
-        format!(" · 💡 a hint costs **{}**", plural(live.hint_cost, "point", "points"))
+        format!(" · 💡 a hint costs **{}**", score_words(live.hint_cost))
     } else {
         " · 💡 hints are free".to_string()
     };
@@ -214,7 +219,7 @@ pub fn card_text(live: &Live) -> String {
         "{} **{}** · worth **{}** · first to solve it wins\n{} · ⏱️ open **{}**{}",
         live.level.emoji(),
         live.level.name(),
-        plural(live.points, "point", "points"),
+        score_words(live.points),
         playing,
         open_words(live.open_secs),
         hint
@@ -229,9 +234,11 @@ pub struct Solved {
     pub puzzle_id: i64,
     pub level: Level,
     pub winner: u64,
-    /// The winner's crest and house, when they are in one.
+    /// The winner's crest and house, when they are in one. It says who they
+    /// play for, not what the solve paid them: sudoku pays no house points.
     pub badge: String,
     pub seconds: i64,
+    /// The SUDOKU points the solve scored, hints already taken off.
     pub points: i64,
     /// Hints the winner took, and what they cost them.
     pub hints: i64,
@@ -240,6 +247,8 @@ pub struct Solved {
     pub all_hints: i64,
     /// People who had started it, the winner not counted.
     pub others: i64,
+    /// The winner's sudoku points today, this puzzle included.
+    pub tally: i64,
     /// "Aarav 3 · Meera 2", the day so far.
     pub today: String,
 }
@@ -248,14 +257,16 @@ pub fn solved_title(puzzle_id: i64, level: Level) -> String {
     format!("🎉 Solved! Puzzle #{} · {} {}", puzzle_id, level.emoji(), level.name())
 }
 
+/// The solved card's words. Sudoku points are the only score here — the House
+/// Cup is not mentioned, because the game no longer moves it.
 pub fn solved_text(s: &Solved) -> String {
     let badge = if s.badge.is_empty() { String::new() } else { format!(" {}", s.badge) };
-    let points = match s.points {
-        0 => " · **no points left after hints**".to_string(),
-        n => format!(" · **+{}**", plural(n, "point", "points")),
+    let scored = match s.points {
+        0 => "**no sudoku points left after hints**".to_string(),
+        n => format!("**+{}**", score_words(n)),
     };
-    let mut text = format!("<@{}>{} solved it in **{}**{}", s.winner, badge, spent_words(s.seconds), points);
-    let mut notes = Vec::new();
+    let mut text = format!("🧩 **solved by <@{}>**{} · {} · {} today", s.winner, badge, scored, s.tally);
+    let mut notes = vec![format!("{} {} in {}", s.level.emoji(), s.level.name(), spent_words(s.seconds))];
     notes.push(match s.hints {
         0 => "no hints used".to_string(),
         n if s.points < s.full_points => format!("{} used, {} off", plural(n, "hint", "hints"), s.full_points - s.points),
@@ -276,7 +287,8 @@ pub fn solved_footer(today: &str) -> String {
 }
 
 /// The day's solvers as the cards and the button show them: wins first, then
-/// the people who finished a puzzle somebody else had already won.
+/// the people who finished a puzzle somebody else had already won. The number
+/// in brackets is SUDOKU points, the same score the solved card names.
 pub fn today_lines(solves: &[store::Solve], name: impl Fn(u64) -> String) -> (Vec<String>, Vec<String>) {
     let mut wins: Vec<(u64, i64, i64)> = Vec::new();
     let mut finishes: Vec<u64> = Vec::new();
@@ -285,9 +297,9 @@ pub fn today_lines(solves: &[store::Solve], name: impl Fn(u64) -> String) -> (Ve
             Kind::Win => match wins.iter_mut().find(|(u, _, _)| *u == s.user) {
                 Some((_, count, points)) => {
                     *count += 1;
-                    *points += s.points;
+                    *points += s.worth;
                 }
-                None => wins.push((s.user, 1, s.points)),
+                None => wins.push((s.user, 1, s.worth)),
             },
             Kind::Finish => {
                 if !finishes.contains(&s.user) {
@@ -302,11 +314,12 @@ pub fn today_lines(solves: &[store::Solve], name: impl Fn(u64) -> String) -> (Ve
     (won, also)
 }
 
-/// One line per solve for the 📊 button: who, which puzzle, how long, what it paid.
+/// One line per solve for the 📊 button: who, which puzzle, how long, what it
+/// scored.
 pub fn solver_line(s: &store::Solve) -> String {
     let tail = match s.kind {
-        Kind::Win => format!("**+{}**", s.points),
-        Kind::Finish => "finished, no points".to_string(),
+        Kind::Win => format!("**+{}**", s.worth),
+        Kind::Finish => "finished after the win, so nothing scored".to_string(),
     };
     format!("<@{}> · #{} {} {} · {} · {}", s.user, s.puzzle, s.level.emoji(), s.level.name(), spent_words(s.seconds), tail)
 }
@@ -572,16 +585,14 @@ fn today_words(ctx: &Context, guild: Option<serenity::all::GuildId>) -> String {
 /// keeps its place in the channel, with the picture and the buttons taken off.
 async fn show_solved(ctx: &Context, row: &store::Row, guild: Option<serenity::all::GuildId>) {
     let Some(winner) = row.winner else { return };
-    let (hints, all_hints, others, points) = {
+    let (hints, all_hints, others, points, tally) = {
         let Some(db) = store::db() else { return };
         let conn = db.lock();
         let player = store::player(&conn, row.id, winner).unwrap_or_default();
-        let paid = store::day_solves(&conn, &super::points::ist_day(row.solved_ts.unwrap_or_else(|| Utc::now().timestamp())))
-            .into_iter()
-            .find(|s| s.puzzle == row.id && s.user == winner)
-            .map(|s| s.points)
-            .unwrap_or(row.points);
-        (player.hints, store::hints_used(&conn, row.id), (store::playing(&conn, row.id) - 1).max(0), paid)
+        let day = store::day_solves(&conn, &super::points::ist_day(row.solved_ts.unwrap_or_else(|| Utc::now().timestamp())));
+        let scored = day.iter().find(|s| s.puzzle == row.id && s.user == winner).map(|s| s.worth).unwrap_or(row.points);
+        let tally: i64 = day.iter().filter(|s| s.user == winner).map(|s| s.worth).sum();
+        (player.hints, store::hints_used(&conn, row.id), (store::playing(&conn, row.id) - 1).max(0), scored, tally.max(scored))
     };
     let solved = Solved {
         puzzle_id: row.id,
@@ -594,6 +605,7 @@ async fn show_solved(ctx: &Context, row: &store::Row, guild: Option<serenity::al
         full_points: row.points,
         all_hints,
         others,
+        tally,
         today: today_words(ctx, guild),
     };
     let embed = CreateEmbed::new()
@@ -985,7 +997,7 @@ pub fn play_text(puzzle_id: i64, level: Level, points: i64, link: Option<&str>, 
             puzzle_id,
             level.emoji(),
             level.name(),
-            plural(points, "point", "points"),
+            score_words(points),
             link
         ),
         None => format!(
@@ -995,7 +1007,7 @@ pub fn play_text(puzzle_id: i64, level: Level, points: i64, link: Option<&str>, 
             puzzle_id,
             level.emoji(),
             level.name(),
-            plural(points, "point", "points"),
+            score_words(points),
             text_grid(givens)
         ),
     }
@@ -1137,7 +1149,7 @@ async fn hint_pressed(ctx: &Context, component: &ComponentInteraction) {
             hints,
             max,
             row.id,
-            plural(worth, "point", "points")
+            score_words(worth)
         ),
     )
     .await;
@@ -1177,11 +1189,12 @@ pub fn today_text(solves: &[store::Solve], me: u64) -> String {
     }
     let mine: Vec<&store::Solve> = solves.iter().filter(|s| s.user == me).collect();
     let wins = mine.iter().filter(|s| s.kind == Kind::Win).count();
-    let points: i64 = mine.iter().map(|s| s.points).sum();
+    let points: i64 = mine.iter().map(|s| s.worth).sum();
     lines.push(match (mine.len(), wins) {
         (0, _) => "-# You haven't solved one today. Press ▶️ Play on the card above.".to_string(),
-        (all, won) => format!("-# **You:** {} today · {} won · **{} points**", plural(all as i64, "puzzle", "puzzles"), won, points),
+        (all, won) => format!("-# **You:** {} today · {} won · **{}**", plural(all as i64, "puzzle", "puzzles"), won, score_words(points)),
     });
+    lines.push("-# Sudoku keeps its own score: sudoku points, no daily limit, and everyone has them. `/sudokutop` is the board.".to_string());
     lines.join("\n")
 }
 
@@ -1293,22 +1306,22 @@ fn finish(row: &store::Row, user: u64, now: i64) -> Landed {
     };
     if !won {
         // A finish: written down so it shows in the day's list, and that is all.
-        // Nothing here touches the ledger — see `payout`.
+        // It scores nothing, because the puzzle was already won — see `payout`.
         let seconds = now - row.posted_ts;
         let winner = {
             let conn = db.lock();
-            let _ = store::add_solve(&conn, &day, user, row.id, 0, Kind::Finish, row.level, seconds, now);
+            let _ = store::add_solve(&conn, &day, user, row.id, 0, 0, Kind::Finish, row.level, seconds, now);
             store::get(&conn, row.id).and_then(|r| r.winner)
         };
         let words = match winner {
             Some(w) => format!(
-                "✅ **Correct!** Puzzle #{} in **{}** — <@{}> got there first, so no points this time.\n-# It still counts as a finish. The puzzle on the card above is up for grabs.",
+                "✅ **Correct!** Puzzle #{} in **{}** — <@{}> got there first, so the sudoku points went to them.\n-# It still counts as a finish. The puzzle on the card above is up for grabs.",
                 row.id,
                 spent_words(seconds),
                 w
             ),
             None => format!(
-                "✅ **Correct!** Puzzle #{} in **{}** — that one was already closed, so no points this time.",
+                "✅ **Correct!** Puzzle #{} in **{}** — that one was already closed, so there was nothing left to score.",
                 row.id,
                 spent_words(seconds)
             ),
@@ -1323,36 +1336,47 @@ fn finish(row: &store::Row, user: u64, now: i64) -> Landed {
         )
     };
     let worth = payout(Kind::Win, row.points, hints, hint_cost());
-    let reason = format!("Sudoku: puzzle {} ({})", row.id, row.level.name().to_lowercase());
-    let granted = match super::house::award_person(user, Source::Sudoku, worth, &reason, None, Some(format!("sudoku:{}", row.id)), None) {
-        Some((_, Outcome::Granted(n))) => n,
-        _ => 0,
-    };
-    {
+    // The ledger is still told, and still told NOTHING: a zero row, written by
+    // the one door that turns mods, Muggles and the unsorted away. It moves no
+    // house points and no total — it is the receipt that says this person played
+    // sudoku today, which is what keeps the daily 🐸 card in the right hands and
+    // what stops a replayed puzzle ever paying if the game is ever put back.
+    let reason = format!("Sudoku: puzzle {} ({}) — sudoku points, no house points", row.id, row.level.name().to_lowercase());
+    let _ = super::house::award_person(user, Source::Sudoku, 0, &reason, None, Some(format!("sudoku:{}", row.id)), None);
+    let tally = {
         let conn = db.lock();
-        let _ = store::add_solve(&conn, &day, user, row.id, granted, Kind::Win, row.level, seconds, now);
-    }
-    tracing::info!("sudoku: puzzle {} won by {} in {}s for {} points", row.id, user, seconds, granted);
-    let paid = match (worth, granted) {
-        (0, _) => "\n-# Your hints used up this puzzle's points, but the solve still counts.".to_string(),
-        (w, 0) => format!("\n-# You're at today's sudoku limit, so these **{}** weren't added. Tomorrow they count again.", w),
-        (w, g) if g < w => format!("\n-# Today's limit trimmed it to **+{}**.", g),
-        _ => String::new(),
+        let _ = store::add_solve(&conn, &day, user, row.id, 0, worth, Kind::Win, row.level, seconds, now);
+        store::day_solves(&conn, &day).iter().filter(|s| s.user == user).map(|s| s.worth).sum::<i64>()
+    };
+    tracing::info!("sudoku: puzzle {} won by {} in {}s for {} sudoku points", row.id, user, seconds, worth);
+    let aside = match worth {
+        0 => "\n-# Your hints used up this puzzle's sudoku points, but the solve still counts.".to_string(),
+        _ => format!("\n-# **{}** today. `/sudokutop` is the board.", score_words(tally.max(worth))),
     };
     Landed {
         won: true,
-        words: format!("🎉 **You solved puzzle #{}** in **{}** · **+{}**{}", row.id, spent_words(seconds), plural(granted, "point", "points"), paid),
+        words: format!("🎉 **You solved puzzle #{}** in **{}** · **+{}**{}", row.id, spent_words(seconds), score_words(worth), aside),
     }
 }
 
 // --- commands -------------------------------------------------------------------------------------------
 
 pub fn new_builder() -> CreateCommand {
-    CreateCommand::new("sudokunew").description("admin only: skip the sudoku that's up and post a fresh one, no points")
+    CreateCommand::new("sudokunew").description("admin only: skip the sudoku that's up and post a fresh one, nobody scoring for it")
 }
 
 pub fn mine_builder() -> CreateCommand {
     CreateCommand::new("sudoku").description("your sudoku links: the puzzle that's up now and any you haven't finished")
+}
+
+pub fn top_builder() -> CreateCommand {
+    CreateCommand::new("sudokutop")
+        .description("the sudoku points board, today or this month")
+        .add_option(
+            serenity::all::CreateCommandOption::new(serenity::all::CommandOptionType::String, "period", "which days to count")
+                .add_string_choice("Today", "today")
+                .add_string_choice("This month", "month"),
+        )
 }
 
 pub fn help_builder() -> CreateCommand {
@@ -1383,9 +1407,107 @@ pub async fn new_command(ctx: &Context, command: &CommandInteraction) {
     reply_command(ctx, command, CreateInteractionResponseMessage::new().content(text)).await;
 }
 
-/// The lines `/sudoku` shows: the live puzzle, then the puzzles this person
-/// started and never finished, newest first.
-pub fn mine_text(live: Option<&store::Row>, mine: &[(store::Row, bool)], base: Option<&str>, channel: Option<u64>) -> String {
+/// Where someone stands on a ranked board, counting from one. `None` when they
+/// aren't on it at all.
+pub fn place_of(rows: &[store::Tally], me: u64) -> Option<usize> {
+    rows.iter().position(|t| t.user == me).map(|i| i + 1)
+}
+
+/// "3rd", the way a line reads it.
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{}{}", n, suffix)
+}
+
+/// One person's own line on a board: where they stand out of how many, what
+/// they have and over how many puzzles. Nothing at all when they haven't won one
+/// in that stretch.
+pub fn standing(rows: &[store::Tally], me: u64) -> Option<String> {
+    let place = place_of(rows, me)?;
+    let mine = rows.get(place - 1)?;
+    Some(format!("{} of {} · **{}** · {}", ordinal(place), rows.len(), score_words(mine.points), plural(mine.solves, "puzzle", "puzzles")))
+}
+
+/// The first and last day of the India month a day falls in. The store's days
+/// are `YYYY-MM-DD`, which sorts as a date, so a month is just a pair of ends —
+/// a 31st that some months don't have is simply never matched.
+pub fn month_ends(day: &str) -> (String, String) {
+    let month = day.get(..7).unwrap_or(day);
+    (format!("{}-01", month), format!("{}-31", month))
+}
+
+/// "September so far", the heading a month's board carries.
+pub fn month_label(day: &str) -> String {
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let month = day.get(5..7).and_then(|m| m.parse::<usize>().ok()).filter(|m| (1..=12).contains(m));
+    match month {
+        Some(m) => format!("{} so far", MONTHS[m - 1]),
+        None => "this month".to_string(),
+    }
+}
+
+/// Today's and this month's sudoku points, both boards ranked.
+fn boards_now() -> (Vec<store::Tally>, Vec<store::Tally>) {
+    let day = super::points::ist_day(Utc::now().timestamp());
+    let (from, to) = month_ends(&day);
+    match store::db() {
+        Some(db) => {
+            let conn = db.lock();
+            (store::day_tally(&conn, &day), store::tally_between(&conn, &from, &to))
+        }
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// How many names `/sudokutop` lists.
+const TOP_LIST: usize = 10;
+
+/// What `/sudokutop` says. `rows` is the whole board, already ranked; only the
+/// first [`TOP_LIST`] are listed, and whoever asked gets their own line under
+/// them when they didn't make it.
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+    let mut text = format!("🧩 **Sudoku points** · {}", period);
+    if rows.is_empty() {
+        text.push_str("\nNobody has solved one yet. The puzzle is waiting in the channel.");
+        return text;
+    }
+    for (i, t) in rows.iter().take(TOP_LIST).enumerate() {
+        let rank = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            n => format!("`{:>2}.`", n + 1),
+        };
+        let you = if t.user == me { " ← you" } else { "" };
+        text.push_str(&format!("\n{} <@{}> **{}** · {}{}", rank, t.user, t.points, plural(t.solves, "puzzle", "puzzles"), you));
+    }
+    if place_of(rows, me).is_some_and(|p| p > TOP_LIST) {
+        if let Some(mine) = standing(rows, me) {
+            text.push_str(&format!("\n-# **You:** {}", mine));
+        }
+    }
+    text.push_str("\n-# Sudoku points are this game's own score — no daily limit, and everyone has them. They don't move the House Cup.");
+    text
+}
+
+/// The lines `/sudoku` shows: the live puzzle, where the asker stands today and
+/// this month, then the puzzles they started and never finished, newest first.
+pub fn mine_text(
+    live: Option<&store::Row>,
+    today: &[store::Tally],
+    month: &[store::Tally],
+    me: u64,
+    mine: &[(store::Row, bool)],
+    base: Option<&str>,
+    channel: Option<u64>,
+) -> String {
     let link = |id: i64| match base {
         Some(b) => format!(" · [play]({})", page_link(b, id)),
         None => String::new(),
@@ -1397,10 +1519,17 @@ pub fn mine_text(live: Option<&store::Row>, mine: &[(store::Row, bool)], base: O
             row.id,
             row.level.emoji(),
             row.level.name(),
-            plural(row.points, "point", "points"),
+            score_words(row.points),
             link(row.id)
         )),
         None => lines.push("No puzzle is up right now.".to_string()),
+    }
+    lines.push(match standing(today, me) {
+        Some(yours) => format!("-# **You today:** {}", yours),
+        None => "-# You haven't won one today. Press ▶️ Play on the card and see.".to_string(),
+    });
+    if let Some(yours) = standing(month, me) {
+        lines.push(format!("-# **This month:** {}", yours));
     }
     let open: Vec<&(store::Row, bool)> = mine.iter().filter(|(_, done)| !done).filter(|(r, _)| live.map(|l| l.id) != Some(r.id)).collect();
     if open.is_empty() {
@@ -1418,13 +1547,16 @@ pub fn mine_text(live: Option<&store::Row>, mine: &[(store::Row, bool)], base: O
         if open.len() > MINE_LINES {
             lines.push(format!("-# …and {} more", open.len() - MINE_LINES));
         }
-        lines.push("-# Finish one and paste its code below: you'll be told whether it was right, but the points went to whoever was first.".to_string());
+        lines.push("-# Finish one and paste its code below: you'll be told whether it was right, but the sudoku points went to whoever was first.".to_string());
     }
     if base.is_none() {
         lines.push("-# The web page isn't set up yet — a mod needs to set **VIZIER_PANEL_URL** in the panel.".to_string());
     }
     if let Some(c) = channel {
-        lines.push(format!("-# The puzzle card lives in <#{}> · press ❓ How to play on it for the rules.", c));
+        lines.push(format!(
+            "-# The puzzle card lives in <#{}> · `/sudokutop` for the board · press ❓ How to play on the card for the rules.",
+            c
+        ));
     }
     lines.join("\n")
 }
@@ -1445,7 +1577,8 @@ pub async fn mine_command(ctx: &Context, command: &CommandInteraction) {
         None => Vec::new(),
     };
     let base = page_base();
-    let text = mine_text(live.as_ref(), &mine, base.as_deref(), live_channel());
+    let (today, month) = boards_now();
+    let text = mine_text(live.as_ref(), &today, &month, user, &mine, base.as_deref(), live_channel());
     let button = live.as_ref().map(|r| r.id).or_else(|| rows.first().map(|r| r.id));
     let mut message = CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
     if button.is_some() {
@@ -1454,6 +1587,21 @@ pub async fn mine_command(ctx: &Context, command: &CommandInteraction) {
         ])]);
     }
     reply_command(ctx, command, message).await;
+}
+
+/// `/sudokutop [period]` — everyone, shown only to them, like `/housetop`.
+pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
+    let month = command.data.options.iter().any(|o| {
+        o.name == "period" && matches!(&o.value, serenity::all::CommandDataOptionValue::String(v) if v == "month")
+    });
+    let (today_rows, month_rows) = boards_now();
+    let (rows, period) = if month {
+        (month_rows, month_label(&super::points::ist_day(Utc::now().timestamp())))
+    } else {
+        (today_rows, "today".to_string())
+    };
+    let text = top_text(&period, &rows, command.user.id.get());
+    reply_command(ctx, command, CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
 }
 
 /// The rules as a card, for both the command and the ❓ How to play button:
@@ -1514,9 +1662,9 @@ mod tests {
     fn the_card_says_the_level_the_points_and_who_is_playing() {
         let text = card_text(&Live { level: Level::Medium, points: 4, playing: 5, open_secs: 380, hint_cost: 1 });
         assert!(text.contains("🟡 **Medium**"), "{}", text);
-        assert!(text.contains("worth **4 points**") && text.contains("first to solve it wins"));
+        assert!(text.contains("worth **4 sudoku points**") && text.contains("first to solve it wins"));
         assert!(text.contains("**5 people** playing") && text.contains("open **6 min**"));
-        assert!(text.contains("a hint costs **1 point**"));
+        assert!(text.contains("a hint costs **1 sudoku point**"));
         assert_eq!(card_title(128), "🔢 Sudoku · Puzzle #128");
         // Nobody yet, and free hints.
         let empty = card_text(&Live { level: Level::Hard, points: 6, playing: 0, open_secs: 4, hint_cost: 0 });
@@ -1525,9 +1673,8 @@ mod tests {
         assert!(CARD_FOOTER.contains("the next puzzle appears"));
     }
 
-    #[test]
-    fn the_solved_card_names_the_winner_and_the_day() {
-        let solved = Solved {
+    fn solved() -> Solved {
+        Solved {
             puzzle_id: 128,
             level: Level::Medium,
             winner: 42,
@@ -1538,18 +1685,37 @@ mod tests {
             full_points: 4,
             all_hints: 0,
             others: 4,
+            tally: 26,
             today: "Aarav 3 (+9) · Meera 2 (+6)".into(),
-        };
+        }
+    }
+
+    #[test]
+    fn the_solved_card_names_the_winner_the_puzzle_and_the_sudoku_points() {
+        let solved = solved();
         assert_eq!(solved_title(128, Level::Medium), "🎉 Solved! Puzzle #128 · 🟡 Medium");
         let text = solved_text(&solved);
-        assert!(text.contains("<@42> 🦅 Ravenclaw solved it in **7 min 41 s** · **+4 points**"), "{}", text);
+        assert_eq!(
+            text.lines().next().unwrap(),
+            "🧩 **solved by <@42>** 🦅 Ravenclaw · **+4 sudoku points** · 26 today"
+        );
+        // The difficulty, how long it took and who was playing are all still there.
+        assert!(text.contains("🟡 Medium in 7 min 41 s"), "{}", text);
         assert!(text.contains("no hints used") && text.contains("4 others were also playing"), "{}", text);
         assert!(solved_footer(&solved.today).starts_with("Solved today: Aarav 3"));
         assert_eq!(solved_footer(""), "The first solve of the day");
-        // Hints eat into the points and are said so.
-        let hinted = Solved { hints: 2, points: 2, all_hints: 3, others: 0, ..solved };
+        // Hints eat into the sudoku points and are said so.
+        let hinted = Solved { hints: 2, points: 2, all_hints: 3, others: 0, tally: 2, ..solved.clone() };
         let text = solved_text(&hinted);
-        assert!(text.contains("**+2 points**") && text.contains("2 hints used, 2 off") && text.contains("3 hints in all"), "{}", text);
+        assert!(text.contains("**+2 sudoku points** · 2 today"), "{}", text);
+        assert!(text.contains("2 hints used, 2 off") && text.contains("3 hints in all"), "{}", text);
+        // One point reads as one point, and hints that ate the lot say so.
+        assert!(solved_text(&Solved { points: 1, tally: 1, ..solved.clone() }).contains("**+1 sudoku point** · 1 today"));
+        let spent = Solved { points: 0, hints: 4, tally: 6, ..solved.clone() };
+        assert!(solved_text(&spent).contains("**no sudoku points left after hints** · 6 today"), "{}", solved_text(&spent));
+        // A mod or a Muggle, with no crest, wins the same way.
+        let no_house = Solved { badge: String::new(), ..solved };
+        assert!(solved_text(&no_house).starts_with("🧩 **solved by <@42>** · **+4 sudoku points** · 26 today"), "{}", solved_text(&no_house));
     }
 
     #[test]
@@ -1631,21 +1797,25 @@ mod tests {
 
     #[test]
     fn todays_solvers_split_wins_from_finishes() {
+        // The ledger pays nothing for any of these now: `points` is nought and
+        // the sudoku points are the whole of the score.
         let solves = vec![
-            store::Solve { user: 1, puzzle: 1, points: 4, kind: Kind::Win, level: Level::Medium, seconds: 120, ts: 10 },
-            store::Solve { user: 2, puzzle: 1, points: 0, kind: Kind::Finish, level: Level::Medium, seconds: 400, ts: 20 },
-            store::Solve { user: 1, puzzle: 2, points: 2, kind: Kind::Win, level: Level::Easy, seconds: 90, ts: 30 },
-            store::Solve { user: 3, puzzle: 3, points: 6, kind: Kind::Win, level: Level::Hard, seconds: 800, ts: 40 },
+            store::Solve { user: 1, puzzle: 1, points: 0, worth: 4, kind: Kind::Win, level: Level::Medium, seconds: 120, ts: 10 },
+            store::Solve { user: 2, puzzle: 1, points: 0, worth: 0, kind: Kind::Finish, level: Level::Medium, seconds: 400, ts: 20 },
+            store::Solve { user: 1, puzzle: 2, points: 0, worth: 2, kind: Kind::Win, level: Level::Easy, seconds: 90, ts: 30 },
+            store::Solve { user: 3, puzzle: 3, points: 0, worth: 6, kind: Kind::Win, level: Level::Hard, seconds: 800, ts: 40 },
         ];
         let name = |u: u64| format!("P{}", u);
         let (won, also) = today_lines(&solves, name);
         assert_eq!(won, vec!["P1 2 (+6)", "P3 1 (+6)"]);
         assert_eq!(also, vec!["P2"]);
         let text = today_text(&solves, 2);
-        assert!(text.contains("<@2> · #1 🟡 Medium · 6 min 40 s · finished, no points"), "{}", text);
-        assert!(text.contains("**You:** 1 puzzle today · 0 won · **0 points**"), "{}", text);
+        assert!(text.contains("<@2> · #1 🟡 Medium · 6 min 40 s · finished after the win, so nothing scored"), "{}", text);
+        assert!(text.contains("**You:** 1 puzzle today · 0 won · **0 sudoku points**"), "{}", text);
+        assert!(text.contains("<@1> · #2 🟢 Easy · 1 min 30 s · **+2**"), "{}", text);
         assert!(today_text(&[], 1).contains("Nobody has solved one yet today"));
         assert!(today_text(&solves, 99).contains("You haven't solved one today"));
+        assert!(today_text(&solves, 1).contains("**You:** 2 puzzles today · 2 won · **6 sudoku points**"), "{}", today_text(&solves, 1));
     }
 
     #[test]
@@ -1690,16 +1860,67 @@ mod tests {
         store::claim(&conn, older.id, 7, 950).unwrap();
         let older = store::get(&conn, older.id).unwrap();
         let mine = vec![(older.clone(), false), (done.clone(), true)];
-        let text = mine_text(Some(&live), &mine, Some("https://p.example"), Some(55));
+        let today = vec![tally(2, 10, 3, 20), tally(1, 6, 2, 30)];
+        let month = vec![tally(1, 84, 21, 90), tally(2, 18, 5, 20)];
+        let text = mine_text(Some(&live), &today, &month, 1, &mine, Some("https://p.example"), Some(55));
         assert!(text.contains(&format!("**Up now: #{}**", live.id)), "{}", text);
+        assert!(text.contains("worth **4 sudoku points**"), "{}", text);
         assert!(text.contains(&format!("https://p.example/sudoku/{}", older.id)));
         assert!(text.contains("won by <@7>"));
         assert!(!text.contains(&format!("#{} 🟢", done.id)), "a puzzle already finished isn't listed again");
-        assert!(text.contains("<#55>"));
+        assert!(text.contains("<#55>") && text.contains("`/sudokutop`"));
+        // Where the asker stands, today and this month.
+        assert!(text.contains("**You today:** 2nd of 2 · **6 sudoku points** · 2 puzzles"), "{}", text);
+        assert!(text.contains("**This month:** 1st of 2 · **84 sudoku points** · 21 puzzles"), "{}", text);
+        // Somebody who hasn't won one today but has this month, and one who never has.
+        let some = mine_text(Some(&live), &today, &month, 2, &[], None, None);
+        assert!(some.contains("**You today:** 1st of 2 · **10 sudoku points**"), "{}", some);
+        let none = mine_text(Some(&live), &today, &month, 99, &[], None, None);
+        assert!(none.contains("haven't won one today") && !none.contains("This month"), "{}", none);
         // Nothing of your own, and no page set up.
-        let bare = mine_text(Some(&live), &[], None, None);
+        let bare = mine_text(Some(&live), &[], &[], 1, &[], None, None);
         assert!(bare.contains("Nothing else of yours is half finished") && bare.contains("VIZIER_PANEL_URL"), "{}", bare);
-        assert!(mine_text(None, &[], None, None).contains("No puzzle is up right now"));
+        assert!(mine_text(None, &[], &[], 1, &[], None, None).contains("No puzzle is up right now"));
+    }
+
+    fn tally(user: u64, points: i64, solves: i64, reached: i64) -> store::Tally {
+        store::Tally { user, points, solves, reached }
+    }
+
+    #[test]
+    fn the_sudoku_points_board_lists_ten_and_finds_the_asker_below_them() {
+        let mut rows: Vec<store::Tally> = (1..=12).map(|i| tally(i, (40 - 2 * i) as i64, 3, 100 + i as i64)).collect();
+        store::rank(&mut rows);
+        let text = top_text("today", &rows, 12);
+        assert!(text.starts_with("🧩 **Sudoku points** · today"), "{}", text);
+        assert!(text.contains("\n🥇 <@1> **38** · 3 puzzles"), "{}", text);
+        assert!(text.contains("\n🥈 <@2> **36**") && text.contains("\n🥉 <@3> **34**"), "{}", text);
+        assert!(text.contains("\n`10.` <@10> **20** · 3 puzzles"), "{}", text);
+        assert!(!text.contains("<@11>"), "only ten are listed: {}", text);
+        // Outside the ten: their own line, and where they stand.
+        assert!(text.contains("-# **You:** 12th of 12 · **16 sudoku points** · 3 puzzles"), "{}", text);
+        // Inside the ten: marked in place, with no line of their own.
+        let inside = top_text("today", &rows, 3);
+        assert!(inside.contains("🥉 <@3> **34** · 3 puzzles ← you"), "{}", inside);
+        assert!(!inside.contains("**You:**"), "{}", inside);
+        // The board says what a sudoku point is, so nobody reads it as a house point.
+        assert!(text.contains("no daily limit, and everyone has them. They don't move the House Cup."), "{}", text);
+        assert!(top_text("September so far", &[], 1).contains("Nobody has solved one yet"));
+        // Ordering is the store's: points, then puzzles, then who got there first.
+        let mut close = vec![tally(1, 6, 1, 50), tally(2, 6, 2, 90), tally(3, 6, 2, 60)];
+        store::rank(&mut close);
+        assert_eq!(close.iter().map(|t| t.user).collect::<Vec<_>>(), vec![3, 2, 1]);
+        assert_eq!((place_of(&close, 2), place_of(&close, 9)), (Some(2), None));
+        assert_eq!([ordinal(1), ordinal(2), ordinal(3), ordinal(4), ordinal(11), ordinal(21)].join(" "), "1st 2nd 3rd 4th 11th 21st");
+    }
+
+    #[test]
+    fn a_month_is_read_off_the_day_it_is_asked_on() {
+        assert_eq!(month_ends("2026-09-17"), ("2026-09-01".to_string(), "2026-09-31".to_string()));
+        assert_eq!(month_ends("2026-02-01"), ("2026-02-01".to_string(), "2026-02-31".to_string()));
+        assert_eq!(month_label("2026-09-17"), "September so far");
+        assert_eq!(month_label("2026-01-02"), "January so far");
+        assert_eq!(month_label("nonsense"), "this month");
     }
 
     #[test]
@@ -1734,22 +1955,23 @@ mod tests {
         let row = solve_row(&conn, Level::Medium, 4, 1_000);
         // The winner takes it; the second correct code is a finish.
         assert!(store::claim(&conn, row.id, 11, 1_120).unwrap());
-        store::add_solve(&conn, "2026-09-16", 11, row.id, 4, Kind::Win, row.level, 120, 1_120).unwrap();
+        store::add_solve(&conn, "2026-09-16", 11, row.id, 0, 4, Kind::Win, row.level, 120, 1_120).unwrap();
         assert!(!store::claim(&conn, row.id, 22, 1_724).unwrap(), "the puzzle is already won");
-        store::add_solve(&conn, "2026-09-16", 22, row.id, 0, Kind::Finish, row.level, 724, 1_724).unwrap();
+        store::add_solve(&conn, "2026-09-16", 22, row.id, 0, 0, Kind::Finish, row.level, 724, 1_724).unwrap();
         let after = store::get(&conn, row.id).unwrap();
         assert_eq!((after.winner, after.seconds), (Some(11), Some(120)), "a late finish never moves the win");
         let day = store::day_solves(&conn, "2026-09-16");
         assert_eq!(day.iter().filter(|s| s.kind == Kind::Finish).count(), 1);
-        assert_eq!(day.iter().map(|s| s.points).sum::<i64>(), 4, "only the win paid");
+        assert_eq!(day.iter().map(|s| s.worth).sum::<i64>(), 4, "only the win scored");
+        assert_eq!(day.iter().map(|s| s.points).sum::<i64>(), 0, "and the House Cup was paid nothing");
         // And the words the late solver sees.
         let words = format!(
-            "✅ **Correct!** Puzzle #{} in **{}** — <@{}> got there first, so no points this time.",
+            "✅ **Correct!** Puzzle #{} in **{}** — <@{}> got there first, so the sudoku points went to them.",
             row.id,
             spent_words(724),
             11
         );
-        assert!(words.contains("12 min 04 s") && words.contains("no points this time"), "{}", words);
+        assert!(words.contains("12 min 04 s") && words.contains("sudoku points went to them"), "{}", words);
     }
 
     #[test]
@@ -1882,6 +2104,7 @@ mod tests {
             full_points: 4,
             all_hints: 2,
             others: 4,
+            tally: 26,
             today: "Aarav 3 (+9) · Meera 2 (+6) · Rohan 1 (+2)".into(),
         };
         let solved_card = card(
@@ -1908,14 +2131,14 @@ mod tests {
         let hint = whisper(
             "Loduchand · in reply to 💡 Hint",
             format!(
-                "💡 **{} is {}** · hint **1/3** on puzzle #129\n-# This puzzle is now worth **5 points** to you. Only you can see this.",
+                "💡 **{} is {}** · hint **1/3** on puzzle #129\n-# This puzzle is now worth **5 sudoku points** to you. Only you can see this.",
                 puzzles::cell_name(40),
                 next.solution[40]
             ),
         );
         let solves = vec![
-            store::Solve { user: 42, puzzle: 128, points: 4, kind: Kind::Win, level: Level::Medium, seconds: 461, ts: 10 },
-            store::Solve { user: 43, puzzle: 128, points: 0, kind: Kind::Finish, level: Level::Medium, seconds: 903, ts: 20 },
+            store::Solve { user: 42, puzzle: 128, points: 0, worth: 4, kind: Kind::Win, level: Level::Medium, seconds: 461, ts: 10 },
+            store::Solve { user: 43, puzzle: 128, points: 0, worth: 0, kind: Kind::Finish, level: Level::Medium, seconds: 903, ts: 20 },
         ];
         let today = whisper("Loduchand · in reply to 📊 Today's solvers", today_text(&solves, 43));
         let style = "body{background:#313338;color:#dbdee1;font:15px/1.4 'Helvetica Neue',Arial,sans-serif;margin:0;padding:24px;}\
@@ -1948,6 +2171,58 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("a place to write");
         std::fs::write(std::path::Path::new(&dir).join("discord.html"), page).unwrap();
         println!("discord flow written to {}/discord.html", dir);
+    }
+
+    /// The one rule the whole change comes down to: nothing the game says to a
+    /// player mentions house points. Not "+4 points", not "no points", not
+    /// "that's your house points for today" — sudoku pays sudoku points, and the
+    /// House Cup is not in it.
+    #[test]
+    fn nothing_the_game_says_to_a_player_mentions_house_points() {
+        let p = generate(Level::Medium, &mut Rng::seeded(11));
+        let solves = vec![
+            store::Solve { user: 1, puzzle: 1, points: 0, worth: 4, kind: Kind::Win, level: Level::Medium, seconds: 120, ts: 10 },
+            store::Solve { user: 2, puzzle: 1, points: 0, worth: 0, kind: Kind::Finish, level: Level::Medium, seconds: 400, ts: 20 },
+        ];
+        let conn = memory();
+        let live = solve_row(&conn, Level::Medium, 4, 1_000);
+        let board = vec![tally(1, 26, 7, 40), tally(2, 4, 1, 20)];
+        let solved_spent = Solved { points: 0, hints: 4, tally: 6, ..solved() };
+        let said: Vec<String> = vec![
+            card_text(&Live { level: Level::Medium, points: 4, playing: 5, open_secs: 380, hint_cost: 1 }),
+            CARD_FOOTER.to_string(),
+            solved_title(128, Level::Medium),
+            solved_text(&solved()),
+            solved_text(&solved_spent),
+            solved_footer(&solved().today),
+            today_text(&solves, 1),
+            today_text(&solves, 99),
+            today_text(&[], 1),
+            solver_line(&solves[0]),
+            solver_line(&solves[1]),
+            play_text(128, Level::Easy, 2, Some("https://p.example/sudoku/128"), &p.givens),
+            play_text(128, Level::Easy, 2, None, &p.givens),
+            mine_text(Some(&live), &board, &board, 1, &[(live.clone(), false)], Some("https://p.example"), Some(55)),
+            mine_text(None, &[], &[], 99, &[], None, None),
+            top_text("today", &board, 1),
+            top_text("September so far", &[], 1),
+            wrong_words(Verdict::Wrong(3), 2),
+            wrong_words(Verdict::Unfinished(1), 0),
+            OFF.to_string(),
+            score_words(1),
+            score_words(4),
+        ];
+        for text in &said {
+            let low = text.to_lowercase();
+            assert!(!low.contains("house point"), "sudoku still talks about house points:\n{}", text);
+            assert!(!low.contains("house cup") || low.contains("don't move the house cup"), "{}", text);
+            assert!(!text.contains("no points"), "a solve is never reported as \"no points\":\n{}", text);
+        }
+        // And what it DOES say is named: sudoku points, everywhere points are named.
+        for text in said.iter().filter(|t| t.to_lowercase().contains("point")) {
+            assert!(text.to_lowercase().contains("sudoku point"), "points named without saying whose:\n{}", text);
+        }
+        assert_eq!((score_words(1), score_words(0), score_words(4)), ("1 sudoku point".into(), "0 sudoku points".into(), "4 sudoku points".into()));
     }
 
     #[test]

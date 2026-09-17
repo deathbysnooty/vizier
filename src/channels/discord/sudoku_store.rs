@@ -9,7 +9,12 @@
 //! Old puzzles are never thrown away. Their answers stay so that someone who
 //! was half way through when the channel moved on can still paste their code
 //! and be told whether it was right — a "finish", which counts in the day's
-//! list but is worth no house points.
+//! list but scores nothing.
+//!
+//! Every solve also records what it was WORTH in sudoku points: the puzzle's
+//! own value with that player's hints taken off. Sudoku points are the game's
+//! own score — they are kept for every solver, houses or no houses, and they
+//! don't move the House Cup.
 
 use std::sync::OnceLock;
 
@@ -35,14 +40,44 @@ pub const SCHEMA: &str = "
         PRIMARY KEY (puzzle_id, user_id));
     CREATE TABLE IF NOT EXISTS solves (
         day TEXT NOT NULL, user_id INTEGER NOT NULL, puzzle_id INTEGER NOT NULL,
-        points INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'win',
+        points INTEGER NOT NULL DEFAULT 0, worth INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'win',
         difficulty TEXT NOT NULL DEFAULT '', seconds INTEGER NOT NULL DEFAULT 0,
         ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, puzzle_id));
     CREATE INDEX IF NOT EXISTS solves_day ON solves (day);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
 
+/// Columns added after the first release, for a database made before them. The
+/// game is live, so they go on with `ALTER TABLE`: nothing is ever rewritten or
+/// dropped under a puzzle somebody is solving.
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[("solves", "worth", "INTEGER NOT NULL DEFAULT 0")];
+
+/// What the solves written before `worth` existed were worth, worked out from
+/// the puzzle each was for: its difficulty's own value. Hints are not taken off
+/// here — what one cost is a setting that has moved since, and the puzzle's
+/// value is the honest thing the database still knows. A finish was never worth
+/// anything, and a solve whose puzzle has gone keeps the zero. Run once, the
+/// moment the column is added.
+const BACKFILL_WORTH: &str = "
+    UPDATE solves SET worth = (SELECT MAX(p.points, 0) FROM puzzles p WHERE p.id = solves.puzzle_id)
+    WHERE worth = 0 AND kind = 'win' AND puzzle_id IN (SELECT id FROM puzzles);";
+
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    for (table, column, kind) in ADDED_COLUMNS {
+        let has: bool = conn
+            .prepare(&format!("PRAGMA table_info({})", table))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .flatten()
+            .any(|name| name == *column);
+        if has {
+            continue;
+        }
+        conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, kind))?;
+        if *column == "worth" {
+            conn.execute_batch(BACKFILL_WORTH)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -287,9 +322,9 @@ pub fn add_try(conn: &Connection, puzzle: i64, user: u64, now: i64) -> rusqlite:
 /// How a solve counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// First to the puzzle: the one that pays house points.
+    /// First to the puzzle: the one that scores.
     Win,
-    /// Right, but somebody else had already solved it. No points.
+    /// Right, but somebody else had already solved it. Worth nothing.
     Finish,
 }
 
@@ -306,7 +341,14 @@ impl Kind {
 pub struct Solve {
     pub user: u64,
     pub puzzle: i64,
+    /// The HOUSE points the ledger paid. Sudoku stopped paying them: this is
+    /// zero for every solve written since, and keeps whatever the old ones were
+    /// paid, which is how the history stays true.
     pub points: i64,
+    /// The SUDOKU points the solve was worth: the puzzle's own value with this
+    /// player's hints taken off, and no cap of any kind. Every solver gets these,
+    /// houses or no houses — they are the game's own score.
+    pub worth: i64,
     pub kind: Kind,
     pub level: Level,
     pub seconds: i64,
@@ -316,13 +358,25 @@ pub struct Solve {
 /// Writes a solve. A player counts once per puzzle, and a win never turns back
 /// into a finish.
 #[allow(clippy::too_many_arguments)]
-pub fn add_solve(conn: &Connection, day: &str, user: u64, puzzle: i64, points: i64, kind: Kind, level: Level, seconds: i64, ts: i64) -> rusqlite::Result<()> {
+pub fn add_solve(
+    conn: &Connection,
+    day: &str,
+    user: u64,
+    puzzle: i64,
+    points: i64,
+    worth: i64,
+    kind: Kind,
+    level: Level,
+    seconds: i64,
+    ts: i64,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO solves (day, user_id, puzzle_id, points, kind, difficulty, seconds, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO solves (day, user_id, puzzle_id, points, worth, kind, difficulty, seconds, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(user_id, puzzle_id) DO UPDATE SET
             points = MAX(solves.points, excluded.points),
+            worth = MAX(solves.worth, excluded.worth),
             kind = CASE WHEN solves.kind = 'win' THEN 'win' ELSE excluded.kind END",
-        params![day, user as i64, puzzle, points, kind.key(), level.key(), seconds, ts],
+        params![day, user as i64, puzzle, points, worth, kind.key(), level.key(), seconds, ts],
     )
     .map(|_| ())
 }
@@ -332,21 +386,64 @@ fn solve_row(r: &rusqlite::Row) -> rusqlite::Result<Solve> {
         user: r.get::<_, i64>(0)? as u64,
         puzzle: r.get(1)?,
         points: r.get(2)?,
-        kind: if r.get::<_, String>(3)? == "win" { Kind::Win } else { Kind::Finish },
-        level: Level::from_key(&r.get::<_, String>(4)?).unwrap_or(Level::Medium),
-        seconds: r.get(5)?,
-        ts: r.get(6)?,
+        worth: r.get(3)?,
+        kind: if r.get::<_, String>(4)? == "win" { Kind::Win } else { Kind::Finish },
+        level: Level::from_key(&r.get::<_, String>(5)?).unwrap_or(Level::Medium),
+        seconds: r.get(6)?,
+        ts: r.get(7)?,
     })
 }
 
 /// A day's solves, first one first.
 pub fn day_solves(conn: &Connection, day: &str) -> Vec<Solve> {
-    let Ok(mut stmt) =
-        conn.prepare("SELECT user_id, puzzle_id, points, kind, difficulty, seconds, ts FROM solves WHERE day = ?1 ORDER BY ts, puzzle_id")
+    let Ok(mut stmt) = conn
+        .prepare("SELECT user_id, puzzle_id, points, worth, kind, difficulty, seconds, ts FROM solves WHERE day = ?1 ORDER BY ts, puzzle_id")
     else {
         return Vec::new();
     };
     stmt.query_map(params![day], solve_row).map(|rows| rows.flatten().collect()).unwrap_or_default()
+}
+
+// --- sudoku points ---------------------------------------------------------------------
+
+/// One player's sudoku points over a stretch of days.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tally {
+    pub user: u64,
+    /// Sudoku points: every puzzle they won at what it was worth to them.
+    pub points: i64,
+    /// How many puzzles they won. A finish is worth nothing and is not one.
+    pub solves: i64,
+    /// When they got to that total — their last win of the stretch.
+    pub reached: i64,
+}
+
+/// The order a board reads in, and the order the day's card is decided in: most
+/// sudoku points, then most puzzles won, then whoever got there first.
+pub fn rank(rows: &mut [Tally]) {
+    rows.sort_by(|a, b| b.points.cmp(&a.points).then(b.solves.cmp(&a.solves)).then(a.reached.cmp(&b.reached)).then(a.user.cmp(&b.user)));
+}
+
+/// Everyone's sudoku points between two days, both ends included (YYYY-MM-DD,
+/// which sorts as a date), best first. Wins only: a finish scored nothing and
+/// would otherwise put someone on the board at nought.
+pub fn tally_between(conn: &Connection, from_day: &str, to_day: &str) -> Vec<Tally> {
+    let sql = "SELECT user_id, COALESCE(SUM(worth), 0), COUNT(*), COALESCE(MAX(ts), 0)
+               FROM solves WHERE kind = 'win' AND day >= ?1 AND day <= ?2 GROUP BY user_id";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let mut rows: Vec<Tally> = stmt
+        .query_map(params![from_day, to_day], |r| {
+            Ok(Tally { user: r.get::<_, i64>(0)? as u64, points: r.get(1)?, solves: r.get(2)?, reached: r.get(3)? })
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    rank(&mut rows);
+    rows
+}
+
+/// One day's sudoku points, best first. What the day's frog card is decided on.
+pub fn day_tally(conn: &Connection, day: &str) -> Vec<Tally> {
+    tally_between(conn, day, day)
 }
 
 /// Whether this player has already been counted on this puzzle.
@@ -425,19 +522,117 @@ pub mod tests {
     fn a_day_of_solves_keeps_wins_and_finishes_apart() {
         let conn = memory();
         let p = put(&conn, Level::Medium, 4, 10);
-        add_solve(&conn, "2026-09-16", 1, p.id, 4, Kind::Win, Level::Medium, 120, 100).unwrap();
-        add_solve(&conn, "2026-09-16", 2, p.id, 0, Kind::Finish, Level::Medium, 300, 200).unwrap();
+        add_solve(&conn, "2026-09-16", 1, p.id, 0, 4, Kind::Win, Level::Medium, 120, 100).unwrap();
+        add_solve(&conn, "2026-09-16", 2, p.id, 0, 0, Kind::Finish, Level::Medium, 300, 200).unwrap();
         // The same person again on the same puzzle doesn't count twice, and a
         // win is never written back down to a finish.
-        add_solve(&conn, "2026-09-16", 1, p.id, 0, Kind::Finish, Level::Medium, 400, 300).unwrap();
+        add_solve(&conn, "2026-09-16", 1, p.id, 0, 0, Kind::Finish, Level::Medium, 400, 300).unwrap();
         let day = day_solves(&conn, "2026-09-16");
         assert_eq!(day.len(), 2);
-        assert_eq!((day[0].user, day[0].points, day[0].kind), (1, 4, Kind::Win));
-        assert_eq!((day[1].user, day[1].points, day[1].kind), (2, 0, Kind::Finish));
+        assert_eq!((day[0].user, day[0].worth, day[0].kind), (1, 4, Kind::Win));
+        assert_eq!((day[1].user, day[1].worth, day[1].kind), (2, 0, Kind::Finish));
         assert_eq!(solved_by(&conn, p.id, 1), Some(Kind::Win));
         assert_eq!(solved_by(&conn, p.id, 2), Some(Kind::Finish));
         assert_eq!(solved_by(&conn, p.id, 3), None);
         assert!(day_solves(&conn, "2026-09-17").is_empty());
+    }
+
+    #[test]
+    fn what_a_puzzle_was_worth_is_kept_for_everyone_the_ledger_pays_nothing() {
+        let conn = memory();
+        let easy = put(&conn, Level::Easy, 2, 10);
+        let hard = put(&conn, Level::Hard, 6, 20);
+        // Sudoku pays no house points at all now: every row's `points` is nought
+        // and the sudoku points are the whole of the score.
+        add_solve(&conn, "2026-09-16", 1, easy.id, 0, 2, Kind::Win, Level::Easy, 40, 100).unwrap();
+        // A mod, who has no house and never had a ledger row, scores the same way.
+        add_solve(&conn, "2026-09-16", 9, hard.id, 0, 6, Kind::Win, Level::Hard, 20, 120).unwrap();
+        let day = day_solves(&conn, "2026-09-16");
+        assert_eq!(day.iter().map(|s| (s.user, s.points, s.worth)).collect::<Vec<_>>(), vec![(1, 0, 2), (9, 0, 6)]);
+        let tally = day_tally(&conn, "2026-09-16");
+        assert_eq!(tally.iter().map(|t| (t.user, t.points, t.solves)).collect::<Vec<_>>(), vec![(9, 6, 1), (1, 2, 1)]);
+        assert_eq!(tally[0].reached, 120);
+        // Hints come off what the solve was worth, and the store keeps that.
+        let hinted = put(&conn, Level::Hard, 6, 30);
+        add_solve(&conn, "2026-09-17", 1, hinted.id, 0, 4, Kind::Win, Level::Hard, 300, 200).unwrap();
+        assert_eq!(day_tally(&conn, "2026-09-17").first().map(|t| (t.user, t.points)), Some((1, 4)));
+        // A finish scores nothing and doesn't put anyone on the board.
+        let late = put(&conn, Level::Easy, 2, 40);
+        add_solve(&conn, "2026-09-18", 3, late.id, 0, 0, Kind::Finish, Level::Easy, 900, 300).unwrap();
+        assert!(day_tally(&conn, "2026-09-18").is_empty(), "a finish is not a win");
+    }
+
+    #[test]
+    fn the_board_is_points_then_puzzles_then_whoever_got_there_first() {
+        let conn = memory();
+        let puzzle = |n: i64, points: i64| put(&conn, Level::Medium, points, n).id;
+        let (a, b, c, d, e) = (puzzle(1, 2), puzzle(2, 2), puzzle(3, 6), puzzle(4, 4), puzzle(5, 4));
+        // 1: two easy ones. 2: one hard one — fewer puzzles, more points.
+        add_solve(&conn, "2026-09-16", 1, a, 0, 2, Kind::Win, Level::Easy, 5, 100).unwrap();
+        add_solve(&conn, "2026-09-16", 1, b, 0, 2, Kind::Win, Level::Easy, 5, 110).unwrap();
+        add_solve(&conn, "2026-09-16", 2, c, 0, 6, Kind::Win, Level::Hard, 5, 120).unwrap();
+        // 3 ties 1 on points with fewer puzzles; 4 ties both and finished later.
+        add_solve(&conn, "2026-09-16", 3, d, 0, 4, Kind::Win, Level::Medium, 5, 130).unwrap();
+        add_solve(&conn, "2026-09-16", 4, e, 0, 4, Kind::Win, Level::Medium, 5, 140).unwrap();
+        let tally = day_tally(&conn, "2026-09-16");
+        assert_eq!(tally.iter().map(|t| (t.user, t.points, t.solves)).collect::<Vec<_>>(), vec![(2, 6, 1), (1, 4, 2), (3, 4, 1), (4, 4, 1)]);
+        // A month is the same reading over a stretch of days, and a stretch with
+        // nothing in it is empty rather than wrong.
+        add_solve(&conn, "2026-09-02", 4, puzzle(6, 6), 0, 6, Kind::Win, Level::Hard, 5, 90).unwrap();
+        let month = tally_between(&conn, "2026-09-01", "2026-09-31");
+        assert_eq!(month.first().map(|t| (t.user, t.points, t.solves)), Some((4, 10, 2)));
+        assert!(tally_between(&conn, "2026-08-01", "2026-08-31").is_empty());
+    }
+
+    #[test]
+    fn the_worth_column_goes_onto_a_database_that_is_already_being_played_in() {
+        // Exactly the schema as it shipped, rows and all: the live database.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE puzzles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, givens TEXT NOT NULL, solution TEXT NOT NULL,
+                difficulty TEXT NOT NULL, points INTEGER NOT NULL, posted_ts INTEGER NOT NULL,
+                message_id INTEGER, channel_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+                winner INTEGER, solved_ts INTEGER, seconds INTEGER);
+             CREATE TABLE players (
+                puzzle_id INTEGER NOT NULL, user_id INTEGER NOT NULL, started_ts INTEGER NOT NULL,
+                hints INTEGER NOT NULL DEFAULT 0, hint_cells TEXT NOT NULL DEFAULT '',
+                tries INTEGER NOT NULL DEFAULT 0, last_try_ts INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (puzzle_id, user_id));
+             CREATE TABLE solves (
+                day TEXT NOT NULL, user_id INTEGER NOT NULL, puzzle_id INTEGER NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'win',
+                difficulty TEXT NOT NULL DEFAULT '', seconds INTEGER NOT NULL DEFAULT 0,
+                ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, puzzle_id));
+             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO puzzles (id, givens, solution, difficulty, points, posted_ts, channel_id, status, winner)
+                VALUES (1, '', '', 'easy', 2, 10, 77, 'solved', 5),
+                       (2, '', '', 'hard', 6, 20, 77, 'solved', 6),
+                       (3, '', '', 'medium', 4, 30, 77, 'solved', 7);
+             INSERT INTO solves (day, user_id, puzzle_id, points, kind, difficulty, seconds, ts)
+                VALUES ('2026-09-15', 5, 1, 2, 'win', 'easy', 40, 100),
+                       ('2026-09-15', 6, 2, 0, 'win', 'hard', 20, 200),
+                       ('2026-09-15', 7, 3, 0, 'finish', 'medium', 900, 300),
+                       ('2026-09-15', 8, 9, 4, 'win', 'medium', 15, 400);",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        // Nothing was dropped or rewritten: every solve and every puzzle survived,
+        // and the house points already paid are exactly as they were.
+        let kept: i64 = conn.query_row("SELECT COUNT(*) FROM solves", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 4, "every solve survived the migration");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM puzzles", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        let day = day_solves(&conn, "2026-09-15");
+        // Worked out from the puzzle's difficulty. A capped win (paid 0) is worth
+        // its puzzle all the same; a finish stays at nought; and nothing is
+        // claimed for a solve whose puzzle has gone.
+        assert_eq!(
+            day.iter().map(|s| (s.user, s.points, s.worth)).collect::<Vec<_>>(),
+            vec![(5, 2, 2), (6, 0, 6), (7, 0, 0), (8, 4, 0)]
+        );
+        // And running it again changes nothing.
+        init(&conn).unwrap();
+        assert_eq!(day_solves(&conn, "2026-09-15"), day);
     }
 
     #[test]
