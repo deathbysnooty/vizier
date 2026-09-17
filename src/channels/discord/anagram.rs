@@ -721,8 +721,12 @@ fn card_message(row: &store::Row, now: i64) -> CreateMessage {
     CreateMessage::new().embed(card_embed(row, now)).allowed_mentions(CreateAllowedMentions::new())
 }
 
-/// Posts a card and remembers it. `replace` takes the old card away.
-async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace: bool) -> Option<u64> {
+/// Posts a card and remembers it. `replace` takes the old card away;
+/// `moved` says this is the card coming DOWN to the bottom rather than a
+/// fresh round starting, which is the only thing the bump cooldown paces.
+/// A new round used to start that cooldown too, and since a round is often
+/// solved inside it, the card could never follow the chat down at all.
+async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace: bool, moved: bool) -> Option<u64> {
     match call(ChannelId::new(channel).send_message(&ctx.http, message)).await {
         Ok(posted) => {
             let id = posted.id.get();
@@ -731,7 +735,9 @@ async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace
                 s.dirty = false;
                 s.card_gone = false;
                 s.others_since_card = 0;
-                s.last_bump_ms = Utc::now().timestamp_millis();
+                if moved {
+                    s.last_bump_ms = Utc::now().timestamp_millis();
+                }
                 s.card.replace((channel, id))
             };
             meta_set("card", &format!("{}:{}", channel, id));
@@ -808,7 +814,7 @@ async fn post_round(ctx: &Context, channel: u64) -> Option<store::Row> {
             }
         }
     };
-    let posted = place_card(ctx, channel, card_message(&row, now), false).await?;
+    let posted = place_card(ctx, channel, card_message(&row, now), false, false).await?;
     if let Some(db) = store::db() {
         let _ = store::set_message(&db.lock(), row.id, posted);
     }
@@ -888,7 +894,7 @@ async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64, last
         CardAction::Bump => {
             let gone = SHARED.lock().card_gone;
             let replace = card.is_some() && !gone;
-            let posted = place_card(ctx, channel, card_message(row, now), replace).await;
+            let posted = place_card(ctx, channel, card_message(row, now), replace, true).await;
             if let (Some(id), Some(db)) = (posted, store::db()) {
                 let _ = store::set_message(&db.lock(), row.id, id);
             }

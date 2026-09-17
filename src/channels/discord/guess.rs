@@ -464,9 +464,6 @@ struct Shared {
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(|| Mutex::new(Shared::default()));
 
-/// TEMPORARY, with the card watch in `tend_card`: when it last said anything.
-static LAST_WATCH: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(0));
-
 /// Every message in the game's channel, the bot's own included. Only other
 /// people's messages count towards burying the card: the bot's own winner lines
 /// must never push its own card down.
@@ -678,8 +675,12 @@ async fn card_message(row: &store::Row, now: i64) -> Option<CreateMessage> {
     Some(CreateMessage::new().embed(card_embed(row, drawings, now)).allowed_mentions(CreateAllowedMentions::new()).add_file(picture))
 }
 
-/// Posts a card and remembers it. `replace` takes the old card away.
-async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace: bool) -> Option<u64> {
+/// Posts a card and remembers it. `replace` takes the old card away;
+/// `moved` says this is the card coming DOWN to the bottom rather than a
+/// fresh round starting, which is the only thing the bump cooldown paces.
+/// A new round used to start that cooldown too, and since a round is often
+/// solved inside it, the card could never follow the chat down at all.
+async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace: bool, moved: bool) -> Option<u64> {
     match call(ChannelId::new(channel).send_message(&ctx.http, message)).await {
         Ok(posted) => {
             let id = posted.id.get();
@@ -688,7 +689,9 @@ async fn place_card(ctx: &Context, channel: u64, message: CreateMessage, replace
                 s.dirty = false;
                 s.card_gone = false;
                 s.others_since_card = 0;
-                s.last_bump_ms = Utc::now().timestamp_millis();
+                if moved {
+                    s.last_bump_ms = Utc::now().timestamp_millis();
+                }
                 s.card.replace((channel, id))
             };
             meta_set("card", &format!("{}:{}", channel, id));
@@ -770,7 +773,7 @@ async fn post_round(ctx: &Context, channel: u64) -> Option<store::Row> {
         }
     };
     let message = card_message(&row, now).await?;
-    let posted = place_card(ctx, channel, message, false).await?;
+    let posted = place_card(ctx, channel, message, false, false).await?;
     if let Some(db) = store::db() {
         let _ = store::set_message(&db.lock(), row.id, posted);
     }
@@ -838,36 +841,14 @@ pub fn card_plan(has_card: bool, right_channel: bool, gone: bool, dirty: bool, o
 /// back if someone deleted it. The only place in the game that posts a card for
 /// a round that is already up.
 async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64) -> (CardAction, Option<u64>) {
-    let (card, plan, watch) = {
+    let (card, plan) = {
         let s = SHARED.lock();
         let since_bump = Utc::now().timestamp_millis() - s.last_bump_ms;
         let right = s.card.map(|(c, _)| c) == Some(channel);
         // A hint comes once to a round, so the second drawing goes up at once
         // rather than waiting on any redraw pace.
-        let plan = card_plan(s.card.is_some(), right, s.card_gone, s.dirty, s.others_since_card, since_bump, bump_messages(), bump_seconds());
-        (s.card, plan, (s.card.is_some(), right, s.card_gone, s.others_since_card, since_bump))
+        (s.card, card_plan(s.card.is_some(), right, s.card_gone, s.dirty, s.others_since_card, since_bump, bump_messages(), bump_seconds()))
     };
-    // TEMPORARY: the card was not following chat down and the state could not be
-    // read from outside. Once every ten seconds, say what the decision saw.
-    {
-        let now_ms = Utc::now().timestamp_millis();
-        let mut last = LAST_WATCH.lock();
-        if now_ms - *last >= 10_000 {
-            *last = now_ms;
-            let (has_card, right, gone, others, since_bump) = watch;
-            tracing::info!(
-                "guess: card watch - plan={:?} has_card={} right={} gone={} others={} since_bump={}ms needed={} every={}s",
-                plan,
-                has_card,
-                right,
-                gone,
-                others,
-                since_bump,
-                bump_messages(),
-                bump_seconds()
-            );
-        }
-    }
     match plan {
         CardAction::Nothing => (CardAction::Nothing, None),
         CardAction::Edit => {
@@ -879,7 +860,7 @@ async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64) -> (
             let Some(message) = card_message(row, now).await else { return (CardAction::Nothing, None) };
             let gone = SHARED.lock().card_gone;
             let replace = card.is_some() && !gone;
-            let posted = place_card(ctx, channel, message, replace).await;
+            let posted = place_card(ctx, channel, message, replace, true).await;
             if let (Some(id), Some(db)) = (posted, store::db()) {
                 let _ = store::set_message(&db.lock(), row.id, id);
             }
