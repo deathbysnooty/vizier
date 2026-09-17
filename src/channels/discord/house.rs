@@ -1954,7 +1954,7 @@ pub(super) fn has_mod_powers(roles: &HashMap<RoleId, serenity::all::Role>, worn:
 /// `{mention}`, `{name}` and `{games}` are filled in; `{games}` becomes the
 /// scoreboard channel's mention, or plain words if no channel is set.
 const WAITING_TEXT: &str = "Everyone here plays for a house, {mention} - the Snitch, chocolate frogs, Wordle, \
-    Sudoku, chess, quizzes, and even chatting and sitting in voice all earn points for one of the four.\n\n\
+    chess, quizzes, and even sitting in voice all earn points for one of the four.\n\n\
     Have a read of {games} first - every game and what it pays is written up there.\n\n\
     You haven't got a house yet: **a mod will give you one.** Say hello in the meantime.";
 

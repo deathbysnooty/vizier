@@ -289,7 +289,8 @@ pub fn sections() -> Vec<Section> {
                 ),
                 setting("VIZIER_CAP_FROG", "Chocolate Frog points a day", "Most points one person can earn from Chocolate Frogs in a day, the collection bonus included. 100 means no limit.", number(0, 100, "points"), "100"),
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
-                setting("VIZIER_CAP_SUDOKU", "Sudoku points a day", "Most house points one person can win from sudoku puzzles in a day. Only the first correct code for a puzzle pays, and hints come off that puzzle's points before this limit is applied. 100 means no limit.", number(0, 100, "points"), "20"),
+                setting("VIZIER_CAP_SUDOKU", "Sudoku house-points limit (no longer used)", "Left from when sudoku paid house points. It does not any more - it keeps its own score, sudoku points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the sudoku house points people earned before the change, and those are untouched.", number(0, 100, "points"), "20"),
+                setting("VIZIER_CAP_CHESS", "Chess house-points limit (no longer used)", "Left from when chess paid house points. It does not any more - it keeps its own score, chess points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the chess house points people earned before the change, and those are untouched.", number(0, 100, "points"), "8"),
                 setting("VIZIER_CAP_DUEL", "Letter Duel points a day", "Most house points one person can win from Letter Duel in a day. Duel points themselves are never capped. 100 means no limit.", number(0, 100, "points"), "8"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
@@ -504,7 +505,8 @@ pub fn sections() -> Vec<Section> {
             title: "Sudoku",
             icon: "🔢",
             about: "A sudoku is always waiting in its own channel (Game channel below), and the first person to solve \
-                    it wins house points. Members can't type there, so deny Send Messages for @everyone and let the \
+                    it wins the puzzle's SUDOKU POINTS - the game's own score, which is not house points and does not move the House \
+                    Cup. Members can't type there, so deny Send Messages for @everyone and let the \
                     bot send, embed, attach files, read history and manage messages. The card sits at the bottom with \
                     a picture of the grid and four buttons: Play, Submit code, Hint and Today's solvers. Play sends \
                     that member a private link to a web page (the panel's own address plus /sudoku/<number>) where \
@@ -520,24 +522,25 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_SUDOKU_CHANNEL", "Game channel", "The channel the puzzle card lives in. Empty means the game is off. Never #safe-corner.", Kind::Channel, ""),
                 toggle("VIZIER_SUDOKU_RULES", "Rules post", "Keep a How it works post at the top of the sudoku channel, written from these settings and edited by itself when they change. Put back if deleted."),
                 setting("VIZIER_SUDOKU_MIX", "Difficulty mix", "How often each difficulty comes up, as name:weight pairs. The weights are shares, not percentages: easy:40,medium:40,hard:20 means easy and medium twice as often as hard. Easy puzzles start with 36-40 squares filled in, medium 30-34 and hard 26-29.", Kind::Text, "easy:40,medium:40,hard:20"),
-                setting("VIZIER_POINTS_SUDOKU_EASY", "Easy puzzle points", "House points for the first correct code on an easy puzzle.", number(0, 100, "points"), "2"),
-                setting("VIZIER_POINTS_SUDOKU_MEDIUM", "Medium puzzle points", "House points for the first correct code on a medium puzzle.", number(0, 100, "points"), "4"),
-                setting("VIZIER_POINTS_SUDOKU_HARD", "Hard puzzle points", "House points for the first correct code on a hard puzzle.", number(0, 100, "points"), "6"),
-                setting("VIZIER_SUDOKU_HINT_COST", "What a hint costs", "How many points one hint takes off that puzzle for the person who asked for it. Their score never goes below nothing, and it only affects them.", number(0, 100, "points"), "1"),
+                setting("VIZIER_POINTS_SUDOKU_EASY", "Easy puzzle points", "Sudoku points for the first correct code on an easy puzzle. Sudoku points are the game's own score, not house points.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_SUDOKU_MEDIUM", "Medium puzzle points", "Sudoku points for the first correct code on a medium puzzle. Sudoku points are the game's own score, not house points.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_SUDOKU_HARD", "Hard puzzle points", "Sudoku points for the first correct code on a hard puzzle. Sudoku points are the game's own score, not house points.", number(0, 100, "points"), "6"),
+                setting("VIZIER_SUDOKU_HINT_COST", "What a hint costs", "How many sudoku points one hint takes off that puzzle for the person who asked for it. Their score never goes below nothing, and it only affects them.", number(0, 100, "points"), "1"),
                 setting("VIZIER_SUDOKU_MAX_HINTS", "Hints per puzzle", "How many squares one person may have given away on the same puzzle.", number(0, 80, "hints"), "3"),
                 setting("VIZIER_SUDOKU_MAX_TRIES", "Codes per puzzle", "How many codes one person may send for the same puzzle before it is closed to them. A wrong code says how many squares are wrong, never which, and there are ten seconds between tries.", number(1, 100, "tries"), "10"),
-                setting("VIZIER_SUDOKU_LATE_HOURS", "Late codes accepted for", "How long after a puzzle goes up its code is still checked, so someone who was still solving is told whether they were right. It pays no points: those went to whoever was first. The last ten puzzles are always checked, however old.", number(1, 720, "hours"), "24"),
+                setting("VIZIER_SUDOKU_LATE_HOURS", "Late codes accepted for", "How long after a puzzle goes up its code is still checked, so someone who was still solving is told whether they were right. It scores nothing: the sudoku points went to whoever was first. The last ten puzzles are always checked, however old.", number(1, 720, "hours"), "24"),
             ],
             commands: vec![
                 command(
                     "Play · Submit code · Hint",
                     EVERYONE,
                     "Buttons on the sudoku card",
-                    "Play sends you a private link to the puzzle's page, Submit code takes the code you copied from it, Hint gives away one square (and takes a point off that puzzle for you), and Today's solvers lists the day's wins and finishes.",
+                    "Play sends you a private link to the puzzle's page, Submit code takes the code you copied from it, Hint gives away one square (and takes a sudoku point off that puzzle for you), and Today's solvers lists the day's wins and finishes.",
                 ),
                 command("sudoku", EVERYONE, "/sudoku", "Your sudoku links: the puzzle that is up now and any from the last day that you started and never finished, each with its own link, and a Submit code button."),
-                command("sudokuhelp", EVERYONE, "/sudokuhelp", "How the sudoku game works, written from the settings as they are right now: how to play, what each difficulty pays, what a hint costs and how long a late code is still checked. Only you see it."),
-                command("sudokunew", ADMINS, "/sudokunew", "Skips the puzzle that is up, with no points for anyone, and posts a fresh one at once."),
+                command("sudokutop", EVERYONE, "/sudokutop", "The sudoku points board, today or this month: the top 10 and, if you are not on it, your own line. Sudoku points are the game's own score - each puzzle at what it was worth with that solver's hints taken off, and no daily limit - and they are NOT house points: sudoku does not move the House Cup. Everyone has them, mods and Muggles included. Only you see it."),
+                command("sudokuhelp", EVERYONE, "/sudokuhelp", "How the sudoku game works, written from the settings as they are right now: how to play, what each difficulty is worth in sudoku points, what a hint costs and how long a late code is still checked. Only you see it."),
+                command("sudokunew", ADMINS, "/sudokunew", "Skips the puzzle that is up, so nobody scores for it, and posts a fresh one at once."),
             ],
         },
         Section {

@@ -1527,6 +1527,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(npat::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(sudoku::new_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), sudoku::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), sudoku::top_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), sudoku::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::top_builder()).await;
@@ -2246,6 +2247,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "sudoku" {
                 sudoku::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "sudokutop" {
+                sudoku::top_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "sudokuhelp" {

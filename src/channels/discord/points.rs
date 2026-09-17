@@ -155,10 +155,7 @@ impl Source {
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
-            // Chess pays no house points at all any more — it keeps chess points
-            // of its own, which nothing limits — so there is no cap to read. The
-            // rows it wrote while it did are still in the ledger, untouched.
-            Source::Chess => Cap::None,
+            Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
             Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),

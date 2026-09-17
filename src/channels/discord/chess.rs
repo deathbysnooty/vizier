@@ -46,6 +46,7 @@ use super::chess_board::{self, View};
 use super::chess_rules::{self as rules, Ending, MoveError, Replay, Result_, TimeControl};
 use super::chess_store::{self as store, ChallengeStatus, Game};
 use super::control;
+use super::points::Source;
 use super::rules_text::ChessRules;
 
 /// How often the game task looks at the clock.
@@ -1961,6 +1962,16 @@ fn score_game(game_id: i64) {
         if !first_today {
             payout = rules::Payout { why_nothing: "you two have already scored from chess today", ..rules::Payout::NOTHING };
         }
+    }
+    // The ledger is still told, and still told NOTHING: a zero row for each
+    // player, written by the one door that turns mods, Muggles and the unsorted
+    // away. It moves no house points and no total — it is the receipt that says
+    // these two played chess today, which is what keeps the daily 🐸 card in the
+    // right hands.
+    let reason = format!("chess: game {} — chess points, no house points", game.id);
+    for user in [game.white, game.black] {
+        let key = format!("chess:{}:{}", game.id, user);
+        let _ = super::house::award_person(user, Source::Chess, 0, &reason, None, Some(key), None);
     }
     tracing::info!("chess: game {} scored {} / {} chess points", game.id, payout.white, payout.black);
     let _ = with_db(|conn| store::record_payout(conn, game.id, payout.white, payout.black, payout.why_nothing));
