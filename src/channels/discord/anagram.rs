@@ -270,8 +270,6 @@ pub struct Won {
     pub tally: i64,
     pub hinted: bool,
     pub seconds: i64,
-    /// "Aarav 3 · Meera 2", the day so far.
-    pub today: String,
 }
 
 /// A solve that paid no house points still won the round, and the line says so
@@ -300,9 +298,6 @@ pub fn won_text(w: &Won) -> String {
     }
     if let Some(why) = why {
         notes.push(why.to_string());
-    }
-    if !w.today.is_empty() {
-        notes.push(format!("today: {}", w.today));
     }
     text.push_str(&format!("\n-# {}", notes.join(" · ")));
     text
@@ -344,21 +339,6 @@ pub const SKIP_TOO_SOON: &str = "🚫 `!skip` opens up once somebody has used `!
 
 /// The day's winners as the cards show them: "Aarav 2 (+3) · Meera 1 (+2)".
 /// The number in brackets is ANAGRAM points, which is what the winner line
-/// beside it counts too — house points are capped and would disagree with it.
-pub fn today_line(solves: &[store::Solve], name: impl Fn(u64) -> String) -> String {
-    let mut tally: Vec<(u64, i64, i64)> = Vec::new();
-    for s in solves {
-        match tally.iter_mut().find(|(u, _, _)| *u == s.user) {
-            Some((_, wins, points)) => {
-                *wins += 1;
-                *points += s.worth;
-            }
-            None => tally.push((s.user, 1, s.worth)),
-        }
-    }
-    tally.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-    tally.iter().map(|(u, wins, points)| format!("{} {} (+{})", name(*u), wins, points)).collect::<Vec<_>>().join(" · ")
-}
 
 /// Where someone stands on a ranked board, counting from one. `None` when they
 /// aren't on it at all.
@@ -1173,7 +1153,6 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
             tally: solves.iter().filter(|s| s.user == winner).map(|s| s.worth).sum(),
             hinted: row.hinted(),
             seconds: row.seconds.unwrap_or(0),
-            today: today_line(&solves, |u| display_name(ctx, guild, u)),
         };
         say(ctx, channel, won_text(&won)).await;
         return;
@@ -1505,7 +1484,6 @@ mod tests {
             tally: 1,
             hinted: false,
             seconds: 47,
-            today: "Aarav 2 (+3)".into(),
         }
     }
 
@@ -1518,9 +1496,8 @@ mod tests {
             "✅ <@42> 🦅 Ravenclaw had it: **BATES** · **+1** · 14 anagram points today"
         );
         assert!(text.contains("round #12 in 47 s") && text.contains("the word I scrambled was BEAST"), "{}", text);
-        assert!(text.contains("today: Aarav 2 (+3)"), "{}", text);
         // The bot's own word needs no aside; a hinted round says what it cost.
-        let plain = Won { word: "beast".into(), hinted: true, points: 1, worth: 1, full_points: 2, today: String::new(), ..won };
+        let plain = Won { word: "beast".into(), hinted: true, points: 1, worth: 1, full_points: 2, ..won };
         let text = won_text(&plain);
         assert!(!text.contains("I scrambled"), "{}", text);
         assert!(text.contains("a hint was out, so 1 instead of 2"), "{}", text);
@@ -1690,8 +1667,6 @@ mod tests {
             store::Solve { user: 2, round: 2, points: 2, worth: 2, word: "silent".into(), seconds: 90, ts: 20 },
             store::Solve { user: 1, round: 3, points: 0, worth: 2, word: "platen".into(), seconds: 40, ts: 30 },
         ];
-        assert_eq!(today_line(&solves, |u| format!("P{}", u)), "P1 2 (+3) · P2 1 (+2)");
-        assert_eq!(today_line(&[], |u| format!("P{}", u)), "");
         // And what /anagram shows one of them.
         let conn = memory();
         let row = put(&conn, "beast", "tsabe", 1, 1_000);
