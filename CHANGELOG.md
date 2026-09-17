@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.57] - 2026-09-17
+
+### 💼 Other
+
+- 4,000 verified Lichess puzzles for the chess game
 ## [0.11.56] - 2026-09-17
 
 ### 🚀 Features
 
 - *(sudoku)* Sudoku points, and the House Cup left out of it
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.56
 ## [0.11.55] - 2026-09-17
 
 ### 🚀 Features
