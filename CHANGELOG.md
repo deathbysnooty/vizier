@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - *(discord)* Letter Duel, a tile game for two to four players
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.52
 ## [0.11.51] - 2026-09-17
 
 ### 💼 Other
