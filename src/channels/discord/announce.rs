@@ -125,6 +125,11 @@ const FIELDS: &[Field] = &[
         key: "chat",
         read: |r| vec![r.chat_tiers.iter().map(i64::to_string).collect::<Vec<_>>().join(","), cap(r.chat_cap)],
         say: |o, n| {
+            // A cap of nought is not "up to 0 a day": chatting simply stops
+            // paying, and the note has to read like a decision, not a number.
+            if cap_at(n, 1) == Some(0) {
+                return "💬 **Chat** no longer pays points — messages are still counted, they just don't earn.".to_string();
+            }
             format!(
                 "💬 **Chat** now pays 1 point at {}{}",
                 shift_in(format!("{} messages in a day", tiers(n)), tiers(n), tiers(o)),
@@ -573,6 +578,10 @@ pub const NEWS: &[News] = &[News {
            straight away.\n           • Those 2 are your **guess points** as well, and those have no daily limit — they keep counting after your \
            house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for this game.\n           • Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
            off the round), and **`!skip`** moves on once a hint is out.\n\n           `/guesshelp` explains the lot, `/guess` shows the doodle that's up, `/guesstop` is the guess points board.",
+}, News {
+    id: "chat-points-off-2026-09",
+    title: "💬 Chatting no longer earns points",
+    body: "From now on, **text messages do not earn house points**. People were spamming to hit the message count \u{2014}            \"6 msgs, 5 to go\" \u{2014} and that is not what this server is for.\n\n           \u{2022} Everything else pays exactly as before: the games, voice, the 🪄 Snitch, 🐸 frogs, the arena, all of it.\n           \u{2022} Your messages are **still counted** \u{2014} the panel, the most-active lists and the day's 🐸 frog card for chat all work the same.\n           \u{2022} Spam is now taken down automatically, and the mods can see what was removed.\n\n           Talk because you want to talk. Play the games for points.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
