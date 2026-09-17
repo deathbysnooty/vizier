@@ -1625,6 +1625,259 @@ pub async fn captain_command(ctx: &Context, command: &CommandInteraction) {
         .await;
 }
 
+// --- rallying the house -------------------------------------------------------
+
+/// The house roles are NOT mentionable (see `find_or_create`): @Gryffindor in
+/// anyone's hands is a ping to a quarter of the server, handed to whoever holds
+/// a grudge. So the bot does it on the captain's behalf, one house at a time,
+/// rationed, with only that one role allowed to ping and the captain's own text
+/// stripped of every ping it might have carried.
+
+/// How long a house waits between rallies.
+fn ping_gap_hours() -> i64 {
+    super::control::number("VIZIER_HOUSE_PING_HOURS", 6) as i64
+}
+
+/// The longest a rally may be. It is a shout, not an essay.
+fn ping_max_chars() -> usize {
+    super::control::number("VIZIER_HOUSE_PING_MAX_CHARS", 300) as usize
+}
+
+/// Where a house's last rally is remembered - in the database beside the
+/// captains, so a restart hands nobody a fresh ping.
+fn ping_key(house: &House) -> String {
+    format!("ping_{}", house.key)
+}
+
+/// Told to whoever isn't a captain. Kept as one line so the refusal reads the
+/// same wherever it is given.
+const NOT_A_CAPTAIN: &str = "Only your house captain can do this. Ask them to rally the house for you.";
+
+/// Which house this person may rally: their own if they captain one, any named
+/// one if they can moderate. `Err` is what to whisper back.
+///
+/// A mod's choice wins over their own captaincy, so a mod who happens to
+/// captain Ravenclaw can still rally Hufflepuff when they ask for it by name.
+fn ping_target(
+    captained: Option<&'static House>,
+    is_mod: bool,
+    chosen: Option<&'static House>,
+) -> Result<&'static House, String> {
+    match (captained, is_mod, chosen) {
+        (_, true, Some(house)) => Ok(house),
+        (Some(own), false, Some(asked)) if asked.key != own.key => Err(format!(
+            "You captain **{} {}** - that's the only house you can rally.",
+            own.crest, own.name
+        )),
+        (Some(own), _, _) => Ok(own),
+        (None, true, None) => Err("Which house? Name one with `/houseping message: house:`.".into()),
+        (None, false, _) => Err(NOT_A_CAPTAIN.into()),
+    }
+}
+
+/// Puts a zero-width space after the `@` so `@everyone` still reads as written
+/// but Discord no longer sees a ping in it. ASCII-only lowercasing, which never
+/// changes a byte's length, so the offsets stay true.
+fn defang(text: &str, word: &str) -> String {
+    let needle = format!("@{}", word);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.to_ascii_lowercase().find(&needle) {
+        out.push_str(&rest[..at]);
+        out.push_str("@\u{200b}");
+        // Past the @ only: the word itself stays exactly as they typed it.
+        rest = &rest[at + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The captain's words with every ping but the house's own taken out: role
+/// mentions become plain words, `@everyone` and `@here` are defanged.
+///
+/// The allowed-mentions guard on the message stops all of this too. This is the
+/// second lock on the same door: a message that LOOKS like it pinged the server
+/// is its own kind of trouble, even when nobody's phone buzzed.
+fn tame(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(at) = rest.find("<@&") else { break };
+        let Some(end) = rest[at..].find('>') else { break };
+        out.push_str(&rest[..at]);
+        out.push_str("@role");
+        rest = &rest[at + end + 1..];
+    }
+    out.push_str(rest);
+    defang(&defang(&out, "everyone"), "here")
+}
+
+/// The captain's words as they will be posted, or the reason they can't be.
+fn rally_words(text: &str, max: usize) -> Result<String, String> {
+    let said = text.trim();
+    let length = said.chars().count();
+    if length == 0 {
+        return Err("Say something to rally them with.".into());
+    }
+    if length > max {
+        return Err(format!("That's {} characters - a rally is {} at most. Say it shorter.", length, max));
+    }
+    Ok(tame(said))
+}
+
+/// How long is still to wait, or `None` when the house is free to be rallied.
+fn ping_wait(last: Option<i64>, now: i64, gap_hours: i64) -> Option<i64> {
+    let ready = last? + gap_hours.max(0) * 3600;
+    (ready > now).then_some(ready - now)
+}
+
+/// A wait in words: "about 4 hours", "about an hour", "about 25 minutes".
+/// Nobody wants "in 13,842 seconds", and to the minute is a precision the
+/// refusal doesn't need.
+fn wait_words(secs: i64) -> String {
+    let mins = (secs + 30) / 60;
+    match mins {
+        ..=0 => "less than a minute".into(),
+        1 => "about a minute".into(),
+        2..=59 => format!("about {} minutes", mins),
+        60..=89 => "about an hour".into(),
+        _ => format!("about {} hours", (mins + 30) / 60),
+    }
+}
+
+/// The rally as it is posted: the role, the captain's words, and a quiet line
+/// saying who is behind it - a ping with no name on it is how a ping gets
+/// abused.
+fn ping_text(role: u64, words: &str, sender: u64, house: &House, by_captain: bool) -> String {
+    let who = if by_captain {
+        format!("captain of {} {}", house.crest, house.name)
+    } else {
+        format!("for {} {}", house.crest, house.name)
+    };
+    format!("📣 <@&{}> — {}\n-# from <@{}>, {}", role, words, sender, who)
+}
+
+/// Whether the ping would actually reach the house: either the role is
+/// mentionable by anyone, or the bot holds "Mention @everyone, @here and All
+/// Roles" here. Discord doesn't refuse a ping it won't deliver - it posts the
+/// message with nobody pinged - so this has to be asked beforehand.
+fn can_ping(here: Option<Permissions>, mentionable: bool) -> bool {
+    mentionable || here.is_none_or(|p| p.contains(Permissions::MENTION_EVERYONE))
+}
+
+/// One line for the panel's activity log: who rallied which house, and with
+/// what words.
+fn logged_ping(house: &House, words: &str, by: u64) {
+    let what = format!("{} {} - {}", house.crest, house.name, words);
+    if let Err(err) = super::control::log_change(&format!("houseping:{}", house.key), None, Some(&what), by) {
+        tracing::warn!("house: rally not written to the activity log: {}", err);
+    }
+}
+
+/// `/houseping message:` - a captain tags their own house.
+///
+/// Mods may rally any house, and must say which when they captain none.
+pub async fn ping_command(ctx: &Context, command: &CommandInteraction) {
+    let Some(guild) = command.guild_id else {
+        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
+        return;
+    };
+    if !super::control::on("VIZIER_HOUSE_PING", true) {
+        let _ = command.create_response(&ctx.http, whisper("House pings are switched off just now.")).await;
+        return;
+    }
+    let user = command.user.id.get();
+    let mut said = String::new();
+    let mut chosen = None;
+    for option in &command.data.options {
+        match (&option.name[..], &option.value) {
+            ("message", CommandDataOptionValue::String(text)) => said = text.clone(),
+            ("house", CommandDataOptionValue::String(key)) => chosen = house(key),
+            _ => {}
+        }
+    }
+    let captained = captain_of(user);
+    let mod_here = match command.member.as_deref() {
+        Some(member) => is_mod(ctx, guild, member).await,
+        None => super::admin_ids().contains(&user),
+    };
+    let house = match ping_target(captained, mod_here, chosen) {
+        Ok(house) => house,
+        Err(why) => {
+            let _ = command.create_response(&ctx.http, whisper(why)).await;
+            return;
+        }
+    };
+    // #safe-corner is where people share hard personal things. A house rally is
+    // not one of them.
+    if command.channel_id.get() == super::weekly::SAFE_CORNER {
+        let _ = command
+            .create_response(&ctx.http, whisper("Not in here - #safe-corner isn't a place to rally a house."))
+            .await;
+        return;
+    }
+    let words = match rally_words(&said, ping_max_chars()) {
+        Ok(words) => words,
+        Err(why) => {
+            let _ = command.create_response(&ctx.http, whisper(why)).await;
+            return;
+        }
+    };
+    let last = meta_get(&ping_key(house)).and_then(|v| v.parse::<i64>().ok());
+    if let Some(left) = ping_wait(last, Utc::now().timestamp(), ping_gap_hours()) {
+        let text = format!(
+            "**{} {}** was rallied recently - the next one can go out in {}.",
+            house.crest,
+            house.name,
+            wait_words(left)
+        );
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+    let Some(role) = role_for(ctx, guild, house).await else {
+        let text = format!(
+            "**{} {}** hasn't got a role yet - a mod needs to run `/houseroles` first.",
+            house.crest, house.name
+        );
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    };
+    let mentionable =
+        guild.roles(&ctx.http).await.ok().and_then(|roles| roles.get(&role).map(|r| r.mentionable)).unwrap_or(false);
+    if !can_ping(command.app_permissions, mentionable) {
+        let text = format!(
+            "I can't mention **{} {}** in this channel - I need \"Mention @everyone, @here and All Roles\" here.",
+            house.crest, house.name
+        );
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+
+    let by_captain = captained.is_some_and(|own| own.key == house.key);
+    // One role may ping, and nothing else: no everyone, no here, no users, no
+    // other role - whatever the text turned out to hold.
+    let mentions = CreateAllowedMentions::new().everyone(false).roles(vec![role]);
+    let text = ping_text(role.get(), &words, user, house, by_captain);
+    let message = CreateMessage::new().content(text).allowed_mentions(mentions);
+    if let Err(err) = command.channel_id.send_message(&ctx.http, message).await {
+        tracing::warn!("house: {} rally not posted: {}", house.name, err);
+        let _ = command.create_response(&ctx.http, whisper("That didn't post - try again in a moment.")).await;
+        return;
+    }
+    // Written down only once it actually went out, so a failed ping costs the
+    // house nothing.
+    meta_set(&ping_key(house), &Utc::now().timestamp().to_string());
+    logged_ping(house, &words, user);
+    tracing::info!("house: {} rallied {} in {}", user, house.name, command.channel_id);
+    let text = format!(
+        "Sent - **{} {}** has been rallied. The next one can go out in {} hours.",
+        house.crest,
+        house.name,
+        ping_gap_hours()
+    );
+    let _ = command.create_response(&ctx.http, whisper(text)).await;
+}
+
 /// `/sort @member house` - mods only: place or move someone by hand.
 pub async fn sort_command(ctx: &Context, command: &CommandInteraction) {
     let Some(guild) = command.guild_id else {
@@ -1845,5 +2098,114 @@ mod tests {
         // Nothing like a strict balance check - it is a coin toss by design -
         // but a house that never comes up would be a modulo bug.
         assert!(seen.values().all(|n| *n > 200), "one house is starved: {:?}", seen);
+    }
+
+    #[test]
+    fn a_captain_rallies_their_own_house_and_nobody_elses() {
+        let gryffindor = house("gryffindor").expect("a house");
+        let hufflepuff = house("hufflepuff").expect("a house");
+        // Their own, whether or not they name it.
+        assert_eq!(ping_target(Some(gryffindor), false, None).unwrap().key, "gryffindor");
+        assert_eq!(ping_target(Some(gryffindor), false, Some(gryffindor)).unwrap().key, "gryffindor");
+        let refused = ping_target(Some(gryffindor), false, Some(hufflepuff)).err().expect("not their house");
+        assert!(refused.contains("Gryffindor"), "it should say which house is theirs: {}", refused);
+    }
+
+    #[test]
+    fn someone_who_captains_nothing_is_told_it_is_the_captains_to_do() {
+        let hufflepuff = house("hufflepuff").expect("a house");
+        for asked in [None, Some(hufflepuff)] {
+            assert_eq!(ping_target(None, false, asked).err().expect("not a captain"), NOT_A_CAPTAIN);
+        }
+        assert!(NOT_A_CAPTAIN.to_lowercase().contains("only your house captain can do this"));
+    }
+
+    #[test]
+    fn a_mod_rallies_any_house_but_must_say_which_when_they_captain_none() {
+        let gryffindor = house("gryffindor").expect("a house");
+        let hufflepuff = house("hufflepuff").expect("a house");
+        assert_eq!(ping_target(None, true, Some(hufflepuff)).unwrap().key, "hufflepuff");
+        // A mod who captains one house may still name another.
+        assert_eq!(ping_target(Some(gryffindor), true, Some(hufflepuff)).unwrap().key, "hufflepuff");
+        assert_eq!(ping_target(Some(gryffindor), true, None).unwrap().key, "gryffindor");
+        let refused = ping_target(None, true, None).err().expect("no house to rally");
+        assert!(refused.contains("Which house?"), "it should ask which house: {}", refused);
+    }
+
+    #[test]
+    fn the_wait_is_kept_per_house_and_lets_go_when_it_is_up() {
+        // Stand-in for the meta table, so the test doesn't open the real one.
+        let mut marks: HashMap<String, i64> = HashMap::new();
+        let gryffindor = house("gryffindor").expect("a house");
+        let hufflepuff = house("hufflepuff").expect("a house");
+        assert_ne!(ping_key(gryffindor), ping_key(hufflepuff), "each house keeps its own mark");
+        let now = 1_700_000_000;
+        let last = |marks: &HashMap<String, i64>, h: &House| marks.get(&ping_key(h)).copied();
+
+        // Nobody has rallied yet: both houses are free.
+        assert!(ping_wait(last(&marks, gryffindor), now, 6).is_none());
+        marks.insert(ping_key(gryffindor), now);
+        // Gryffindor is held; Hufflepuff is untouched by it.
+        assert_eq!(ping_wait(last(&marks, gryffindor), now + 3600, 6), Some(5 * 3600));
+        assert!(ping_wait(last(&marks, hufflepuff), now + 3600, 6).is_none());
+        // One second short of the window still holds, and the window itself frees it.
+        assert_eq!(ping_wait(last(&marks, gryffindor), now + 6 * 3600 - 1, 6), Some(1));
+        assert!(ping_wait(last(&marks, gryffindor), now + 6 * 3600, 6).is_none());
+        // A gap of nothing is no gap at all.
+        assert!(ping_wait(last(&marks, gryffindor), now, 0).is_none());
+    }
+
+    #[test]
+    fn the_wait_is_given_in_words() {
+        assert_eq!(wait_words(4 * 3600), "about 4 hours");
+        assert_eq!(wait_words(5 * 3600 + 59 * 60), "about 6 hours");
+        assert_eq!(wait_words(3600), "about an hour");
+        assert_eq!(wait_words(80 * 60), "about an hour");
+        assert_eq!(wait_words(25 * 60), "about 25 minutes");
+        assert_eq!(wait_words(60), "about a minute");
+        assert_eq!(wait_words(1), "less than a minute");
+    }
+
+    #[test]
+    fn a_rally_can_ping_nobody_but_the_house_itself() {
+        let words = rally_words("@everyone @here get in here <@&12345> please @EVERYONE", 300).expect("short enough");
+        assert!(!words.contains("@everyone"), "@everyone survived: {}", words);
+        assert!(!words.contains("@EVERYONE"), "@EVERYONE survived: {}", words);
+        assert!(!words.contains("@here"), "@here survived: {}", words);
+        assert!(!words.contains("<@&12345>"), "a role mention survived: {}", words);
+        // The words themselves still read as they were typed.
+        assert!(words.contains("everyone") && words.contains("here") && words.contains("get in here"));
+        // Plain text is left completely alone.
+        assert_eq!(rally_words("  quiz in ten minutes!  ", 300).unwrap(), "quiz in ten minutes!");
+        // And the house's own role is the only thing the posted line pings.
+        let gryffindor = house("gryffindor").expect("a house");
+        let posted = ping_text(77, &words, 42, gryffindor, true);
+        assert_eq!(posted.matches("<@&").count(), 1, "only the house role may be tagged: {}", posted);
+        assert!(posted.starts_with("📣 <@&77> — "), "the role leads the rally: {}", posted);
+        assert!(posted.contains("-# from <@42>, captain of 🦁 Gryffindor"), "it should name the sender: {}", posted);
+        // A mod rallying a house they don't captain is not called its captain.
+        let by_mod = ping_text(77, "up you get", 42, gryffindor, false);
+        assert!(by_mod.contains("-# from <@42>, for 🦁 Gryffindor"), "{}", by_mod);
+    }
+
+    #[test]
+    fn a_rally_has_to_be_short_and_has_to_say_something() {
+        assert_eq!(rally_words("  ", 300).expect_err("nothing said"), "Say something to rally them with.");
+        let essay = "a".repeat(301);
+        let refused = rally_words(&essay, 300).expect_err("too long");
+        assert_eq!(refused, "That's 301 characters - a rally is 300 at most. Say it shorter.");
+        assert!(rally_words(&"a".repeat(300), 300).is_ok(), "the cap itself is allowed");
+        // Counted in characters, not bytes: 300 emoji are 300 characters.
+        assert!(rally_words(&"🦁".repeat(300), 300).is_ok(), "emoji are one character each");
+    }
+
+    #[test]
+    fn a_role_nobody_may_mention_is_only_pinged_when_the_bot_can() {
+        let none = Permissions::empty();
+        assert!(!can_ping(Some(none), false), "a silent ping should be refused, not posted");
+        assert!(can_ping(Some(none), true), "a mentionable role needs no permission");
+        assert!(can_ping(Some(Permissions::MENTION_EVERYONE), false));
+        // Discord not telling us means we try rather than refuse.
+        assert!(can_ping(None, false));
     }
 }

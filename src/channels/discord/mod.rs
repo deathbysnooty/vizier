@@ -1562,6 +1562,21 @@ impl EventHandler for Handler {
             .add_option(house::house_option("house", "which house").required(true));
         let _ = Command::create_global_command(ctx.http.clone(), house_list).await;
 
+        // Not an admin_command: the captains are members, and a command they
+        // can't see is a command they can't use.
+        let house_ping = CreateCommand::new("houseping")
+            .description("house captains: tag your own house with a message")
+            .add_option(
+                CreateCommandOption::new(
+                    serenity::all::CommandOptionType::String,
+                    "message",
+                    "what to say to your house",
+                )
+                .required(true),
+            )
+            .add_option(house::house_option("house", "which house (mods only - a captain always rallies their own)"));
+        let _ = Command::create_global_command(ctx.http.clone(), house_ping).await;
+
         let houses = CreateCommand::new("houses").description("the four houses, their points, sizes and captains");
         let _ = Command::create_global_command(ctx.http.clone(), houses).await;
 
@@ -2331,6 +2346,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "houses" {
                 house::houses_command(&ctx, &command).await;
+            }
+            if command.data.name == "houseping" {
+                house::ping_command(&ctx, &command).await;
             }
             if command.data.name == "housecaptain" {
                 house::captain_command(&ctx, &command).await;

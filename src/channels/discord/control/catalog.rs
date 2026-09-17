@@ -93,6 +93,9 @@ fn command(name: &'static str, who: &'static str, usage: &'static str, what: &'s
 
 const EVERYONE: &str = "Everyone";
 const ADMINS: &str = "Bot admins";
+/// Captains and mods both - and not the word "admin", so /help still shows it
+/// to the members who are captains.
+const CAPTAINS: &str = "House captains and mods";
 const ROUNDS: &[(&str, &str)] = &[("semi", "Semi-finals"), ("quarter", "Quarter-finals"), ("r16", "Round of 16")];
 const DAYS: &[(&str, &str)] = &[
     ("mon", "Monday"),
@@ -185,10 +188,37 @@ pub fn sections() -> Vec<Section> {
                     Kind::Text,
                     "",
                 ),
+                toggle(
+                    "VIZIER_HOUSE_PING",
+                    "House rallies",
+                    "Let a house captain tag their own house with /houseping. Off refuses every rally, captains included.",
+                ),
+                setting(
+                    "VIZIER_HOUSE_PING_HOURS",
+                    "Hours between rallies",
+                    "How long a house waits between /houseping rallies. Counted per house, not per person, and remembered across restarts.",
+                    number(1, 168, "hours"),
+                    "6",
+                ),
+                setting(
+                    "VIZIER_HOUSE_PING_MAX_CHARS",
+                    "Longest rally",
+                    "How long a /houseping message may be. A rally is a shout, not an essay; anything longer is refused.",
+                    number(20, 1000, "characters"),
+                    "300",
+                ),
             ],
             commands: vec![
                 command("houses", EVERYONE, "/houses", "The four houses with this month's points, member counts and captains."),
                 command("houselist", EVERYONE, "/houselist house:", "Who is in a house, a page at a time. Only the asker sees it."),
+                command(
+                    "houseping",
+                    CAPTAINS,
+                    "/houseping message: house:",
+                    "Tags your own house with a short message, in the channel you run it in. The house roles can't be \
+                     mentioned by hand, so the bot does it for the captain: one house at a time, once every few hours, \
+                     and with any other ping stripped out of the words. Mods may rally any house by naming one.",
+                ),
                 command(
                     "housetop",
                     EVERYONE,
