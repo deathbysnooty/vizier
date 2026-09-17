@@ -14,11 +14,12 @@
 //! card where it is; making a move brings it back to the bottom, because its
 //! board has changed anyway and a new picture has to be posted.
 //!
-//! Points go to the winner, or to both on a draw, and ONLY when the two
-//! players are in different houses: a game inside one house moves nothing
-//! between houses, so it is played for fun and the card says so. A pair is paid
-//! for one game a day, and a game given up in the first few moves pays nothing,
-//! so two friends can't farm points by resigning at move two.
+//! CHESS POINTS go to the winner, or to both on a draw. They are the game's own
+//! score and no longer move the House Cup at all: there is no daily limit on
+//! them, no house needs to be behind them, and mods and Muggles keep theirs like
+//! everyone else. `/chesstop` is the board. A pair is scored for one game a day,
+//! and a game given up in the first few moves scores nothing, so two friends
+//! can't farm the board by resigning at move two.
 //!
 //! One task drives the clock ([`run`]): the buttons and the web page only write
 //! to the database, and the task posts, edits and pays, so two presses can
@@ -45,7 +46,6 @@ use super::chess_board::{self, View};
 use super::chess_rules::{self as rules, Ending, MoveError, Replay, Result_, TimeControl};
 use super::chess_store::{self as store, ChallengeStatus, Game};
 use super::control;
-use super::points::{Outcome, Source};
 use super::rules_text::ChessRules;
 
 /// How often the game task looks at the clock.
@@ -137,13 +137,6 @@ fn draw_points() -> i64 {
     control::number("VIZIER_POINTS_CHESS_DRAW", 1).min(100) as i64
 }
 
-fn daily_cap() -> Option<i64> {
-    match Source::Chess.cap() {
-        super::points::Cap::PerDay(n) => Some(n),
-        _ => None,
-    }
-}
-
 /// How long a side has per move under a time control, right now.
 pub fn per_move_secs(time: TimeControl) -> i64 {
     match time {
@@ -153,7 +146,7 @@ pub fn per_move_secs(time: TimeControl) -> i64 {
 }
 
 /// Every setting the guide and the help card mention, as they are now.
-pub fn chess_rules(cap: Option<i64>) -> ChessRules {
+pub fn chess_rules() -> ChessRules {
     ChessRules {
         channel: live_channel(),
         casual_hours: casual_hours(),
@@ -164,13 +157,12 @@ pub fn chess_rules(cap: Option<i64>) -> ChessRules {
         min_plies: min_plies(),
         win: win_points(),
         draw: draw_points(),
-        cap,
     }
 }
 
 /// The guide's view of chess, read from the settings.
 pub fn live_rules() -> ChessRules {
-    chess_rules(daily_cap())
+    chess_rules()
 }
 
 // --- being away ---------------------------------------------------------------------------
@@ -287,29 +279,26 @@ pub fn control_words(time: TimeControl, per_move: i64) -> String {
     }
 }
 
-/// What a game is worth, in one line.
-pub fn worth_words(same_house: bool, win: i64, draw: i64, cap: Option<i64>) -> String {
-    if same_house {
-        return "Same house, so this one is just for the fun of it — no House Cup points.".to_string();
+/// What a game is worth, in one line. Chess points, not house points: the House
+/// Cup does not move for a game of chess, so which house either player is in
+/// makes no difference to it and nothing is capped.
+pub fn worth_words(win: i64, draw: i64) -> String {
+    if win <= 0 && draw <= 0 {
+        return "Played for the fun of it — this one scores nothing.".to_string();
     }
-    let limit = match cap {
-        Some(n) => format!(" (max {} a day)", n),
-        None => String::new(),
-    };
-    format!("Different houses, so it counts for the House Cup · winner **+{}** · draw **+{}** each{}", win, draw, limit)
+    format!("Chess points · winner **+{}** · draw **+{}** each · no daily limit · `/chesstop`", win, draw)
 }
 
 // --- the challenge card --------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub fn challenge_text(
     challenger: u64,
     opponent: u64,
     time: TimeControl,
     per_move: i64,
-    same_house: bool,
     win: i64,
     draw: i64,
-    cap: Option<i64>,
     expires_at: i64,
 ) -> String {
     format!(
@@ -319,12 +308,12 @@ pub fn challenge_text(
         opponent,
         crest(opponent),
         control_words(time, per_move),
-        worth_words(same_house, win, draw, cap),
+        worth_words(win, draw),
         expires_at
     )
 }
 
-fn challenge_embed(c: &store::Challenge, same_house: bool) -> CreateEmbed {
+fn challenge_embed(c: &store::Challenge) -> CreateEmbed {
     let time = TimeControl::from_key(&c.time_control);
     CreateEmbed::new()
         .title("♟️ Chess challenge")
@@ -333,10 +322,8 @@ fn challenge_embed(c: &store::Challenge, same_house: bool) -> CreateEmbed {
             c.opponent,
             time,
             per_move_secs(time),
-            same_house,
             win_points(),
             draw_points(),
-            daily_cap(),
             c.expires_at,
         ))
         .colour(CHALLENGE_COLOUR)
@@ -366,10 +353,8 @@ pub fn challenge_closed_text(c: &store::Challenge, game_id: Option<i64>) -> Stri
             c.opponent,
             TimeControl::from_key(&c.time_control),
             per_move_secs(TimeControl::from_key(&c.time_control)),
-            false,
             win_points(),
             draw_points(),
-            daily_cap(),
             c.expires_at,
         ),
     }
@@ -400,7 +385,7 @@ pub fn turn_line(game: &Game, secs_left: i64) -> String {
 }
 
 /// The game card's whole description.
-pub fn game_text(game: &Game, secs_left: i64, now: i64, win: i64, draw: i64, cap: Option<i64>) -> String {
+pub fn game_text(game: &Game, secs_left: i64, now: i64, win: i64, draw: i64) -> String {
     let time = TimeControl::from_key(&game.time_control);
     let mut text = format!(
         "{} <@{}> {} **vs** {} <@{}> {}\n{}\n-# {} · move {} · started {} ago\n-# {}",
@@ -414,7 +399,7 @@ pub fn game_text(game: &Game, secs_left: i64, now: i64, win: i64, draw: i64, cap
         control_words(time, game.per_move_secs),
         game.moves.len() / 2 + 1,
         rules::span_words(now - game.started_at),
-        worth_words(game.same_house(), win, draw, cap)
+        worth_words(win, draw)
     );
     if game.given_back > 0 {
         text.push_str(&format!("\n-# ⏸️ {} given back after an update — nobody loses time to a restart.", rules::span_words(game.given_back)));
@@ -430,7 +415,7 @@ fn game_embed(game: &Game, running: usize, now: i64) -> CreateEmbed {
     let left = rules::seconds_left(game.last_move_ts, game.per_move_secs, now);
     CreateEmbed::new()
         .title(game_title(game.id, running))
-        .description(game_text(game, left, now, win_points(), draw_points(), daily_cap()))
+        .description(game_text(game, left, now, win_points(), draw_points()))
         .colour(COLOUR)
         .image(format!("attachment://{}", BOARD_FILE))
         .footer(CreateEmbedFooter::new("Open the board for a tap-to-move page, or type your move"))
@@ -505,13 +490,8 @@ pub fn idle_text(rules: &ChessRules) -> String {
     );
     if rules.win > 0 {
         text.push_str(&format!(
-            "\n-# Winner **+{}** · draw **+{}** each, when the two of you are in different houses{}",
-            rules.win,
-            rules.draw,
-            match rules.cap {
-                Some(n) => format!(" (max {} a day)", n),
-                None => String::new(),
-            }
+            "\n-# Chess points: winner **+{}** · draw **+{}** each, with no daily limit — `/chesstop` is the board",
+            rules.win, rules.draw
         ));
     }
     text.push_str("\n-# Press **❓ How to play** for the rules.");
@@ -567,7 +547,9 @@ pub fn replay_window_days() -> i64 {
     replay_days()
 }
 
-/// What a result card says. `paid` is what the ledger actually credited.
+/// What a result card says. `scored` is the CHESS points the game was worth to
+/// white and to black - the game's own score, with no limit over it and nothing
+/// to do with the House Cup, which chess no longer moves at all.
 #[allow(clippy::too_many_arguments)]
 pub fn result_text(
     game: &Game,
@@ -575,7 +557,7 @@ pub fn result_text(
     winner: Option<u64>,
     plies: usize,
     lasted: i64,
-    paid: (i64, i64),
+    scored: (i64, i64),
     why_nothing: &str,
     replay: Option<&str>,
 ) -> (String, String) {
@@ -599,16 +581,16 @@ pub fn result_text(
         (None, "cancelled") => format!("<@{}> and <@{}> — the game was stopped after **{}**", game.white, game.black, moves),
         (None, _) => format!("<@{}> {} and <@{}> {} drew after **{}**", game.white, crest(game.white), game.black, crest(game.black), moves),
     };
-    let awarded: Vec<String> = [(game.white, paid.0), (game.black, paid.1)]
+    let awarded: Vec<String> = [(game.white, scored.0), (game.black, scored.1)]
         .into_iter()
         .filter(|(_, n)| *n > 0)
         .map(|(user, n)| format!("<@{}> **+{}**", user, n))
         .collect();
     if awarded.is_empty() {
-        let why = if why_nothing.is_empty() { "no House Cup points this time".to_string() } else { format!("no House Cup points: {}", why_nothing) };
-        body.push_str(&format!("\n🏠 {}", why));
+        let why = if why_nothing.is_empty() { "no chess points this time".to_string() } else { format!("no chess points: {}", why_nothing) };
+        body.push_str(&format!("\n♟️ {}", why));
     } else {
-        body.push_str(&format!("\n🏠 House points: {}", awarded.join(" · ")));
+        body.push_str(&format!("\n♟️ Chess points: {} · `/chesstop` for the board", awarded.join(" · ")));
     }
     let mut tail = format!("The game lasted {}", rules::span_words(lasted));
     if let Some(link) = replay {
@@ -984,19 +966,13 @@ pub fn picker_text(chosen: Option<u64>, time: TimeControl, per_move: i64, proble
     text
 }
 
-/// Something worth telling the challenger that is not a reason to refuse: a
-/// game inside one house, or against somebody the ledger cannot pay.
-pub fn picker_note(them: u64, my_house: &str, their_house: &str) -> Option<String> {
-    if their_house.is_empty() {
-        return Some(format!("🧙 <@{}> isn't in a house, so this one wins no House Cup points. Still a game, though.", them));
-    }
-    if my_house.is_empty() {
-        return Some("🧙 You're not in a house, so this one wins no House Cup points. Still a game, though.".to_string());
-    }
-    if my_house == their_house {
-        let name = super::house::house(my_house).map(|h| format!("{} {}", h.crest, h.name)).unwrap_or_else(|| my_house.to_string());
-        return Some(format!("🏠 You're both {} — a game inside one house is just for the fun of it, and pays nothing.", name));
-    }
+/// Something worth telling the challenger that is not a reason to refuse.
+///
+/// There is nothing left to warn about: chess scores CHESS points, which owe
+/// nothing to the House Cup, so a game inside one house and a game with someone
+/// who has no house are worth exactly what any other game is. The picker keeps
+/// the slot because a future reason to warn would go here.
+pub fn picker_note(_them: u64, _my_house: &str, _their_house: &str) -> Option<String> {
     None
 }
 
@@ -1193,20 +1169,23 @@ pub fn help_builder() -> CreateCommand {
     CreateCommand::new("chesshelp").description("how chess works here: challenges, moves, points and time controls")
 }
 
+pub fn top_builder() -> CreateCommand {
+    CreateCommand::new("chesstop")
+        .description("the chess points board, today or this month")
+        .add_option(
+            CreateCommandOption::new(serenity::all::CommandOptionType::String, "period", "which days to count")
+                .add_string_choice("Today", "today")
+                .add_string_choice("This month", "month"),
+        )
+}
+
 pub fn stop_builder() -> CreateCommand {
     CreateCommand::new("chessstop")
-        .description("admin only: cancel a stuck chess game, with no points")
+        .description("admin only: cancel a stuck chess game, with no chess points")
         .add_option(
             CreateCommandOption::new(serenity::all::CommandOptionType::Integer, "game", "the game's number")
                 .required(true),
         )
-}
-
-/// Whether two members are in the same house, which is what decides whether a
-/// game is worth anything.
-fn same_house(a: u64, b: u64) -> bool {
-    let (one, other) = (house_key(a), house_key(b));
-    !one.is_empty() && one == other
 }
 
 /// Puts a challenge up in the chess channel and says what to tell the person
@@ -1238,7 +1217,7 @@ async fn send_challenge(ctx: &Context, me: u64, them: u64, them_is_bot: bool, ti
         return Err("Couldn't put that challenge up. Try again.".to_string());
     };
     let message = CreateMessage::new()
-        .embed(challenge_embed(&challenge, same_house(me, them)))
+        .embed(challenge_embed(&challenge))
         .components(challenge_rows(challenge.id))
         .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(them)]));
     match call(ChannelId::new(channel).send_message(&ctx.http, message)).await {
@@ -1319,22 +1298,149 @@ pub fn my_game_line(game: &Game, user: u64, secs_left: i64, board: Option<&str>,
     line
 }
 
-/// The whole ephemeral list, newest game last.
+/// The whole ephemeral list, newest game last, with the asker's own chess
+/// points under it.
 pub fn my_games_text(user: u64, guild: Option<u64>) -> String {
+    let (today, month) = boards_now();
+    my_games_lines(user, guild, &today, &month)
+}
+
+/// The same list with the two boards already read, so a test can see it.
+pub fn my_games_lines(user: u64, guild: Option<u64>, today: &[store::Tally], month: &[store::Tally]) -> String {
     let games = with_db(|conn| store::games_of(conn, user)).unwrap_or_default();
-    if games.is_empty() {
-        return "You have no games running. `/chess @someone` starts one.".to_string();
-    }
     let now = Utc::now().timestamp();
-    let mut lines = vec![format!("♟️ **Your games** ({} running)", games.len())];
+    let mut lines = match games.is_empty() {
+        true => vec!["♟️ **Chess** — you have no games running. `/chess @someone` starts one.".to_string()],
+        false => vec![format!("♟️ **Your games** ({} running)", games.len())],
+    };
     for game in &games {
         let left = rules::seconds_left(game.last_move_ts, game.per_move_secs, now);
         let board = board_link(game.id, user);
         let jump = jump_link(guild, game);
         lines.push(my_game_line(game, user, left, board.as_deref(), jump.as_deref()));
     }
-    lines.push("-# Only you can see these board links — each one works for your side of its own game alone.".to_string());
+    if !games.is_empty() {
+        lines.push("-# Only you can see these board links — each one works for your side of its own game alone.".to_string());
+    }
+    lines.push(match standing(today, user) {
+        Some(mine) => format!("-# **You today:** {}", mine),
+        None => "-# You haven't finished a game today. Chess points come from playing one out.".to_string(),
+    });
+    if let Some(mine) = standing(month, user) {
+        lines.push(format!("-# **This month:** {}", mine));
+    }
+    lines.push("-# `/chesstop` for the board · `/chesshelp` explains the rest.".to_string());
     lines.join("\n")
+}
+
+// --- the chess points board -------------------------------------------------------------
+
+/// Where someone stands on a ranked board, counting from one. `None` when they
+/// aren't on it at all.
+pub fn place_of(rows: &[store::Tally], me: u64) -> Option<usize> {
+    rows.iter().position(|t| t.user == me).map(|i| i + 1)
+}
+
+/// "3rd", the way a line reads it.
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{}{}", n, suffix)
+}
+
+/// One person's own line on a board: where they stand out of how many, what
+/// they have and over how many games. Nothing at all when they haven't finished
+/// a game in that stretch.
+pub fn standing(rows: &[store::Tally], me: u64) -> Option<String> {
+    let place = place_of(rows, me)?;
+    let mine = rows.get(place - 1)?;
+    Some(format!(
+        "{} of {} · **{}** · {}",
+        ordinal(place),
+        rows.len(),
+        plural(mine.points, "chess point", "chess points"),
+        plural(mine.games, "game", "games")
+    ))
+}
+
+/// How many names `/chesstop` lists.
+const TOP_LIST: usize = 10;
+
+/// What `/chesstop` says. `rows` is the whole board, already ranked; only the
+/// first [`TOP_LIST`] are listed, and whoever asked gets their own line under
+/// them when they didn't make it.
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+    let mut text = format!("♟️ **Chess points** · {}", period);
+    if rows.is_empty() {
+        text.push_str("\nNobody has finished a game yet. `/chess @someone` starts one.");
+        return text;
+    }
+    for (i, t) in rows.iter().take(TOP_LIST).enumerate() {
+        let rank = match i {
+            0 => "🥇".to_string(),
+            1 => "🥈".to_string(),
+            2 => "🥉".to_string(),
+            n => format!("`{:>2}.`", n + 1),
+        };
+        let you = if t.user == me { " ← you" } else { "" };
+        text.push_str(&format!("\n{} <@{}> **{}** · {}{}", rank, t.user, t.points, plural(t.games, "game", "games"), you));
+    }
+    if place_of(rows, me).is_some_and(|p| p > TOP_LIST) {
+        if let Some(mine) = standing(rows, me) {
+            text.push_str(&format!("\n-# **You:** {}", mine));
+        }
+    }
+    text.push_str("\n-# Chess points are the game's own score: a win or a draw at what it was worth, with no daily limit at all, and everyone has them.");
+    text
+}
+
+/// The first moment of the India day a moment falls in, and the first moment of
+/// the day after it.
+pub fn day_bounds(now: i64) -> (i64, i64) {
+    let start = super::points::ist_day_start(&super::points::ist_day(now)).unwrap_or(0);
+    (start, start + 86_400)
+}
+
+/// The first moment of the India month a moment falls in, and the first moment
+/// of the month after it.
+pub fn month_bounds(now: i64) -> (i64, i64) {
+    let day = super::points::ist_day(now);
+    let (year, month) = (
+        day.get(..4).and_then(|y| y.parse::<i32>().ok()).unwrap_or(1970),
+        day.get(5..7).and_then(|m| m.parse::<u32>().ok()).unwrap_or(1),
+    );
+    let next = if month == 12 { format!("{}-01-01", year + 1) } else { format!("{}-{:02}-01", year, month + 1) };
+    let start = super::points::ist_day_start(&format!("{}-{:02}-01", year, month)).unwrap_or(0);
+    (start, super::points::ist_day_start(&next).unwrap_or(start))
+}
+
+/// "September so far", the heading a month's board carries.
+pub fn month_label(day: &str) -> String {
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let month = day.get(5..7).and_then(|m| m.parse::<usize>().ok()).filter(|m| (1..=12).contains(m));
+    match month {
+        Some(m) => format!("{} so far", MONTHS[m - 1]),
+        None => "this month".to_string(),
+    }
+}
+
+/// Today's and this month's chess points, both boards ranked.
+fn boards_now() -> (Vec<store::Tally>, Vec<store::Tally>) {
+    let now = Utc::now().timestamp();
+    let (day, month) = (day_bounds(now), month_bounds(now));
+    match store::db() {
+        Some(db) => {
+            let conn = db.lock();
+            (store::tally_between(&conn, day.0, day.1), store::tally_between(&conn, month.0, month.1))
+        }
+        None => (Vec::new(), Vec::new()),
+    }
 }
 
 /// The address of a game's card in the channel, so `/chess` can point at it.
@@ -1364,6 +1470,23 @@ fn help_embed() -> CreateEmbed {
         .title("♟️ How chess works here")
         .description(super::rules_text::chess_help_text(&live_rules()))
         .colour(COLOUR)
+}
+
+/// `/chesstop [period]` - everyone, shown only to them, like `/housetop`.
+pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
+    let month = command.data.options.iter().any(|o| {
+        o.name == "period" && matches!(&o.value, serenity::all::CommandDataOptionValue::String(v) if v == "month")
+    });
+    let (today_rows, month_rows) = boards_now();
+    let (rows, period) = if month {
+        (month_rows, month_label(&super::points::ist_day(Utc::now().timestamp())))
+    } else {
+        (today_rows, "today".to_string())
+    };
+    let text = top_text(&period, &rows, command.user.id.get());
+    let message =
+        CreateInteractionResponseMessage::new().content(text).ephemeral(true).allowed_mentions(CreateAllowedMentions::new());
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await;
 }
 
 /// `/chesshelp` - everyone, shown only to them.
@@ -1674,11 +1797,11 @@ async fn ask_resign(ctx: &Context, component: &ComponentInteraction, game_id: i6
     match my_game(component, game_id) {
         Err(text) => whisper(ctx, component, text).await,
         Ok(game) => {
-            let short = game.moves.len() < min_plies() as usize && !game.same_house();
+            let short = game.moves.len() < min_plies() as usize;
             let mut text = format!("🏳️ Really give up game #{}?", game.id);
             if short {
                 text.push_str(&format!(
-                    "\n-# It's only move {} — a game given up this early pays no House Cup points to either of you.",
+                    "\n-# It's only move {} — a game given up this early scores no chess points for either of you.",
                     game.moves.len() / 2 + 1
                 ));
             }
@@ -1800,17 +1923,25 @@ pub fn finish(game_id: i64, result: &str, winner: Option<u64>, by_resignation: b
     true
 }
 
-/// Pays and announces every game that has ended but not yet been settled.
+/// Scores and announces every game that has ended but not yet been settled.
 async fn settle_finished(ctx: &Context) {
     for game in with_db(store::unfinished_business).unwrap_or_default() {
-        pay_game(game.id);
+        score_game(game.id);
         post_result(ctx, game.id).await;
     }
 }
 
-/// Writes a finished game's points to the ledger. Safe to repeat: every row
-/// carries a key naming the game and the player.
-fn pay_game(game_id: i64) {
+/// Writes what a finished game was worth to each player in CHESS points.
+///
+/// Nothing here touches the House Cup any more: a game of chess moves no house
+/// points at all, so there is no cap to bite, no house to be in and no ledger
+/// row to write. What it does write is the game's own score, which no limit ever
+/// takes away. Safe to repeat: only the first call finds the game unsettled.
+///
+/// The one game that scores nothing on purpose is a rematch — a pair is scored
+/// for one game a day, so two friends can't sit and trade wins into an uncapped
+/// board.
+fn score_game(game_id: i64) {
     let Some(game) = with_db(|conn| store::get_game(conn, game_id)).flatten() else { return };
     if game.paid_out {
         return;
@@ -1820,15 +1951,8 @@ fn pay_game(game_id: i64) {
         (_, Some(winner)) => Result_::Win { winner: if winner == game.white { Color::White } else { Color::Black } },
         (_, None) => Result_::Draw,
     };
-    let mut payout = rules::payout(
-        result,
-        game.by_resignation,
-        game.moves.len(),
-        game.same_house(),
-        min_plies() as usize,
-        win_points(),
-        draw_points(),
-    );
+    let mut payout =
+        rules::payout(result, game.by_resignation, game.moves.len(), min_plies() as usize, win_points(), draw_points());
     let day = super::points::ist_day(game.finished_at.unwrap_or(game.started_at));
     if payout.pays() {
         let first_today = with_db(|conn| store::claim_pair_day(conn, &day, game.white, game.black, game.id))
@@ -1838,33 +1962,8 @@ fn pay_game(game_id: i64) {
             payout = rules::Payout { why_nothing: "you two have already scored from chess today", ..rules::Payout::NOTHING };
         }
     }
-    let reason = format!("chess: game {}", game.id);
-    let credit = |user: u64, amount: i64| -> i64 {
-        if amount <= 0 {
-            return 0;
-        }
-        let key = format!("chess:{}:{}", game.id, user);
-        match super::house::award_person(user, Source::Chess, amount, &reason, None, Some(key.clone()), None) {
-            Some((_, Outcome::Granted(n))) => n,
-            Some((_, Outcome::Duplicate)) => ledger_points(&key).unwrap_or(0),
-            _ => 0,
-        }
-    };
-    let (white, black) = (credit(game.white, payout.white), credit(game.black, payout.black));
-    let why = if white == 0 && black == 0 && payout.pays() {
-        // The ledger refused: a Muggle, someone unsorted, or a limit already reached.
-        "neither of you can earn house points from this one right now"
-    } else {
-        payout.why_nothing
-    };
-    let _ = with_db(|conn| store::record_payout(conn, game.id, white, black, why));
-}
-
-/// Points already in the ledger under a key, for a payment played again.
-fn ledger_points(key: &str) -> Option<i64> {
-    let db = super::house::db()?;
-    let points = db.lock().query_row("SELECT points FROM ledger WHERE dedupe = ?1", rusqlite::params![key], |r| r.get(0)).ok();
-    points
+    tracing::info!("chess: game {} scored {} / {} chess points", game.id, payout.white, payout.black);
+    let _ = with_db(|conn| store::record_payout(conn, game.id, payout.white, payout.black, payout.why_nothing));
 }
 
 async fn post_result(ctx: &Context, game_id: i64) {
@@ -1876,7 +1975,7 @@ async fn post_result(ctx: &Context, game_id: i64) {
         game.winner,
         game.moves.len(),
         game.finished_at.unwrap_or(now) - game.started_at,
-        (game.points_white, game.points_black),
+        (game.worth_white, game.worth_black),
         &game.why_nothing,
         watch_link(game.id).filter(|_| replay_days() > 0).as_deref(),
     );
@@ -2213,6 +2312,8 @@ mod tests {
             finished_at: None,
             points_white: 0,
             points_black: 0,
+            worth_white: 0,
+            worth_black: 0,
             paid_out: false,
             why_nothing: String::new(),
             draw_offer: None,
@@ -2237,12 +2338,12 @@ mod tests {
         };
         let live = game(&["e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6", "d3", "Bc5"]);
         let mate = game(&["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qxf7"]);
-        let challenge = challenge_text(111, 222, TimeControl::Casual, 43_200, false, 4, 1, Some(8), 1_790_000_000);
-        let playing = game_text(&live, 42_120, live.started_at + 1_200, 4, 1, Some(8));
+        let challenge = challenge_text(111, 222, TimeControl::Casual, 43_200, 4, 1, 1_790_000_000);
+        let playing = game_text(&live, 42_120, live.started_at + 1_200, 4, 1);
         let (result_title, result_body) =
             result_text(&mate, "checkmate", Some(111), 7, 22_320, (4, 0), "", Some("https://panel.example/chess/watch/42"));
         let same = Game { black_house: "ravenclaw".into(), ..game(&["d4", "d5"]) };
-        let same_text = game_text(&same, 41_000, same.started_at + 60, 4, 1, Some(8));
+        let same_text = game_text(&same, 41_000, same.started_at + 60, 4, 1);
         let idle = idle_text(&super::super::rules_text::tests::chess_defaults());
         let playing_title = game_title(42, 3);
         let same_title = game_title(43, 3);
@@ -2296,45 +2397,73 @@ mod tests {
     #[test]
     fn the_game_card_names_both_sides_and_whose_move_it_is() {
         let g = game(&["e4", "e5", "Nf3", "Nc6"]);
-        let text = game_text(&g, 42_120, 2_200, 4, 1, Some(8));
+        let text = game_text(&g, 42_120, 2_200, 4, 1);
         assert!(text.contains("<@111>") && text.contains("<@222>"));
         assert!(text.contains("⬜ <@111>"), "white is to move on an even move list: {}", text);
         assert!(text.contains("11 h 42 m"), "{}", text);
         assert!(text.contains("move 3"), "{}", text);
         assert!(text.contains("1. e4 e5  2. Nf3 Nc6"), "{}", text);
-        assert!(text.contains("Different houses"), "{}", text);
+        assert!(text.contains("Chess points"), "{}", text);
         assert!(text.contains("winner **+4**") && text.contains("draw **+1**"));
 
         let after = game(&["e4", "e5", "Nf3"]);
-        assert!(game_text(&after, 100, 2_200, 4, 1, None).contains("⬛ <@222>"), "black to move after three plies");
+        assert!(game_text(&after, 100, 2_200, 4, 1).contains("⬛ <@222>"), "black to move after three plies");
     }
 
     #[test]
-    fn a_same_house_game_says_it_pays_nothing() {
+    fn a_game_inside_one_house_is_worth_exactly_what_any_other_game_is() {
+        // It used to be worth nothing, because it moved nothing between houses.
+        // Chess points aren't the House Cup's, so it scores like everything else.
         let g = Game { black_house: "ravenclaw".into(), ..game(&["e4"]) };
         assert!(g.same_house());
-        let text = game_text(&g, 100, 2_000, 4, 1, Some(8));
-        assert!(text.contains("just for the fun of it"), "{}", text);
-        assert!(!text.contains("winner **+4**"));
-        assert!(worth_words(false, 4, 1, None).contains("winner **+4**"));
-        assert!(worth_words(false, 4, 1, Some(8)).contains("max 8 a day"));
+        let text = game_text(&g, 100, 2_000, 4, 1);
+        assert!(text.contains("winner **+4**") && text.contains("no daily limit"), "{}", text);
+        assert!(!text.contains("just for the fun of it"), "{}", text);
+        assert!(worth_words(4, 1).contains("winner **+4**"));
+        assert!(worth_words(4, 1).contains("Chess points"));
+        // Only a game set to nothing at all says so.
+        assert!(worth_words(0, 0).contains("scores nothing"));
+    }
+
+    #[test]
+    fn no_card_of_a_chess_game_talks_about_house_points() {
+        let g = game(&["e4", "e5"]);
+        let idle = idle_text(&super::super::rules_text::tests::chess_defaults());
+        let (_, result) = result_text(&g, "checkmate", Some(111), 7, 500, (4, 0), "", None);
+        let (_, nothing) = result_text(&g, "cancelled", None, 7, 500, (0, 0), "the game was cancelled", None);
+        let boards = top_text("today", &[store::Tally { user: 111, points: 4, games: 1, reached: 9 }], 111);
+        for text in [
+            game_text(&g, 100, 2_000, 4, 1),
+            challenge_text(111, 222, TimeControl::Casual, 43_200, 4, 1, 9_999),
+            idle,
+            result,
+            nothing,
+            boards,
+            worth_words(4, 1),
+            worth_words(0, 0),
+        ] {
+            let flat = text.to_lowercase();
+            assert!(!flat.contains("house point"), "still talks about house points: {}", text);
+            assert!(!flat.contains("house cup"), "still talks about the House Cup: {}", text);
+            assert!(!flat.contains("no points"), "a game is never reported as nothing: {}", text);
+        }
     }
 
     #[test]
     fn an_open_draw_offer_shows_on_the_card() {
         let g = Game { draw_offer: Some(222), ..game(&["e4", "e5"]) };
-        assert!(game_text(&g, 100, 2_000, 4, 1, None).contains("<@222> has offered a draw"));
+        assert!(game_text(&g, 100, 2_000, 4, 1).contains("<@222> has offered a draw"));
     }
 
     #[test]
     fn the_challenge_card_says_who_what_and_until_when() {
-        let text = challenge_text(111, 222, TimeControl::Casual, 43_200, false, 4, 1, Some(8), 9_999);
+        let text = challenge_text(111, 222, TimeControl::Casual, 43_200, 4, 1, 9_999);
         assert!(text.contains("<@111>") && text.contains("<@222>"));
         assert!(text.contains("Casual · 12 h 00 m per move"), "{}", text);
         assert!(text.contains("<t:9999:R>"), "Discord counts the offer down itself: {}", text);
-        let live = challenge_text(1, 2, TimeControl::Live, 180, true, 4, 1, None, 5);
+        let live = challenge_text(1, 2, TimeControl::Live, 180, 4, 1, 5);
         assert!(live.contains("Live · 3 m 00 s per move"), "{}", live);
-        assert!(live.contains("just for the fun of it"), "{}", live);
+        assert!(live.contains("Chess points"), "{}", live);
     }
 
     #[test]
@@ -2465,14 +2594,13 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_warns_about_games_that_cannot_pay_without_refusing_them() {
-        let same = picker_note(222, "ravenclaw", "ravenclaw").expect("a note");
-        assert!(same.contains("Ravenclaw") && same.contains("pays nothing"), "{}", same);
-        let theirs = picker_note(222, "ravenclaw", "").expect("a note");
-        assert!(theirs.contains("<@222>") && theirs.contains("no House Cup points"), "{}", theirs);
-        let mine = picker_note(222, "", "gryffindor").expect("a note");
-        assert!(mine.starts_with("🧙 You're not in a house"), "{}", mine);
-        assert_eq!(picker_note(222, "ravenclaw", "gryffindor"), None, "two houses: nothing to warn about");
+    fn the_picker_no_longer_warns_about_houses_because_houses_no_longer_matter() {
+        // Every one of these used to be a warning that the game would pay
+        // nothing. Chess points don't care which house anyone is in, so there is
+        // nothing left to say.
+        for (mine, theirs) in [("ravenclaw", "ravenclaw"), ("ravenclaw", ""), ("", "gryffindor"), ("ravenclaw", "gryffindor")] {
+            assert_eq!(picker_note(222, mine, theirs), None, "{} vs {}", mine, theirs);
+        }
     }
 
     #[test]
@@ -2673,14 +2801,14 @@ mod tests {
         assert_eq!(title, "🏁 Checkmate · Game #42");
         assert!(body.contains("<@222>") && body.contains("beat <@111>"), "{}", body);
         assert!(body.contains("in **2 moves**"), "{}", body);
-        assert!(body.contains("House points: <@222> **+4**"), "{}", body);
+        assert!(body.contains("Chess points: <@222> **+4**"), "{}", body);
         assert!(body.contains("lasted 6 h 12 m"), "{}", body);
         assert!(body.contains("[replay the moves](https://panel/chess/watch/42)"), "{}", body);
 
         let (title, body) = result_text(&g, "resign", Some(111), 30, 60, (0, 0), "it was given up too early to count", None);
         assert!(title.starts_with("🏳️ Resignation"));
         assert!(body.contains("resigned"), "{}", body);
-        assert!(body.contains("no House Cup points: it was given up too early"), "{}", body);
+        assert!(body.contains("no chess points: it was given up too early"), "{}", body);
         assert!(!body.contains("replay"), "no replay line when replays are off: {}", body);
 
         let (title, body) = result_text(&g, "timeout", Some(111), 9, 90_000, (4, 0), "", None);
@@ -2780,10 +2908,10 @@ mod tests {
     #[test]
     fn a_game_given_time_back_says_so_until_it_is_played_on() {
         let given = Game { given_back: 135, ..game(&["e4", "e5"]) };
-        let text = game_text(&given, 43_000, 2_000, 4, 1, Some(8));
+        let text = game_text(&given, 43_000, 2_000, 4, 1);
         assert!(text.contains("⏸️ 2 m given back after an update"), "{}", text);
         let quiet = game(&["e4", "e5"]);
-        assert!(!game_text(&quiet, 43_000, 2_000, 4, 1, Some(8)).contains("given back"));
+        assert!(!game_text(&quiet, 43_000, 2_000, 4, 1).contains("given back"));
     }
 
     #[test]
@@ -2820,13 +2948,12 @@ mod tests {
             replay_days: 30,
             win: 4,
             draw: 1,
-            cap: Some(8),
         });
         assert!(text.contains("No game running"), "{}", text);
         assert!(text.contains("⚔️ Challenge someone"), "the button comes first: {}", text);
         assert!(text.contains("`/chess @member`"), "and the command still works: {}", text);
         assert!(text.find("⚔️").unwrap() < text.find("/chess").unwrap(), "the button is named first: {}", text);
-        assert!(text.contains("+4") && text.contains("+1") && text.contains("max 8 a day"), "{}", text);
+        assert!(text.contains("+4") && text.contains("+1") && text.contains("no daily limit"), "{}", text);
         assert!(text.contains("❓ How to play"), "and the rules are a button too: {}", text);
     }
 

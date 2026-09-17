@@ -1529,6 +1529,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), sudoku::mine_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), sudoku::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), chess::top_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), duel::command()).await;
@@ -2253,6 +2254,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "chess" {
                 chess::command_handler(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "chesstop" {
+                chess::top_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "chesshelp" {

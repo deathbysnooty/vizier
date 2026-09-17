@@ -155,7 +155,10 @@ impl Source {
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
-            Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
+            // Chess pays no house points at all any more — it keeps chess points
+            // of its own, which nothing limits — so there is no cap to read. The
+            // rows it wrote while it did are still in the ledger, untouched.
+            Source::Chess => Cap::None,
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
             Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
@@ -224,6 +227,13 @@ fn ist() -> chrono::FixedOffset {
 /// The India calendar day a moment falls on, as the caps count days.
 pub fn ist_day(ts: i64) -> String {
     ist().timestamp_opt(ts, 0).single().map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
+}
+
+/// The moment an India day begins, from the day's own name. The inverse of
+/// [`ist_day`], for the stores that keep timestamps rather than day names.
+pub fn ist_day_start(day: &str) -> Option<i64> {
+    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp() - (5 * 3600 + 30 * 60))
 }
 
 /// The Monday that starts a moment's India week.

@@ -186,10 +186,10 @@ pub struct ChessRules {
     pub min_plies: i64,
     /// How long a finished game's replay is kept; 0 for no replays.
     pub replay_days: i64,
-    /// House points for winning, and for each side of a draw.
+    /// Chess points for winning, and for each side of a draw. Chess moves no
+    /// house points at all, so there is no cap to name.
     pub win: i64,
     pub draw: i64,
-    pub cap: Option<i64>,
 }
 
 fn limit(cap: Cap) -> Option<i64> {
@@ -296,7 +296,7 @@ impl Rules {
 
             npat: super::npat::npat_rules(limit(Source::Npat.cap())),
             sudoku: super::sudoku::sudoku_rules(),
-            chess: super::chess::chess_rules(limit(Source::Chess.cap())),
+            chess: super::chess::chess_rules(),
             anagrams: super::anagram::anagram_rules(),
             guess: super::guess::guess_rules(),
         }
@@ -407,7 +407,7 @@ pub fn welcome_text(r: &Rules) -> String {
         action.push(format!("🔢 {} · a sudoku always waiting, first to solve it wins", c));
     }
     if let Some(c) = channel(r.chess.channel) {
-        action.push(format!("♟️ {} · chess — press ⚔️ Challenge someone on the card", c));
+        action.push(format!("♟️ {} · chess — press ⚔️ Challenge someone on the card; chess points, not house points", c));
     }
     if let Some(c) = channel(r.anagrams.channel) {
         action.push(format!("🔀 {} · anagrams — unscramble the letters and type the word", c));
@@ -684,10 +684,12 @@ fn game_lines(r: &Rules) -> Vec<String> {
             max_words(r.sudoku.cap)
         ));
     }
+    // Chess is on this list as a game, but it is no longer a way to earn house
+    // points: it scores chess points of its own, which nothing limits.
     if let Some(c) = channel(r.chess.channel).filter(|_| r.chess.win > 0 || r.chess.draw > 0) {
         lines.push(format!(
-            "♟️ **Chess** in {} — press ⚔️ Challenge someone (or `/chess @member`); win **+{}**, draw **+{}** each, only when you're in different houses {}",
-            c, r.chess.win, r.chess.draw, max_words(r.chess.cap)
+            "♟️ **Chess** in {} — press ⚔️ Challenge someone (or `/chess @member`); **chess points**, not house points: win **+{}**, draw **+{}** each, no daily limit, `/chesstop`",
+            c, r.chess.win, r.chess.draw
         ));
     }
     if let Some(c) = channel(r.anagrams.channel).filter(|_| r.anagrams.points.iter().any(|p| *p > 0)) {
@@ -843,9 +845,7 @@ pub fn earn_text(r: &Rules) -> String {
             max_words(r.sudoku.cap)
         ));
     }
-    if r.chess.channel.is_some() && (r.chess.win > 0 || r.chess.draw > 0) {
-        more.push(format!("♟️ Chess win +{} · draw +{} {}", r.chess.win, r.chess.draw, max_words(r.chess.cap)));
-    }
+    // Chess is not a house-points line any more — see the note above.
     if r.anagrams.channel.is_some() && r.anagrams.points.iter().any(|p| *p > 0) {
         more.push(format!(
             "🔀 Anagrams {}–{} first to type it {}",
@@ -1123,24 +1123,21 @@ pub fn chess_help_text(c: &ChessRules) -> String {
     t.push_str("• **🏳️ Resign** gives the game up, and **🤝 Offer draw** asks the other side, who gets Accept or Play on.\n");
     t.push_str("• A game should be finished within a day or so; a mod can clear a stuck one.\n");
 
-    t.push_str("\n**🏠 House points**\n");
+    t.push_str("\n**♟️ Chess points**\n");
     t.push_str(&format!("• Winner **+{}**, or **+{}** each for a draw.\n", c.win, c.draw));
-    t.push_str("• **Only when the two of you are in different houses.** A game inside one house moves nothing between houses, so it pays nothing — the card says so before you start.\n");
-    t.push_str("• Muggles and anyone not yet sorted earn nothing, here as everywhere.\n");
-    t.push_str("• The same pair is paid for one game a day, so a rematch is for pride.\n");
+    t.push_str("• Chess points are the game's own score. There is **no daily limit** on them, it makes no difference which house either of you is in, and mods and anyone not yet sorted have them too.\n");
+    t.push_str("• Games of chess move **nothing** in the House Cup — the Cup is won elsewhere, and this board is chess's own.\n");
+    t.push_str("• The same pair is scored for one game a day, so a rematch is for pride.\n");
     if c.min_plies > 0 {
         t.push_str(&format!(
-            "• Give up in the first **{}** and nobody scores. Losing on time always pays the winner, however short the game.\n",
+            "• Give up in the first **{}** and nobody scores. Losing on time always scores for the winner, however short the game.\n",
             plural((c.min_plies + 1) / 2, "move", "moves")
         ));
     }
-    t.push_str(&format!("• {}\n", match c.cap {
-        Some(n) => format!("Up to **{}** a day each from chess.", plural(n, "house point", "house points")),
-        None => "No daily limit from chess.".to_string(),
-    }));
+    t.push_str("• `/chesstop` shows the board for today or this month, and the day's top scorer is the one the frog card goes to.\n");
 
     t.push_str("\n**⌨️ Commands**\n");
-    t.push_str("`/chess @someone time:` challenge · `/chess` your games and their board links · `/chesshelp` this card");
+    t.push_str("`/chess @someone time:` challenge · `/chess` your games, their board links and your chess points · `/chesstop` the chess points board · `/chesshelp` this card");
     t
 }
 
@@ -1365,7 +1362,6 @@ pub(crate) mod tests {
             replay_days: 30,
             win: 4,
             draw: 1,
-            cap: Some(8),
         }
     }
 
@@ -1447,7 +1443,7 @@ pub(crate) mod tests {
                 mix: [1000, 1000, 1000],
                 has_page: true,
             },
-            chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, replay_days: 365, win: 100, draw: 100, cap: Some(99), ..chess_defaults() },
+            chess: ChessRules { casual_hours: 72, live_seconds: 3600, max_games: 20, max_active: 50, min_plies: 200, replay_days: 365, win: 100, draw: 100, ..chess_defaults() },
             anagrams: AnagramRules { channel: Some(u64::MAX), points: [100, 100, 100], cap: Some(99), idle_minutes: 1440, no_repeat_days: 365, words: Some(500_000) },
             guess: GuessRules { channel: Some(u64::MAX), points: 100, cap: Some(99), idle_minutes: 1440, no_repeat_days: 365, words: Some(500_000) },
             ..defaults()
@@ -1784,10 +1780,12 @@ pub(crate) mod tests {
         assert!(text.contains("**12 hours**") && text.contains("**3 minutes**"), "both time controls: {}", text);
         assert!(text.contains("**3 games**") && text.contains("**8 games**"), "both limits: {}", text);
         assert!(text.contains("Winner **+4**, or **+1** each for a draw"), "{}", text);
-        assert!(text.contains("different houses"), "the rule that decides whether it pays: {}", text);
+        assert!(text.contains("no daily limit"), "chess points are uncapped: {}", text);
+        assert!(text.contains("makes no difference which house"), "houses no longer decide anything: {}", text);
+        assert!(!text.to_lowercase().contains("house point"), "chess pays none: {}", text);
         assert!(text.contains("one game a day"), "{}", text);
         assert!(text.contains("first **5 moves**"), "ten half-moves is five moves: {}", text);
-        assert!(text.contains("Up to **8 house points** a day"), "{}", text);
+        assert!(text.contains("`/chesstop`"), "{}", text);
         assert!(text.contains("`Nf3`") && text.contains("`g1f3`"), "both notations: {}", text);
         assert!(text.contains("/chesshelp"), "{}", text);
         assert!(text.contains("👀 Watch"), "anyone can follow a game: {}", text);
@@ -1796,10 +1794,10 @@ pub(crate) mod tests {
         assert!(text.chars().count() <= DESCRIPTION_LIMIT, "it has to fit an embed: {} characters", text.chars().count());
 
         // Turned off, or with the rules loosened, the words follow.
-        let off = chess_help_text(&ChessRules { channel: None, min_plies: 0, cap: None, ..c.clone() });
+        let off = chess_help_text(&ChessRules { channel: None, min_plies: 0, ..c.clone() });
         assert!(!off.contains("<#"), "no channel, no link: {}", off);
         assert!(!off.contains("Give up in the first"), "the quick-resign rule is off: {}", off);
-        assert!(off.contains("No daily limit"), "{}", off);
+        assert!(off.contains("no daily limit"), "{}", off);
         let live_only = chess_help_text(&ChessRules { live_seconds: 45, casual_hours: 1, ..c });
         assert!(live_only.contains("**45 seconds**") && live_only.contains("**1 hour**"), "{}", live_only);
     }
@@ -1810,13 +1808,14 @@ pub(crate) mod tests {
         let games = on.iter().find(|p| p.title.contains("Play the games")).expect("the games panel");
         assert!(games.body.contains("♟️ **Chess**"), "{}", games.body);
         assert!(games.body.contains("⚔️ Challenge someone"), "the guide names the button too: {}", games.body);
-        assert!(games.body.contains("different houses"), "{}", games.body);
+        assert!(games.body.contains("**chess points**, not house points"), "{}", games.body);
         let off = Rules { chess: ChessRules { channel: None, ..chess_defaults() }, ..defaults() };
         let quiet = guide(&off, true);
         let games = quiet.iter().find(|p| p.title.contains("Play the games")).expect("the games panel");
         assert!(!games.body.contains("Chess"), "left out while off or without a channel: {}", games.body);
-        assert!(earn_text(&defaults()).contains("♟️ Chess win +4"));
-        assert!(!earn_text(&off).contains("♟️ Chess"));
+        // Chess is off the house-points list altogether now, on or off.
+        assert!(!earn_text(&defaults()).contains("Chess"), "chess earns no house points: {}", earn_text(&defaults()));
+        assert!(!earn_text(&off).contains("Chess"));
         assert!(welcome_text(&defaults()).contains("♟️ <#1549625408004165682>"));
         assert!(!welcome_text(&off).contains("♟️"));
         // Worth nothing is the same as switched off, as far as the guide goes.
