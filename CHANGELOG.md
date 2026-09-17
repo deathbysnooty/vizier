@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.55] - 2026-09-17
+
+### 🚀 Features
+
+- *(quiz)* Carry a round in progress across a restart
 ## [0.11.54] - 2026-09-17
 
 ### 💼 Other
 
 - Four minutes a turn, and no seat-0 fallback
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.54
 ## [0.11.53] - 2026-09-17
 
 ### ⚙️ Miscellaneous Tasks
