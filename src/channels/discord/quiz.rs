@@ -5,7 +5,8 @@
 //! one click. There is no time limit: a question stays, moved back to the
 //! bottom of the channel as chat piles up, until someone answers it or it is
 //! skipped (one admin or three members typing `!skip`). The quiz stays on
-//! across restarts once started.
+//! across restarts once started, and a round in progress is picked up where it
+//! left off rather than started again.
 //!
 //! Questions live in quiz.db, loaded at every startup from the JSONL files
 //! under `{workspace}/quizbank/`. Points are a log, one row per point, so the
@@ -53,6 +54,10 @@ const STICKY_GAP: Duration = Duration::from_secs(6);
 /// Pending /quizadd submissions one member may have waiting at once,
 /// `VIZIER_QUIZ_MAX_PENDING`.
 const MAX_PENDING: u64 = 5;
+/// How old a round in progress may be and still be picked up after a restart,
+/// `VIZIER_QUIZ_RESUME_MAX_MINUTES`. Past it everyone has moved on, so bringing
+/// the round back is stranger than starting a fresh one.
+const RESUME_MAX_MINUTES: u64 = 15;
 
 fn skips_needed() -> usize {
     super::control::number("VIZIER_QUIZ_SKIPS", SKIPS_NEEDED).max(1) as usize
@@ -64,6 +69,12 @@ fn retry_after() -> Duration {
 
 fn max_pending() -> i64 {
     super::control::number("VIZIER_QUIZ_MAX_PENDING", MAX_PENDING) as i64
+}
+
+/// How long after a restart a round in progress is still picked up rather than
+/// quietly abandoned. `VIZIER_QUIZ_RESUME_MAX_MINUTES`.
+fn resume_window() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_QUIZ_RESUME_MAX_MINUTES", RESUME_MAX_MINUTES).max(1) * 60)
 }
 
 /// Questions per round of the genre vote.
@@ -1469,6 +1480,226 @@ fn celebrate(user: u64, q: &Question, this_round: u32, total: i64) -> String {
     format!("✅ <@{}> {}! Answer: **{}** · +1 · this round **{}** · total **{}**", user, verb, q.a, this_round, total)
 }
 
+// --- a round that survives a restart ------------------------------------------
+//
+// The bot is deployed several times a day and a round takes minutes, so a
+// restart usually lands inside one. quiz.db keeps the round as it stands - its
+// genre, how far through it is, everyone's score, and the question on screen -
+// and the loop picks it up from there instead of starting again. The one thing
+// that cannot come back cleanly is the question that was in flight: nobody
+// could answer it while the bot was away, so it is asked again, once, under the
+// number it already had, and the channel is told why.
+
+/// The `meta` row the round is written to.
+const ROUND_KEY: &str = "round_state";
+/// Asking the round's questions.
+const STAGE_ASK: &str = "ask";
+/// Over and recorded, its summary still to reach the channel.
+const STAGE_POST: &str = "post";
+/// Summary posted; only the genre vote is left.
+const STAGE_VOTE: &str = "vote";
+
+/// The question that was on screen, with the parts of it the bank row doesn't
+/// carry - who sent it in, and the theme its card is coloured by - and the
+/// number it was asked under.
+#[derive(Clone, Serialize, Deserialize)]
+struct Held {
+    number: u64,
+    body: Question,
+    #[serde(default)]
+    added_by: Option<u64>,
+    #[serde(default)]
+    theme: String,
+    #[serde(default)]
+    theme_region: String,
+}
+
+impl Held {
+    fn of(number: u64, q: &Question) -> Self {
+        Held {
+            number,
+            body: q.clone(),
+            added_by: q.added_by,
+            theme: q.theme.clone(),
+            theme_region: q.theme_region.clone(),
+        }
+    }
+
+    fn question(&self) -> Question {
+        Question {
+            added_by: self.added_by,
+            theme: self.theme.clone(),
+            theme_region: self.theme_region.clone(),
+            ..self.body.clone()
+        }
+    }
+}
+
+/// A round written down in quiz.db, one row in `meta`, rewritten at every step
+/// of the loop.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Saved {
+    /// The genre key, or `MIX`.
+    key: String,
+    label: String,
+    /// The channel the round was running in.
+    channel: u64,
+    /// Questions asked in the round so far, the one on screen included.
+    asked: u32,
+    /// Points won in the round: member, points, and the order of the point that
+    /// reached that total, so ties still go to whoever got there first.
+    scores: Vec<(u64, u32, u64)>,
+    wins: u64,
+    /// The last few themes, kinds and sides, so variety carries over as well.
+    themes: Vec<String>,
+    kinds: Vec<String>,
+    sides: Vec<String>,
+    /// The question on screen when the bot went down.
+    #[serde(default)]
+    held: Option<Held>,
+    /// `STAGE_ASK`, `STAGE_POST` or `STAGE_VOTE`.
+    stage: String,
+    /// The round summary, written down before it is posted so a restart in
+    /// between still sends it.
+    #[serde(default)]
+    summary: String,
+    /// When this was written.
+    ts: i64,
+}
+
+fn write_round(conn: &Connection, saved: &Saved) {
+    match serde_json::to_string(saved) {
+        Ok(json) => meta_set(conn, ROUND_KEY, &json),
+        Err(err) => tracing::warn!("quiz: round not written down: {}", err),
+    }
+}
+
+fn read_round(conn: &Connection) -> Option<Saved> {
+    serde_json::from_str(&meta_get(conn, ROUND_KEY)?).ok()
+}
+
+fn forget_round(conn: &Connection) {
+    let _ = conn.execute("DELETE FROM meta WHERE key = ?1", params![ROUND_KEY]);
+}
+
+/// Writes the round down as it stands. A point is in the board the moment it is
+/// won and reaches quiz.db here, at the end of the question that won it.
+fn save_round(channel: ChannelId, recent: &Recent, held: Option<Held>, stage: &str, summary: &str) {
+    let Some(db) = DB.get() else {
+        return;
+    };
+    let saved = {
+        let board = BOARD.lock();
+        snapshot(&board, channel, recent, held, stage, summary)
+    };
+    write_round(&db.lock(), &saved);
+}
+
+/// The round as it stands, ready to be written down.
+fn snapshot(
+    board: &Board,
+    channel: ChannelId,
+    recent: &Recent,
+    held: Option<Held>,
+    stage: &str,
+    summary: &str,
+) -> Saved {
+    Saved {
+        key: board.key.clone(),
+        label: board.label.clone(),
+        channel: channel.get(),
+        asked: board.asked,
+        scores: board.scores.iter().map(|(user, (points, order))| (*user, *points, *order)).collect(),
+        wins: board.wins,
+        themes: recent.themes.clone(),
+        kinds: recent.kinds.clone(),
+        sides: recent.sides.clone(),
+        held,
+        stage: stage.to_string(),
+        summary: summary.to_string(),
+        ts: Utc::now().timestamp(),
+    }
+}
+
+fn clear_round() {
+    if let Some(db) = DB.get() {
+        forget_round(&db.lock());
+    }
+}
+
+/// The round to carry on with, taken out of quiz.db as it is read so a bot that
+/// keeps crashing on boot abandons it rather than resurrecting it every time.
+/// `None` when there is nothing to carry on: no round was in progress, it was
+/// running in another channel, or it is old enough that everyone has moved on.
+fn take_round(conn: &Connection, home: ChannelId, now: i64) -> Option<Saved> {
+    let saved = read_round(conn)?;
+    forget_round(conn);
+    if saved.channel != home.get() {
+        tracing::info!("quiz: the round in progress belonged to another channel, starting fresh");
+        return None;
+    }
+    let age = now.saturating_sub(saved.ts);
+    if age > resume_window().as_secs() as i64 {
+        tracing::info!("quiz: the round in progress is {} minutes old, starting fresh", age / 60);
+        return None;
+    }
+    Some(saved)
+}
+
+/// What the loop starts with when it picks a round up.
+#[derive(Default)]
+struct Pickup {
+    genre: Option<&'static Genre>,
+    /// The scores as they were; `None` once the round has been settled.
+    board: Option<Board>,
+    recent: Recent,
+    /// Questions already asked in the round, the one on screen included.
+    asked: u32,
+    /// The question that was on screen, and its number.
+    again: Option<(Question, u64)>,
+    /// What is left of an already settled round: its summary, or `Some("")`
+    /// when only the genre vote is left.
+    pending: Option<String>,
+}
+
+/// Turns a saved round into the loop's starting point. `freaky` says whether
+/// the 18+ genre may still be asked here: a round of it carries on as the mix
+/// when the setting or the channel has changed since, and so does a round of a
+/// genre that has gone from the code. A round longer than the setting now
+/// allows is simply over, and settles at its next step.
+fn pickup(saved: Saved, freaky: bool) -> Pickup {
+    let recent = Recent { themes: saved.themes.clone(), kinds: saved.kinds.clone(), sides: saved.sides.clone() };
+    let genre = genre(&saved.key).filter(|g| g.key != FREAKY || freaky);
+    // A settled round has no scores left to restore: they were taken and
+    // recorded before the summary was written down.
+    match saved.stage.as_str() {
+        STAGE_POST | STAGE_VOTE => Pickup {
+            genre,
+            recent,
+            asked: saved.asked.max(block()),
+            pending: Some(if saved.stage == STAGE_POST { saved.summary } else { String::new() }),
+            ..Default::default()
+        },
+        _ => {
+            let board = Board {
+                key: saved.key.clone(),
+                label: saved.label.clone(),
+                asked: saved.asked,
+                scores: saved.scores.iter().map(|(user, points, order)| (*user, (*points, *order))).collect(),
+                wins: saved.wins,
+            };
+            Pickup {
+                genre,
+                board: Some(board),
+                recent,
+                asked: saved.asked,
+                again: saved.held.map(|held| (held.question(), held.number)),
+                pending: None,
+            }
+        }
+    }
+}
+
 // --- the loop ---------------------------------------------------------------
 
 pub async fn start_command(
@@ -1529,7 +1760,10 @@ pub async fn start_command(
         )
         .await;
     set_running(true);
-    tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home));
+    // A fresh start is a fresh round: anything left written down belongs to a
+    // quiz that was stopped, not to this one.
+    clear_round();
+    tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home, None));
 }
 
 /// `/quizstop`: an admin ends the quiz. It stays off, restarts included, until
@@ -1539,9 +1773,11 @@ pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
         "Only admins can stop the quiz."
     } else if !RUNNING.load(Ordering::SeqCst) {
         set_running(false);
+        clear_round();
         "The quiz isn't running."
     } else {
         set_running(false);
+        clear_round();
         STOP.store(true, Ordering::SeqCst);
         let mut guard = LIVE.lock();
         if let Some(live) = guard.as_mut().filter(|live| live.is_open()) {
@@ -1561,29 +1797,69 @@ fn set_running(on: bool) {
     }
 }
 
-/// After a restart, carries on a quiz that was running before it.
+/// After a restart, carries on a quiz that was running before it - the round in
+/// progress included, when it is recent enough to still mean anything.
 pub fn resume(ctx: &Context, storage: &Arc<VizierStorage>, agent_id: &str) {
     let Some(home) = channel() else {
         return;
     };
     let was_running = DB.get().is_some_and(|db| meta_get(&db.lock(), "running").as_deref() == Some("1"));
     if was_running && !RUNNING.swap(true, Ordering::SeqCst) {
-        tracing::info!("quiz: resuming after restart");
-        tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home));
+        let carried = DB.get().and_then(|db| take_round(&db.lock(), home, Utc::now().timestamp()));
+        match &carried {
+            Some(saved) => {
+                tracing::info!("quiz: resuming after restart, {} questions into the {} round", saved.asked, saved.key)
+            }
+            None => tracing::info!("quiz: resuming after restart"),
+        }
+        tokio::spawn(run(ctx.clone(), storage.clone(), agent_id.to_string(), home, carried));
     }
 }
 
-async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channel: ChannelId) {
+async fn run(
+    ctx: Context,
+    storage: Arc<VizierStorage>,
+    agent_id: String,
+    channel: ChannelId,
+    carried: Option<Saved>,
+) {
     let _running = Running;
     STOP.store(false, Ordering::SeqCst);
     let mut recent = Recent::default();
     // The first block after a start is a mix; every block after that is voted on.
     let mut genre: Option<&'static Genre> = None;
     let mut in_block = 0u32;
+    // The question that was on screen when the bot went down: asked again, once.
+    let mut again: Option<(Question, u64)> = None;
+    // A round that was already over when the bot went down: its summary, still
+    // to post, or `Some("")` when only the genre vote is left.
+    let mut pending: Option<String> = None;
     new_round(MIX, "🎲 Mix");
     tokio::time::sleep(Duration::from_secs(2)).await;
+    if let Some(saved) = carried {
+        let picked = pickup(saved, freaky_allowed(&ctx, channel));
+        genre = picked.genre;
+        recent = picked.recent;
+        in_block = picked.asked;
+        again = picked.again;
+        pending = picked.pending;
+        if let Some(board) = picked.board {
+            *BOARD.lock() = board;
+        }
+        // One line, and only when players are about to see the round carry on:
+        // a summary that never went out speaks for itself.
+        let line = match (&again, &pending) {
+            (Some(_), _) => Some("🔁 Back after a restart — same round, this question again."),
+            (None, None) if in_block < block() => Some("🔁 Back after a restart — same round, carrying on."),
+            _ => None,
+        };
+        if let Some(line) = line {
+            let _ = channel.say(&ctx.http, line).await;
+        }
+    }
     loop {
         if STOP.load(Ordering::SeqCst) {
+            clear_round();
             let _ = channel.say(&ctx.http, "🛑 The quiz has been stopped by an admin. Start it again with `/quiz`.").await;
             break;
         }
@@ -1593,28 +1869,57 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             continue;
         }
         if in_block >= block() {
-            let finished = std::mem::take(&mut *BOARD.lock());
-            let crowns = DB.get().and_then(|db| record_round(&db.lock(), &finished));
-            award_podium(&finished);
-            let summary = round_summary(&finished, crowns);
-            let _ = channel
-                .send_message(&ctx.http, CreateMessage::new().content(summary).allowed_mentions(CreateAllowedMentions::new()))
-                .await;
+            // A round is settled once. Its summary is written down before it is
+            // posted, so a restart in between sends the summary rather than
+            // crowning the round and paying its house points a second time.
+            let summary = match pending.take() {
+                Some(text) => text,
+                None => {
+                    let finished = std::mem::take(&mut *BOARD.lock());
+                    let crowns = DB.get().and_then(|db| record_round(&db.lock(), &finished));
+                    award_podium(&finished);
+                    let text = round_summary(&finished, crowns);
+                    save_round(channel, &recent, None, STAGE_POST, &text);
+                    text
+                }
+            };
+            if !summary.is_empty() {
+                let _ = channel
+                    .send_message(
+                        &ctx.http,
+                        CreateMessage::new().content(summary).allowed_mentions(CreateAllowedMentions::new()),
+                    )
+                    .await;
+            }
+            // A restart during the vote starts the vote again rather than
+            // guessing at votes nobody can see any more: the buttons of the old
+            // one are dead, so a click on them says the vote has closed.
+            save_round(channel, &recent, None, STAGE_VOTE, "");
             tokio::time::sleep(GAP).await;
             genre = run_vote(&ctx, channel).await;
             new_round(genre.map(|g| g.key).unwrap_or(MIX), genre.map(|g| g.label).unwrap_or("🎲 Mix"));
             in_block = 0;
+            save_round(channel, &recent, None, STAGE_ASK, "");
             continue;
         }
-        let Some(question) = pick(&recent, genre.map(|g| g.themes)) else {
-            let _ = channel.say(&ctx.http, "Out of questions! Ask an admin to add more.").await;
-            set_running(false);
-            break;
+        // The question a restart interrupted comes first, under the number it
+        // already had, so neither the round's count nor the card's "Question #"
+        // jumps; it was picked, counted and asked before the bot went down.
+        let (question, round) = match again.take() {
+            Some(held) => held,
+            None => {
+                let Some(question) = pick(&recent, genre.map(|g| g.themes)) else {
+                    let _ = channel.say(&ctx.http, "Out of questions! Ask an admin to add more.").await;
+                    set_running(false);
+                    clear_round();
+                    break;
+                };
+                recent.push(&question);
+                in_block += 1;
+                BOARD.lock().asked = in_block;
+                (question, next_round())
+            }
         };
-        recent.push(&question);
-        in_block += 1;
-        BOARD.lock().asked = in_block;
-        let round = next_round();
         let (options, correct) =
             if question.is_mcq() { shuffled(&question.options, &question.a) } else { (Vec::new(), 0) };
         let sent = channel
@@ -1652,6 +1957,7 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             passed: false,
             done: done.clone(),
         });
+        save_round(channel, &recent, Some(Held::of(round, &question)), STAGE_ASK, "");
 
         // No time limit: the question stays until someone answers it, enough
         // people skip it, or a report removes it.
@@ -1665,6 +1971,9 @@ async fn run(ctx: Context, storage: Arc<VizierStorage>, agent_id: String, channe
             Some(winner) => Shown::Won(winner),
             None => Shown::Skipped,
         };
+        // The question is over and whoever won it has their point: write the
+        // round down before the slower business of tidying the channel up.
+        save_round(channel, &recent, None, STAGE_ASK, "");
         let edits = EDIT_LOCK.lock().await;
         let _ = channel
             .edit_message(
@@ -3276,6 +3585,212 @@ mod tests {
         assert!(!question("Australia").accepts_given("austria", &known));
         assert!(!question("Raipur").accepts_given("Jaipur", &known));
         assert!(question("Raipur").accepts_given("Raipor", &known));
+    }
+
+    /// A workspace with an empty bank, for the tests that need quiz.db itself.
+    fn scratch(name: &str) -> (PathBuf, Connection) {
+        let workspace = std::env::temp_dir().join(format!("quiz{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join("quizbank")).unwrap();
+        let conn = open_conn(workspace.to_str().unwrap()).unwrap();
+        (workspace, conn)
+    }
+
+    fn asked_question(id: &str, theme: &str) -> Question {
+        Question {
+            id: id.into(),
+            kind: "text".into(),
+            q: "Who wrote it?".into(),
+            a: "Gulzar".into(),
+            alt: vec!["Gulzaar".into()],
+            options: vec![],
+            cat: "lyrics".into(),
+            region: "india".into(),
+            diff: "medium".into(),
+            note: "".into(),
+            src: "member".into(),
+            added_by: Some(77),
+            theme: theme.into(),
+            theme_region: "india".into(),
+        }
+    }
+
+    /// A round part way through, as the loop writes it down.
+    fn mid_round(held: Option<Held>) -> (Board, Recent) {
+        let board = Board {
+            key: "bollywood".into(),
+            label: "🎬 Bollywood".into(),
+            asked: 7,
+            scores: HashMap::from([(11, (3, 5)), (22, (2, 6))]),
+            wins: 6,
+        };
+        let mut recent = Recent::default();
+        recent.push(&asked_question("q-5", "bollywood_songs"));
+        recent.push(&asked_question("q-6", "indian_tv_ott"));
+        if let Some(held) = &held {
+            recent.push(&held.question());
+        }
+        (board, recent)
+    }
+
+    #[test]
+    fn a_round_in_progress_comes_back_with_its_scores_and_its_place_in_the_round() {
+        let (workspace, conn) = scratch("carry");
+        let home = ChannelId::new(909);
+        let live = asked_question("q-7", "bollywood_songs");
+        let (board, recent) = mid_round(Some(Held::of(431, &live)));
+        // 431 questions have been asked all told; the counter must not move
+        // because of the restart.
+        meta_set(&conn, "round", "431");
+        write_round(&conn, &snapshot(&board, home, &recent, Some(Held::of(431, &live)), STAGE_ASK, ""));
+
+        let carried = take_round(&conn, home, Utc::now().timestamp()).expect("the round carries over");
+        let picked = pickup(carried, false);
+        let back = picked.board.expect("the scores come back");
+        assert_eq!(back.key, "bollywood");
+        assert_eq!(back.label, "🎬 Bollywood");
+        assert_eq!(back.asked, 7);
+        assert_eq!(back.wins, 6);
+        // Nobody loses a point they had already won, and the order that breaks
+        // a tie comes back with them.
+        assert_eq!(back.scores.get(&11), Some(&(3, 5)));
+        assert_eq!(back.scores.get(&22), Some(&(2, 6)));
+        // The questions already asked in the round come back as well, so the
+        // variety rules don't start over.
+        assert_eq!(picked.recent.themes, vec!["bollywood_songs", "indian_tv_ott", "bollywood_songs"]);
+        assert_eq!(picked.recent.kinds, vec!["text", "text"]);
+        assert_eq!(picked.asked, 7);
+        let (question, number) = picked.again.expect("the question on screen comes back");
+        assert_eq!(question.id, "q-7");
+        assert_eq!(question.a, "Gulzar");
+        // The bits the bank row doesn't carry survive too: a member's question
+        // still knows its author, and the card still knows its theme.
+        assert_eq!(question.added_by, Some(77));
+        assert_eq!(question.theme, "bollywood_songs");
+        assert_eq!(number, 431);
+        // Reading it takes it out, so a bot that keeps crashing on boot gives up
+        // on the round instead of resurrecting it every time.
+        assert!(read_round(&conn).is_none());
+        assert_eq!(meta_get(&conn, "round").as_deref(), Some("431"));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn the_question_in_flight_is_asked_again_once_and_counted_once() {
+        let (workspace, conn) = scratch("again");
+        let home = ChannelId::new(909);
+        let live = asked_question("q-7", "bollywood_songs");
+        let (board, recent) = mid_round(Some(Held::of(431, &live)));
+        meta_set(&conn, "round", "431");
+        write_round(&conn, &snapshot(&board, home, &recent, Some(Held::of(431, &live)), STAGE_ASK, ""));
+        let picked = pickup(take_round(&conn, home, Utc::now().timestamp()).unwrap(), false);
+
+        // What the loop does with it: the interrupted question first, under the
+        // number it already had, and it is neither counted nor numbered twice.
+        let mut again = picked.again;
+        let mut in_block = picked.asked;
+        let (question, number) = again.take().expect("asked again");
+        assert_eq!((question.id.as_str(), number), ("q-7", 431));
+        assert_eq!(in_block, 7, "the question was counted when it was first asked");
+        assert!(again.take().is_none(), "it is only asked again once");
+        // The one after it is the round's eighth and the bank's 432nd.
+        in_block += 1;
+        assert_eq!(in_block, 8);
+        let next = meta_get(&conn, "round").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) + 1;
+        assert_eq!(next, 432);
+        // And the re-ask changes nobody's score.
+        let back = picked.board.unwrap();
+        assert_eq!(back.scores.get(&11), Some(&(3, 5)));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_round_nobody_remembers_is_abandoned_rather_than_resurrected() {
+        let (workspace, conn) = scratch("stale");
+        let home = ChannelId::new(909);
+        let (board, recent) = mid_round(None);
+        let now = Utc::now().timestamp();
+        let write = |ts: i64, channel: ChannelId| {
+            let mut saved = snapshot(&board, channel, &recent, None, STAGE_ASK, "");
+            saved.ts = ts;
+            write_round(&conn, &saved);
+        };
+        // Minutes: the round is still the one everybody was playing.
+        write(now - 120, home);
+        assert!(take_round(&conn, home, now).is_some());
+        // Hours: everyone has moved on, so the quiz starts fresh instead.
+        write(now - 4 * 3600, home);
+        assert!(take_round(&conn, home, now).is_none());
+        assert!(read_round(&conn).is_none(), "an abandoned round is not left behind");
+        // A round from another channel belongs to a quiz that has been moved.
+        write(now - 120, ChannelId::new(111));
+        assert!(take_round(&conn, home, now).is_none());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_round_that_ended_posts_its_summary_and_votes_again() {
+        let (workspace, conn) = scratch("settle");
+        let home = ChannelId::new(909);
+        let recent = Recent::default();
+        let summary = "🏁 **🎬 Bollywood round over!** 14 of 20 questions answered.";
+        // Down between recording the round and posting its result: the summary
+        // is already written down, so it still goes out - and the round is not
+        // crowned a second time, because its scores are gone.
+        write_round(&conn, &snapshot(&Board::default(), home, &recent, None, STAGE_POST, summary));
+        let picked = pickup(take_round(&conn, home, Utc::now().timestamp()).unwrap(), false);
+        assert_eq!(picked.pending.as_deref(), Some(summary));
+        assert!(picked.board.is_none() && picked.again.is_none());
+        assert!(picked.asked >= block(), "a settled round asks no more questions");
+
+        // Down during the genre vote: nothing left to post, and the vote is run
+        // again from scratch rather than settled on votes nobody can see.
+        write_round(&conn, &snapshot(&Board::default(), home, &recent, None, STAGE_VOTE, ""));
+        let picked = pickup(take_round(&conn, home, Utc::now().timestamp()).unwrap(), false);
+        assert_eq!(picked.pending.as_deref(), Some(""));
+        assert!(picked.board.is_none() && picked.again.is_none());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_resume_with_no_round_in_progress_does_nothing() {
+        let (workspace, conn) = scratch("quiet");
+        let home = ChannelId::new(909);
+        assert!(take_round(&conn, home, Utc::now().timestamp()).is_none());
+        assert!(meta_get(&conn, ROUND_KEY).is_none());
+        // Today's behaviour is untouched: the quiz is still on, and the counter
+        // and the scoreboard are left exactly as they were.
+        meta_set(&conn, "running", "1");
+        meta_set(&conn, "round", "431");
+        assert!(take_round(&conn, home, Utc::now().timestamp()).is_none());
+        assert_eq!(meta_get(&conn, "running").as_deref(), Some("1"));
+        assert_eq!(meta_get(&conn, "round").as_deref(), Some("431"));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// A genre the channel may no longer ask carries on as the mix, keeping the
+    /// round's scores and its count.
+    #[test]
+    fn a_genre_the_settings_have_closed_carries_on_as_the_mix() {
+        let home = ChannelId::new(909);
+        let (mut board, recent) = mid_round(None);
+        board.key = FREAKY.into();
+        board.label = "🌶️ Freaky (18+)".into();
+        let saved = snapshot(&board, home, &recent, None, STAGE_ASK, "");
+        let allowed = pickup(saved.clone(), true);
+        assert_eq!(allowed.genre.map(|g| g.key), Some(FREAKY));
+        let closed = pickup(saved.clone(), false);
+        assert!(closed.genre.is_none(), "18+ questions stop when the channel or the setting has changed");
+        assert_eq!(closed.board.map(|b| b.asked), Some(7));
+        // A genre that has gone from the code does the same.
+        let gone = pickup(Saved { key: "quidditch".into(), ..saved }, true);
+        assert!(gone.genre.is_none());
+        assert_eq!(gone.asked, 7);
     }
 
     #[test]

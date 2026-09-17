@@ -913,6 +913,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_QUIZ_WRONG_WAIT_SECS", "Wait after a wrong pick", "How long someone waits to pick again after a wrong multiple-choice answer.", number(0, 600, "seconds"), "20"),
                 setting("VIZIER_QUIZ_VOTE_SECS", "Genre vote time", "How long the genre vote stays open between rounds.", number(10, 600, "seconds"), "60"),
                 setting("VIZIER_QUIZ_MAX_PENDING", "Questions waiting per member", "How many /quizadd questions one member may have waiting for approval.", number(0, 100, "questions"), "5"),
+                setting("VIZIER_QUIZ_RESUME_MAX_MINUTES", "Pick a round back up within", "After a restart the quiz carries on the round it was in - same scores, same count, the question that was on screen asked again. A round older than this is quietly abandoned and a fresh one starts instead.", number(1, 1440, "minutes"), "15"),
                 setting(
                     "VIZIER_QUIZ_INDIA_SHARE",
                     "India share",
