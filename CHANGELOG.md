@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.46] - 2026-09-16
+
+### 💼 Other
+
+- Say what the card decision sees, for one release
 ## [0.11.45] - 2026-09-16
 
 ### 🚀 Features
 
 - *(guess)* Guess points, an uncapped score the cap can't hide
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.45
 ## [0.11.44] - 2026-09-16
 
 ### 💼 Other
