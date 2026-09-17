@@ -228,6 +228,7 @@ pub fn card_text(live: &Live) -> String {
             text.push_str(&format!("\n\n🥇 <@{}> cracked it first, in **{}**", who, spent_words(live.first_seconds)));
             text.push_str(&match live.since_first {
                 0 => " — nobody else has yet.".to_string(),
+                1 => " · **1 person** has solved it since.".to_string(),
                 n => format!(" · **{}** have solved it since.", plural(n, "person", "people")),
             });
             if let Some(secs) = live.next_in {
@@ -1402,7 +1403,7 @@ mod tests {
         let more = card_text(&Live { since_first: 4, ..solved.clone() });
         assert!(more.contains("**4 people** have solved it since."), "{}", more);
         let one = card_text(&Live { since_first: 1, ..solved });
-        assert!(one.contains("**1 person** have solved it since.") || one.contains("**1 person**"), "{}", one);
+        assert!(one.contains("**1 person** has solved it since."), "one person HAS: {}", one);
         // And how many are on it before anyone cracks it.
         assert!(card_text(&Live { playing: 3, ..live() }).contains("**3 people** on it right now"));
     }
