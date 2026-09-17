@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.54] - 2026-09-17
+
+### 💼 Other
+
+- Four minutes a turn, and no seat-0 fallback
+## [0.11.53] - 2026-09-17
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.53
 ## [0.11.52] - 2026-09-17
 
 ### 🚀 Features
