@@ -143,6 +143,29 @@ pub struct SudokuRules {
     pub has_page: bool,
 }
 
+/// The chess puzzle's live settings, for `/puzzlehelp` and its card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PuzzleRules {
+    /// The chess channel the puzzle lives in, only while it is on.
+    pub channel: Option<u64>,
+    /// House points for the FIRST person to crack one.
+    pub first: i64,
+    /// The daily limit on those. Nought - the default - means no house points
+    /// are paid at all, and the help card says so rather than promising any.
+    pub cap: i64,
+    /// What easy, medium and hard are worth in PUZZLE points.
+    pub band_points: [i64; 3],
+    /// How long a solved puzzle stays up so others can still try it.
+    pub next_minutes: i64,
+    /// How long an untouched one stays up before its answer is shown.
+    pub idle_minutes: i64,
+    pub no_repeat_days: i64,
+    /// How many puzzles the bank holds, when there is one.
+    pub puzzles: Option<usize>,
+    /// The line the pack asks to be credited with.
+    pub attribution: String,
+}
+
 /// Name Place Animal Thing's live settings, for its rules post and the lines
 /// about it in the House Cup posts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1063,6 +1086,71 @@ pub fn sudoku_rules_text(s: &SudokuRules) -> String {
     t
 }
 
+// --- the chess puzzle --------------------------------------------------------------------
+
+pub const PUZZLE_RULES_TITLE: &str = "🧩 How the chess puzzle works";
+
+/// What `/puzzlehelp` says, written from the settings as they are now.
+///
+/// Two things it must always say, whatever the settings: that an engine would
+/// solve any of these instantly and the point is to do it yourself, and where
+/// the puzzles came from - the bank's own attribution line, word for word.
+pub fn puzzle_help_text(p: &PuzzleRules) -> String {
+    let place = channel(p.channel).map(|c| format!(" in {}", c)).unwrap_or_else(|| " in the chess channel".to_string());
+    let mut t = String::new();
+    t.push_str(&format!(
+        "**🧩 What it is**\nA real position from a real game is always waiting{}. One side has just blundered; \
+         you have to find the move that wins it.\n\n",
+        place
+    ));
+
+    t.push_str("**▶️ How to play**\n");
+    t.push_str("• Press **🧩 Solve it** on the card. The bot hands you a private board of your own — tap a piece, tap where it goes.\n");
+    t.push_str("• Play the whole winning line. The other side answers for itself between your moves.\n");
+    t.push_str("• A wrong move is simply refused — *that's not it* — and you try again. Nothing is lost by guessing, and there is no limit on tries.\n");
+    t.push_str("• If the position is a mate and you find a **different** mate, that counts: any move that mates is the right move.\n\n");
+
+    t.push_str("**🏅 What it scores**\n");
+    t.push_str(&format!(
+        "• Everyone who solves a puzzle scores **puzzle points** — **{}** for an easy one, **{}** for a medium, **{}** for a hard. \
+         They have no daily limit, they are **not** house points, and everyone has them: houses or no houses, mods included.\n",
+        p.band_points[0], p.band_points[1], p.band_points[2]
+    ));
+    if p.cap > 0 && p.first > 0 {
+        t.push_str(&format!(
+            "• The **first** person to crack each puzzle also takes **{}**, up to **{}** a day. Nobody else earns house points from a puzzle.\n",
+            plural(p.first, "house point", "house points"),
+            plural(p.cap, "house point", "house points")
+        ));
+    } else {
+        t.push_str("• Puzzles pay **no house points** at the moment: puzzle points are the whole of the score, and being first is for the glory. A mod can turn house points on from the panel.\n");
+    }
+    t.push_str("• `/puzzletop` is the board for today or this month, and `/puzzle` shows where you stand.\n\n");
+
+    t.push_str("**⏱️ The pace**\n");
+    t.push_str(&format!(
+        "• Once somebody cracks it the puzzle stays up for another **{}**, so everyone else still gets their go.\n",
+        plural(p.next_minutes, "minute", "minutes")
+    ));
+    t.push_str(&format!(
+        "• One nobody solves is replaced after **{}**, with the answer shown on its card.\n",
+        plural(p.idle_minutes, "minute", "minutes")
+    ));
+    if p.no_repeat_days > 0 {
+        t.push_str(&format!("• The same puzzle doesn't come round again for **{}**.\n", plural(p.no_repeat_days, "day", "days")));
+    }
+    if let Some(n) = p.puzzles {
+        t.push_str(&format!("• There are **{}** in the bank.\n", plural(n as i64, "puzzle", "puzzles")));
+    }
+
+    t.push_str("\n**🤖 About cheating**\n");
+    t.push_str("• A chess engine would find any of these in a blink, and the bot has no way of knowing whether you used one. **The point is to find it yourself.** That is exactly why a puzzle is worth so little, and why the house points are capped — or off.\n");
+
+    t.push_str(&format!("\n-# {}\n", p.attribution));
+    t.push_str("-# `/puzzle` the one that's up · `/puzzletop` the board · `/puzzlehelp` this card · mods: `/puzzleskip` for a fresh one");
+    t
+}
+
 // --- chess ------------------------------------------------------------------------------
 
 /// "12 hours", "3 minutes", "45 seconds".
@@ -1347,6 +1435,20 @@ pub(crate) mod tests {
             late_hours: 24,
             mix: [40, 40, 20],
             has_page: true,
+        }
+    }
+
+    pub(crate) fn puzzle_defaults() -> PuzzleRules {
+        PuzzleRules {
+            channel: Some(1549625408004165682),
+            first: 1,
+            cap: 0,
+            band_points: [1, 2, 3],
+            next_minutes: 10,
+            idle_minutes: 60,
+            no_repeat_days: 60,
+            puzzles: Some(4_000),
+            attribution: super::super::puzzle_bank::ATTRIBUTION.to_string(),
         }
     }
 
@@ -1793,6 +1895,45 @@ pub(crate) mod tests {
         let off = welcome_text(&Rules { npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() });
         assert!(!off.contains("Name Place Animal Thing"), "{}", off);
         assert!(welcome_text(&huge()).chars().count() < MESSAGE_LIMIT);
+    }
+
+    #[test]
+    fn the_puzzle_help_card_reads_from_the_settings_and_always_credits_the_bank() {
+        let p = puzzle_defaults();
+        let text = puzzle_help_text(&p);
+        assert!(text.contains("🧩 Solve it"), "the button comes first: {}", text);
+        assert!(text.contains("<#1549625408004165682>"), "it names the chess channel: {}", text);
+        assert!(text.contains("*that's not it*") && text.contains("try again"), "a wrong move is refused gently: {}", text);
+        assert!(text.contains("any move that mates is the right move"), "the fairness rule is stated: {}", text);
+        assert!(text.contains("**1** for an easy one, **2** for a medium, **3** for a hard"), "{}", text);
+        assert!(text.contains("stays up for another **10 minutes**"), "{}", text);
+        assert!(text.contains("replaced after **60 minutes**"), "{}", text);
+        assert!(text.contains("doesn't come round again for **60 days**"), "{}", text);
+        assert!(text.contains("**4000 puzzles** in the bank"), "{}", text);
+        assert!(text.contains("`/puzzletop`") && text.contains("`/puzzleskip`"), "{}", text);
+        // The two things it must say whatever the settings are.
+        assert!(text.contains("The point is to find it yourself."), "the honesty about engines: {}", text);
+        assert!(
+            text.contains("Puzzles from the Lichess puzzle database (https://database.lichess.org/#puzzles), CC0 1.0."),
+            "the bank's own attribution line, word for word: {}",
+            text
+        );
+        assert!(text.chars().count() <= DESCRIPTION_LIMIT, "it has to fit an embed: {} characters", text.chars().count());
+
+        // Shipped as it is — the limit at nought — it promises no house points
+        // and never reads as "no points".
+        assert!(text.contains("Puzzles pay **no house points** at the moment"), "{}", text);
+        assert!(!text.contains("takes **1 house point**"), "{}", text);
+        // With the limit turned up, the first solver's point is named.
+        let paying = puzzle_help_text(&PuzzleRules { cap: 10, ..p.clone() });
+        assert!(paying.contains("The **first** person to crack each puzzle also takes **1 house point**, up to **10 house points** a day"), "{}", paying);
+        assert!(!paying.contains("pay **no house points**"), "{}", paying);
+        // A first-solver value of nought is the same as the limit being off.
+        assert!(puzzle_help_text(&PuzzleRules { cap: 10, first: 0, ..p.clone() }).contains("pay **no house points**"));
+        // No bank, no channel, no no-repeat rule: the lines simply go.
+        let bare = puzzle_help_text(&PuzzleRules { channel: None, puzzles: None, no_repeat_days: 0, ..p });
+        assert!(!bare.contains("<#") && !bare.contains("in the bank") && !bare.contains("come round again"), "{}", bare);
+        assert!(bare.contains("in the chess channel"), "{}", bare);
     }
 
     #[test]

@@ -221,6 +221,13 @@ pub fn note_message(_ctx: &Context, msg: &Message) {
     if Some(msg.channel_id.get()) != channel_setting() {
         return;
     }
+    // The chess PUZZLE lives in this channel too and keeps its own card at the
+    // bottom. Without this the two would chase each other down the channel for
+    // ever — chess moves below the puzzle card, the puzzle moves below that —
+    // so the puzzle's card is the one message chess does not follow.
+    if super::puzzle::owns_message(msg.id.get()) {
+        return;
+    }
     let mut s = SHARED.lock();
     s.latest = s.latest.max(msg.id.get());
     s.last_seen_ms = Utc::now().timestamp_millis();

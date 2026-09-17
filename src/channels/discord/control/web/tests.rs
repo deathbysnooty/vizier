@@ -1178,6 +1178,7 @@ pub fn store() {
         std::fs::write(bank.join("test.jsonl"), lines.join("\n")).unwrap();
         super::super::super::frog_store::open(dir.path().to_str().unwrap()).expect("frog store");
         // One puzzle of each difficulty, for the public sudoku page.
+        super::super::super::puzzle_store::open(dir.path().to_str().unwrap()).expect("puzzle store");
         super::super::super::sudoku_store::open(dir.path().to_str().unwrap()).expect("sudoku store");
         if let Some(db) = super::super::super::sudoku_store::db() {
             use super::super::super::sudoku_gen::{Level, Rng, generate};

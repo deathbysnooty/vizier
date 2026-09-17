@@ -35,6 +35,8 @@ pub const NAMES: &[&str] = &[
     "duel.js",
     "favicon.svg",
     "index.html",
+    "puzzle.html",
+    "puzzle.js",
     "sudoku.css",
     "sudoku.html",
     "sudoku.js",

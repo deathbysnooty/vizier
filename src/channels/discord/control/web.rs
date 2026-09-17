@@ -292,6 +292,7 @@ mod agent;
 mod arena;
 mod automod;
 mod chess;
+mod puzzle;
 mod duel;
 mod frogs;
 mod houses;
@@ -1014,6 +1015,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", ui::file("favicon.svg", FAVICON)) }))
         .merge(puzzles)
         .merge(chess::routes())
+        .merge(puzzle::routes())
         .merge(duel::routes())
         .nest("/api", api)
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })

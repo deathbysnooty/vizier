@@ -71,6 +71,10 @@ mod sudoku_store;
 mod house_card;
 mod house_draft;
 mod points;
+mod puzzle;
+mod puzzle_bank;
+mod puzzle_rules;
+mod puzzle_store;
 mod snitch;
 mod standings;
 mod scoreboard;
@@ -133,6 +137,10 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = sudoku_store::open(&self.deps.config.workspace) {
             tracing::warn!("sudoku: store not opened: {}", err);
         }
+        if let Err(err) = puzzle_store::open(&self.deps.config.workspace) {
+            tracing::warn!("puzzle: store not opened ({}) — the puzzle stays off", err);
+        }
+        puzzle_bank::open(&self.deps.config.workspace);
         if let Err(err) = chess_store::open(&self.deps.config.workspace) {
             tracing::warn!("chess: store not opened: {}", err);
         }
@@ -1285,6 +1293,7 @@ impl EventHandler for Handler {
         npat::on_delete(channel_id, deleted_message_id);
         sudoku::on_delete(channel_id, deleted_message_id);
         chess::on_delete(channel_id, deleted_message_id);
+        puzzle::on_delete(channel_id, deleted_message_id);
         duel::on_delete(channel_id, deleted_message_id);
         anagram::on_delete(channel_id, deleted_message_id);
         guess::on_delete(channel_id, deleted_message_id);
@@ -1531,6 +1540,10 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), sudoku::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::top_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), puzzle::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), puzzle::top_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), puzzle::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(puzzle::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), duel::command()).await;
@@ -1644,6 +1657,7 @@ impl EventHandler for Handler {
         sudoku::spawn(ctx.clone());
         // Chess: pays and announces games a restart left, then keeps the clocks.
         chess::spawn(ctx.clone());
+        puzzle::spawn(ctx.clone());
         // Letter Duel: settles games a restart left, hands the clocks their
         // time back, and keeps the one card at the bottom of its channel.
         duel::spawn(ctx.clone());
@@ -1705,6 +1719,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("sudoku") {
                 sudoku::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("puzzle") {
+                puzzle::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("chess") {
@@ -2259,6 +2277,22 @@ impl EventHandler for Handler {
             }
             if command.data.name == "chess" {
                 chess::command_handler(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "puzzle" {
+                puzzle::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "puzzletop" {
+                puzzle::top_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "puzzlehelp" {
+                puzzle::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "puzzleskip" {
+                puzzle::skip_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "chesstop" {
@@ -3113,6 +3147,7 @@ impl EventHandler for Handler {
         sudoku::note_message(&ctx, &msg);
         // The same for the chess channel's active card.
         chess::note_message(&ctx, &msg);
+        puzzle::note_message(&ctx, &msg);
         // Chat in the Letter Duel channel buries its one card, which follows
         // the conversation down once enough has landed under it.
         duel::note_message(&ctx, &msg);

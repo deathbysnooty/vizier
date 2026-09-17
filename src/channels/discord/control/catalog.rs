@@ -291,6 +291,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_SUDOKU", "Sudoku house-points limit (no longer used)", "Left from when sudoku paid house points. It does not any more - it keeps its own score, sudoku points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the sudoku house points people earned before the change, and those are untouched.", number(0, 100, "points"), "20"),
                 setting("VIZIER_CAP_CHESS", "Chess house-points limit (no longer used)", "Left from when chess paid house points. It does not any more - it keeps its own score, chess points, which has no limit - so this no longer bites on anything. It is kept because the ledger still holds the chess house points people earned before the change, and those are untouched.", number(0, 100, "points"), "8"),
+                setting("VIZIER_CAP_PUZZLE", "Chess puzzle points a day", "Most house points one person can win from chess puzzles in a day. Only the FIRST person to crack each puzzle earns one at all. Nought - the default - means chess puzzles pay no house points whatever: an engine solves any of them instantly, so this is deliberately off until you decide otherwise. Puzzle points themselves are never capped and are not affected by this. 100 means no limit.", number(0, 100, "points"), "0"),
                 setting("VIZIER_CAP_DUEL", "Letter Duel points a day", "Most house points one person can win from Letter Duel in a day. Duel points themselves are never capped. 100 means no limit.", number(0, 100, "points"), "8"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
@@ -680,6 +681,40 @@ pub fn sections() -> Vec<Section> {
                     "/chessstop game:",
                     "Cancels a chess game that is stuck, by its number. No chess points for either player, and the card is replaced with a cancelled result.",
                 ),
+            ],
+        },
+        Section {
+            id: "puzzle",
+            title: "Chess puzzle",
+            icon: "🧩",
+            about: "A real position from a real game, always waiting in the CHESS channel (the puzzle has no channel of \
+                    its own - it goes wherever chess is). One side has just blundered; members press 🧩 Solve it, get a \
+                    private board page of their own, and play the winning line move by move. A wrong move is refused - \
+                    \"that's not it\" - and they try again, as often as they like; the puzzle is solved when the whole \
+                    line is played, or when they find a mate of their own, because any move that mates is the right \
+                    move. The FIRST person to crack each puzzle takes a house point, if house points are switched on \
+                    for this at all - by default they are NOT, because a chess engine would find any of these \
+                    instantly and the bot cannot tell whether one was used. Everybody who solves it, first or not, \
+                    scores PUZZLE POINTS: this game's own score, which nothing limits and everyone has, mods and \
+                    Muggles included. `/puzzletop` is the board. Once somebody cracks it the puzzle stays up a while \
+                    longer so the rest still get their go; one nobody solves is replaced with its answer shown. The \
+                    puzzles come from the Lichess puzzle database (CC0), shipped in `puzzlebank/`: no bank, no \
+                    puzzle, and the rest of chess is unaffected. The card lives below chess's own and never runs in \
+                    #safe-corner.",
+            settings: vec![
+                setting("VIZIER_PUZZLE", "Puzzle on", "Run the chess puzzle in the chess channel. Off takes the card down and sets no more puzzles; chess itself is unaffected either way.", Kind::Toggle, "off"),
+                setting("VIZIER_POINTS_PUZZLE", "House points for cracking it first", "House points for the FIRST person to solve each puzzle. Nobody else ever earns house points from one. The daily limit above decides whether any of this is paid at all - it is nought by default, which means none is.", number(0, 100, "points"), "1"),
+                setting("VIZIER_PUZZLE_NEXT_MINUTES", "Stays up after the first solve", "How long a cracked puzzle stays up before the next one takes its place, so everybody else still gets their go at it.", number(1, 1440, "minutes"), "10"),
+                setting("VIZIER_PUZZLE_IDLE_MINUTES", "Replace an unsolved one after", "How long a puzzle nobody has solved stays up. When it goes, its card shows the answer.", number(5, 10080, "minutes"), "60"),
+                setting("VIZIER_PUZZLE_NO_REPEAT_DAYS", "Don't repeat a puzzle for", "How long before the same puzzle may be set again. 0 turns the rule off.", number(0, 3650, "days"), "60"),
+                setting("VIZIER_PUZZLE_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the puzzle card before it follows the conversation down. The bot's own messages never count.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_PUZZLE_BUMP_SECONDS", "Wait between moves of the card", "The shortest time between two moves of the puzzle card, however busy the channel is.", number(10, 3600, "seconds"), "120"),
+            ],
+            commands: vec![
+                command("puzzle", EVERYONE, "/puzzle", "The puzzle that is up now: whose move it is, how long the line is, who cracked it first, and your own puzzle points today and this month. Only you see it."),
+                command("puzzletop", EVERYONE, "/puzzletop", "The puzzle points board, today or this month: the top 10 and, if you are not on it, your own line. Puzzle points are the game's own score - every solve, first or not, with no daily limit - so mods and Muggles have them too. Only you see it."),
+                command("puzzlehelp", EVERYONE, "/puzzlehelp", "How the chess puzzle works, written from the settings as they are right now: the private board, what a solve scores, the pace, and where the puzzles come from. Only you see it."),
+                command("puzzleskip", ADMINS, "/puzzleskip", "Drops the puzzle that is up, shows its answer on its card and sets a fresh one at once."),
             ],
         },
         Section {
