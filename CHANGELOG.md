@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - Say what the card decision sees, for one release
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.46
 ## [0.11.45] - 2026-09-16
 
 ### 🚀 Features
