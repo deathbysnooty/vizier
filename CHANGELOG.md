@@ -2,11 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.58] - 2026-09-17
+
+### 🚀 Features
+
+- *(chess)* Chess points, and the House Cup left alone
+- *(puzzle)* A chess puzzle in the chess channel, solved on your own board
+
+### 💼 Other
+
+- One person HAS solved it, not have
 ## [0.11.57] - 2026-09-17
 
 ### 💼 Other
 
 - 4,000 verified Lichess puzzles for the chess game
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.57
 ## [0.11.56] - 2026-09-17
 
 ### 🚀 Features
