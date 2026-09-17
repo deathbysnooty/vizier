@@ -291,6 +291,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_NPAT", "Name Place Animal Thing points a day", "Most house points one person can win from Name Place Animal Thing rounds in a day (1st and 2nd places, review fixes included). 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_SUDOKU", "Sudoku points a day", "Most house points one person can win from sudoku puzzles in a day. Only the first correct code for a puzzle pays, and hints come off that puzzle's points before this limit is applied. 100 means no limit.", number(0, 100, "points"), "20"),
                 setting("VIZIER_CAP_CHESS", "Chess points a day", "Most house points one person can win from chess in a day. 100 means no limit.", number(0, 100, "points"), "8"),
+                setting("VIZIER_CAP_DUEL", "Letter Duel points a day", "Most house points one person can win from Letter Duel in a day. Duel points themselves are never capped. 100 means no limit.", number(0, 100, "points"), "8"),
                 setting(
                     "VIZIER_CAP_WEEKLY",
                     "Weekly scan points",
@@ -671,6 +672,52 @@ pub fn sections() -> Vec<Section> {
                     "/chessstop game:",
                     "Cancels a chess game that is stuck, by its number. No house points for either player, and the card is replaced with a cancelled result.",
                 ),
+            ],
+        },
+        Section {
+            id: "duel",
+            title: "Letter Duel",
+            icon: "🔠",
+            about: "A tile game for two to four people in its own channel (Game channel below): a fifteen-by-fifteen \
+                    board with the usual premium squares, the usual hundred tiles, and seven on a rack. `/duel`, or \
+                    the ⚔️ Start a duel button on the card, puts a LOBBY up with a Join button and a countdown the bot \
+                    rewrites every few seconds — Discord's own relative timestamps do not tick where anyone is \
+                    looking, so the seconds are written out. The lobby starts early when it fills and is called off, \
+                    with nothing lost, below the minimum. Each player then gets a private page of their own, the way \
+                    chess does: their rack along the bottom, tap a tile then a square, tap it again to pick it back \
+                    up, and the page adds up what the play would score BEFORE it is committed and refuses an illegal \
+                    one in plain words. The server checks everything again, so the page is never trusted. Full rules: \
+                    the first word crosses the middle, tiles in one line with no gaps, every word made — sideways \
+                    ones too — has to be in the dictionary, premium squares multiply the letter and then the word and \
+                    are spent after use, all seven tiles is +50, blanks are any letter and score nothing, and a \
+                    player may swap tiles while the bag is full enough or simply pass. It ends when the bag is empty \
+                    and somebody puts their last tile down — they gain what everyone else is holding and the rest \
+                    lose theirs — or when everybody passes twice. After every turn the one card in the channel is \
+                    redrawn with the board as a picture, the word just played, the scores and whose turn it is; it \
+                    follows the conversation down when chat buries it. **The words come from wordbank/dictionary.txt \
+                    in the bot's workspace**, read once at start: with no bank there the game simply stays off and \
+                    says so in the log. That file starts at four letters, so the two- and three-letter words a board \
+                    needs are built into the bot itself. A restart is safe: the bot notes that it is alive every half \
+                    minute and hands every running game and open lobby back the time it was away. Never runs in \
+                    #safe-corner.",
+            settings: vec![
+                setting("VIZIER_DUEL", "Game on", "Run Letter Duel in its channel. Off stops new lobbies; a game already running keeps its card until it finishes. The game also stays off, whatever this says, when there is no dictionary to play with.", Kind::Toggle, "off"),
+                setting("VIZIER_DUEL_CHANNEL", "Game channel", "The channel Letter Duel lives in. The bot needs Send Messages, Attach Files, Embed Links, Read Message History and Manage Messages there. Empty means the channel the game was made for. Never #safe-corner.", Kind::Channel, "1550088683414225006"),
+                setting("VIZIER_DUEL_LOBBY_SECS", "Lobby stays open for", "How long a lobby takes seats before it starts. It starts early the moment it is full, and is called off if too few have joined by the end.", number(15, 1800, "seconds"), "120"),
+                setting("VIZIER_DUEL_MIN", "Fewest players", "How many have to join for a game to start at all. Below this the lobby is called off and nobody loses anything.", number(2, 4, "players"), "2"),
+                setting("VIZIER_DUEL_MAX", "Most players", "How many seats a game has. The lobby starts the moment they are all taken.", number(2, 4, "players"), "4"),
+                setting("VIZIER_DUEL_TURN_SECS", "Seconds per turn", "How long each player has to play, swap or pass. A turn that runs out is an automatic pass, and three missed turns take that player out of the game.", number(20, 3600, "seconds"), "90"),
+                setting("VIZIER_DUEL_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_DUEL_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, counted from when the card last MOVED rather than from every redraw, so a game whose board changes each turn still follows the conversation down.", number(10, 3600, "seconds"), "60"),
+                setting("VIZIER_POINTS_DUEL_WIN", "House points for winning", "House points for the winner of a game with three or more players. A two-player game pays its winner the runner-up's share instead, and the loser nothing, so two friends can't farm each other.", number(0, 100, "points"), "4"),
+                setting("VIZIER_POINTS_DUEL_SECOND", "House points for second", "House points for the runner-up, in a game with three or more players.", number(0, 100, "points"), "2"),
+                setting("VIZIER_POINTS_DUEL_PLAYED", "House points for playing to the end", "House points for everybody else who was still in the game when it finished, so turning up pays. Somebody who left, or was dropped for missing turns, gets nothing.", number(0, 100, "points"), "1"),
+            ],
+            commands: vec![
+                command("duel", EVERYONE, "/duel", "Opens a Letter Duel lobby in the game channel and takes a seat in it. Refused politely while a lobby or a game is already running."),
+                command("dueltop", EVERYONE, "/dueltop", "The duel points board, today or this month: the top 10 and, if you are not on it, your own line. Duel points are the game's own score — what each finish was worth before the daily house-points limit — so they keep counting after that limit is full, and mods and Muggles have them too. Only you see it."),
+                command("duelhelp", EVERYONE, "/duelhelp", "How Letter Duel works, written from the settings as they are right now: the lobby, the board page, the words, the scoring, the clock and the points. Only you see it."),
+                command("duelstop", ADMINS, "/duelstop", "Stops the Letter Duel game that is running, or closes the lobby that is open. No points for anyone, and nobody loses anything from a closed lobby."),
             ],
         },
         Section {

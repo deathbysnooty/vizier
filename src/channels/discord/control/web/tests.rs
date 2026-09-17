@@ -1188,6 +1188,22 @@ pub fn store() {
             }
         }
         super::super::super::chess_store::open(dir.path().to_str().unwrap()).expect("chess store");
+        // Letter Duel: its own store, and the dictionary it plays with — the
+        // real one from the checkout when there is one, so the words a test
+        // plays are the words the server would take.
+        super::super::super::duel_store::open(dir.path().to_str().unwrap()).expect("duel store");
+        let wordbank = dir.path().join("wordbank");
+        std::fs::create_dir_all(&wordbank).unwrap();
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wordbank/dictionary.txt");
+        match std::fs::read_to_string(&shipped) {
+            Ok(words) => std::fs::write(wordbank.join("dictionary.txt"), words).unwrap(),
+            Err(_) => std::fs::write(
+                wordbank.join("dictionary.txt"),
+                super::super::super::duel_words::tests::DICTIONARY,
+            )
+            .unwrap(),
+        }
+        super::super::super::duel_words::open(dir.path().to_str().unwrap());
         // Automatic moderation, with a few flags to draw the Moderation page.
         super::super::super::automod_store::start(dir.path().to_str().unwrap()).expect("automod store");
         seed_automod();
@@ -4493,6 +4509,23 @@ async fn demo_server() {
         }
     }
 
+    // A Letter Duel game part-played, so its private board page can be opened
+    // and tapped about on. The link is printed below with the panel's.
+    let duel_link = {
+        use super::super::super::{duel_rules as dr, duel_store as ds};
+        let db = ds::db().expect("duel store");
+        let conn = db.lock();
+        let seats = [
+            (ADMIN, "ravenclaw".to_string(), "QUARTZ?".to_string()),
+            (MEMBER, "gryffindor".to_string(), "ANTEDIR".to_string()),
+        ];
+        let game = ds::start_game(&conn, 21, &seats, &dr::empty_board(), &"E".repeat(40), 900, now, "2026-09-17")
+            .expect("a duel");
+        ds::token_for(&conn, game.id, ADMIN, now, || rand::random::<f64>())
+            .map(|token| format!("http://127.0.0.1:8799/duel/{}/{}", game.id, token))
+            .unwrap_or_default()
+    };
+
     let session = session_for(ADMIN);
     let signed_in = demo_panel().layer(axum::middleware::map_request(move |mut req: axum::extract::Request| {
         let session = session.clone();
@@ -4509,6 +4542,7 @@ async fn demo_server() {
     let a = tokio::net::TcpListener::bind("127.0.0.1:8799").await.unwrap();
     let b = tokio::net::TcpListener::bind("127.0.0.1:8798").await.unwrap();
     println!("demo panel: http://127.0.0.1:8799 (signed in), http://127.0.0.1:8798 (signed out) for {secs}s");
+    println!("letter duel board: {duel_link}");
     let serve_a = axum::serve(a, signed_in.into_make_service_with_connect_info::<SocketAddr>());
     let serve_b = axum::serve(b, signed_out.into_make_service_with_connect_info::<SocketAddr>());
     tokio::select! {

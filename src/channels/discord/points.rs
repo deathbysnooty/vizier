@@ -46,6 +46,8 @@ pub enum Source {
     Chess,
     /// Guess the Word: the first person to name the doodle on the card.
     Guess,
+    /// Letter Duel: a whole game of tiles, paid by where each player finished.
+    Duel,
 }
 
 /// How much one person may earn from a source.
@@ -61,7 +63,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 18] = [
+    pub const ALL: [Source; 19] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -80,6 +82,7 @@ impl Source {
         Source::Sudoku,
         Source::Chess,
         Source::Guess,
+        Source::Duel,
     ];
 
     pub fn key(self) -> &'static str {
@@ -102,6 +105,7 @@ impl Source {
             Source::Sudoku => "sudoku",
             Source::Chess => "chess",
             Source::Guess => "guess",
+            Source::Duel => "duel",
         }
     }
 
@@ -129,6 +133,7 @@ impl Source {
             Source::Sudoku => "🔢 Sudoku",
             Source::Chess => "♟️ Chess",
             Source::Guess => "🎨 Guess the Word",
+            Source::Duel => "🔠 Letter Duel",
         }
     }
 
@@ -152,6 +157,7 @@ impl Source {
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
             Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
+            Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
             Source::Weekly => Cap::PerWeekPerChannel(super::control::number("VIZIER_CAP_WEEKLY", 3) as i64),
             // A battle royale is a rare event, the Golden Snitch is meant to be a
             // jackpot, and mods decide their own amounts.
@@ -626,6 +632,34 @@ mod tests {
         // A fresh day starts again, and the anagrams limit is its own.
         assert_eq!(write(&conn, &win(9, 2), MON + DAY).unwrap(), Outcome::Granted(2));
         assert_eq!(write(&conn, &entry(1, Source::Anagram, 3), MON).unwrap(), Outcome::Granted(3));
+    }
+
+    #[test]
+    fn duel_games_pay_by_place_and_stop_at_eight_a_day() {
+        let conn = db();
+        // Each game names itself and the player, so one game can only ever pay
+        // that player once, however often the result is settled again.
+        let win = |game: i64, points: i64| {
+            let mut e = entry(1, Source::Duel, points);
+            e.dedupe = Some(format!("duel:{}:1", game));
+            e
+        };
+        assert_eq!(Source::Duel.cap(), Cap::PerDay(8), "VIZIER_CAP_DUEL, unset");
+        for game in 1..=2 {
+            assert_eq!(write(&conn, &win(game, 4), MON).unwrap(), Outcome::Granted(4));
+        }
+        // Eight used: the next win is trimmed to nothing at all.
+        assert_eq!(write(&conn, &win(3, 4), MON).unwrap(), Outcome::Capped);
+        assert_eq!(write(&conn, &win(1, 4), MON).unwrap(), Outcome::Duplicate, "the same game again pays nothing");
+        let today: i64 = conn
+            .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE source = 'duel' AND day = ?1", params![ist_day(MON)], |r| r.get(0))
+            .unwrap();
+        assert_eq!(today, 8, "the day's duel limit");
+        // A fresh day starts again, and a part-payment is trimmed to what fits.
+        assert_eq!(write(&conn, &win(9, 6), MON + DAY).unwrap(), Outcome::Granted(6));
+        let mut runner_up = entry(1, Source::Duel, 4);
+        runner_up.dedupe = Some("duel:10:1".into());
+        assert_eq!(write(&conn, &runner_up, MON + DAY).unwrap(), Outcome::Granted(2), "only the two that fit");
     }
 
     #[test]

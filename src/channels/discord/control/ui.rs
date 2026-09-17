@@ -1,8 +1,8 @@
 //! The panel's own files: from disk when they are there, from the binary
 //! otherwise.
 //!
-//! Every page the panel serves (`index.html`, `app.js`, the sudoku and chess
-//! pages) is built into the binary with `include_str!`, so a release always has
+//! Every page the panel serves (`index.html`, `app.js`, the sudoku, chess and
+//! Letter Duel pages) is built into the binary with `include_str!`, so a release always has
 //! a complete panel. That also meant a one-line change to a stylesheet needed a
 //! full release and a restart. So each of those files is looked for first in
 //! `<workspace>/.runtime/ui/` — the same runtime directory control.db and the
@@ -31,6 +31,8 @@ pub const NAMES: &[&str] = &[
     "chess-watch.js",
     "chess.html",
     "chess.js",
+    "duel.html",
+    "duel.js",
     "favicon.svg",
     "index.html",
     "sudoku.css",

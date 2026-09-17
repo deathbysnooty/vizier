@@ -292,6 +292,7 @@ mod agent;
 mod arena;
 mod automod;
 mod chess;
+mod duel;
 mod frogs;
 mod houses;
 mod insights;
@@ -1013,6 +1014,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", ui::file("favicon.svg", FAVICON)) }))
         .merge(puzzles)
         .merge(chess::routes())
+        .merge(duel::routes())
         .nest("/api", api)
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))

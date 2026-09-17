@@ -583,13 +583,22 @@ pub const NEWS: &[News] = &[News {
     title: "💬 Chatting no longer earns points",
     body: "From now on, **text messages do not earn house points**. People were spamming to hit the message count \u{2014}            \"6 msgs, 5 to go\" \u{2014} and that is not what this server is for.\n\n           \u{2022} Everything else pays exactly as before: the games, voice, the 🪄 Snitch, 🐸 frogs, the arena, all of it.\n           \u{2022} Your messages are **still counted** \u{2014} the panel, the most-active lists and the day's 🐸 frog card for chat all work the same.\n           \u{2022} Spam is now taken down automatically, and the mods can see what was removed.\n\n           Talk because you want to talk. Play the games for points.",
 }, News {
+    id: "letter-duel-2026-09",
+    title: "🔠 Letter Duel is here",
+    body: "A board, a bag of tiles and up to four of you — Letter Duel is now in {duel}.\n\n           • `/duel`, or **⚔️ Start a duel** on the card, opens a lobby. Anyone can press **⚔️ Join**; it starts \
+           early when the seats fill, and is called off with nothing lost if too few turn up.\n           • Press **🔤 Open my rack** for a board of your own. Tap a tile, tap a square. Nobody else sees your \
+           tiles, and the page tells you what a play scores **before** you commit it.\n           • Proper rules: first word over the middle ★, every word made — sideways ones too — has to be real, \
+           premium squares double and triple, all seven tiles is **+50**, blanks score nothing. Swap or pass if \
+           you're stuck. **90 seconds** a turn; three missed turns and you're out.\n           • Winner **+4**, runner-up **+2**, **+1** to everyone who plays to the end — turning up pays. Three or \
+           more players for the full prizes.\n           • **Duel points** as well, with no daily limit, for everybody — `/dueltop` is that board.\n\n           `/duelhelp` explains the lot.",
+}, News {
     id: "sudoku-solver-points-back-2026-09",
     title: "⚖️ Sudoku: some points have been taken back",
     body: "A few sudoku puzzles have been solved in times that are not humanly possible. A medium puzzle has about fifty            empty squares, and some were handed in **14 to 19 seconds** after the page was first opened \u{2014} faster than the            digits can be typed, never mind worked out. A solver app does that. A person doesn\u{2019}t.\n\n           \u{2022} **66 points have been taken back**, from the members and from their house.\n           \u{2022} This is checked, not guessed: the bot records when each player opened a puzzle and when their code arrived.\n           \u{2022} Nobody is named here, one of them owned up when asked, and solves that merely look quick have been left            alone \u{2014} being good at sudoku is not cheating.\n\n           Use a solver for fun if you like. Just don\u{2019}t hand the code in for points.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
-/// `{anagram}`, `{guess}`, `{npat}`
+/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -602,6 +611,7 @@ pub fn fill_channels(body: &str) -> String {
         .replace("{anagram}", &mention("VIZIER_ANAGRAM_CHANNEL", "the anagrams channel"))
         .replace("{guess}", &mention("VIZIER_GUESS_CHANNEL", "the guess-the-word channel"))
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
+        .replace("{duel}", &mention("VIZIER_DUEL_CHANNEL", "the Letter Duel channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
 

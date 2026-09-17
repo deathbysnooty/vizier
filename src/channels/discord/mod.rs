@@ -55,6 +55,11 @@ mod chess;
 mod chess_board;
 mod chess_rules;
 mod chess_store;
+mod duel;
+mod duel_board;
+mod duel_rules;
+mod duel_store;
+mod duel_words;
 mod npat;
 mod npat_judge;
 mod npat_store;
@@ -134,6 +139,11 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = anagram_store::open(&self.deps.config.workspace) {
             tracing::warn!("anagram: store not opened: {}", err);
         }
+        if let Err(err) = duel_store::open(&self.deps.config.workspace) {
+            tracing::warn!("duel: store not opened: {}", err);
+        }
+        // Letter Duel's dictionary, read once. Missing only means the game is off.
+        duel_words::open(&self.deps.config.workspace);
         // The word bank, read once. Missing only means the anagrams game is off.
         anagram_words::open(&self.deps.config.workspace);
         if let Err(err) = guess_store::open(&self.deps.config.workspace) {
@@ -1275,6 +1285,7 @@ impl EventHandler for Handler {
         npat::on_delete(channel_id, deleted_message_id);
         sudoku::on_delete(channel_id, deleted_message_id);
         chess::on_delete(channel_id, deleted_message_id);
+        duel::on_delete(channel_id, deleted_message_id);
         anagram::on_delete(channel_id, deleted_message_id);
         guess::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
@@ -1520,6 +1531,10 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), duel::command()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), duel::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), duel::top_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(duel::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), anagram::mine_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), anagram::top_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), anagram::help_builder()).await;
@@ -1627,6 +1642,9 @@ impl EventHandler for Handler {
         sudoku::spawn(ctx.clone());
         // Chess: pays and announces games a restart left, then keeps the clocks.
         chess::spawn(ctx.clone());
+        // Letter Duel: settles games a restart left, hands the clocks their
+        // time back, and keeps the one card at the bottom of its channel.
+        duel::spawn(ctx.clone());
         // Anagrams: picks up the round a restart left in its channel, or sets one.
         anagram::spawn(ctx.clone());
         // Guess the Word: picks up the doodle a restart left in its channel, or draws one.
@@ -1689,6 +1707,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("chess") {
                 chess::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("duel") {
+                duel::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -2239,6 +2261,22 @@ impl EventHandler for Handler {
             }
             if command.data.name == "chessstop" {
                 chess::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "duel" {
+                duel::command_handler(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "duelhelp" {
+                duel::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "dueltop" {
+                duel::top_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "duelstop" {
+                duel::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "anagram" {
@@ -3065,6 +3103,9 @@ impl EventHandler for Handler {
         sudoku::note_message(&ctx, &msg);
         // The same for the chess channel's active card.
         chess::note_message(&ctx, &msg);
+        // Chat in the Letter Duel channel buries its one card, which follows
+        // the conversation down once enough has landed under it.
+        duel::note_message(&ctx, &msg);
         // Chat in the anagrams channel buries the scramble card, which follows
         // it down once enough has landed under it.
         anagram::note_message(&ctx, &msg);
