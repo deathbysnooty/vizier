@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.48] - 2026-09-17
+
+### 🚀 Features
+
+- Automatic moderation — delete spam, only ever flag suspected AI writing
+## [0.11.47] - 2026-09-17
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.47
 ## [0.11.46] - 2026-09-16
 
 ### 💼 Other
