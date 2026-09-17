@@ -2,11 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.51] - 2026-09-17
+
+### 💼 Other
+
+- Tell the server why some points went back
 ## [0.11.50] - 2026-09-17
 
 ### 💼 Other
 
 - /houseping, so a captain can rally their own house
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.50
 ## [0.11.49] - 2026-09-17
 
 ### 💼 Other
