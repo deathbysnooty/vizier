@@ -608,8 +608,8 @@ pub const NEWS: &[News] = &[News {
            early when the seats fill, and is called off with nothing lost if too few turn up.\n           • Press **🔤 Open my rack** for a board of your own. Tap a tile, tap a square. Nobody else sees your \
            tiles, and the page tells you what a play scores **before** you commit it.\n           • Proper rules: first word over the middle ★, every word made — sideways ones too — has to be real, \
            premium squares double and triple, all seven tiles is **+50**, blanks score nothing. Swap or pass if \
-           you're stuck. **90 seconds** a turn; three missed turns and you're out.\n           • Winner **+4**, runner-up **+2**, **+1** to everyone who plays to the end — turning up pays. Three or \
-           more players for the full prizes.\n           • **Duel points** as well, with no daily limit, for everybody — `/dueltop` is that board.\n\n           `/duelhelp` explains the lot.",
+           you're stuck. **Four minutes** a turn; three missed turns and you're out.\n           • **Duel points** for everyone who plays, with no daily limit — the winner most, then the runner-up, then \
+           anyone who sees it through. `/dueltop` is that board.\n\n           `/duelhelp` explains the lot.",
 }, News {
     id: "sudoku-solver-points-back-2026-09",
     title: "⚖️ Sudoku: some points have been taken back",
@@ -623,6 +623,10 @@ pub const NEWS: &[News] = &[News {
            keeps counting all the way.\n           • **Everyone** has sudoku points, houses or no houses. Mods and Muggles score too.\n           • **The house points already earned stay exactly where they are.** Nothing is taken back by this.\n           • `/sudokutop` is the new board, today or this month; `/sudoku` shows where you stand; the day's top \
            scorer still gets the 🐸 frog card.\n\n           Why: a grid handed to a solver app was paying a house the same as a grid worked out by a person. Sudoku is \
            still here to play — it just doesn't decide the House Cup any more.",
+}, News {
+    id: "letter-duel-correction-2026-09",
+    title: "🔠 Letter Duel \u{2014} two corrections",
+    body: "The note about Letter Duel had two things wrong in it.\n\n           \u{2022} A turn is **four minutes**, not ninety seconds. The very first game showed ninety seconds isn\u{2019}t long            enough to open your rack, read seven tiles and find a word \u{2014} nobody managed a single move.\n           \u{2022} It pays **duel points only** for now, not house points. Win, come second or just see the game through            and you score duel points, with no daily limit; `/dueltop` is the board. House points may follow once the            game has been played in properly.\n\n           Everything else in that note stands: the lobby, your own tile page, the real rules, and **+50** for using all seven tiles.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,

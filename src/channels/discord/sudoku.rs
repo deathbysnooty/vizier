@@ -282,10 +282,6 @@ pub fn solved_text(s: &Solved) -> String {
     text
 }
 
-pub fn solved_footer(today: &str) -> String {
-    if today.is_empty() { "The first solve of the day".to_string() } else { format!("Solved today: {}", today) }
-}
-
 /// The day's solvers as the cards and the button show them: wins first, then
 /// the people who finished a puzzle somebody else had already won. The number
 /// in brackets is SUDOKU points, the same score the solved card names.
@@ -612,7 +608,7 @@ async fn show_solved(ctx: &Context, row: &store::Row, guild: Option<serenity::al
         .title(solved_title(row.id, row.level))
         .description(solved_text(&solved))
         .colour(SOLVED_COLOUR)
-        .footer(CreateEmbedFooter::new(solved_footer(&solved.today)));
+        .footer(CreateEmbedFooter::new(CARD_FOOTER));
     let Some(message) = row.message else { return };
     let edit = EditMessage::new()
         .embed(embed)
@@ -1702,8 +1698,6 @@ mod tests {
         // The difficulty, how long it took and who was playing are all still there.
         assert!(text.contains("🟡 Medium in 7 min 41 s"), "{}", text);
         assert!(text.contains("no hints used") && text.contains("4 others were also playing"), "{}", text);
-        assert!(solved_footer(&solved.today).starts_with("Solved today: Aarav 3"));
-        assert_eq!(solved_footer(""), "The first solve of the day");
         // Hints eat into the sudoku points and are said so.
         let hinted = Solved { hints: 2, points: 2, all_hints: 3, others: 0, tally: 2, ..solved.clone() };
         let text = solved_text(&hinted);
@@ -2110,7 +2104,7 @@ mod tests {
         let solved_card = card(
             &solved_title(128, Level::Medium),
             solved_text(&solved),
-            &solved_footer(&solved.today),
+            CARD_FOOTER,
             SOLVED_COLOUR,
             None,
             &[],
@@ -2194,7 +2188,6 @@ mod tests {
             solved_title(128, Level::Medium),
             solved_text(&solved()),
             solved_text(&solved_spent),
-            solved_footer(&solved().today),
             today_text(&solves, 1),
             today_text(&solves, 99),
             today_text(&[], 1),
