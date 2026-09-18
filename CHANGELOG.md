@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.60] - 2026-09-18
+
+### 🚀 Features
+
+- *(house)* Click a name on the House Cup page to see that member's cards
 ## [0.11.59] - 2026-09-18
 
 ### 🚀 Features
@@ -11,6 +16,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - /housecards - what a house holds, and who holds it
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.59
 ## [0.11.58] - 2026-09-17
 
 ### 🚀 Features
