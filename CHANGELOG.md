@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.61] - 2026-09-18
+
+### 🚀 Features
+
+- *(msglog)* Keep every channel's text for a year and open it member-first
+
+### 🧪 Testing
+
+- The handle check only means something for a real-sized id
 ## [0.11.60] - 2026-09-18
 
 ### 🚀 Features
 
 - *(house)* Click a name on the House Cup page to see that member's cards
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.60
 ## [0.11.59] - 2026-09-18
 
 ### 🚀 Features
