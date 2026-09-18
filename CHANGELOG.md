@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.59] - 2026-09-18
+
+### 🚀 Features
+
+- *(house)* A public House Cup page, live, and /housecup to hand out its link
+
+### 💼 Other
+
+- /housecards - what a house holds, and who holds it
 ## [0.11.58] - 2026-09-17
 
 ### 🚀 Features
@@ -12,6 +21,10 @@ All notable changes to this project will be documented in this file.
 ### 💼 Other
 
 - One person HAS solved it, not have
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.58
 ## [0.11.57] - 2026-09-17
 
 ### 💼 Other
