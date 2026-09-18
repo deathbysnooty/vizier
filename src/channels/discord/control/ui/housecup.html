@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="dark light">
+<title>House Cup · MLCI</title>
+<link rel="stylesheet" href="/assets/housecup.css">
+<script src="/assets/housecup.js" defer></script>
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <div class="title">
+      <h1>🏆 House Cup</h1>
+      <p class="period" id="period">Loading the scoreboard…</p>
+    </div>
+    <div class="corner">
+      <p class="live" id="live"><span class="dot" id="dot" aria-hidden="true"></span><span id="freshness">connecting…</span></p>
+      <button type="button" class="switch" id="theme" aria-label="Switch between light and dark">🌙</button>
+    </div>
+  </header>
+
+  <p class="trouble" id="trouble" hidden></p>
+
+  <section class="standings" id="standings" aria-label="Standings"></section>
+
+  <section class="houses" id="houses" aria-label="Each house"></section>
+
+  <footer class="foot">
+    <p>Points reset at midnight on the 1st, India time. Chocolate Frog cards count for whichever house their holder is in now.</p>
+    <p class="thin">This page updates itself · no sign-in · display names only</p>
+  </footer>
+
+  <noscript><p class="trouble">This page needs JavaScript to draw the scoreboard. In Discord, <b>/housetop</b> shows a house's top ten and <b>/frogs</b> shows your cards.</p></noscript>
+</main>
+</body>
+</html>

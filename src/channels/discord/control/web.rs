@@ -127,6 +127,11 @@ pub trait PanelData: Send + Sync + 'static {
     fn house_cup(&self, _period: houses::Period, _now: i64) -> Option<houses::HouseCup> {
         None
     }
+    /// Everything the public House Cup page shows at `now`: this month's points,
+    /// each house's top scorers and the Chocolate Frog cards they hold.
+    fn housecup(&self, _now: i64) -> Option<housecup::Cup> {
+        None
+    }
     /// The AI agent's tone and limits, or none when the agent isn't reachable.
     async fn agent_settings(&self) -> Option<agent::AgentSettings> {
         None
@@ -295,6 +300,8 @@ mod chess;
 mod puzzle;
 mod duel;
 mod frogs;
+// The public scoreboard page: its link is handed out by `/housecup`.
+pub mod housecup;
 mod houses;
 mod insights;
 mod left;
@@ -456,6 +463,10 @@ impl PanelData for LiveData {
 
     fn house_cup(&self, period: houses::Period, now: i64) -> Option<houses::HouseCup> {
         houses::read_live(period, now)
+    }
+
+    fn housecup(&self, now: i64) -> Option<housecup::Cup> {
+        housecup::read_live(now)
     }
 
     async fn agent_settings(&self) -> Option<agent::AgentSettings> {
@@ -1014,6 +1025,7 @@ pub fn router(panel: Panel) -> Router {
         )
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", ui::file("favicon.svg", FAVICON)) }))
         .merge(puzzles)
+        .merge(housecup::routes())
         .merge(chess::routes())
         .merge(puzzle::routes())
         .merge(duel::routes())

@@ -207,6 +207,18 @@ pub fn sections() -> Vec<Section> {
                     number(20, 1000, "characters"),
                     "300",
                 ),
+                toggle(
+                    "VIZIER_HOUSECUP",
+                    "Scoreboard page",
+                    "The public House Cup web page and the /housecup command that hands out its link. Off closes the page for everyone, link or no link; the link itself does not change and works again the moment this goes back on.",
+                ),
+                setting(
+                    "VIZIER_HOUSECUP_CACHE_SECS",
+                    "Scoreboard refresh",
+                    "How long the scoreboard page serves one set of figures before working them out again. Everyone reading shares the same pass over the points, so a hundred people watching cost the same as one.",
+                    number(1, 300, "seconds"),
+                    "10",
+                ),
             ],
             commands: vec![
                 command("houses", EVERYONE, "/houses", "The four houses with this month's points, member counts and captains."),
@@ -218,6 +230,14 @@ pub fn sections() -> Vec<Section> {
                     "Tags your own house with a short message, in the channel you run it in. The house roles can't be \
                      mentioned by hand, so the bot does it for the captain: one house at a time, once every few hours, \
                      and with any other ping stripped out of the words. Mods may rally any house by naming one.",
+                ),
+                command(
+                    "housecup",
+                    EVERYONE,
+                    "/housecup",
+                    "Posts the link to the live scoreboard page: the four houses' points this month with bars, every \
+                     house's top ten scorers and the Chocolate Frog cards each one holds, updating itself while it is \
+                     open. The address carries a long random token so it can't be guessed, and it never changes.",
                 ),
                 command(
                     "housetop",

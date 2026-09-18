@@ -162,6 +162,17 @@ impl PanelData for FakeData {
         super::houses::read(&conn, period, now, &optouts, &captains, &counts).ok()
     }
 
+    fn housecup(&self, now: i64) -> Option<super::housecup::Cup> {
+        // The frog store is read and let go of before the ledger is locked, the
+        // same way round as the live one.
+        let (types, held) = {
+            let frog = fake_cards().lock();
+            (super::housecup::types_in_play(&frog), super::housecup::holdings(&frog))
+        };
+        let conn = fake_ledger(now).lock();
+        super::housecup::assemble(&conn, now, &[2043u64].into_iter().collect(), types, &held).ok()
+    }
+
     async fn agent_settings(&self) -> Option<super::agent::AgentSettings> {
         Some(FAKE_AGENT.lock().clone())
     }
@@ -711,6 +722,19 @@ fn fake_ledger(now: i64) -> &'static parking_lot::Mutex<rusqlite::Connection> {
     LEDGER.get_or_init(|| {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(super::super::super::points::SCHEMA).unwrap();
+        // Who is in which house, as house.db keeps it: the scoreboard page needs
+        // it to know whose cards belong where.
+        conn.execute_batch(
+            "CREATE TABLE members (user_id INTEGER PRIMARY KEY, house TEXT NOT NULL, sorted_by TEXT NOT NULL DEFAULT 'hat', ts INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        for i in 0..ROSTER.len() as u64 {
+            conn.execute(
+                "INSERT INTO members (user_id, house) VALUES (?1, ?2)",
+                rusqlite::params![(2000 + i) as i64, HOUSES_KEYS[(i % 4) as usize]],
+            )
+            .unwrap();
+        }
         let mut seed: u64 = 0x5eed_cafe;
         let mut roll = |n: u64| {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -755,6 +779,49 @@ fn fake_ledger(now: i64) -> &'static parking_lot::Mutex<rusqlite::Connection> {
                 ],
             )
             .unwrap();
+        }
+        parking_lot::Mutex::new(conn)
+    })
+}
+
+/// Cards for the fake server: the ten in play, spread over the roster so the
+/// scoreboard has something to draw. Fixed, so it looks the same every run.
+/// Aarav (2000) holds all ten, which is what marks a full set on the page.
+fn fake_cards() -> &'static parking_lot::Mutex<rusqlite::Connection> {
+    static CARDS: OnceLock<parking_lot::Mutex<rusqlite::Connection>> = OnceLock::new();
+    CARDS.get_or_init(|| {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::super::super::frog_store::init(&conn).unwrap();
+        let wizards: Vec<i64> = super::super::super::frog_store::wizards(&conn).iter().map(|w| w.id).collect();
+        let mut seed: u64 = 0xc0ff_ee11;
+        let mut roll = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        let mut serial = 1i64;
+        let mut give = |conn: &rusqlite::Connection, serial: &mut i64, user: u64, wizard: i64| {
+            conn.execute(
+                "INSERT INTO cards (serial, user_id, wizard_id, edition, ts, original_owner) VALUES (?1, ?2, ?3, ?1, 0, ?2)",
+                rusqlite::params![*serial, user as i64, wizard],
+            )
+            .unwrap();
+            *serial += 1;
+        };
+        for wizard in &wizards {
+            give(&conn, &mut serial, 2000, *wizard);
+        }
+        for i in 1..ROSTER.len() as u64 {
+            // The commoner cards are held more often than the rare ones, and a
+            // good third of the roster holds nothing at all.
+            let how_many = match roll(10) {
+                0..=3 => 0,
+                4..=7 => 1 + roll(3),
+                _ => 3 + roll(6),
+            };
+            for _ in 0..how_many {
+                let pick = (roll(100) * wizards.len() as u64 / 100) as usize;
+                give(&conn, &mut serial, 2000 + i, wizards[pick.min(wizards.len() - 1)]);
+            }
         }
         parking_lot::Mutex::new(conn)
     })
@@ -1177,6 +1244,9 @@ pub fn store() {
             .collect();
         std::fs::write(bank.join("test.jsonl"), lines.join("\n")).unwrap();
         super::super::super::frog_store::open(dir.path().to_str().unwrap()).expect("frog store");
+        // The houses' own database: empty of members here, but it is where the
+        // public scoreboard page keeps its address.
+        super::super::super::house::open(dir.path().to_str().unwrap()).expect("house store");
         // One puzzle of each difficulty, for the public sudoku page.
         super::super::super::puzzle_store::open(dir.path().to_str().unwrap()).expect("puzzle store");
         super::super::super::sudoku_store::open(dir.path().to_str().unwrap()).expect("sudoku store");
@@ -3943,6 +4013,9 @@ async fn ui_from_disk(req: axum::extract::Request, next: axum::middleware::Next)
         "/" | "/login" => "index.html",
         "/assets/app.css" => "app.css",
         "/assets/app.js" => "app.js",
+        "/assets/housecup.css" => "housecup.css",
+        "/assets/housecup.js" => "housecup.js",
+        path if path.starts_with("/housecup/") && !path.ends_with("/state") => "housecup.html",
         _ => return next.run(req).await,
     };
     let res = next.run(req).await;
@@ -4544,6 +4617,10 @@ async fn demo_server() {
     let b = tokio::net::TcpListener::bind("127.0.0.1:8798").await.unwrap();
     println!("demo panel: http://127.0.0.1:8799 (signed in), http://127.0.0.1:8798 (signed out) for {secs}s");
     println!("letter duel board: {duel_link}");
+    match super::housecup::token() {
+        Some(token) => println!("house cup scoreboard: http://127.0.0.1:8798/housecup/{}", token),
+        None => println!("house cup scoreboard: the house store isn't open"),
+    }
     let serve_a = axum::serve(a, signed_in.into_make_service_with_connect_info::<SocketAddr>());
     let serve_b = axum::serve(b, signed_out.into_make_service_with_connect_info::<SocketAddr>());
     tokio::select! {
@@ -4638,4 +4715,293 @@ async fn hammering_the_sudoku_page_is_slowed_down() {
     let req = Request::builder().method("GET").uri(path).header("x-forwarded-for", "198.51.100.8").body(Body::empty()).unwrap();
     assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
     super::sudoku::forget_all();
+}
+
+// --- the public House Cup page --------------------------------------------------------
+
+/// Every id the fake server has, so a test can prove none of them is on the page.
+fn every_fake_id() -> Vec<u64> {
+    let mut ids: Vec<u64> = PEOPLE.iter().map(|p| p.0).collect();
+    ids.extend(OUTSIDERS.iter().map(|p| p.0));
+    ids.extend((0..ROSTER.len() as u64).map(|i| 2000 + i));
+    ids
+}
+
+/// Every `path.to.key` in a document, so the whole shape can be pinned down.
+fn key_paths(value: &Value, at: &str, out: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                let path = if at.is_empty() { key.clone() } else { format!("{}.{}", at, key) };
+                out.insert(path.clone());
+                key_paths(inner, &path, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                key_paths(item, &format!("{}[]", at), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk(value: &Value, at: &str, on: &mut impl FnMut(&str, &Value)) {
+    on(at, value);
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                walk(inner, &format!("{}.{}", at, key), on);
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                walk(item, &format!("{}[{}]", at, i), on);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The scoreboard's cache is one thing shared by the whole binary, so the tests
+/// that count how often it is filled take it in turns.
+static SCOREBOARD: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+async fn scoreboard_state(app: &Router) -> Value {
+    let token = super::housecup::token().expect("the page has an address");
+    let (status, body, headers) = fetch(app, &format!("/housecup/{}/state", token)).await;
+    assert_eq!(status, StatusCode::OK, "the state must be served to anyone with the link: {}", body);
+    assert_eq!(headers.get("content-type").unwrap(), "application/json");
+    assert!(headers.get("set-cookie").is_none(), "the state must not set a cookie");
+    serde_json::from_str(&body).expect("json")
+}
+
+#[tokio::test]
+async fn the_house_cup_page_needs_no_sign_in_and_only_opens_on_its_own_token() {
+    let app = panel();
+    let token = super::housecup::token().expect("the page has an address");
+    assert!(token.len() >= 24, "the address must not be guessable: {}", token);
+    assert_eq!(super::housecup::token().as_deref(), Some(token.as_str()), "the address must not change under a reader");
+
+    let (status, html, headers) = fetch(&app, &format!("/housecup/{}", token)).await;
+    assert_eq!(status, StatusCode::OK, "the page must need no sign-in at all");
+    assert_eq!(headers.get("content-type").unwrap(), "text/html; charset=utf-8");
+    assert!(headers.get("set-cookie").is_none(), "the page must not set a cookie");
+    assert!(html.contains("House Cup") && html.contains("/assets/housecup.js"));
+    // Its two files are public too.
+    for (path, kind, wanted) in [
+        ("/assets/housecup.css", "text/css; charset=utf-8", ".stand"),
+        ("/assets/housecup.js", "text/javascript; charset=utf-8", "housecup"),
+    ] {
+        let (status, body, headers) = fetch(&app, path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(headers.get("content-type").unwrap(), kind);
+        assert!(body.contains(wanted), "{path}");
+    }
+
+    // A guess, a near miss and the bare address all get the same nothing.
+    for path in ["/housecup", "/housecup/scoreboard", &format!("/housecup/{}x", token), &format!("/housecup/{}/state", "a".repeat(32))] {
+        let (status, body, _) = fetch(&app, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path} must not open the scoreboard");
+        assert!(!body.contains("Gryffindor"), "{path} gave away the standings");
+    }
+    // And the page lives outside /api, where the rest of the panel still needs a session.
+    let (status, body, _) = call(&app, "GET", "/api/housecup", None, None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "No such endpoint.");
+}
+
+#[tokio::test]
+async fn the_house_cup_state_says_what_the_page_draws_and_in_what_order() {
+    let _alone = SCOREBOARD.lock().await;
+    let app = panel();
+    let state = scoreboard_state(&app).await;
+
+    let mut paths = std::collections::BTreeSet::new();
+    key_paths(&state, "", &mut paths);
+    let expected: std::collections::BTreeSet<String> = [
+        "generated",
+        "month",
+        "month.since",
+        "month.label",
+        "now",
+        "types",
+        "types[].name",
+        "types[].rarity",
+        "types[].rarity_name",
+        "types[].emoji",
+        "houses",
+        "houses[].key",
+        "houses[].name",
+        "houses[].crest",
+        "houses[].colour",
+        "houses[].secondary",
+        "houses[].total",
+        "houses[].rank",
+        "houses[].gap",
+        "houses[].share",
+        "houses[].top",
+        "houses[].top[].name",
+        "houses[].top[].points",
+        "houses[].cards",
+        "houses[].missing",
+        "houses[].held",
+        "houses[].held[].name",
+        "houses[].held[].rarity",
+        "houses[].held[].emoji",
+        "houses[].held[].held",
+        "houses[].collectors",
+        "houses[].collectors[].name",
+        "houses[].collectors[].cards",
+        "houses[].collectors[].types",
+        "houses[].collectors[].full_set",
+        "houses[].more_collectors",
+        "houses[].full_sets",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(paths, expected, "the state's shape changed; the page and this list have to agree");
+
+    // The month is the one the ledger counts, and it is said in words.
+    let since = state["month"]["since"].as_i64().unwrap();
+    assert_eq!(since, super::super::super::points::month_start(state["now"].as_i64().unwrap()));
+    assert!(super::super::super::points::ist_day(since).ends_with("-01"), "the month starts on the 1st, India time");
+    assert!(state["month"]["label"].as_str().unwrap().contains(char::is_numeric));
+
+    let houses = state["houses"].as_array().unwrap();
+    assert_eq!(houses.len(), 4);
+    let totals: Vec<i64> = houses.iter().map(|h| h["total"].as_i64().unwrap()).collect();
+    assert!(totals.windows(2).all(|w| w[0] >= w[1]), "houses come most points first: {:?}", totals);
+    assert_eq!(houses[0]["rank"], 1);
+    assert_eq!(houses[0]["gap"], 0, "the leader is no distance behind itself");
+    assert_eq!(houses[0]["share"], 1.0);
+    let types = state["types"].as_array().unwrap().len();
+    assert_eq!(types, 10, "the ten cards in play");
+
+    let mut sets_found = 0;
+    for house in houses {
+        let top = house["top"].as_array().unwrap();
+        assert!(top.len() <= 10, "a house lists ten names at most");
+        let points: Vec<i64> = top.iter().map(|s| s["points"].as_i64().unwrap()).collect();
+        assert!(points.windows(2).all(|w| w[0] >= w[1]), "scorers are ranked: {:?}", points);
+        assert!(top.iter().all(|s| !s["name"].as_str().unwrap().is_empty()));
+        assert!(house["gap"].as_i64().unwrap() >= 0);
+
+        let held = house["held"].as_array().unwrap();
+        assert_eq!(held.len(), types, "every card in play has a place, held or not");
+        let counted: i64 = held.iter().map(|c| c["held"].as_i64().unwrap()).sum();
+        assert!(counted <= house["cards"].as_i64().unwrap(), "a house cannot hold more of a card than it has cards");
+        assert_eq!(
+            house["missing"].as_i64().unwrap(),
+            held.iter().filter(|c| c["held"] == 0).count() as i64,
+            "what the house lacks is counted, so the page can show it as missing"
+        );
+
+        let collectors = house["collectors"].as_array().unwrap();
+        let counts: Vec<i64> = collectors.iter().map(|c| c["cards"].as_i64().unwrap()).collect();
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "collectors come best first: {:?}", counts);
+        for c in collectors {
+            assert!(c["types"].as_i64().unwrap() <= types as i64);
+            assert_eq!(c["full_set"], c["types"].as_i64().unwrap() == types as i64, "a full set is all ten and nothing less");
+            if c["full_set"] == true {
+                sets_found += 1;
+            }
+        }
+        assert_eq!(house["full_sets"].as_i64().unwrap(), collectors.iter().filter(|c| c["full_set"] == true).count() as i64);
+    }
+    assert_eq!(sets_found, 1, "Aarav holds all ten and should be the one marked");
+}
+
+#[tokio::test]
+async fn the_house_cup_page_never_says_who_anyone_is_beyond_their_name() {
+    let _alone = SCOREBOARD.lock().await;
+    let app = panel();
+    let state = scoreboard_state(&app).await;
+    let ids = every_fake_id();
+
+    // The only numbers on the page are points, counts and the clock. Any other
+    // number holding a member's id would be an id in disguise - and a brand new
+    // field to hide one in would fail the shape test above first.
+    let counted = [
+        "total", "points", "cards", "types", "held", "gap", "rank", "missing", "more_collectors", "full_sets", "since",
+        "generated", "now", "share",
+    ];
+    walk(&state, "", &mut |at, value| match value {
+        Value::Number(n) => {
+            let leaf = at.rsplit('.').next().unwrap_or("").trim_end_matches(|c: char| c == ']' || c.is_ascii_digit());
+            let leaf = leaf.trim_end_matches('[');
+            if let Some(n) = n.as_u64() {
+                assert!(counted.contains(&leaf) || !ids.contains(&n), "{} is a member's id and it is at {}", n, at);
+            }
+        }
+        Value::String(s) => {
+            // A name is a name: never an id on its own, never a mention, never a
+            // long run of digits that could be one.
+            assert!(!s.contains("<@"), "{} is a Discord mention, which carries an id", at);
+            assert!(
+                !ids.iter().any(|id| *s == id.to_string()),
+                "{} is a member's id written as text, at {}",
+                s,
+                at
+            );
+            assert!(
+                s.len() < 15 || !s.chars().all(|c| c.is_ascii_digit()),
+                "{} looks like an id, at {}",
+                s,
+                at
+            );
+        }
+        _ => {}
+    });
+
+    // Nor anything else a member might mind: no ids, no joins, no message counts.
+    let mut paths = std::collections::BTreeSet::new();
+    key_paths(&state, "", &mut paths);
+    for banned in ["id", "user", "user_id", "wizard_id", "avatar", "username", "joined", "messages", "seen"] {
+        assert!(
+            !paths.iter().any(|p| p.split(['.', '[']).any(|part| part == banned)),
+            "the page must not carry {}: {:?}",
+            banned,
+            paths
+        );
+    }
+    // The names that ARE there are display names the bot already uses in public.
+    let first = state["houses"][0]["top"][0]["name"].as_str().unwrap_or("");
+    assert!(ROSTER.contains(&first) || first == "A member", "unexpected name on the page: {}", first);
+}
+
+#[tokio::test]
+async fn one_pass_over_the_points_serves_everybody_watching() {
+    let _alone = SCOREBOARD.lock().await;
+    let app = panel();
+    super::housecup::forget();
+    let token = super::housecup::token().expect("the page has an address");
+    let path = format!("/housecup/{}/state", token);
+    let before = super::housecup::builds();
+    let (status, first, _) = fetch(&app, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(super::housecup::builds(), before + 1, "the first reader has the figures worked out");
+
+    // More readers inside the window cost nothing more. (Twenty-five here rather
+    // than the hundred the comment in housecup.rs talks about only because the
+    // public bucket would start turning them away, which is its own test.)
+    for _ in 0..25 {
+        let (status, again, _) = fetch(&app, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        // Only the clock moves; the figures are the ones already worked out.
+        let strip = |body: &str| {
+            let mut v: Value = serde_json::from_str(body).unwrap();
+            v.as_object_mut().unwrap().remove("now");
+            v
+        };
+        assert_eq!(strip(&again), strip(&first), "a second reader got a different scoreboard");
+    }
+    assert_eq!(super::housecup::builds(), before + 1, "the databases were read again for a reader inside the window");
+
+    // Thrown away, and the next reader pays for a fresh one.
+    super::housecup::forget();
+    let (status, _, _) = fetch(&app, &path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(super::housecup::builds(), before + 2);
 }

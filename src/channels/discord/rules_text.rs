@@ -22,6 +22,8 @@ pub const EMBEDS_LIMIT: usize = 6000;
 #[derive(Clone, Debug)]
 pub struct Rules {
     pub scoreboard_on: bool,
+    /// The public scoreboard page is on and has an address to live at.
+    pub housecup_on: bool,
     pub house_channel: Option<u64>,
     pub quiz_channel: Option<u64>,
     pub fight_channel: Option<u64>,
@@ -232,6 +234,7 @@ impl Rules {
         let cards = super::frog_store::db().map(|db| super::frog_store::wizards(&db.lock()).into_iter().filter(|w| w.enabled).count());
         Rules {
             scoreboard_on: control::on("VIZIER_SCOREBOARD", true) && control::id("VIZIER_SCOREBOARD_CHANNEL").is_some(),
+            housecup_on: control::on("VIZIER_HOUSECUP", true) && control::web::panel_url().is_some(),
             house_channel: control::id("VIZIER_HOUSE_CHANNEL"),
             quiz_channel: control::id("VIZIER_QUIZ_CHANNEL"),
             fight_channel: control::id("VIZIER_FIGHT_CHANNEL"),
@@ -782,12 +785,13 @@ pub fn guide(r: &Rules, cards_post_above: bool) -> Vec<Panel> {
     }
     let frogs = if r.frogs_on { " · `/frogs` your cards" } else { "" };
     let buttons = if r.scoreboard_on { " · or press the buttons on the scoreboard below ⬇️" } else { "" };
+    let page = if r.housecup_on { "\n`/housecup` the whole scoreboard as a web page that updates itself" } else { "" };
     sections.push((
         "📊",
         "Check your progress",
         format!(
-            "`/today` your points and limits today · `/mypoints` this month\n`/housetop` your house's top scorers{}\n`/help` every command{}",
-            frogs, buttons
+            "`/today` your points and limits today · `/mypoints` this month\n`/housetop` your house's top scorers{}{}\n`/help` every command{}",
+            frogs, page, buttons
         ),
         0x99AAB5,
     ));
@@ -1351,6 +1355,7 @@ pub(crate) mod tests {
     pub(crate) fn defaults() -> Rules {
         Rules {
             scoreboard_on: true,
+            housecup_on: true,
             house_channel: Some(1548371226890604665),
             quiz_channel: Some(1547862192932528138),
             fight_channel: Some(1548160947766698074),

@@ -1567,6 +1567,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), standings::housecup_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(standings::draw_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(scoreboard::refresh_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(announce::builder())).await;
@@ -2397,6 +2398,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "housetop" {
                 standings::housetop_command(&ctx, &command).await;
+            }
+            if command.data.name == "housecup" {
+                standings::housecup_command(&ctx, &command).await;
             }
             if command.data.name == "housedraw" {
                 standings::draw_command(&ctx, &command).await;

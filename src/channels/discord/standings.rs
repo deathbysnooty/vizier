@@ -366,6 +366,46 @@ fn whisper(text: impl Into<String>) -> CreateInteractionResponse {
     CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
 }
 
+// --- the scoreboard page -------------------------------------------------------------
+
+pub fn housecup_builder() -> CreateCommand {
+    CreateCommand::new("housecup").description("a link to the live House Cup scoreboard page")
+}
+
+/// What `/housecup` says. `link` is the page's address, `None` when the panel
+/// has no public one yet.
+fn housecup_text(link: Option<&str>) -> String {
+    match link {
+        Some(link) => format!(
+            "🏆 **The House Cup, live** · {}\nEvery house's points this month, each house's top ten and the Chocolate \
+             Frog cards they're holding. The page keeps itself up to date, so leave it open.",
+            link
+        ),
+        None => "The scoreboard page isn't set up yet — a mod needs to set **VIZIER_PANEL_URL** in the panel. \
+                 Until then, `/housetop` shows a house's top ten and `/frogs` shows your cards."
+            .to_string(),
+    }
+}
+
+/// `/housecup` - the link, said out loud: everybody wants the same one, and a
+/// private copy each would only get pasted back into the channel anyway.
+pub async fn housecup_command(ctx: &Context, command: &CommandInteraction) {
+    if !super::control::web::housecup::enabled() {
+        let _ = command.create_response(&ctx.http, whisper("The scoreboard page is switched off right now.")).await;
+        return;
+    }
+    let link = super::control::web::housecup::link();
+    let response = match link {
+        Some(link) => CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content(housecup_text(Some(&link)))
+                .allowed_mentions(CreateAllowedMentions::new()),
+        ),
+        None => whisper(housecup_text(None)),
+    };
+    let _ = command.create_response(&ctx.http, response).await;
+}
+
 pub fn mypoints_builder() -> CreateCommand {
     CreateCommand::new("mypoints").description("your house points this month, and where they came from")
 }
