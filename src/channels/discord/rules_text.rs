@@ -579,6 +579,7 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
         if r.trades_on {
             text.push_str("• 🔁 `/trade` swap, gift or ask for cards with anyone\n");
         }
+        text.push_str("• 🏠 `/housecards` what your house holds, by card or by member\n");
         let selling = r.set_bonus > 0;
         if selling {
             let all = r.cards.map(|n| format!("**all {}**", n)).unwrap_or_else(|| "**every card**".to_string());
@@ -594,7 +595,11 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
             "\n**{}** Low numbers and rare cards may matter later. Something is coming. 👀\n",
             if selling { "…or keep them." } else { "Keep them." }
         ));
-        let mut commands = vec!["📖 `/frogs` your collection", "🔎 `/frogcard` look up any card by number"];
+        let mut commands = vec![
+            "📖 `/frogs` your collection",
+            "🔎 `/frogcard` look up any card by number",
+            "🏠 `/housecards` your house's cards",
+        ];
         if r.trades_on {
             commands.push("🔁 `/trades` your offers");
         }
@@ -1597,7 +1602,8 @@ pub(crate) mod tests {
             "There are **10 cards** to collect",
             "• 🏆 `/sellset` hand in one of **all 10** for **+35** house points (you keep your catch points)",
             "**…or keep them.** Low numbers",
-            "📖 `/frogs` your collection · 🔎 `/frogcard` look up any card by number · 🔁 `/trades` your offers",
+            "• 🏠 `/housecards` what your house holds, by card or by member",
+            "📖 `/frogs` your collection · 🔎 `/frogcard` look up any card by number · 🏠 `/housecards` your house's cards · 🔁 `/trades` your offers",
         ] {
             assert!(text.contains(part), "missing {:?} in\n{}", part, text);
         }

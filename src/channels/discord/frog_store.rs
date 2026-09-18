@@ -1259,6 +1259,18 @@ pub fn cards_of(conn: &Connection, user: u64) -> Vec<Card> {
         .unwrap_or_default()
 }
 
+/// Every card these members hold, lowest number first. Spent cards are nobody's
+/// to show. The list is built from a house's roll, so it is short and bounded;
+/// the ids are numbers, so they go into the `IN` list as themselves.
+pub fn cards_of_users(conn: &Connection, users: &[u64]) -> Vec<Card> {
+    if users.is_empty() {
+        return Vec::new();
+    }
+    let list = users.iter().map(|u| (*u as i64).to_string()).collect::<Vec<_>>().join(",");
+    let sql = format!("{} WHERE c.status = 'owned' AND c.user_id IN ({}) ORDER BY c.serial", CARD_SELECT, list);
+    conn.prepare(&sql).and_then(|mut s| s.query_map([], card_row)?.collect()).unwrap_or_default()
+}
+
 /// Cards by number, as they are now.
 pub fn cards_by_serial(conn: &Connection, serials: &[i64]) -> Vec<Card> {
     serials

@@ -1411,7 +1411,7 @@ const LIST_PAGE: usize = 30;
 
 /// Everyone in a house, in the order they were sorted - which for the draft's
 /// intake means strongest first.
-fn members_of(key: &str) -> Vec<u64> {
+pub(super) fn members_of(key: &str) -> Vec<u64> {
     let mut out = Vec::new();
     if let Some(db) = DB.get() {
         let conn = db.lock();
@@ -1921,7 +1921,7 @@ fn cards_channel() -> Option<ChannelId> {
 /// Mods stay out of the houses entirely (user's call): no house, no card, and
 /// later no points - they are the ones running the competition. "Mod" means
 /// the bot's own admin list, or any role that can moderate.
-async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
+pub(super) async fn is_mod(ctx: &Context, guild: GuildId, member: &Member) -> bool {
     match guild.roles(&ctx.http).await {
         Ok(roles) => is_mod_with(&roles, member),
         Err(_) => false,

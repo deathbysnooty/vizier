@@ -420,6 +420,17 @@ pub fn sections() -> Vec<Section> {
                     "Your Chocolate Frog cards, or anyone's: which cards are collected, frog points, and every copy owned, like The Eternal Phoenix #3 · No. 0187. Only you see it.",
                 ),
                 command(
+                    "housecards",
+                    EVERYONE,
+                    "/housecards house: view:",
+                    "What a whole house holds. By card (the default): every card in the game in the same order as \
+                     /frogs, how many of each the house has, who has them with their numbers, and which cards nobody \
+                     has at all - plus how many full sets the house could make between them, which is what /sellset \
+                     wants. By member: each collector, most cards first, and what they hold, with 🏆 on anyone \
+                     holding a whole set alone. Members see their own house; mods may name any. A card counts for \
+                     the house its holder is in now, so cards move house when their owner does. Only the asker sees it.",
+                ),
+                command(
                     "trade",
                     EVERYONE,
                     "/trade member:",

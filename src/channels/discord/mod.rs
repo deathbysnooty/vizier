@@ -38,6 +38,7 @@ mod battle_card;
 mod battle_theme;
 mod frog;
 mod frog_answer;
+mod frog_house;
 mod frog_rewards;
 mod frog_sell;
 mod frog_store;
@@ -1592,6 +1593,10 @@ impl EventHandler for Handler {
             .add_option(house::house_option("house", "which house").required(true));
         let _ = Command::create_global_command(ctx.http.clone(), house_list).await;
 
+        // Not an admin_command: anyone in a house may look at their own house's
+        // cards. Naming another house is the mods' part, and refused inside.
+        let _ = Command::create_global_command(ctx.http.clone(), frog_house::command()).await;
+
         // Not an admin_command: the captains are members, and a command they
         // can't see is a command they can't use.
         let house_ping = CreateCommand::new("houseping")
@@ -2422,6 +2427,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "houselist" {
                 house::list_command(&ctx, &command).await;
+            }
+            if command.data.name == "housecards" {
+                frog_house::housecards_command(&ctx, &command).await;
+                return;
             }
             if command.data.name == "housepoints" {
                 house::points_command(&ctx, &command).await;
