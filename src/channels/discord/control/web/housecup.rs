@@ -15,8 +15,12 @@
 //! kept in house.db: the link is unguessable, stable (so it can be pinned in a
 //! channel and bookmarked), shareable, and replaceable if it ever gets out.
 //!
-//! What it gives away, and no more: display names, points, card counts. No user
-//! ids, no join dates, no message counts, nothing about who is looking.
+//! What it gives away, and no more: display names, points, card counts and the
+//! cards each named member holds. No user ids, no join dates, no message counts,
+//! nothing about who is looking. A name on the page can be clicked to see that
+//! member's own cards, and the page asks for them by an opaque handle that is a
+//! keyed hash of the id under a key minted fresh at every start - see
+//! [`handle`] - so the id itself never crosses the wire.
 //!
 //! The whole state is computed behind a short cache (`VIZIER_HOUSECUP_CACHE_SECS`,
 //! ten seconds), so a hundred people with the page open cost one pass over
@@ -135,6 +139,48 @@ pub struct Collector {
     pub full_set: bool,
 }
 
+/// One card as the store keeps it, before anything is counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Held {
+    pub user: u64,
+    pub wizard: i64,
+    pub serial: i64,
+}
+
+/// One kind of card in one pair of hands: which card in play it is, and the
+/// serial of every copy of it they hold, lowest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Holding {
+    /// Index into [`Cup::types`], so the member's cards come out in the same
+    /// order as the house's grid above them.
+    pub slot: usize,
+    pub serials: Vec<i64>,
+}
+
+/// A member the page names, and everything it is willing to say about them.
+///
+/// Only members the page already names are here - the top ten of each house and
+/// the collectors it lists - so this is tens of people, not the whole server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    pub user: u64,
+    /// The house whose list named them.
+    pub house: &'static str,
+    /// Their points this month, 0 if they haven't scored.
+    pub points: i64,
+    /// Their place among that house's scorers; 0 when they have no points yet.
+    /// Members level on points share a place, as houses do.
+    pub place: i64,
+    /// Every card they hold, retired ones included - the same number the
+    /// collectors list shows.
+    pub cards: i64,
+    /// How many of the cards in play they hold at least one of.
+    pub types: i64,
+    pub full_set: bool,
+    /// The cards in play they hold, in `Cup::types` order.
+    pub holdings: Vec<Holding>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HouseState {
     pub key: &'static str,
@@ -157,6 +203,9 @@ pub struct Cup {
     pub types: Vec<CardType>,
     /// The four houses, most points first.
     pub houses: Vec<HouseState>,
+    /// Everyone the houses above name, once each, in the order they are first
+    /// named. What a reader sees when they click a name.
+    pub members: Vec<Member>,
 }
 
 /// The cards in play, in the order the bot lists them.
@@ -168,11 +217,17 @@ pub fn types_in_play(frog: &Connection) -> Vec<CardType> {
         .collect()
 }
 
-/// Who holds how many of what: (member, card, copies). Spent cards are nobody's.
-pub fn holdings(frog: &Connection) -> Vec<(u64, i64, i64)> {
-    frog.prepare("SELECT user_id, wizard_id, COUNT(*) FROM cards WHERE status = 'owned' GROUP BY user_id, wizard_id")
+/// Every card somebody holds, serial by serial. Spent cards are nobody's.
+///
+/// Card by card rather than a `GROUP BY` count, because the panel behind a name
+/// shows serials, and this is the one and only look at the frog store: it is let
+/// go of before the house ledger is locked (see [`read_live`]), so there is no
+/// second chance to come back and ask about the members the page turned out to
+/// name.
+pub fn owned(frog: &Connection) -> Vec<Held> {
+    frog.prepare("SELECT user_id, wizard_id, serial FROM cards WHERE status = 'owned' ORDER BY serial")
         .and_then(|mut s| {
-            s.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?.collect()
+            s.query_map([], |r| Ok(Held { user: r.get::<_, i64>(0)? as u64, wizard: r.get(1)?, serial: r.get(2)? }))?.collect()
         })
         .unwrap_or_default()
 }
@@ -188,43 +243,60 @@ pub fn assemble(
     now: i64,
     optouts: &HashSet<u64>,
     types: Vec<CardType>,
-    holdings: &[(u64, i64, i64)],
+    owned: &[Held],
 ) -> rusqlite::Result<Cup> {
     let since = points::month_start(now);
     let members = scorers::read_members(house_conn)?;
     let slot: HashMap<i64, usize> = types.iter().enumerate().map(|(i, t)| (t.wizard_id, i)).collect();
 
     // Gather each house's holders first, so one pass over the cards does for all four.
-    let mut by_house: HashMap<&'static str, (i64, Vec<i64>, HashMap<u64, (i64, i64)>)> =
+    let mut by_house: HashMap<&'static str, (i64, Vec<i64>, HashMap<u64, (i64, HashSet<usize>)>)> =
         HOUSES.iter().map(|h| (h.key, (0, vec![0; types.len()], HashMap::new()))).collect();
-    for (user, wizard, copies) in holdings {
-        if *copies <= 0 || optouts.contains(user) {
+    for card in owned {
+        if optouts.contains(&card.user) {
             continue;
         }
-        let Some(key) = members.get(user).and_then(|k| house::house(k)).map(|h| h.key) else { continue };
+        let Some(key) = members.get(&card.user).and_then(|k| house::house(k)).map(|h| h.key) else { continue };
         let Some((cards, held, who)) = by_house.get_mut(key) else { continue };
-        *cards += copies;
-        let entry = who.entry(*user).or_insert((0, 0));
-        entry.0 += copies;
-        if let Some(i) = slot.get(wizard) {
-            held[*i] += copies;
-            entry.1 += 1;
+        *cards += 1;
+        let entry = who.entry(card.user).or_insert_with(|| (0, HashSet::new()));
+        entry.0 += 1;
+        if let Some(i) = slot.get(&card.wizard) {
+            held[*i] += 1;
+            entry.1.insert(*i);
         }
     }
 
     let wanted = types.len() as i64;
+    // Where a member stands in a house: their points there this month, and their
+    // place. Keyed by the house too, because points stay with the house they
+    // were won for even when the member has since moved.
+    let mut standing: HashMap<(u64, &'static str), (i64, i64)> = HashMap::new();
     let mut houses = Vec::new();
     for h in HOUSES {
         let total = points::house_total(house_conn, h.key, since, i64::MAX)?;
-        let top: Vec<(u64, i64)> = points::top_members(house_conn, h.key, since, i64::MAX)?
+        let ranked: Vec<(u64, i64)> = points::top_members(house_conn, h.key, since, i64::MAX)?
             .into_iter()
             .filter(|(user, _)| !optouts.contains(user))
-            .take(TOP_LIST)
             .collect();
+        // Level members share a place, the same way level houses do.
+        let mut place = 0i64;
+        let mut last = i64::MIN;
+        for (i, (user, points)) in ranked.iter().enumerate() {
+            if *points != last {
+                place = i as i64 + 1;
+                last = *points;
+            }
+            standing.insert((*user, h.key), (*points, place));
+        }
+        let top: Vec<(u64, i64)> = ranked.into_iter().take(TOP_LIST).collect();
         let (cards, held, who) = by_house.remove(h.key).unwrap_or_else(|| (0, vec![0; types.len()], HashMap::new()));
         let mut collectors: Vec<Collector> = who
             .into_iter()
-            .map(|(user, (cards, kinds))| Collector { user, cards, types: kinds, full_set: wanted > 0 && kinds >= wanted })
+            .map(|(user, (cards, kinds))| {
+                let kinds = kinds.len() as i64;
+                Collector { user, cards, types: kinds, full_set: wanted > 0 && kinds >= wanted }
+            })
             .collect();
         // Most cards first, then the widest collection, then oldest member id so
         // the order never wobbles between two equal rows.
@@ -238,7 +310,58 @@ pub fn assemble(
             name(a.key).cmp(name(b.key))
         })
     });
-    Ok(Cup { since, types, houses })
+
+    // Whom the page will actually name, in the order it names them: a house's
+    // ten scorers and then the collectors it lists. Nobody else's cards are
+    // worked out, let alone sent - the page is tens of names, not the roster.
+    let mut named: Vec<(u64, &'static str)> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    for h in &houses {
+        let from_top = h.top.iter().map(|(user, _)| *user);
+        let from_cards = h.collectors.iter().take(COLLECTORS).map(|c| c.user);
+        for user in from_top.chain(from_cards) {
+            if seen.insert(user) {
+                named.push((user, h.key));
+            }
+        }
+    }
+
+    // A second pass over the cards, for those members only.
+    let mut theirs: HashMap<u64, HashMap<usize, Vec<i64>>> = HashMap::new();
+    for card in owned {
+        if !seen.contains(&card.user) {
+            continue;
+        }
+        let Some(i) = slot.get(&card.wizard) else { continue };
+        theirs.entry(card.user).or_default().entry(*i).or_default().push(card.serial);
+    }
+
+    let counts: HashMap<u64, (i64, i64, bool)> = houses
+        .iter()
+        .flat_map(|h| h.collectors.iter())
+        .map(|c| (c.user, (c.cards, c.types, c.full_set)))
+        .collect();
+    let members: Vec<Member> = named
+        .into_iter()
+        .map(|(user, house)| {
+            let mut holdings: Vec<Holding> = theirs
+                .remove(&user)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(slot, mut serials)| {
+                    serials.sort_unstable();
+                    Holding { slot, serials }
+                })
+                .collect();
+            // The member's own cards in the order the house's grid has them.
+            holdings.sort_by_key(|h| h.slot);
+            let (cards, types, full_set) = counts.get(&user).copied().unwrap_or((0, 0, false));
+            let (points, place) = standing.get(&(user, house)).copied().unwrap_or((0, 0));
+            Member { user, house, points, place, cards, types, full_set, holdings }
+        })
+        .collect();
+
+    Ok(Cup { since, types, houses, members })
 }
 
 /// Reads the live stores. The frog store is read and let go of BEFORE the house
@@ -249,7 +372,7 @@ pub fn read_live(now: i64) -> Option<Cup> {
     let (types, held) = {
         let db = frog_store::db()?;
         let frog = db.lock();
-        (types_in_play(&frog), holdings(&frog))
+        (types_in_play(&frog), owned(&frog))
     };
     let db = house::db()?;
     let conn = db.lock();
@@ -275,6 +398,48 @@ fn named(panel: &Panel, user: u64) -> String {
     panel.cached_name(user).unwrap_or_else(|| "A member".to_string())
 }
 
+/// The key the handles are hashed under: random, made once when the bot starts,
+/// never written down and never sent anywhere.
+static HANDLE_KEY: LazyLock<std::collections::hash_map::RandomState> =
+    LazyLock::new(std::collections::hash_map::RandomState::new);
+
+/// The short opaque handle the page hangs a member's panel on.
+///
+/// The page has to be able to say "that name, show me their cards" without ever
+/// holding an id. So each named member gets eight hex characters of a SipHash of
+/// their id under [`HANDLE_KEY`]. Nothing about it can be undone: the key is 128
+/// random bits that never leave the process, so even someone holding every id on
+/// the server cannot match one to a handle, and tomorrow's bot gives the same
+/// member a different one. It only has to last as long as a page is open.
+///
+/// Two members with the same display name get different handles, because it is
+/// the id that is hashed and not the name.
+fn handle(user: u64) -> String {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = HANDLE_KEY.build_hasher();
+    user.hash(&mut hasher);
+    format!("m{:08x}", hasher.finish() as u32)
+}
+
+/// Handles for everyone the page names. Eight hex characters over tens of people
+/// practically never collide, but "practically never" is not never, so a clash
+/// is given a suffix rather than left to point two names at one panel.
+fn handles(members: &[Member]) -> HashMap<u64, String> {
+    let mut out: HashMap<u64, String> = HashMap::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    for m in members {
+        let base = handle(m.user);
+        let mut key = base.clone();
+        let mut n = 1;
+        while !taken.insert(key.clone()) {
+            n += 1;
+            key = format!("{}-{}", base, n);
+        }
+        out.insert(m.user, key);
+    }
+    out
+}
+
 /// The state as JSON. Every id is left behind here: only names, points and
 /// counts go out.
 pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
@@ -285,6 +450,8 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
         .collect();
     let best = cup.houses.iter().map(|h| h.total).max().unwrap_or(0);
     let totals: Vec<i64> = cup.houses.iter().map(|h| h.total).collect();
+    let who = handles(&cup.members);
+    let key_of = |user: u64| who.get(&user).cloned().unwrap_or_default();
     let houses: Vec<Value> = cup
         .houses
         .iter()
@@ -307,7 +474,11 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
                 "rank": totals.iter().position(|t| *t == s.total).map(|i| i + 1).unwrap_or(1),
                 "gap": best - s.total,
                 "share": if best > 0 { s.total as f64 / best as f64 } else { 0.0 },
-                "top": s.top.iter().map(|(user, points)| json!({ "name": named(panel, *user), "points": points })).collect::<Vec<_>>(),
+                "top": s.top.iter().map(|(user, points)| json!({
+                    "name": named(panel, *user),
+                    "points": points,
+                    "who": key_of(*user),
+                })).collect::<Vec<_>>(),
                 "cards": s.cards,
                 "missing": s.held.iter().filter(|n| **n == 0).count(),
                 "held": held,
@@ -316,9 +487,43 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
                     "cards": c.cards,
                     "types": c.types,
                     "full_set": c.full_set,
+                    "who": key_of(c.user),
                 })).collect::<Vec<_>>(),
                 "more_collectors": s.collectors.len().saturating_sub(COLLECTORS),
                 "full_sets": s.collectors.iter().filter(|c| c.full_set).count(),
+            })
+        })
+        .collect();
+    // What a click on a name opens: the member, their standing and their cards.
+    // Only the members the houses above already name are here.
+    let members: Vec<Value> = cup
+        .members
+        .iter()
+        .map(|m| {
+            let cards: Vec<Value> = m
+                .holdings
+                .iter()
+                .filter_map(|h| cup.types.get(h.slot).map(|t| (h, t)))
+                .map(|(h, t)| {
+                    json!({
+                        "name": t.name,
+                        "rarity": t.rarity.key(),
+                        "rarity_name": t.rarity.name(),
+                        "emoji": t.rarity.emoji(),
+                        "serials": h.serials,
+                    })
+                })
+                .collect();
+            json!({
+                "who": key_of(m.user),
+                "name": named(panel, m.user),
+                "house": m.house,
+                "points": m.points,
+                "place": m.place,
+                "held": m.cards,
+                "types": m.types,
+                "full_set": m.full_set,
+                "cards": cards,
             })
         })
         .collect();
@@ -330,6 +535,7 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
         },
         "types": types,
         "houses": houses,
+        "members": members,
     })
 }
 
@@ -513,7 +719,7 @@ mod tests {
 
     fn state_of(house_conn: &Connection, frog_conn: &Connection, optouts: &[u64]) -> Cup {
         let out: HashSet<u64> = optouts.iter().copied().collect();
-        assemble(house_conn, NOW, &out, types_in_play(frog_conn), &holdings(frog_conn)).unwrap()
+        assemble(house_conn, NOW, &out, types_in_play(frog_conn), &owned(frog_conn)).unwrap()
     }
 
     #[test]
@@ -631,6 +837,112 @@ mod tests {
         let h = cup.houses.iter().find(|h| h.key == "hufflepuff").unwrap();
         assert_eq!(h.cards, 2, "the house still holds both");
         assert_eq!(h.collectors[0].types, 1, "only the one in play counts towards a set");
+    }
+
+    /// What the panel behind a name holds: (card in play, serials), in order.
+    fn shown(cup: &Cup, user: u64) -> Vec<(&str, Vec<i64>)> {
+        let m = cup.members.iter().find(|m| m.user == user).expect("the page names this member");
+        m.holdings.iter().map(|h| (cup.types[h.slot].name.as_str(), h.serials.clone())).collect()
+    }
+
+    #[test]
+    fn a_members_cards_are_their_own_in_the_order_the_house_lists_them() {
+        let conn = ledger();
+        let frog = frog();
+        sort(&conn, 1, "gryffindor");
+        sort(&conn, 2, "gryffindor");
+        let all: Vec<i64> = types_in_play(&frog).iter().map(|t| t.wizard_id).collect();
+        // Given out back to front, and the duplicates out of order, so the page's
+        // order can only come from the page and not from the store.
+        give(&frog, 55, 1, all[4]);
+        give(&frog, 12, 1, all[1]);
+        give(&frog, 9, 1, all[1]);
+        give(&frog, 70, 2, all[0]);
+        let cup = state_of(&conn, &frog, &[]);
+        let names: Vec<&str> = cup.types.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            shown(&cup, 1),
+            vec![(names[1], vec![9, 12]), (names[4], vec![55])],
+            "the cards in play order, duplicates gathered under one card, lowest serial first"
+        );
+        assert_eq!(shown(&cup, 2), vec![(names[0], vec![70])], "one member's cards never stray into another's");
+        let one = cup.members.iter().find(|m| m.user == 1).unwrap();
+        assert_eq!((one.cards, one.types, one.full_set), (3, 2, false), "three cards of two kinds is not a set");
+    }
+
+    #[test]
+    fn a_named_member_holding_nothing_is_still_someone_to_click() {
+        let conn = ledger();
+        let frog = frog();
+        sort(&conn, 1, "hufflepuff");
+        sort(&conn, 2, "hufflepuff");
+        score(&conn, Some(1), "hufflepuff", "quiz", 30, NOW);
+        score(&conn, Some(2), "hufflepuff", "quiz", 10, NOW);
+        give(&frog, 1, 2, 1);
+        let cup = state_of(&conn, &frog, &[]);
+        let top = cup.members.iter().find(|m| m.user == 1).expect("a scorer with no cards is still named");
+        assert!(top.holdings.is_empty() && top.cards == 0, "they hold nothing, and the page must say so rather than hide them");
+        assert_eq!((top.points, top.place), (30, 1), "their standing is there to show beside the empty shelf");
+        let other = cup.members.iter().find(|m| m.user == 2).unwrap();
+        assert_eq!((other.points, other.place), (10, 2));
+    }
+
+    #[test]
+    fn only_the_members_the_page_names_carry_their_cards() {
+        let conn = ledger();
+        let frog = frog();
+        // Thirty collectors in one house: the page lists twelve of them.
+        for i in 1..=30u64 {
+            sort(&conn, i, "slytherin");
+            for copy in 0..i {
+                give(&frog, (i * 100 + copy) as i64, i, 1);
+            }
+        }
+        let cup = state_of(&conn, &frog, &[]);
+        let s = cup.houses.iter().find(|h| h.key == "slytherin").unwrap();
+        assert_eq!(s.collectors.len(), 30, "the house still counts all thirty");
+        assert_eq!(cup.members.len(), COLLECTORS, "only the twelve it names cost anything to send");
+        assert!(cup.members.iter().all(|m| m.user > 30 - COLLECTORS as u64), "the twelve named are the twelve biggest");
+        assert_eq!(cup.members[0].user, 30, "in the order the page names them");
+    }
+
+    #[test]
+    fn a_whole_set_is_marked_on_the_member_as_well_as_the_house() {
+        let conn = ledger();
+        let frog = frog();
+        sort(&conn, 1, "ravenclaw");
+        sort(&conn, 2, "ravenclaw");
+        let all: Vec<i64> = types_in_play(&frog).iter().map(|t| t.wizard_id).collect();
+        for (i, wizard) in all.iter().enumerate() {
+            give(&frog, 100 + i as i64, 1, *wizard);
+        }
+        give(&frog, 200, 2, all[0]);
+        let cup = state_of(&conn, &frog, &[]);
+        let whole = cup.members.iter().find(|m| m.user == 1).unwrap();
+        assert!(whole.full_set && whole.holdings.len() == cup.types.len(), "all ten, and all ten on show");
+        assert!(!cup.members.iter().find(|m| m.user == 2).unwrap().full_set);
+        // A member who has stepped out is nobody the page names, cards or not.
+        assert!(state_of(&conn, &frog, &[1]).members.iter().all(|m| m.user != 1));
+    }
+
+    #[test]
+    fn two_members_who_share_a_display_name_are_still_two_people() {
+        // The handle is hashed from the id, so nothing about it comes from the
+        // name: two members the page draws as "A member" still open two panels.
+        let a = Member { user: 7, house: "gryffindor", points: 0, place: 0, cards: 0, types: 0, full_set: false, holdings: vec![] };
+        let b = Member { user: 8, ..a.clone() };
+        let keys = handles(&[a, b]);
+        assert_ne!(keys[&7], keys[&8]);
+        assert_eq!(keys[&7], handle(7), "a handle holds still while a page is open");
+        // Short, opaque, and nothing of the id left in it.
+        for id in [7u64, 8, 2000, 918_273_645_000_111_222, 1_300_000_000_000_000_000] {
+            let h = handle(id);
+            assert_eq!(h.len(), 9, "short enough to sit in a dataset attribute: {}", h);
+            assert!(h.starts_with('m') && h[1..].chars().all(|c| c.is_ascii_hexdigit()));
+            assert_ne!(h[1..], format!("{:x}", id), "{} is its own handle in hex", id);
+            assert_ne!(h[1..], format!("{:x}", id as u32), "{} is the bottom of its id in hex", id);
+            assert!(id < 1000 || !h.contains(&id.to_string()), "{} shows through its handle {}", id, h);
+        }
     }
 
     #[test]

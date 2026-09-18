@@ -36,5 +36,27 @@
 
   <noscript><p class="trouble">This page needs JavaScript to draw the scoreboard. In Discord, <b>/housetop</b> shows a house's top ten and <b>/frogs</b> shows your cards.</p></noscript>
 </main>
+
+<!-- What a click on a name opens: that member's own Chocolate Frog cards. A
+     drawer on a wide screen, a sheet up from the bottom on a phone. It is filled
+     in from the same state as the rest of the page, so it keeps up with the
+     ten-second refresh instead of going stale or closing under the reader. -->
+<div class="veil" id="veil" hidden>
+  <aside class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-name" tabindex="-1">
+    <header class="sheet-top">
+      <span class="crest" id="sheet-crest" aria-hidden="true"></span>
+      <div class="sheet-who">
+        <h2 id="sheet-name"></h2>
+        <p class="sheet-sub" id="sheet-sub"></p>
+      </div>
+      <button type="button" class="shut-x" id="shut" aria-label="Close this member">✕</button>
+    </header>
+    <div class="sheet-body">
+      <p class="sheet-line" id="sheet-line"></p>
+      <div class="cards" id="sheet-cards"></div>
+      <p class="empty" id="sheet-none" hidden></p>
+    </div>
+  </aside>
+</div>
 </body>
 </html>

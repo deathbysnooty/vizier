@@ -183,10 +183,27 @@ function fill(list, rows, signature, make) {
   rows.forEach((row, i) => list.appendChild(make(row, i)));
 }
 
+/** A name that opens that member's cards. */
+function pick(who, name) {
+  const button = node('button', 'pick', name);
+  button.type = 'button';
+  button.dataset.who = who || '';
+  button.setAttribute('aria-haspopup', 'dialog');
+  if (!who) {
+    // Nothing to show: the state didn't carry this one. Never happens, but a
+    // dead button that looks alive would be worse than a plain name.
+    button.disabled = true;
+    button.classList.add('flat');
+  }
+  return button;
+}
+
 function scorerRow(scorer, i) {
   const li = node('li');
   const rank = node('span', 'rank' + (i < 3 ? ' medal' : ''), MEDALS[i] || String(i + 1));
-  li.append(rank, node('span', 'nm', scorer.name), node('span', 'pt', thousands(scorer.points)));
+  const name = node('span', 'nm');
+  name.appendChild(pick(scorer.who, scorer.name));
+  li.append(rank, name, node('span', 'pt', thousands(scorer.points)));
   return li;
 }
 
@@ -200,7 +217,7 @@ function cardChip(card) {
 function holderRow(holder, types) {
   const li = node('li');
   const name = node('span', 'nm');
-  name.appendChild(node('span', null, holder.name));
+  name.appendChild(pick(holder.who, holder.name));
   if (holder.full_set) {
     const badge = node('span', 'set', 'full set');
     badge.title = 'Holds all ' + types + ' cards, so they can /sellset on their own';
@@ -259,6 +276,154 @@ function drawHouses() {
   }
 }
 
+// --- one member's cards ----------------------------------------------------------
+//
+// Clicking a name opens this. It is filled from the same state as everything
+// else, and redrawn in place on every refresh, so the ten-second update goes on
+// underneath it rather than shutting it or leaving it stale. Nothing is scrolled
+// or moved while it is open, so closing it leaves the page exactly where it was.
+
+const veil = el('veil');
+const sheet = el('sheet');
+
+/** handle -> member, rebuilt from each state. */
+let people = new Map();
+/** The handle whose cards are open, or null. */
+let showing = null;
+
+function ordinal(n) {
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
+  return n + suffix;
+}
+
+function houseOf(key) {
+  return state && state.houses.find((h) => h.key === key);
+}
+
+function memberCard(card) {
+  const copies = (card.serials || []).length;
+  const chip = node('div', 'card mine');
+  chip.title = card.name + ' · ' + (card.rarity_name || card.rarity);
+  const body = node('span', 'cn');
+  body.appendChild(node('span', 'ck', card.name));
+  body.appendChild(node('span', 'sr', card.serials.map((s) => '#' + s).join(' · ')));
+  chip.append(node('span', 'ce', card.emoji), body);
+  if (copies > 1) chip.appendChild(node('span', 'cc', '×' + copies));
+  return chip;
+}
+
+function drawSheet() {
+  const member = people.get(showing);
+  // Somebody who has slipped off every list the page draws keeps the cards they
+  // had a moment ago rather than having the panel blank or close under a reader.
+  if (!member) return;
+  const home = houseOf(member.house);
+  if (home) paint(sheet, home);
+  el('sheet-crest').textContent = home ? home.crest : '';
+  el('sheet-name').textContent = member.name;
+
+  const where = [];
+  where.push(home ? home.name : '');
+  where.push(member.points ? plural(member.points, 'point', 'points') + ' this month' : 'no points yet this month');
+  if (member.place) where.push(ordinal(member.place) + ' in the house');
+  el('sheet-sub').textContent = where.filter(Boolean).join(' · ');
+
+  const types = state.types.length;
+  const line = el('sheet-line');
+  line.textContent = '';
+  if (member.held) {
+    line.appendChild(node('b', null, plural(member.held, 'card', 'cards')));
+    line.appendChild(document.createTextNode(' · ' + member.types + ' of ' + types + ' kinds'));
+    if (member.full_set) {
+      const badge = node('span', 'set', 'full set');
+      badge.title = 'Holds all ' + types + ' cards, so they can /sellset on their own';
+      line.appendChild(badge);
+    }
+  } else {
+    line.appendChild(node('b', null, 'No cards yet'));
+  }
+
+  const grid = el('sheet-cards');
+  fill(grid, member.cards, member.who + ':' + JSON.stringify(member.cards), memberCard);
+  grid.hidden = !member.cards.length;
+  const none = el('sheet-none');
+  none.textContent = member.cards.length
+    ? ''
+    : 'They are holding no Chocolate Frog cards at the moment. Cards are caught with /frog in Discord.';
+  none.hidden = !!member.cards.length;
+}
+
+function opener() {
+  return Array.prototype.find.call(document.querySelectorAll('.pick'), (b) => b.dataset.who === showing);
+}
+
+function reveal(who) {
+  if (!people.has(who)) return;
+  showing = who;
+  drawSheet();
+  veil.hidden = false;
+  const was = opener();
+  if (was) was.setAttribute('aria-expanded', 'true');
+  // preventScroll, here and on the way back: taking the focus must never be the
+  // thing that moves the page out from under the reader.
+  sheet.focus({ preventScroll: true });
+}
+
+function shut() {
+  if (showing === null) return;
+  // The button may have been rebuilt by a refresh, so it is found again by hand
+  // rather than held on to: whoever is standing in its place takes the focus.
+  const back = opener();
+  showing = null;
+  veil.hidden = true;
+  document.querySelectorAll('.pick[aria-expanded]').forEach((b) => b.removeAttribute('aria-expanded'));
+  if (back) back.focus({ preventScroll: true });
+}
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest && event.target.closest('.pick');
+  if (button && button.dataset.who) {
+    event.preventDefault();
+    reveal(button.dataset.who);
+  }
+});
+
+el('shut').addEventListener('click', shut);
+// A click on the dark, never one inside the panel itself.
+veil.addEventListener('click', (event) => {
+  if (event.target === veil) shut();
+});
+document.addEventListener('keydown', (event) => {
+  if (showing === null) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    shut();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  // Keep the keyboard inside the panel while it is up.
+  const stops = sheet.querySelectorAll('button, [href], [tabindex]:not([tabindex="-1"])');
+  if (!stops.length) return;
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+// The page behind is never scrolled or locked - it is simply left alone - so a
+// wheel or a drag on the dark moves nothing and closing gives back the exact
+// view the reader had.
+for (const kind of ['wheel', 'touchmove']) {
+  veil.addEventListener(kind, (event) => {
+    if (event.target === veil) event.preventDefault();
+  }, { passive: false });
+}
+
 // --- how fresh it is -------------------------------------------------------------
 
 function ago(seconds) {
@@ -281,8 +446,10 @@ function tick() {
 function draw() {
   el('period').textContent =
     'This month · ' + state.month.label + ' · counted from midnight on the 1st, India time';
+  people = new Map((state.members || []).map((m) => [m.who, m]));
   drawStandings();
   drawHouses();
+  if (showing !== null) drawSheet();
   tick();
 }
 

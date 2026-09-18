@@ -167,7 +167,7 @@ impl PanelData for FakeData {
         // same way round as the live one.
         let (types, held) = {
             let frog = fake_cards().lock();
-            (super::housecup::types_in_play(&frog), super::housecup::holdings(&frog))
+            (super::housecup::types_in_play(&frog), super::housecup::owned(&frog))
         };
         let conn = fake_ledger(now).lock();
         super::housecup::assemble(&conn, now, &[2043u64].into_iter().collect(), types, &held).ok()
@@ -4843,6 +4843,7 @@ async fn the_house_cup_state_says_what_the_page_draws_and_in_what_order() {
         "houses[].top",
         "houses[].top[].name",
         "houses[].top[].points",
+        "houses[].top[].who",
         "houses[].cards",
         "houses[].missing",
         "houses[].held",
@@ -4855,8 +4856,24 @@ async fn the_house_cup_state_says_what_the_page_draws_and_in_what_order() {
         "houses[].collectors[].cards",
         "houses[].collectors[].types",
         "houses[].collectors[].full_set",
+        "houses[].collectors[].who",
         "houses[].more_collectors",
         "houses[].full_sets",
+        "members",
+        "members[].who",
+        "members[].name",
+        "members[].house",
+        "members[].points",
+        "members[].place",
+        "members[].held",
+        "members[].types",
+        "members[].full_set",
+        "members[].cards",
+        "members[].cards[].name",
+        "members[].cards[].rarity",
+        "members[].cards[].rarity_name",
+        "members[].cards[].emoji",
+        "members[].cards[].serials",
     ]
     .into_iter()
     .map(String::from)
@@ -4969,6 +4986,187 @@ async fn the_house_cup_page_never_says_who_anyone_is_beyond_their_name() {
     // The names that ARE there are display names the bot already uses in public.
     let first = state["houses"][0]["top"][0]["name"].as_str().unwrap_or("");
     assert!(ROSTER.contains(&first) || first == "A member", "unexpected name on the page: {}", first);
+
+    // The handle a click sends back is the one thing on the page that stands for
+    // a member, so it gets looked at twice: it must be short, opaque, one per
+    // member, and nothing an id can be read out of.
+    let members = state["members"].as_array().expect("the members block");
+    assert!(!members.is_empty(), "the page names people, so it must carry them");
+    let mut handles = std::collections::BTreeSet::new();
+    for m in members {
+        let who = m["who"].as_str().expect("every member has a handle");
+        assert!(who.len() <= 12 && who.starts_with('m'), "a handle is a short opaque token: {}", who);
+        assert!(who[1..].chars().all(|c| c.is_ascii_hexdigit() || c == '-'), "a handle carries nothing but hex: {}", who);
+        for id in &ids {
+            // Not the id, not the id in hex, not the low half of it either.
+            assert!(!who.contains(&id.to_string()), "{} has an id in it", who);
+            assert_ne!(&who[1..], format!("{:x}", id), "{} is an id in hex", who);
+            assert_ne!(&who[1..], format!("{:x}", *id as u32), "{} is half an id in hex", who);
+        }
+        assert!(handles.insert(who.to_string()), "two members share the handle {}", who);
+        // And a member's cards say what they are, never who caught them.
+        for card in m["cards"].as_array().unwrap() {
+            let serials = card["serials"].as_array().unwrap();
+            assert!(!serials.is_empty(), "a card with no copies is not a card they hold");
+            assert!(serials.iter().all(|s| !ids.contains(&s.as_u64().unwrap_or(0))), "a serial is standing in for an id");
+        }
+    }
+
+    // Every name the page draws points at one of them, and at nobody else.
+    for house in state["houses"].as_array().unwrap() {
+        for row in house["top"].as_array().unwrap().iter().chain(house["collectors"].as_array().unwrap()) {
+            let who = row["who"].as_str().unwrap_or("");
+            assert!(handles.contains(who), "{} is a name with nothing behind it", row["name"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_name_on_the_scoreboard_opens_that_members_own_cards() {
+    let _alone = SCOREBOARD.lock().await;
+    let app = panel();
+    let state = scoreboard_state(&app).await;
+    let types = state["types"].as_array().unwrap();
+    let order: Vec<&str> = types.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let members = state["members"].as_array().unwrap();
+    let find = |who: &str| members.iter().find(|m| m["who"] == who).expect("the handle names a member");
+
+    // Nobody is carried who isn't named, and everybody named is carried.
+    let mut named = std::collections::BTreeSet::new();
+    for house in state["houses"].as_array().unwrap() {
+        for row in house["top"].as_array().unwrap().iter().chain(house["collectors"].as_array().unwrap()) {
+            named.insert(row["who"].as_str().unwrap().to_string());
+            // The name beside the handle is the same name in both places.
+            assert_eq!(find(row["who"].as_str().unwrap())["name"], row["name"]);
+        }
+    }
+    assert_eq!(named.len(), members.len(), "the page sends the members it names and no more");
+    assert!(members.len() < 100, "this is tens of people, not the roster: {}", members.len());
+
+    let mut with_cards = 0;
+    let mut empty = 0;
+    let mut sets = 0;
+    for m in members {
+        let house = state["houses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["key"] == m["house"])
+            .expect("a member belongs to a house the page draws");
+        let cards = m["cards"].as_array().unwrap();
+        // The member's cards come in the same order as the house's grid above.
+        let mine: Vec<&str> = cards.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        let wanted: Vec<&str> = order.iter().copied().filter(|n| mine.contains(n)).collect();
+        assert_eq!(mine, wanted, "a member's cards follow the order the rest of the page uses");
+        let copies: i64 = cards.iter().map(|c| c["serials"].as_array().unwrap().len() as i64).sum();
+        assert_eq!(copies, m["held"].as_i64().unwrap(), "every card they hold is on show, duplicates and all");
+        assert_eq!(cards.len() as i64, m["types"].as_i64().unwrap());
+        assert_eq!(m["full_set"], cards.len() == types.len(), "all ten kinds, and nothing less, is a set");
+        if m["full_set"] == true {
+            sets += 1;
+        }
+        if cards.is_empty() {
+            empty += 1;
+            assert_eq!(m["held"], 0, "a member with no cards holds none of anything");
+        } else {
+            with_cards += 1;
+        }
+        // Their standing is the one the house's own list gives them.
+        let place = m["place"].as_i64().unwrap();
+        let points = m["points"].as_i64().unwrap();
+        assert_eq!(place == 0, points == 0, "a place and some points go together");
+        if let Some(row) = house["top"].as_array().unwrap().iter().find(|r| r["who"] == m["who"]) {
+            assert_eq!(row["points"], m["points"], "the points in the panel are the points in the list");
+            assert!((1..=10).contains(&place), "a top-ten scorer is placed in the top ten: {}", place);
+        }
+        if let Some(row) = house["collectors"].as_array().unwrap().iter().find(|r| r["who"] == m["who"]) {
+            assert_eq!(row["cards"], m["held"], "the cards in the panel are the cards in the list");
+            assert_eq!(row["types"], m["types"]);
+            assert_eq!(row["full_set"], m["full_set"]);
+        }
+    }
+    assert!(with_cards > 0 && empty > 0, "the fake server has both kinds of member: {} with, {} without", with_cards, empty);
+    assert_eq!(sets, 1, "Aarav holds all ten, and his panel should be the one marked");
+
+    // Aarav's own panel: all ten kinds, each with the serial of every copy.
+    let aarav = members.iter().find(|m| m["name"] == "Aarav").expect("Aarav is named on the page");
+    assert_eq!(aarav["cards"].as_array().unwrap().len(), 10);
+    assert!(aarav["full_set"] == true && aarav["place"].as_i64().unwrap() >= 1);
+    for card in aarav["cards"].as_array().unwrap() {
+        let serials: Vec<i64> = card["serials"].as_array().unwrap().iter().map(|s| s.as_i64().unwrap()).collect();
+        assert!(serials.windows(2).all(|w| w[0] < w[1]), "serials come lowest first and never twice: {:?}", serials);
+        assert!(card["rarity_name"].as_str().unwrap().len() > 2 && !card["emoji"].as_str().unwrap().is_empty());
+    }
+
+    // A duplicate is one card with two serials under it, not two cards.
+    let doubled = members
+        .iter()
+        .find(|m| m["cards"].as_array().unwrap().iter().any(|c| c["serials"].as_array().unwrap().len() > 1))
+        .expect("somebody on the fake server holds two of something");
+    let card = doubled["cards"].as_array().unwrap().iter().find(|c| c["serials"].as_array().unwrap().len() > 1).unwrap();
+    assert!(
+        doubled["cards"].as_array().unwrap().iter().filter(|c| c["name"] == card["name"]).count() == 1,
+        "a card a member holds twice is listed once, with both serials"
+    );
+    assert!(doubled["held"].as_i64().unwrap() > doubled["types"].as_i64().unwrap(), "more cards than kinds");
+}
+
+#[test]
+fn two_members_the_page_draws_alike_still_open_their_own_panels() {
+    // Two members the bot's cache cannot name are both drawn as "A member", so
+    // the name is no way to tell them apart: the handle has to be, and each
+    // panel has to hold that member's own cards.
+    let panel = fake_panel();
+    let types = {
+        let frog = fake_cards().lock();
+        super::housecup::types_in_play(&frog)
+    };
+    let (first, second) = (9_100_000_000_000_000_001u64, 9_100_000_000_000_000_002u64);
+    let ledger = rusqlite::Connection::open_in_memory().unwrap();
+    ledger.execute_batch(super::super::super::points::SCHEMA).unwrap();
+    ledger
+        .execute_batch(
+            "CREATE TABLE members (user_id INTEGER PRIMARY KEY, house TEXT NOT NULL, sorted_by TEXT NOT NULL DEFAULT 'hat', ts INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    for (i, user) in [first, second].into_iter().enumerate() {
+        ledger
+            .execute("INSERT INTO members (user_id, house) VALUES (?1, 'gryffindor')", rusqlite::params![user as i64])
+            .unwrap();
+        ledger
+            .execute(
+                "INSERT INTO ledger (user_id, house, source, points, reason, day, ts) VALUES (?1, 'gryffindor', 'quiz', ?2, '', ?3, ?4)",
+                rusqlite::params![user as i64, 20 - i as i64, super::super::super::points::ist_day(now), now],
+            )
+            .unwrap();
+    }
+    // The first holds two cards, the second exactly one.
+    let held = vec![
+        super::housecup::Held { user: first, wizard: types[0].wizard_id, serial: 11 },
+        super::housecup::Held { user: first, wizard: types[3].wizard_id, serial: 12 },
+        super::housecup::Held { user: second, wizard: types[1].wizard_id, serial: 13 },
+    ];
+    let cup = super::housecup::assemble(&ledger, now, &Default::default(), types, &held).unwrap();
+    let state = super::housecup::render(&panel, &cup, now);
+
+    let members = state["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0]["name"], "A member");
+    assert_eq!(members[1]["name"], members[0]["name"], "the page draws them both the same way");
+    assert_ne!(members[0]["who"], members[1]["who"], "and still knows they are two people");
+    assert_eq!(members[0]["cards"].as_array().unwrap().len(), 2);
+    assert_eq!(members[1]["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(members[0]["cards"][0]["serials"], serde_json::json!([11]));
+    assert_eq!(members[1]["cards"][0]["serials"], serde_json::json!([13]));
+    assert_eq!((members[0]["place"].as_i64(), members[1]["place"].as_i64()), (Some(1), Some(2)));
+
+    // The two names in the list point at one panel each, not both at one.
+    let top = state["houses"].as_array().unwrap().iter().find(|h| h["key"] == "gryffindor").unwrap()["top"].clone();
+    assert_eq!(top.as_array().unwrap().len(), 2);
+    assert_eq!(top[0]["who"], members[0]["who"]);
+    assert_eq!(top[1]["who"], members[1]["who"]);
+    assert_ne!(top[0]["who"], top[1]["who"]);
 }
 
 #[tokio::test]
@@ -5005,3 +5203,4 @@ async fn one_pass_over_the_points_serves_everybody_watching() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(super::housecup::builds(), before + 2);
 }
+

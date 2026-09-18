@@ -33,6 +33,7 @@
   --shadow: 0 16px 40px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .35);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .35);
   --track: #1d2130;
+  --veil: rgba(5, 7, 12, .62);
   color-scheme: dark;
 }
 
@@ -52,6 +53,7 @@
   --shadow: 0 18px 44px rgba(20, 24, 40, .14), 0 2px 6px rgba(20, 24, 40, .06);
   --shadow-sm: 0 1px 2px rgba(20, 24, 40, .06);
   --track: #e6e9f0;
+  --veil: rgba(20, 24, 40, .38);
   color-scheme: light;
 }
 
@@ -304,6 +306,113 @@ p { margin: 0; }
   flex: none;
 }
 
+/* a name that opens a member's cards: a button that reads as the name it is */
+.pick {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-bottom: 1px dashed transparent;
+  border-radius: 2px;
+}
+.pick:hover { border-bottom-color: var(--line-2); color: var(--text); }
+.pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pick.flat { cursor: default; border-bottom-color: transparent; }
+.scorers .nm, .holders .nm { min-width: 0; }
+
+/* --- one member's cards --------------------------------------------------------- */
+
+.veil {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--veil);
+  backdrop-filter: blur(2px);
+  overscroll-behavior: contain;
+}
+
+.sheet {
+  width: min(560px, 100%);
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--house, var(--accent));
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: rise .16s cubic-bezier(.22, .8, .3, 1);
+}
+.sheet:focus { outline: none; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .sheet { animation: none; } }
+
+.sheet-top {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 14px 14px 14px 16px;
+  background: color-mix(in srgb, var(--house, var(--accent)) 10%, var(--surface));
+  border-bottom: 1px solid var(--line);
+}
+.sheet-top .crest { font-size: 22px; flex: none; }
+.sheet-who { flex: 1; min-width: 0; }
+.sheet-who h2 { font-size: 18px; overflow: hidden; text-overflow: ellipsis; }
+.sheet-sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+.shut-x {
+  flex: none;
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+.shut-x:hover { border-color: var(--line-2); color: var(--text); }
+.shut-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.sheet-body { padding: 14px 16px 18px; overflow: auto; overscroll-behavior: contain; }
+.sheet-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-2);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.sheet-line b { color: var(--text); font-size: 14px; }
+.sheet-body .cards { margin-bottom: 0; }
+
+.card.mine { align-items: flex-start; padding: 7px 9px; }
+.card.mine .cn { display: flex; flex-direction: column; gap: 1px; }
+.card .ck { overflow: hidden; text-overflow: ellipsis; }
+.card .sr {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  letter-spacing: -.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card.mine .cc { color: var(--text); }
+
 .empty { color: var(--faint); font-size: 13.5px; padding: 3px 6px; }
 .more { color: var(--faint); font-size: 12.5px; padding: 6px 6px 0; }
 
@@ -349,4 +458,23 @@ p { margin: 0; }
   .score b { font-size: 19px; }
   .houses { grid-template-columns: 1fr; gap: 14px; }
   .cards { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+
+  /* A member's cards come up from the bottom, full width, the way a phone
+   * expects - a small box in the middle of the screen is a desktop idea. */
+  .veil { place-items: end stretch; padding: 0; }
+  .sheet {
+    width: 100%;
+    max-height: 86vh;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    border-bottom: 0;
+    animation: up .18s cubic-bezier(.22, .8, .3, 1);
+  }
+  @keyframes up { from { transform: translateY(18px); opacity: .6; } }
+  @media (prefers-reduced-motion: reduce) { .sheet { animation: none; } }
+  /* the name and the house wrap to two lines here, so the crest sits beside the
+   * first of them rather than between the two */
+  .sheet-top { align-items: flex-start; }
+  .sheet-top .crest { margin-top: 1px; }
+  .sheet-body { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .sheet-body .cards { grid-template-columns: repeat(auto-fill, minmax(146px, 1fr)); }
 }
