@@ -259,6 +259,14 @@ pub trait PanelData: Send + Sync + 'static {
     async fn cancel_trade(&self, _id: i64, _by: u64) -> Result<super::super::frog_trade::Trade, String> {
         Err("Discord isn't connected right now.".into())
     }
+    /// What was said: kept messages, newest first, a page at a time.
+    async fn msglog_said(&self, _filter: super::super::msglog::SaidFilter) -> anyhow::Result<super::super::msglog::Said> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// How far back the kept messages reach, and how many there are.
+    async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
+        None
+    }
     /// Deleted messages from the message log, a page at a time.
     async fn msglog_deleted(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
         anyhow::bail!("the message log isn't open")
@@ -308,6 +316,7 @@ mod left;
 mod media;
 mod members;
 mod memos;
+mod messages;
 mod msglog;
 mod posts;
 mod profiles;
@@ -581,6 +590,18 @@ impl PanelData for LiveData {
 
     async fn left_stats(&self, ids: Vec<u64>, now: i64) -> HashMap<u64, left::LeftStats> {
         tokio::task::spawn_blocking(move || left::read_stats_live(&ids, now)).await.unwrap_or_default()
+    }
+
+    async fn msglog_said(&self, filter: super::super::msglog::SaidFilter) -> anyhow::Result<super::super::msglog::Said> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        tokio::task::spawn_blocking(move || super::super::msglog::list_said(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
+        let reader = super::super::msglog::reader()?;
+        tokio::task::spawn_blocking(move || super::super::msglog::coverage(&reader.conn.lock()).ok()).await.ok().flatten()
     }
 
     async fn msglog_deleted(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
@@ -985,6 +1006,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/profiles/{id}/apply", post(profiles::apply))
         .route("/profiles/{id}/apply/preview", post(profiles::apply_preview))
         .route("/profiles/{id}/prompt", get(profiles::prompt_preview))
+        .route("/messages", get(messages::list))
         .route("/messages/search", get(search::search))
         .route("/msglog/deleted", get(msglog::deleted))
         .route("/msglog/edited", get(msglog::edited))
@@ -1718,8 +1740,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.insert("new".into(), Value::Null);
             } else if e.key.starts_with("welcome:") {
                 obj.extend(welcomes::audit_entry(&panel, e));
-            } else if e.key == "messages:search" {
-                obj.extend(search::audit_entry(e));
+            } else if e.key == "messages:search" || e.key == "messages:look" {
+                obj.extend(messages::audit_entry(e));
             } else if e.key == "msglog:deleted" || e.key == "msglog:edited" {
                 obj.extend(msglog::audit_entry(e));
             } else if e.key == "members:left" {

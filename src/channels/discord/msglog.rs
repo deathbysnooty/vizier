@@ -1,17 +1,32 @@
-//! The deleted and edited message log, shown on the panel only.
+//! What the server said: the message store behind the panel's Messages page and
+//! its deleted/edited log.
 //!
 //! Every new member message in a server channel the bot receives (text
-//! channels, voice channel chats including temporary rooms, threads) is kept
-//! for a short while: its text, who sent it, and its pictures, downloaded at
-//! once because Discord's copy goes when the message does. When a message is
-//! deleted its copy moves to the log, pictures included; when it is edited the
-//! text before and after goes to the log. Copies of messages nobody deletes are
-//! cleared after `VIZIER_MSGLOG_KEEP_DAYS`, log entries after
-//! `VIZIER_MSGLOG_LOG_DAYS`.
+//! channels, voice channel chats including temporary rooms, threads) is kept:
+//! its text, who sent it, and its pictures, downloaded at once because
+//! Discord's copy goes when the message does. When a message is deleted its
+//! copy moves to the log, pictures included; when it is edited the text before
+//! and after goes to the log.
 //!
-//! Never #safe-corner or a thread inside it, never DMs, never bots or webhooks,
-//! and never a channel the cache can't place (it could be a thread in
-//! #safe-corner). Discord doesn't tell bots who deleted a message.
+//! Three clocks, because the three things are kept for different reasons:
+//!
+//! * text — `VIZIER_MSGLOG_TEXT_DAYS` (a year). This is the server's memory of
+//!   what was said, in every channel, and it is what the Messages page reads.
+//! * pictures — `VIZIER_MSGLOG_KEEP_DAYS` (a week). They are only here so a
+//!   message deleted soon after it was posted can still be shown with them, and
+//!   they are what costs disk. A copy older than this keeps its text and loses
+//!   its pictures.
+//! * the deleted and edited log — `VIZIER_MSGLOG_LOG_DAYS` (a month): a
+//!   moderation record, not a memory.
+//!
+//! Never #safe-corner or a thread inside it, never a channel listed in
+//! `VIZIER_MSGLOG_SKIP_CHANNELS`, never DMs, never bots or webhooks, and never a
+//! channel the cache can't place (it could be a thread in #safe-corner).
+//! Discord doesn't tell bots who deleted a message.
+//!
+//! Text is searched through an FTS5 index over `recent.content`, kept in step by
+//! triggers. A year is about nine million rows here; a `LIKE` scan over that
+//! takes seconds, the same search through FTS5 takes milliseconds.
 //!
 //! Nothing here blocks the gateway: the handlers queue events on a bounded
 //! channel (dropping, with a count, when it is full) and one writer thread owns
@@ -50,8 +65,30 @@ pub fn enabled() -> bool {
     super::control::on("VIZIER_MSGLOG", true)
 }
 
+/// How long a copy's pictures are kept. Text outlives them: see [`text_days`].
 pub fn keep_days() -> i64 {
     super::control::number("VIZIER_MSGLOG_KEEP_DAYS", 7).clamp(1, 90) as i64
+}
+
+/// How long the text of a message nobody deleted is kept.
+pub fn text_days() -> i64 {
+    super::control::number("VIZIER_MSGLOG_TEXT_DAYS", 365).clamp(7, 3650) as i64
+}
+
+/// Channels the owner has asked never to be recorded, on top of #safe-corner.
+pub fn skip_channels() -> Vec<u64> {
+    super::control::ids("VIZIER_MSGLOG_SKIP_CHANNELS")
+}
+
+/// Every channel that is never recorded and never shown: #safe-corner, the
+/// channels no analysis may read, and the ones the owner has skipped. Threads
+/// inside any of them go too — [`excluded`] checks the parent.
+pub fn never_logged() -> Vec<u64> {
+    let mut out = super::control::insights::sensitive_channels();
+    out.extend(skip_channels());
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 pub fn log_days() -> i64 {
@@ -223,6 +260,15 @@ const SCHEMA: &str = "
         created_ts INTEGER NOT NULL, reply_to INTEGER, reply_author TEXT, reply_text TEXT,
         attachments_json TEXT NOT NULL DEFAULT '[]', stored_files_json TEXT NOT NULL DEFAULT '[]');
     CREATE INDEX IF NOT EXISTS recent_created ON recent (created_ts);
+    -- A member's own messages and a channel's own messages, newest first. The id
+    -- is the sort key everywhere: a Discord id carries the moment it was made, so
+    -- ordering by it is ordering by time, with no second column to page on.
+    CREATE INDEX IF NOT EXISTS recent_author ON recent (author_id, message_id);
+    CREATE INDEX IF NOT EXISTS recent_channel ON recent (channel_id, message_id);
+    CREATE INDEX IF NOT EXISTS recent_thread ON recent (parent_id, message_id) WHERE parent_id IS NOT NULL;
+    -- Only the copies that still have pictures, so the hourly picture purge never
+    -- walks a year of rows that have none.
+    CREATE INDEX IF NOT EXISTS recent_pictures ON recent (created_ts) WHERE stored_files_json != '[]';
     CREATE TABLE IF NOT EXISTS others (message_id INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS others_ts ON others (ts);
     CREATE TABLE IF NOT EXISTS deleted (
@@ -240,6 +286,27 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS edited_ts ON edited (edited_ts);
     CREATE INDEX IF NOT EXISTS edited_author ON edited (author_id);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
+
+/// The words of every kept copy, for searching. An external-content table: it
+/// holds no text of its own, only the index, and the triggers keep it in step
+/// with `recent`. `remove_diacritics 2` makes "cafe" find "café".
+///
+/// `AFTER UPDATE OF content` and not of the whole row, so the picture purge —
+/// which only rewrites `stored_files_json` — never touches the index.
+const SEARCH_SCHEMA: &str = "
+    CREATE VIRTUAL TABLE IF NOT EXISTS recent_fts USING fts5 (
+        content, content='recent', content_rowid='message_id', tokenize='unicode61 remove_diacritics 2');
+    CREATE TRIGGER IF NOT EXISTS recent_fts_insert AFTER INSERT ON recent BEGIN
+        INSERT INTO recent_fts (rowid, content) VALUES (new.message_id, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS recent_fts_delete AFTER DELETE ON recent BEGIN
+        INSERT INTO recent_fts (recent_fts, rowid, content) VALUES ('delete', old.message_id, old.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS recent_fts_update AFTER UPDATE OF content ON recent BEGIN
+        INSERT INTO recent_fts (recent_fts, rowid, content) VALUES ('delete', old.message_id, old.content);
+        INSERT INTO recent_fts (rowid, content) VALUES (new.message_id, new.content);
+    END;
 ";
 
 /// Why a deleted message has no copy.
@@ -272,12 +339,15 @@ pub struct Store {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PurgeReport {
+    /// Copies whose text has run out its time.
     pub recent: usize,
     pub others: usize,
     pub deleted: usize,
     pub edited: usize,
     pub files: usize,
     pub folders: usize,
+    /// Copies that kept their text and lost their pictures.
+    pub stripped: usize,
 }
 
 struct Kept {
@@ -310,7 +380,14 @@ impl Store {
         let conn = Connection::open(db)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(SEARCH_SCHEMA)?;
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('first_started_ms', ?1)", params![now_ms.to_string()])?;
+        // The search index arrived after the copies did: fill it in once, from
+        // whatever was already kept.
+        if conn.query_row("SELECT 1 FROM meta WHERE key = 'fts_built'", [], |_| Ok(())).optional()?.is_none() {
+            conn.execute_batch("INSERT INTO recent_fts (recent_fts) VALUES ('rebuild')")?;
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_built', '1')", [])?;
+        }
         let first_started_ms = conn
             .query_row("SELECT value FROM meta WHERE key = 'first_started_ms'", [], |r| r.get::<_, String>(0))?
             .parse()
@@ -456,7 +533,7 @@ impl Store {
     /// Logs deleted messages: a kept copy moves to the log with its pictures; a
     /// bot's message is forgotten; anything else becomes a row without text,
     /// saying why there is no copy. Returns the rows added to the log.
-    pub fn delete(&mut self, d: &Deletion, keep_days: i64) -> rusqlite::Result<usize> {
+    pub fn delete(&mut self, d: &Deletion, text_days: i64) -> rusqlite::Result<usize> {
         let mut added = 0;
         for &id in &d.ids {
             if let Some(k) = self.kept(id)? {
@@ -494,7 +571,7 @@ impl Store {
             let created = snowflake_ms(id);
             let reason = if created < self.first_started_ms {
                 REASON_BEFORE
-            } else if created < d.ts_ms - keep_days * DAY_MS {
+            } else if created < d.ts_ms - text_days * DAY_MS {
                 REASON_EXPIRED
             } else {
                 REASON_MISSED
@@ -562,13 +639,21 @@ impl Store {
         files_of(json).iter().filter(|f| safe_rel(&f.path) && std::fs::remove_file(self.root.join(&f.path)).is_ok()).count()
     }
 
-    /// Clears copies older than `keep_days` and log entries older than
-    /// `log_days`, with their pictures, then day folders with nothing left to
-    /// keep, and recounts the space used.
-    pub fn purge(&mut self, now_ms: i64, keep_days: i64, log_days: i64) -> rusqlite::Result<PurgeReport> {
+    /// Clears each thing on its own clock: the pictures of copies older than
+    /// `keep_days` (the copy itself keeps its text), copies older than
+    /// `text_days` altogether, and log entries older than `log_days` with their
+    /// pictures; then day folders with nothing left to keep, and recounts the
+    /// space used.
+    ///
+    /// The picture pass is the one that runs every hour over a year of rows, so
+    /// it goes through `recent_pictures`, the partial index of the copies that
+    /// still have any: once a day's pictures are gone its rows leave that index
+    /// and are never looked at again.
+    pub fn purge(&mut self, now_ms: i64, keep_days: i64, log_days: i64, text_days: i64) -> rusqlite::Result<PurgeReport> {
         let mut report = PurgeReport::default();
         let keep_cut = now_ms - keep_days * DAY_MS;
         let log_cut = now_ms - log_days * DAY_MS;
+        let text_cut = now_ms - text_days.max(keep_days) * DAY_MS;
         let old_files = |sql: &str, cut: i64| -> rusqlite::Result<Vec<String>> {
             let mut stmt = self.conn.prepare(sql)?;
             let rows = stmt.query_map(params![cut], |r| r.get::<_, String>(0))?;
@@ -577,8 +662,13 @@ impl Store {
         for json in old_files("SELECT stored_files_json FROM recent WHERE created_ts < ?1 AND stored_files_json != '[]'", keep_cut)? {
             report.files += self.remove_files(&json);
         }
-        report.recent = self.conn.execute("DELETE FROM recent WHERE created_ts < ?1", params![keep_cut])?;
-        report.others = self.conn.execute("DELETE FROM others WHERE ts < ?1", params![keep_cut])?;
+        report.stripped = self
+            .conn
+            .execute("UPDATE recent SET stored_files_json = '[]' WHERE created_ts < ?1 AND stored_files_json != '[]'", params![keep_cut])?;
+        report.recent = self.conn.execute("DELETE FROM recent WHERE created_ts < ?1", params![text_cut])?;
+        // A bot's message is only noted so its deletion isn't logged as a phantom:
+        // that pairs with the copies, so it goes when they do.
+        report.others = self.conn.execute("DELETE FROM others WHERE ts < ?1", params![text_cut])?;
         for json in old_files("SELECT stored_files_json FROM deleted WHERE deleted_ts < ?1 AND stored_files_json != '[]'", log_cut)? {
             report.files += self.remove_files(&json);
         }
@@ -626,20 +716,22 @@ impl Store {
                     }
                 }),
                 Event::Other { message_id, ts_ms } => self.note_other(message_id, ts_ms),
-                Event::Deleted(d) => self.delete(&d, keep_days()).map(|_| ()),
+                Event::Deleted(d) => self.delete(&d, text_days()).map(|_| ()),
                 Event::Edited { message_id, content, ts_ms } => self.edit(message_id, &content, ts_ms).map(|_| ()),
                 Event::Saved { message_id, file } => self.saved(message_id, file),
                 Event::Purge { now_ms } => {
                     // Commit what came before, so a slow purge never holds it back.
                     let _ = self.conn.execute_batch("COMMIT; BEGIN");
-                    self.purge(now_ms, keep_days(), log_days()).map(|r| {
+                    self.purge(now_ms, keep_days(), log_days(), text_days()).map(|r| {
                         if r != PurgeReport::default() {
                             tracing::info!(
-                                "msglog: cleared {} copies, {} deleted and {} edited log entries, {} pictures, {} folders; {} MB in use",
+                                "msglog: cleared {} copies, {} deleted and {} edited log entries, {} pictures from {} copies that kept their text, \
+                                 {} folders; {} MB in use",
                                 r.recent,
                                 r.deleted,
                                 r.edited,
                                 r.files,
+                                r.stripped,
                                 r.folders,
                                 self.used / (1024 * 1024)
                             );
@@ -855,6 +947,199 @@ pub fn list_edited(conn: &Connection, f: &ListFilter) -> rusqlite::Result<Page<E
     )
 }
 
+// --- what was said: the Messages page -------------------------------------------------------
+
+/// The smallest Discord id that can have been made at `ms`: the bound that
+/// turns "the last 30 days" into a range over `message_id`.
+pub fn first_id_at(ms: i64) -> u64 {
+    ((ms - DISCORD_EPOCH_MS).max(0) as u64) << 22
+}
+
+/// Rows one request may look through on the index path before it hands back a
+/// cursor, so a search inside a year of one busy channel never holds the
+/// connection. About a third of a second's reading.
+pub const SAID_BUDGET: usize = 50_000;
+
+/// What the Messages page asks the store for: a member's messages, a channel's,
+/// or the whole server's, newest first, with or without words to find.
+#[derive(Clone, Debug)]
+pub struct SaidFilter {
+    pub member: Option<u64>,
+    pub channel: Option<u64>,
+    /// The oldest message id the period reaches, inclusive.
+    pub since_id: u64,
+    /// Carry on below this id (exclusive); none starts at the newest.
+    pub before: Option<u64>,
+    /// Words to find, or none for the plain timeline.
+    pub q: Option<String>,
+    /// Whether `q` is really in a text. The index and the search index both only
+    /// narrow things down; this says yes or no.
+    pub matches: fn(&str, &str) -> bool,
+    pub limit: usize,
+    pub budget: usize,
+    /// Channels never shown (with threads in them); #safe-corner by name always.
+    pub sensitive: Vec<u64>,
+}
+
+/// One kept message, as the Messages page shows it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SaidRow {
+    pub message_id: u64,
+    pub channel_id: u64,
+    pub parent_id: Option<u64>,
+    pub channel_name: String,
+    pub author_id: u64,
+    pub author_name: String,
+    pub avatar: String,
+    pub content: String,
+    pub created_ms: i64,
+    pub reply_to: Option<u64>,
+    pub reply_author: Option<String>,
+    pub reply_text: Option<String>,
+    /// What came attached, whether or not a picture of it was kept.
+    pub attachments: Vec<Attachment>,
+    /// Pictures still on disk (they go before the text does).
+    pub images: Vec<StoredFile>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Said {
+    pub rows: Vec<SaidRow>,
+    /// Pass back as `before` for the next page; none when the period is done.
+    pub next_before: Option<u64>,
+    /// Stored rows this request looked through.
+    pub scanned: usize,
+    /// Whether the period was read to its end.
+    pub complete: bool,
+}
+
+/// The typed words as an FTS5 query: one phrase, its last word matched from the
+/// start ("tourn" finds "tournament"). `None` when nothing is left to match on —
+/// only punctuation, say — and the caller falls back to reading the index.
+///
+/// FTS5 only narrows the candidates down; [`SaidFilter::matches`] decides, so a
+/// query that is looser than the words typed can never show a wrong message.
+pub fn fts_query(needle: &str) -> Option<String> {
+    let words: Vec<String> = needle.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.replace('"', "\"\"")).collect();
+    (!words.is_empty()).then(|| format!("\"{}\"*", words.join(" ")))
+}
+
+impl SaidFilter {
+    fn shows(&self, row: &SaidRow) -> bool {
+        let place = Place { channel_id: row.channel_id, parent_id: row.parent_id, channel_name: row.channel_name.clone() };
+        !excluded(&place, None, &self.sensitive) && self.q.as_deref().is_none_or(|q| (self.matches)(&row.content, q))
+    }
+}
+
+fn said_row(r: &rusqlite::Row) -> rusqlite::Result<SaidRow> {
+    Ok(SaidRow {
+        message_id: r.get::<_, i64>(0)? as u64,
+        channel_id: r.get::<_, i64>(1)? as u64,
+        parent_id: r.get::<_, Option<i64>>(2)?.map(|p| p as u64),
+        channel_name: r.get(3)?,
+        author_id: r.get::<_, i64>(4)? as u64,
+        author_name: r.get(5)?,
+        avatar: r.get(6)?,
+        content: r.get(7)?,
+        created_ms: r.get(8)?,
+        reply_to: r.get::<_, Option<i64>>(9)?.map(|x| x as u64),
+        reply_author: r.get(10)?,
+        reply_text: r.get(11)?,
+        attachments: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        images: files_of(&r.get::<_, String>(13)?),
+    })
+}
+
+const SAID_COLUMNS: &str = "message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts, \
+                            reply_to, reply_author, reply_text, attachments_json, stored_files_json";
+
+/// The same columns read through the join, so `recent`'s and the search index's
+/// own columns can't be confused.
+fn said_columns_of(table: &str) -> String {
+    SAID_COLUMNS.split(", ").map(|c| format!("{}.{}", table, c.trim())).collect::<Vec<_>>().join(", ")
+}
+
+/// Reads rows already in newest-first order into `out`, stopping at the page
+/// size or the scan budget and saying where to carry on from.
+fn collect(rows: &mut rusqlite::Rows<'_>, f: &SaidFilter, out: &mut Said) -> rusqlite::Result<()> {
+    while let Some(raw) = rows.next()? {
+        let row = said_row(raw)?;
+        out.scanned += 1;
+        let id = row.message_id;
+        if f.shows(&row) {
+            if out.rows.len() == f.limit {
+                // The page is full and there is more: carry on below the last row shown.
+                out.next_before = out.rows.last().map(|r| r.message_id);
+                out.complete = false;
+                return Ok(());
+            }
+            out.rows.push(row);
+        }
+        if out.scanned >= f.budget {
+            out.next_before = Some(id);
+            out.complete = false;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Kept messages, newest first.
+///
+/// Which way the store is read depends on what was asked, because the two ways
+/// fail in opposite places (both measured over a year of messages):
+///
+/// * a member or a channel was picked — read their own index, newest first, and
+///   check each message's text. Bounded by how much that one person or channel
+///   ever said, and it is the same read whether or not words were typed.
+/// * words only, over the whole server — ask the search index. It answers in
+///   milliseconds where walking the messages takes seconds. Going the other way
+///   round is the trap: asking the search index for a common word and then
+///   keeping only one member's is seconds of work for fifty rows.
+pub fn list_said(conn: &Connection, f: &SaidFilter) -> rusqlite::Result<Said> {
+    // SQLite has no unsigned integers, and a Discord id never reaches i64::MAX.
+    let before = f.before.unwrap_or(u64::MAX).min(i64::MAX as u64) as i64;
+    let fts = f.member.is_none() && f.channel.is_none() && f.q.is_some();
+    let query = fts.then(|| f.q.as_deref().and_then(fts_query)).flatten();
+    let mut out = Said { complete: true, ..Default::default() };
+    match query {
+        Some(q) => {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {} FROM recent_fts f JOIN recent r ON r.message_id = f.rowid
+                 WHERE f.recent_fts MATCH ?1 AND f.rowid < ?2 AND f.rowid >= ?3 ORDER BY f.rowid DESC",
+                said_columns_of("r")
+            ))?;
+            collect(&mut stmt.query(params![q, before, f.since_id as i64])?, f, &mut out)?;
+        }
+        None => {
+            let mut stmt = conn.prepare_cached(&format!(
+                "SELECT {} FROM recent
+                 WHERE message_id < ?1 AND message_id >= ?2 AND (?3 IS NULL OR author_id = ?3)
+                   AND (?4 IS NULL OR channel_id = ?4 OR parent_id = ?4)
+                 ORDER BY message_id DESC",
+                SAID_COLUMNS
+            ))?;
+            collect(&mut stmt.query(params![before, f.since_id as i64, f.member.map(|m| m as i64), f.channel.map(|c| c as i64)])?, f, &mut out)?;
+        }
+    }
+    Ok(out)
+}
+
+/// The oldest and newest message still kept, and how many there are: what the
+/// page says about how far back it can see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct Coverage {
+    pub rows: i64,
+    pub oldest_ms: Option<i64>,
+    pub newest_ms: Option<i64>,
+}
+
+pub fn coverage(conn: &Connection) -> rusqlite::Result<Coverage> {
+    conn.query_row("SELECT COUNT(*), MIN(created_ts), MAX(created_ts) FROM recent", [], |r| {
+        Ok(Coverage { rows: r.get(0)?, oldest_ms: r.get(1)?, newest_ms: r.get(2)? })
+    })
+}
+
 /// A saved picture of a DELETED message: its bytes and content type. Nothing
 /// for a message that wasn't deleted, a picture that isn't there, or a stored
 /// path that would leave the folder.
@@ -1005,7 +1290,7 @@ fn place(ctx: &Context, guild: GuildId, channel: serenity::all::ChannelId) -> Op
     };
     let parent_name = parent.and_then(|p| g.channels.get(&p).map(|c| c.name.clone()));
     let place = Place { channel_id: channel.get(), parent_id: parent.map(|p| p.get()), channel_name: name };
-    let sensitive = super::control::insights::sensitive_channels();
+    let sensitive = never_logged();
     // A thread whose parent the cache doesn't know can't be checked.
     if parent.is_some() && parent_name.is_none() {
         return None;
@@ -1350,10 +1635,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(&dir);
         let day = |d: i64| NOW - d * DAY_MS;
-        // Copies: one eight days old with a picture, one two days old with a picture.
+        // Copies with a picture each: one past the year, one past the week, one inside it.
+        let ancient = msg(id_at(day(400), 0), day(400), "last year's chat", vec![img(0, "a.png", Some("image/png"), 3)]);
         let old = msg(id_at(day(8), 0), day(8), "old copy", vec![img(1, "o.png", Some("image/png"), 3)]);
         let young = msg(id_at(day(2), 0), day(2), "young copy", vec![img(2, "y.png", Some("image/png"), 3)]);
-        for m in [&old, &young] {
+        for m in [&ancient, &old, &young] {
             store.insert_new(m).unwrap();
             let job = store.plan(m, 100, 1 << 30).remove(0);
             finish(&mut store, &job, b"img");
@@ -1363,8 +1649,9 @@ mod tests {
         std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
         std::fs::write(&stray, b"orphan").unwrap();
         std::fs::create_dir_all(store.root().join(day_folder(day(1)))).unwrap();
-        store.note_other(5, day(8)).unwrap();
-        store.note_other(6, day(1)).unwrap();
+        store.note_other(5, day(400)).unwrap();
+        store.note_other(6, day(8)).unwrap();
+        store.note_other(7, day(1)).unwrap();
         // Log entries: deleted 31 and 20 days ago (with pictures), edited 31 and 20 days ago.
         let gone_old = msg(id_at(day(35), 0), day(35), "deleted long ago", vec![img(3, "g.png", Some("image/png"), 3)]);
         let gone_new = msg(id_at(day(21), 0), day(21), "deleted recently", vec![img(4, "h.png", Some("image/png"), 3)]);
@@ -1373,25 +1660,317 @@ mod tests {
             let job = store.plan(m, 100, 1 << 30).remove(0);
             finish(&mut store, &job, b"img");
             store.edit(m.message_id, "edited text", at).unwrap();
-            store.delete(&Deletion { ids: vec![m.message_id], place: place(21), ts_ms: at, bulk: false }, 7).unwrap();
+            store.delete(&Deletion { ids: vec![m.message_id], place: place(21), ts_ms: at, bulk: false }, 365).unwrap();
         }
 
-        let report = store.purge(NOW, 7, 30).unwrap();
+        let report = store.purge(NOW, 7, 30, 365).unwrap();
         assert_eq!((report.recent, report.others, report.deleted, report.edited), (1, 1, 1, 1), "{report:?}");
-        assert_eq!(report.files, 2, "the old copy's picture and the old deleted one's");
-        assert!(!stray.exists(), "a folder older than the copies goes whole");
+        assert_eq!(report.stripped, 2, "last year's copy and the eight-day-old one lose their pictures");
+        assert_eq!(report.files, 3, "those two pictures and the old deleted one's");
+        assert!(!stray.exists(), "a folder older than the pictures are kept goes whole");
         assert!(!store.root().join(day_folder(day(1))).exists(), "empty folders go");
         assert!(store.root().join(day_folder(day(2))).exists(), "the young copy's folder stays");
-        let texts: Vec<String> = store.conn().prepare("SELECT content FROM recent").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
-        assert_eq!(texts, vec!["young copy"]);
+        // Text lives on its own clock: a week-old message keeps every word, without its picture.
+        let texts: Vec<String> = store
+            .conn()
+            .prepare("SELECT content FROM recent ORDER BY message_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(texts, vec!["old copy", "young copy"], "only last year's copy went");
+        let pics: Vec<String> =
+            store.conn().prepare("SELECT stored_files_json FROM recent ORDER BY message_id").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(pics[0], "[]", "the old copy's picture is gone");
+        assert_ne!(pics[1], "[]", "the young copy still has its picture");
+        // Bookkeeping for bots' messages pairs with the copies, so it goes with them.
+        assert_eq!(count(&store, "others"), 2);
         let deleted = list_deleted(store.conn(), &filter()).unwrap().rows;
         assert_eq!(deleted.iter().map(|r| r.content.clone().unwrap()).collect::<Vec<_>>(), vec!["edited text"]);
         assert!(deleted_file(store.conn(), store.root(), gone_new.message_id, 0).is_some());
         assert!(deleted_file(store.conn(), store.root(), gone_old.message_id, 0).is_none());
         assert_eq!(list_edited(store.conn(), &filter()).unwrap().rows.len(), 1);
         assert_eq!(store.used, 6, "two pictures of three bytes left");
-        // Nothing more to do on a second run.
-        assert_eq!(store.purge(NOW, 7, 30).unwrap(), PurgeReport::default());
+        // Nothing more to do on a second run: the stripped copies are not stripped again.
+        assert_eq!(store.purge(NOW, 7, 30, 365).unwrap(), PurgeReport::default());
+    }
+
+    /// The setting that decides how long text lives, on its own.
+    #[test]
+    fn text_outlives_pictures_and_goes_on_its_own_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let day = |d: i64| NOW - d * DAY_MS;
+        let m = msg(id_at(day(30), 0), day(30), "said a month ago", vec![img(1, "p.png", Some("image/png"), 3)]);
+        store.insert_new(&m).unwrap();
+        let job = store.plan(&m, 100, 1 << 30).remove(0);
+        finish(&mut store, &job, b"img");
+
+        // A week for pictures, a year for text: the picture goes, the words stay.
+        let report = store.purge(NOW, 7, 30, 365).unwrap();
+        assert_eq!((report.recent, report.stripped, report.files), (0, 1, 1));
+        assert_eq!(count(&store, "recent"), 1);
+        // Shorten the text clock to a fortnight and the same message goes altogether.
+        let report = store.purge(NOW, 7, 30, 14).unwrap();
+        assert_eq!((report.recent, report.stripped), (1, 0));
+        assert_eq!(count(&store, "recent"), 0);
+    }
+
+    // --- what was said: the Messages page ------------------------------------------------
+
+    fn said() -> SaidFilter {
+        SaidFilter {
+            member: None,
+            channel: None,
+            since_id: 0,
+            before: None,
+            q: None,
+            matches: |t, q| t.to_lowercase().contains(&q.to_lowercase()),
+            limit: 50,
+            budget: 100_000,
+            sensitive: vec![SAFE],
+        }
+    }
+
+    /// A store of messages across several channels and members, newest last.
+    fn said_store(dir: &tempfile::TempDir) -> Store {
+        let mut store = open(dir);
+        let at = |c: u64, parent: Option<u64>, name: &str| Place { channel_id: c, parent_id: parent, channel_name: name.into() };
+        let mut add = |mins_ago: i64, who: u64, name: &str, place: Place, text: &str| {
+            let ms = NOW - mins_ago * 60_000;
+            let mut m = msg(id_at(ms, who), ms, text, vec![]);
+            m.author_id = who;
+            m.author_name = name.into();
+            m.place = place;
+            store.insert_new(&m).unwrap();
+            m.message_id
+        };
+        add(600, 42, "Riya", at(21, None, "general"), "koto was hard today");
+        add(500, 43, "Dev", at(22, None, "memes"), "the zebrafish meme again");
+        add(400, 42, "Riya", at(22, None, "memes"), "KOTO is never easy");
+        add(300, 42, "Riya", at(78, Some(21), "koto-spoilers"), "today's word is PLANET");
+        add(200, 43, "Dev", at(24, None, "music"), "arijit on repeat");
+        add(100, 42, "Riya", at(21, None, "general"), "quiz at nine");
+        // Never shown, however it got in: #safe-corner and a thread inside it.
+        add(90, 42, "Riya", at(SAFE, None, "safe-corner"), "koto secret");
+        add(80, 42, "Riya", at(77, Some(SAFE), "vent"), "koto secret in a thread");
+        // A channel the owner has asked to be left out.
+        add(70, 43, "Dev", at(4242, None, "staff-only"), "koto staff chatter");
+        store
+    }
+
+    #[test]
+    fn a_members_timeline_is_newest_first_across_every_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let mut f = said();
+        f.member = Some(42);
+        let page = list_said(store.conn(), &f).unwrap();
+        assert_eq!(
+            page.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec!["quiz at nine", "today's word is PLANET", "KOTO is never easy", "koto was hard today"],
+            "newest first, every channel, never #safe-corner"
+        );
+        assert_eq!(page.rows[1].channel_name, "koto-spoilers");
+        assert_eq!(page.rows[1].parent_id, Some(21));
+        assert!(page.complete && page.next_before.is_none());
+        // The whole server, newest first, one member's messages among the rest.
+        let all = list_said(store.conn(), &said()).unwrap();
+        assert_eq!(all.rows.first().map(|r| r.content.as_str()), Some("koto staff chatter"));
+        assert_eq!(all.rows.len(), 7, "only the two #safe-corner rows are left out; #staff-only until it is on the skip list");
+    }
+
+    #[test]
+    fn the_timeline_pages_with_load_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let mut f = said();
+        f.member = Some(42);
+        f.limit = 2;
+        let first = list_said(store.conn(), &f).unwrap();
+        assert_eq!(first.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), vec!["quiz at nine", "today's word is PLANET"]);
+        assert_eq!(first.next_before, Some(first.rows[1].message_id), "carry on below the last row shown");
+        assert!(!first.complete);
+        f.before = first.next_before;
+        let second = list_said(store.conn(), &f).unwrap();
+        assert_eq!(second.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), vec!["KOTO is never easy", "koto was hard today"]);
+        assert!(second.complete && second.next_before.is_none(), "nothing older");
+        // No row is shown twice or skipped.
+        let ids: Vec<u64> = first.rows.iter().chain(&second.rows).map(|r| r.message_id).collect();
+        assert_eq!(ids.len(), 4);
+        assert!(ids.windows(2).all(|w| w[0] > w[1]), "always newest first");
+    }
+
+    #[test]
+    fn the_timeline_narrows_by_channel_and_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let mut f = said();
+        f.channel = Some(21);
+        let page = list_said(store.conn(), &f).unwrap();
+        assert_eq!(
+            page.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec!["quiz at nine", "today's word is PLANET", "koto was hard today"],
+            "a thread counts as its channel"
+        );
+        // The last two and a half hours only.
+        let mut f = said();
+        f.since_id = first_id_at(NOW - 150 * 60_000);
+        assert_eq!(
+            list_said(store.conn(), &f).unwrap().rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec!["koto staff chatter", "quiz at nine"]
+        );
+        assert_eq!(first_id_at(0), 0);
+        assert!(first_id_at(NOW) < id_at(NOW, 0) + 1 && first_id_at(NOW) >= id_at(NOW, 0), "the first id of that millisecond");
+    }
+
+    #[test]
+    fn searching_finds_the_words_both_ways_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        // No member and no channel: the words index answers.
+        let mut f = said();
+        f.q = Some("KOTO".into());
+        let page = list_said(store.conn(), &f).unwrap();
+        assert_eq!(
+            page.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+            vec!["koto staff chatter", "KOTO is never easy", "koto was hard today"],
+            "case doesn't matter, and #safe-corner is never searched"
+        );
+        // A member: their own messages are read instead, and find the same thing.
+        let mut f = said();
+        f.member = Some(42);
+        f.q = Some("koto".into());
+        assert_eq!(list_said(store.conn(), &f).unwrap().rows.len(), 2);
+        // Searching within a member reads only theirs, and still hides what is off limits.
+        let mut f = said();
+        f.member = Some(43);
+        f.q = Some("koto".into());
+        assert_eq!(list_said(store.conn(), &f).unwrap().rows.len(), 1);
+        f.sensitive = vec![SAFE, 4242];
+        assert!(list_said(store.conn(), &f).unwrap().rows.is_empty(), "once #staff-only is skipped, nothing of theirs holds the word");
+        // A word from the start, and a phrase.
+        for (q, want) in [("zebra", 1), ("arijit on", 1), ("planet", 1), ("nothing like this", 0)] {
+            let mut f = said();
+            f.q = Some(q.into());
+            assert_eq!(list_said(store.conn(), &f).unwrap().rows.len(), want, "{q}");
+        }
+    }
+
+    /// The words index only narrows the candidates down; the exact check decides,
+    /// so a message it offers that doesn't really hold the words is dropped.
+    #[test]
+    fn the_words_index_never_shows_a_message_that_doesnt_hold_the_words() {
+        assert_eq!(fts_query("koto").as_deref(), Some("\"koto\"*"));
+        assert_eq!(fts_query("arijit on").as_deref(), Some("\"arijit on\"*"));
+        assert_eq!(fts_query("say \"hi\"").as_deref(), Some("\"say hi\"*"));
+        assert_eq!(fts_query("???"), None, "nothing to match on: the index is skipped");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let mut f = said();
+        f.q = Some("koto wa".into());
+        let page = list_said(store.conn(), &f).unwrap();
+        assert_eq!(page.rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(), vec!["koto was hard today"], "words next to each other");
+
+        // The index ignores accents, so "cafe" brings "café" up as a candidate;
+        // the exact check drops it, and the page never claims a match it hasn't got.
+        let mut store = open(&tempfile::tempdir().unwrap());
+        let m = msg(id_at(NOW, 2), NOW, "at the café again", vec![]);
+        store.insert_new(&m).unwrap();
+        let mut f = said();
+        f.q = Some("cafe".into());
+        let page = list_said(store.conn(), &f).unwrap();
+        assert!(page.rows.is_empty(), "not the word that was typed");
+        assert_eq!(page.scanned, 1, "but the index did offer it");
+        f.q = Some("café".into());
+        assert_eq!(list_said(store.conn(), &f).unwrap().rows.len(), 1);
+
+        // Words in any script go through the same index, whole and unmangled.
+        let mut store = open(&tempfile::tempdir().unwrap());
+        let m = msg(id_at(NOW, 1), NOW, "नमस्ते दोस्त, koto done", vec![]);
+        store.insert_new(&m).unwrap();
+        for q in ["नमस्ते", "दोस्त", "koto"] {
+            let mut f = said();
+            f.q = Some(q.into());
+            assert_eq!(list_said(store.conn(), &f).unwrap().rows.len(), 1, "{q}");
+        }
+    }
+
+    #[test]
+    fn a_long_search_stops_at_its_budget_and_says_where_it_got_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        for i in 0..60u64 {
+            let ms = NOW - (60 - i as i64) * 60_000;
+            let mut m = msg(id_at(ms, i), ms, "nothing to find here", vec![]);
+            m.author_id = 42;
+            store.insert_new(&m).unwrap();
+        }
+        let mut f = said();
+        f.member = Some(42);
+        f.q = Some("needle".into());
+        f.budget = 25;
+        let page = list_said(store.conn(), &f).unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(page.scanned, 25);
+        assert!(!page.complete && page.next_before.is_some(), "it hands back where to carry on");
+        // Carrying on reaches the end.
+        f.before = page.next_before;
+        f.budget = 1000;
+        let rest = list_said(store.conn(), &f).unwrap();
+        assert_eq!(rest.scanned, 35);
+        assert!(rest.complete);
+    }
+
+    #[test]
+    fn the_store_says_how_far_back_it_reaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let c = coverage(store.conn()).unwrap();
+        assert_eq!(c.rows, 9, "everything kept, #safe-corner rows included: the page filters, the count doesn't");
+        assert_eq!(c.oldest_ms, Some(NOW - 600 * 60_000));
+        assert_eq!(c.newest_ms, Some(NOW - 70 * 60_000));
+        let empty = coverage(open(&tempfile::tempdir().unwrap()).conn()).unwrap();
+        assert_eq!(empty, Coverage { rows: 0, oldest_ms: None, newest_ms: None });
+    }
+
+    #[test]
+    fn a_skipped_channel_is_never_recorded_and_never_shown() {
+        // The gate on the way in: #safe-corner by id or name, a skipped channel,
+        // and threads inside either.
+        let skipped = [SAFE, 4242];
+        assert!(excluded(&Place { channel_id: 4242, parent_id: None, channel_name: "staff-only".into() }, None, &skipped));
+        assert!(excluded(&Place { channel_id: 77, parent_id: Some(4242), channel_name: "a thread".into() }, Some("staff-only"), &skipped));
+        assert!(excluded(&place(SAFE), None, &skipped));
+        assert!(!excluded(&place(21), None, &skipped), "everything else is recorded");
+        assert!(!excluded(&Place { channel_id: 4242, parent_id: None, channel_name: "staff-only".into() }, None, &[SAFE]), "until it is listed");
+        assert!(never_logged().contains(&SAFE), "#safe-corner is never in anyone's hands to take off the list");
+
+        // And the gate on the way out, for rows written before it was listed.
+        let dir = tempfile::tempdir().unwrap();
+        let store = said_store(&dir);
+        let mut f = said();
+        f.sensitive = vec![SAFE, 4242];
+        let page = list_said(store.conn(), &f).unwrap();
+        assert!(page.rows.iter().all(|r| r.channel_id != 4242), "{:?}", page.rows.iter().map(|r| &r.channel_name).collect::<Vec<_>>());
+        assert_eq!(page.rows.len(), 6);
+        let mut f = said();
+        f.q = Some("koto".into());
+        f.sensitive = vec![SAFE, 4242];
+        assert!(list_said(store.conn(), &f).unwrap().rows.iter().all(|r| r.channel_id != 4242), "nor by searching for it");
+    }
+
+    /// Text can't be kept for less time than the pictures hanging off it.
+    #[test]
+    fn a_shorter_text_clock_than_the_picture_one_never_beats_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let m = msg(id_at(NOW - 20 * DAY_MS, 0), NOW - 20 * DAY_MS, "twenty days old", vec![]);
+        store.insert_new(&m).unwrap();
+        assert_eq!(store.purge(NOW, 30, 30, 7).unwrap().recent, 0, "the pictures' 30 days win over the text's 7");
+        assert_eq!(count(&store, "recent"), 1);
     }
 
     #[test]
@@ -1408,7 +1987,7 @@ mod tests {
         assert!(store.plan(&second, 1000, 1000).is_empty(), "600 + 600 is over 1000");
         assert!(store.full_logged);
         assert!(store.plan(&second, 1000, 1000).is_empty());
-        store.purge(NOW, 7, 30).unwrap();
+        store.purge(NOW, 7, 30, 365).unwrap();
         assert_eq!(store.used, 0);
         assert_eq!(store.plan(&second, 1000, 1000).len(), 1, "room again after the old picture was cleared");
     }

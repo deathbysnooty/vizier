@@ -1273,26 +1273,49 @@ pub fn sections() -> Vec<Section> {
         },
         Section {
             id: "msglog",
-            title: "Deleted messages",
-            icon: "🗑️",
-            about: "A log of deleted and edited messages, shown only on the panel's Deleted messages page (nothing is \
-                    posted in Discord). The bot keeps a short-lived copy of every member message it sees in the server - \
-                    text channels, threads and voice channel chats, temporary rooms included - with its pictures, so \
-                    that when a message is deleted its text and pictures can still be shown, and when one is edited the \
-                    text before and after. Never #safe-corner or its threads, never DMs, never bots. Discord doesn't \
-                    tell bots who deleted a message, so the log can't say. Every look at the log is in the activity log.",
+            title: "Message history",
+            icon: "🗄️",
+            about: "What the server said, kept for the panel only - nothing is posted in Discord. The bot copies every \
+                    member message it sees anywhere in the server (text channels, threads, voice channel chats, \
+                    temporary rooms) with its pictures, and two pages read it: Messages, where you open a member and \
+                    see what they have said across every channel, and Deleted messages, where a deleted message's text \
+                    and pictures and an edited one's before and after are shown. Three clocks, because the three \
+                    things are kept for different reasons: text is the server's memory, so a year; pictures are only \
+                    here so a message deleted soon after it was posted can still be shown, and they are what costs \
+                    disk, so a week; the deleted and edited log is a moderation record, so a month. Past the picture \
+                    clock a copy keeps every word and loses its pictures. Never #safe-corner or its threads, never a \
+                    channel on the skip list, never DMs, never bots. Discord doesn't tell bots who deleted a message, \
+                    so the log can't say. Every look at either page is in the activity log.",
             settings: vec![
                 toggle(
                     "VIZIER_MSGLOG",
-                    "Log deleted and edited messages",
+                    "Keep what the server says",
                     "Keep copies of new messages and log deletions and edits. Off stops copying new messages and logging; \
-                     what's already logged stays until it's cleared.",
+                     what's already kept stays until it's cleared.",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_TEXT_DAYS",
+                    "Keep what was said for",
+                    "How long the text of a message nobody deleted is kept, and so how far back the Messages page can \
+                     look. At about 24,000 messages a day a year takes roughly 3.5 GB on the server. A message deleted \
+                     after this shows in the deleted log without its text.",
+                    number(7, 3650, "days"),
+                    "365",
+                ),
+                setting(
+                    "VIZIER_MSGLOG_SKIP_CHANNELS",
+                    "Channels never kept",
+                    "Channels whose messages are never copied at all, on top of #safe-corner, which is always left out. \
+                     Threads inside a skipped channel are skipped too. Anything already kept from a channel added here \
+                     stops being shown at once.",
+                    Kind::Channels,
+                    "",
                 ),
                 setting(
                     "VIZIER_MSGLOG_KEEP_DAYS",
-                    "Keep copies for",
-                    "How long the copy of a message nobody deleted (its text and pictures) is kept before it's cleared. \
-                     A message deleted after this shows in the log without its text.",
+                    "Keep pictures for",
+                    "How long a message's saved pictures are kept. After this the copy keeps its text and loses its \
+                     pictures, so a message deleted later shows its words but not what was attached.",
                     number(1, 90, "days"),
                     "7",
                 ),

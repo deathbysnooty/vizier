@@ -1,6 +1,13 @@
-//! Search messages: who said something, and when, in what the bot has stored
-//! from its channels. Never DMs, never #safe-corner or a thread inside it, and
-//! never a channel the server doesn't list (an archived thread could be either).
+//! The long archive: searching the AI's stored history for who said something
+//! and when. Never DMs, never #safe-corner or a thread inside it, and never a
+//! channel the server doesn't list (an archived thread could be either).
+//!
+//! This is only half of the Messages page. The other half, and its way in, is
+//! [`super::messages`], which reads `msglog`'s copy of EVERY channel. This store
+//! is the older and narrower one: it goes back to the day the bot started, but
+//! only for the channels it is allowed to chat in, so a house channel is simply
+//! not in it. The page asks for one store at a time and says which, because the
+//! same empty result means a different thing in each.
 //!
 //! The stored history is read a window at a time, newest first: the (agent,
 //! time) index picks the next few thousand rows, SQL keeps the member requests
@@ -477,11 +484,13 @@ pub async fn search(State(panel): State<Panel>, axum::Extension(Caller(user)): a
                     (Some(g), Some(m)) => Some(jump_url(g, place.channel, m)),
                     _ => None,
                 },
+                "source": "archive",
             })
         })
         .collect();
     let next_before = (!complete).then_some(cursor);
     ok(json!({
+        "source": "archive",
         "q": needle,
         "member": member.map(|m| json!({ "id": m.to_string(), "name": member_name })),
         "channel": channel.map(|c| json!({ "id": c.to_string(), "name": channel_name.map(|n| n.trim_start_matches('#').to_string()) })),
@@ -493,22 +502,16 @@ pub async fn search(State(panel): State<Panel>, axum::Extension(Caller(user)): a
         "scanned_to": if complete { days.map(|_| since_ms / 1000) } else { Some(cursor / 1000) },
         "complete": complete,
         "rows_scanned": rows,
+        // What this store can and can't answer for, so the page never lets a
+        // silence read as "nobody said it". The bot only ever stored the channels
+        // it is allowed to chat in; an empty allowlist means every channel it can
+        // see, and then there is no number to give.
+        "coverage": json!({ "channels": Some(super::super::super::allowed_channels().len()).filter(|n| *n > 0) }),
     }))
 }
 
 pub fn jump_url(guild: &str, channel: u64, message: u64) -> String {
     format!("https://discord.com/channels/{}/{}/{}", guild, channel, message)
-}
-
-/// How a search reads in the activity log.
-pub fn audit_entry(e: &super::super::AuditEntry) -> serde_json::Map<String, Value> {
-    let mut obj = serde_json::Map::new();
-    obj.insert("label".into(), json!("Searched messages"));
-    obj.insert("section".into(), json!({ "id": "search", "title": "Search messages", "icon": "🔎" }));
-    obj.insert("change".into(), json!(e.new.clone().unwrap_or_else(|| "Searched".into())));
-    obj.insert("old".into(), Value::Null);
-    obj.insert("new".into(), Value::Null);
-    obj
 }
 
 #[cfg(test)]

@@ -260,7 +260,7 @@ fn is_voice_chat(ctx: &Context, channel: ChannelId) -> bool {
     })
 }
 
-fn allowed_channels() -> Vec<u64> {
+pub(crate) fn allowed_channels() -> Vec<u64> {
     control::ids("VIZIER_DISCORD_CHANNELS")
 }
 

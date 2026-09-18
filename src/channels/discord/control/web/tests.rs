@@ -381,6 +381,14 @@ impl PanelData for FakeData {
         Ok(super::search::read_window(&conn, "lodu", &filter)?)
     }
 
+    async fn msglog_said(&self, filter: super::super::super::msglog::SaidFilter) -> anyhow::Result<super::super::super::msglog::Said> {
+        Ok(super::super::super::msglog::list_said(fake_log().store.lock().conn(), &filter)?)
+    }
+
+    async fn msglog_coverage(&self) -> Option<super::super::super::msglog::Coverage> {
+        super::super::super::msglog::coverage(fake_log().store.lock().conn()).ok()
+    }
+
     async fn msglog_deleted(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::DeletedRow>> {
         Ok(super::super::super::msglog::list_deleted(fake_log().store.lock().conn(), &filter)?)
     }
@@ -1113,6 +1121,65 @@ fn fake_log() -> &'static FakeLog {
                 rusqlite::params![SAFE as i64, now - 4 * min],
             )
             .unwrap();
+        // What the Messages page reads: kept messages nobody deleted, across every
+        // channel the bot sees, including ones the AI's own history never covers.
+        let said: &[(i64, u64, u64, Option<u64>, &str, &str)] = &[
+            (34 * hour, 2003, 33, None, "houses", "houseparty on saturday, every house sends two people"),
+            (33 * hour, 2010, 33, None, "houses", "gryffindor is not winning the houseparty, screenshot this"),
+            (32 * hour, 2023, 33, None, "houses", "who is counting points for the houseparty though"),
+            (31 * hour, 2007, 21, None, "general", "gm gm, chai ready ☕"),
+            (30 * hour, 2011, 23, None, "desi-banter", "filter coffee is still better and I will die on this hill"),
+            (29 * hour, 2020, 22, None, "memes", "the zebrafish one is peak, no notes"),
+            (28 * hour, 2008, 32, None, "quiz", "koto in four today, my streak lives"),
+            (27 * hour, 2013, 24, None, "music", "Arijit on loop again, no regrets"),
+            (26 * hour, 2010, 21, None, "general", "who's on voice tonight? lounge at 10"),
+            (25 * hour, 2023, 78, Some(21), "koto-spoilers", "don't say the word yet, Nikhil is on try 5"),
+            (24 * hour, 2012, 22, None, "memes", "snitch dropped while everyone was in voice AGAIN"),
+            (23 * hour, 2003, 21, None, "general", "quiz at 9:30 tonight, not 9"),
+            (22 * hour, 2007, 4400, None, "Kutiya ke dost 🎮", "brb pizza, don't start without me"),
+            (21 * hour, 2020, 23, None, "desi-banter", "RCB will win it this year, screenshot this"),
+            (20 * hour, 2008, 32, None, "quiz", "that Sholay question was criminal, nobody got it"),
+            (19 * hour, 2013, 41, None, "Lounge", "who took my seat in lounge 😤"),
+            (18 * hour, 2011, 24, None, "music", "adding everything to the shared playlist, fight me"),
+            (17 * hour, 2023, 33, None, "houses", "ravenclaw needs one more for the houseparty team"),
+            (16 * hour, 2010, 22, None, "memes", "Dev every monday morning 💀"),
+            (15 * hour, MEMBER, 21, None, "general", "chai break, back in 10"),
+            (14 * hour, 2003, 32, None, "quiz", "koto streak 14 days, don't jinx it"),
+            (13 * hour, 2007, 23, None, "desi-banter", "my fantasy team has four bowlers, send help"),
+            (12 * hour, 2012, 21, None, "general", "Loduchand who is winning the house cup this month?"),
+            (11 * hour, 2020, 78, Some(21), "koto-spoilers", "okay I got it in six, that word was unfair"),
+            (10 * hour, 2008, 22, None, "memes", "posting this before someone else does"),
+            (9 * hour, 2013, 24, None, "music", "ÉCLAIR au café, anyone? asking for a friend"),
+            (8 * hour, 2011, 33, None, "houses", "houseparty scores are up on the board"),
+            (7 * hour, MEMBER, 32, None, "quiz", "quiz night friday? I'm in, Kabir better go easy"),
+            (6 * hour, 2023, 21, None, "general", "anyone up for a 1v1 in the arena?"),
+            (5 * hour, 2010, 23, None, "desi-banter", "the aquarium trip is happening, Nikhil is not choosing snacks"),
+            (4 * hour, 2003, 22, None, "memes", "this one is too good, I'm crying"),
+            (3 * hour + 30 * min, 2012, 41, None, "Lounge", "vc is open, come through"),
+            (2 * hour + 45 * min, 2007, 21, None, "general", "did anyone finish the koto today or is it just me"),
+            (2 * hour, 2020, 32, None, "quiz", "six tries and I still got it wrong, unbelievable"),
+            (95 * min, 2013, 33, None, "houses", "hufflepuff is quietly winning and nobody noticed"),
+            (75 * min, 2011, 24, None, "music", "new album drops friday, clearing my evening"),
+            (45 * min, 2008, 23, None, "desi-banter", "chai is overrated, fight me"),
+            (25 * min, MEMBER, 21, None, "general", "back, that took longer than ten minutes"),
+            (12 * min, 2023, 22, None, "memes", "last one I promise 💀"),
+            (4 * min, 2003, 21, None, "general", "goodnight everyone, quiz was fun"),
+        ];
+        for (ago, uid, channel, parent, name, text) in said {
+            let m = msg(now - ago, *uid, at(*channel, name, *parent), text, vec![]);
+            keep(&mut store, &m, &[]);
+        }
+        // Longer stretches of one member, so "load more" has something to load.
+        for i in 0..70i64 {
+            let m = msg(now - 36 * hour - i * 17 * min, 2013, at(21, "general", None), &format!("thinking out loud number {}", 70 - i), vec![]);
+            keep(&mut store, &m, &[]);
+        }
+        // Written straight in, as if the channel were listed later: never shown.
+        for (channel, parent, name) in [(SAFE, None, "safe-corner"), (77, Some(SAFE), "vent")] {
+            let m = msg(now - 6 * min, 2012, at(channel, name, parent), "SECRET-SAFE kept words", vec![]);
+            keep(&mut store, &m, &[]);
+        }
+
         FakeLog { kept: riya.message_id, evil: evil.message_id, meme: meme.message_id, store: parking_lot::Mutex::new(store), _dir: dir }
     })
 }
@@ -3505,7 +3572,187 @@ async fn message_searches_are_in_the_activity_log_once() {
     assert_eq!(entries.len(), 1, "a repeat isn't logged again: {audit}");
     assert_eq!(entries[0]["label"], "Searched messages");
     assert_eq!(entries[0]["user_id"], ADMIN_TWO.to_string());
-    assert_eq!(entries[0]["section"]["id"], "search");
+    assert_eq!(entries[0]["section"]["id"], "messages");
+}
+
+// --- the Messages page: what was said, member first -------------------------------------------
+
+async fn said_api(app: &Router, session: &str, query: &str) -> (StatusCode, Value) {
+    let (status, body, _) = call(app, "GET", &format!("/api/messages?{}", query), Some(session), None, false).await;
+    (status, body)
+}
+
+/// Every page of a Messages request, followed to the end.
+async fn said_all(app: &Router, session: &str, query: &str) -> Vec<Value> {
+    let mut all = Vec::new();
+    let mut before = String::new();
+    for _ in 0..40 {
+        let (status, body) = said_api(app, session, &format!("{}{}", query, before)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        all.extend(body["results"].as_array().unwrap().clone());
+        match body["next_before"].as_str() {
+            Some(b) => before = format!("&before={b}"),
+            None => return all,
+        }
+    }
+    panic!("paging never ends");
+}
+
+#[tokio::test]
+async fn the_messages_page_opens_on_the_newest_messages_in_the_server() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = said_api(&app, &session, "days=all").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], "log");
+    assert_eq!(body["count"], 50, "a full page without being asked anything");
+    let rows = body["results"].as_array().unwrap();
+    assert_eq!(rows[0]["text"], "goodnight everyone, quiz was fun");
+    let times: Vec<i64> = rows.iter().map(|r| r["ts_ms"].as_i64().unwrap()).collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "newest first");
+    // Every row says where and when it was, and how to open it in Discord.
+    assert_eq!(rows[0]["channel"]["name"], "general");
+    assert!(rows[0]["url"].as_str().unwrap().starts_with("https://discord.com/channels/"));
+    assert!(rows[0]["member"]["name"].is_string() && rows[0]["house"]["name"].is_string());
+    // It says how far back it can see, so nothing looks missing that isn't.
+    let cover = &body["coverage"];
+    assert_eq!(cover["text_days"], 365);
+    assert_eq!(cover["picture_days"], 7);
+    assert!(cover["oldest_ts"].as_i64().unwrap() > 0 && cover["rows"].as_i64().unwrap() > 100);
+    // Never #safe-corner, however the words got in.
+    let all = said_all(&app, &session, "days=all&limit=100").await;
+    assert!(!all.iter().any(|r| r["text"].as_str().unwrap_or("").contains("SECRET-SAFE")), "#safe-corner is never shown");
+}
+
+#[tokio::test]
+async fn a_members_messages_come_back_newest_first_and_page() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body) = said_api(&app, &session, "member=2013&days=all&limit=5").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["member"]["id"], "2013");
+    assert_eq!(body["member"]["name"], "Riya");
+    assert_eq!(texts(&body).first().map(String::as_str), Some("look at this sunset"));
+    assert!(body["results"].as_array().unwrap().iter().all(|r| r["member"]["id"] == "2013"), "only theirs");
+    let cursor = body["next_before"].as_str().expect("more to come").to_string();
+
+    // The next page carries on below the last row, never repeating or skipping.
+    let (_, second) = said_api(&app, &session, &format!("member=2013&days=all&limit=5&before={cursor}")).await;
+    let first_ids: Vec<&str> = body["results"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    let second_ids: Vec<&str> = second["results"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert!(second_ids.iter().all(|id| !first_ids.contains(id)), "no row twice");
+    assert!(first_ids.last().unwrap().parse::<u64>().unwrap() > second_ids[0].parse::<u64>().unwrap(), "and none skipped");
+
+    // The whole timeline, across channels, in one long read.
+    let all = said_all(&app, &session, "member=2013&days=all&limit=25").await;
+    assert!(all.len() > 70, "a member with a lot to say: {}", all.len());
+    let channels: HashSet<&str> = all.iter().map(|r| r["channel"]["name"].as_str().unwrap()).collect();
+    assert!(channels.len() >= 4, "across every channel, not just the chatty ones: {channels:?}");
+    let ids: Vec<u64> = all.iter().map(|r| r["id"].as_str().unwrap().parse().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] > w[1]), "newest first the whole way down");
+    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len(), "and every one of them once");
+}
+
+#[tokio::test]
+async fn searching_inside_a_member_and_across_the_server() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    // Across everyone: the words index answers, and the match is marked.
+    let (status, body) = said_api(&app, &session, "q=houseparty&days=all").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["q"], "houseparty");
+    assert_eq!(body["count"], 5);
+    assert!(body["results"].as_array().unwrap().iter().all(|r| r["channel"]["name"] == "houses"));
+    let first = &body["results"][0];
+    let (start, end) = (first["match"][0].as_u64().unwrap() as usize, first["match"][1].as_u64().unwrap() as usize);
+    let text: Vec<char> = first["text"].as_str().unwrap().chars().collect();
+    assert_eq!(text[start..end].iter().collect::<String>().to_lowercase(), "houseparty");
+
+    // The same word inside one member: only theirs.
+    let (_, mine) = said_api(&app, &session, "q=houseparty&member=2023&days=all").await;
+    assert_eq!(mine["count"], 2);
+    assert_eq!(texts(&mine), vec!["ravenclaw needs one more for the houseparty team", "who is counting points for the houseparty though"]);
+    // And inside one channel.
+    let (_, chan) = said_api(&app, &session, "q=word&channel=21&days=all").await;
+    assert_eq!(chan["count"], 2, "a thread counts as the channel it is in: {chan}");
+    assert!(chan["results"].as_array().unwrap().iter().all(|r| r["channel"]["name"] == "koto-spoilers" && r["channel"]["thread"] == true));
+
+    // Case doesn't matter, and a word nobody said finds nothing rather than erroring.
+    let (_, upper) = said_api(&app, &session, "q=HOUSEPARTY&days=all").await;
+    assert_eq!(upper["count"], 5);
+    let (_, none) = said_api(&app, &session, "q=quidditch&days=all").await;
+    assert_eq!((none["count"].as_u64(), none["complete"].as_bool()), (Some(0), Some(true)));
+}
+
+/// The whole point of the new store: channels the AI's history never covered.
+#[tokio::test]
+async fn a_message_only_the_new_store_has_is_still_found() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    // #houses is not a channel the bot chats in, so the long archive has nothing.
+    let (status, archive) = search_api(&app, &session, "q=houseparty&days=all").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(archive["count"], 0, "the archive has never seen it: {archive}");
+    assert_eq!(archive["source"], "archive");
+    // The store that keeps every channel has it.
+    let (_, log) = said_api(&app, &session, "q=houseparty&days=all").await;
+    assert!(log["count"].as_u64().unwrap() >= 3, "{log}");
+    assert!(log["results"].as_array().unwrap().iter().all(|r| r["source"] == "log"));
+    // The two are never mixed: each answer says which store it came from, and
+    // what that store can see.
+    // The archive's number is the allowlist, not the channel list: with no
+    // allowlist set there is no number to give, and the page says so instead.
+    assert!(archive["coverage"]["channels"].is_null(), "{archive}");
+    assert!(log["coverage"]["rows"].as_i64().unwrap() > 100);
+    assert_eq!(log["coverage"]["skipped"], 0);
+}
+
+#[tokio::test]
+async fn the_messages_page_checks_its_input_and_needs_an_admin() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    for bad in ["q=a", &format!("q={}", "x".repeat(101)), "days=5", "member=abc", "channel=x1", "before=-4", "before=0", "limit=lots", &format!("channel={SAFE}")] {
+        let (status, body) = said_api(&app, &session, bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        assert!(body["error"].is_string());
+    }
+    let (status, body) = said_api(&app, &session, "limit=1000").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 100);
+    let (status, _, _) = call(&app, "GET", "/api/messages", None, None, false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = call(&app, "GET", "/api/messages", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn looking_at_someones_messages_is_in_the_activity_log_once() {
+    let app = panel();
+    let session = session_for(ADMIN_TWO);
+    let q = "member=2008&days=7";
+    let (status, _) = said_api(&app, &session, q).await;
+    assert_eq!(status, StatusCode::OK);
+    // A second look, and the next page of it, aren't logged again for 15 minutes.
+    let (_, body) = said_api(&app, &session, q).await;
+    if let Some(b) = body["next_before"].as_str() {
+        let _ = said_api(&app, &session, &format!("{q}&before={b}")).await;
+    }
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let looks: Vec<&Value> =
+        audit.as_array().unwrap().iter().filter(|e| e["key"] == "messages:look" && e["change"] == "@Arjun · all channels · last 7 days").collect();
+    assert_eq!(looks.len(), 1, "a repeat isn't logged again: {audit}");
+    assert_eq!(looks[0]["label"], "Looked at messages");
+    assert_eq!(looks[0]["section"]["id"], "messages");
+    assert_eq!(looks[0]["user_id"], ADMIN_TWO.to_string());
+
+    // Searching inside that member is its own entry, and says what was searched for.
+    let (status, _) = said_api(&app, &session, "member=2008&days=7&q=koto").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let searches: Vec<&Value> =
+        audit.as_array().unwrap().iter().filter(|e| e["key"] == "messages:search" && e["change"] == "“koto” · @Arjun · all channels · last 7 days").collect();
+    assert_eq!(searches.len(), 1, "{audit}");
+    assert_eq!(searches[0]["label"], "Searched messages");
 }
 
 // --- deleted and edited messages ------------------------------------------------------------

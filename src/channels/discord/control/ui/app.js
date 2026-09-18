@@ -560,7 +560,7 @@
       navItem('#/welcomes', icon('door'), 'Welcomes', S.welcomes && S.welcomes.active ? h('span', { class: 'nav-count', 'aria-label': plural(S.welcomes.active, 'welcome') + ' waiting', 'data-tip': 'Waiting for their member' }, String(S.welcomes.active)) : null),
       navItem('#/autoreplies', icon('reply'), 'Auto-responses', count(activeRules, S.rules.length)),
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
-      navItem('#/search', icon('search'), 'Search messages'),
+      navItem('#/messages', icon('message'), 'Messages'),
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
@@ -607,7 +607,8 @@
       ['House Cup', '#/houses', 'trophy', 'Live house points, top scorers, latest points'],
       ['Bot behaviour', '#/agent', 'bot', 'Personality, tone, chattiness, model'],
       ['Members', '#/members', 'users', 'Profiles, what the bot sees, mods’ notes'],
-      ['Search messages', '#/search', 'search', 'Find who said something and when'],
+      ['Messages', '#/messages', 'message', 'What a member has said, across every channel, newest first'],
+      ['Search messages', '#/messages?q=', 'search', 'Find who said something and when, in every channel or in the long archive'],
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
@@ -750,7 +751,7 @@
       case 'insights': renderInsights(page); break;
       case 'commands': renderCommands(page, r.q.get('q') || ''); break;
       case 'activity': renderActivity(page, r.q); break;
-      case 'search': renderSearch(page, r.q); break;
+      case 'messages': case 'search': renderMessages(page, r.q); break;
       case 'deleted': renderDeleted(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
       case 'automod': renderAutomod(page, r.q); break;
@@ -1412,7 +1413,7 @@
       secSel.appendChild(h('option', { value: 'welcomes', selected: section === 'welcomes' }, '👋  Welcomes'));
       if (!sectionById('autoreplies')) secSel.appendChild(h('option', { value: 'autoreplies', selected: section === 'autoreplies' }, '💬  Auto-responses'));
       secSel.appendChild(h('option', { value: 'agent', selected: section === 'agent' }, '🤖  Bot behaviour'));
-      secSel.appendChild(h('option', { value: 'search', selected: section === 'search' }, '🔎  Search messages'));
+      secSel.appendChild(h('option', { value: 'messages', selected: section === 'messages' }, '💬  Messages'));
       secSel.appendChild(h('option', { value: 'left', selected: section === 'left' }, '🚪  Left the server'));
       if (!sectionById('members')) secSel.appendChild(h('option', { value: 'members', selected: section === 'members' }, '👤  Members'));
       clear(keySel);
@@ -1481,80 +1482,92 @@
     };
   }
 
-  function renderSearch(page, rq) {
-    document.title = 'Search messages · Loduchand';
-    page.appendChild(pageHead('Search messages', 'Find who said something and when. Searches what the bot has stored from its channels (not DMs, never #safe-corner).'));
+  /**
+   * Messages: what the server has said, member first.
+   *
+   * Two stores hold message text and they cover different things, so the page
+   * reads one at a time and says which. "Every channel" is the bot's own copy of
+   * every channel it can see, kept for a year. "Long archive" is the AI's stored
+   * history: back to the bot's first day, but only the channels it chats in, so
+   * a house channel is simply not in it. Mixing them would make a silence mean
+   * two things at once.
+   */
+  const MSG_SOURCES = [['log', 'Every channel'], ['archive', 'Long archive']];
+
+  function renderMessages(page, rq) {
+    document.title = 'Messages · Loduchand';
+    page.appendChild(pageHead('Messages', 'What the server has said. Pick a member to read theirs, newest first, across every channel — then search inside it.'));
     const days = rq.get('days');
+    const src = rq.get('source');
     const st = {
       q: (rq.get('q') || '').trim().slice(0, 100),
       member: /^\d{1,20}$/.test(rq.get('member') || '') ? rq.get('member') : '',
       channel: /^\d{1,20}$/.test(rq.get('channel') || '') ? rq.get('channel') : '',
       days: SEARCH_PERIODS.some((x) => x[0] === days) ? days : '30',
+      source: MSG_SOURCES.some((x) => x[0] === src) ? src : 'log',
     };
-    const hashFor = () => {
+    const hashFor = (over) => {
+      const s = Object.assign({}, st, over || {});
       const p = new URLSearchParams();
-      if (st.q) p.set('q', st.q);
-      if (st.member) p.set('member', st.member);
-      if (st.channel) p.set('channel', st.channel);
-      if (st.days !== '30') p.set('days', st.days);
+      if (s.q) p.set('q', s.q);
+      if (s.member) p.set('member', s.member);
+      if (s.channel) p.set('channel', s.channel);
+      if (s.days !== '30') p.set('days', s.days);
+      if (s.source !== 'log') p.set('source', s.source);
       const qs = p.toString();
-      return '#/search' + (qs ? '?' + qs : '');
+      return '#/messages' + (qs ? '?' + qs : '');
     };
-    const input = h('input', { type: 'search', value: st.q, placeholder: 'Words to find, e.g. koto', 'aria-label': 'Words to find', maxlength: '100', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
-    const tooShort = h('p', { class: 'hint msg-short', hidden: true, role: 'status' }, 'Type at least 2 characters.');
-    const go = () => {
-      st.q = input.value.trim();
-      if (Array.from(st.q).length < 2) { tooShort.hidden = false; input.focus(); return; }
-      tooShort.hidden = true;
-      navigate(hashFor());
-    };
-    // Filters apply at once when there is a search to apply them to; otherwise they wait in the address.
-    const refilter = () => { if (Array.from(input.value.trim()).length >= 2) go(); else { const href = hashFor(); history.replaceState(null, '', href); currentHash = href; } };
+    const apply = (over) => navigate(hashFor(over));
 
-    const memberBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Member' });
+    // --- the filters ------------------------------------------------------------------
+    const input = h('input', { type: 'search', value: st.q, placeholder: st.member ? 'Search within their messages' : 'Search every message, e.g. koto',
+      'aria-label': 'Words to find', maxlength: '100', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
+    const tooShort = h('p', { class: 'hint msg-short', hidden: true, role: 'status' }, 'Type at least 2 characters, or leave it empty to see everything.');
+    const go = () => {
+      const typed = input.value.trim();
+      if (typed && Array.from(typed).length < 2) { tooShort.hidden = false; input.focus(); return; }
+      tooShort.hidden = true;
+      apply({ q: typed });
+    };
+    input.addEventListener('search', () => { if (!input.value.trim() && st.q) apply({ q: '' }); });
+
+    const memberBtn = h('button', { class: 'picker-btn wide', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Member' });
     const drawMember = (m) => {
       clear(memberBtn);
       append(memberBtn, [st.member && m ? avatar(m.avatar, m.name, 'xs') : icon(st.member ? 'user' : 'users'),
-        h('span', { class: 'value' + (st.member ? '' : ' placeholder') }, st.member ? (m ? m.name : 'Member ' + st.member) : 'Any member'), icon('chevron')]);
+        h('span', { class: 'value' + (st.member ? '' : ' placeholder') }, st.member ? (m ? m.name : 'Member ' + st.member) : 'Everyone'), icon('chevron')]);
     };
-    drawMember(null);
+    drawMember(S.members.get(st.member) || null);
     if (st.member) memberById(st.member).then((m) => { if (memberBtn.isConnected) drawMember(m); });
-    memberBtn.addEventListener('click', () => openPicker(memberBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180,
-      load: async (q) => (q ? [] : [{ id: '', label: 'Any member', lead: icon('users'), trail: !st.member ? icon('check', 'check-mark') : null }]).concat(await memberItems(q)),
-      onPick: (it) => { st.member = it.id; drawMember(it.member || null); refilter(); } }));
+    memberBtn.addEventListener('click', () => openPicker(memberBtn, { title: 'Whose messages', placeholder: 'Search members by name', debounce: 180,
+      load: async (q) => (q ? [] : [{ id: '', label: 'Everyone', lead: icon('users'), trail: !st.member ? icon('check', 'check-mark') : null }]).concat(await memberItems(q)),
+      onPick: (it) => apply({ member: it.id }) }));
 
     const channelBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Channel' });
-    const drawChannel = () => {
-      const c = st.channel ? chan(st.channel) : null;
-      clear(channelBtn);
-      append(channelBtn, [c && c.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
-        h('span', { class: 'value' + (st.channel ? '' : ' placeholder') }, st.channel ? (c ? c.name : 'channel ' + st.channel) : 'All channels'), icon('chevron')]);
-    };
-    drawChannel();
-    channelBtn.addEventListener('click', () => openPicker(channelBtn, { title: 'Channel', placeholder: 'Search channels', load: searchChannelItems(st.channel), onPick: (it) => { st.channel = it.id; drawChannel(); refilter(); } }));
+    const c = st.channel ? chan(st.channel) : null;
+    append(channelBtn, [c && c.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
+      h('span', { class: 'value' + (st.channel ? '' : ' placeholder') }, st.channel ? (c ? c.name : 'channel ' + st.channel) : 'All channels'), icon('chevron')]);
+    channelBtn.addEventListener('click', () => openPicker(channelBtn, { title: 'Channel', placeholder: 'Search channels',
+      load: searchChannelItems(st.channel), onPick: (it) => apply({ channel: it.id }) }));
 
-    const period = segmented(SEARCH_PERIODS, st.days, 'Period', (v) => { st.days = v; refilter(); });
+    const period = segmented(SEARCH_PERIODS, st.days, 'Period', (v) => apply({ days: v }));
     period.classList.add('msg-periods');
-    const form = h('form', { class: 'card msg-search', role: 'search', onsubmit: (e) => { e.preventDefault(); go(); } },
-      h('div', { class: 'msg-search-row' },
-        h('label', { class: 'search-box big' }, icon('search'), input),
+    const source = segmented(MSG_SOURCES, st.source, 'Where to look', (v) => apply({ source: v }));
+    source.classList.add('msg-sources');
+    const coverNote = h('p', { class: 'msg-cover' });
+
+    const form = h('form', { class: 'card msg-search messages-filters', role: 'search', onsubmit: (e) => { e.preventDefault(); go(); } },
+      h('div', { class: 'msg-search-row' }, memberBtn, h('label', { class: 'search-box big' }, icon('search'), input),
         h('button', { class: 'btn primary', type: 'submit' }, 'Search')),
       tooShort,
-      h('div', { class: 'msg-search-filters' }, memberBtn, channelBtn, period));
+      h('div', { class: 'msg-search-filters' }, channelBtn, period, h('span', { class: 'grow' }), source),
+      coverNote);
     page.appendChild(form);
 
     const out = h('div', { class: 'msg-out' });
     page.appendChild(out);
-    const periodWords = () => st.days === 'all' ? 'everything the bot has stored' : st.days === '1' ? 'the last day' : 'the last ' + st.days + ' days';
 
-    if (Array.from(st.q).length < 2) {
-      out.appendChild(h('div', { class: 'card empty msg-empty' }, icon('search'), h('h3', null, 'Search what members said'),
-        h('p', null, 'Type a word or phrase and press Enter. Upper and lower case don’t matter.'),
-        h('p', { class: 'hint' }, 'Pick a member or a channel to narrow it down. Only messages the bot has stored show up.')));
-      if (!st.q) setTimeout(() => { if (input.isConnected) input.focus(); }, 0);
-      return;
-    }
-
+    // --- the list ---------------------------------------------------------------------
     let items = [], next = null, last = null, busy = false, failed = null, failedStatus = 0;
     const summary = h('div', { class: 'msg-summary', 'aria-live': 'polite' });
     const list = h('div', { class: 'msg-list' });
@@ -1563,56 +1576,103 @@
     out.appendChild(summary);
     out.appendChild(box);
 
+    const memberName = () => { const m = S.members.get(st.member); return m ? m.name : 'that member'; };
+    const channelName = () => { const x = chan(st.channel); return x ? x.name : 'that channel'; };
+    const periodWords = () => st.days === 'all' ? 'everything kept here' : st.days === '1' ? 'the last day' : 'the last ' + st.days + ' days';
+    const inPeriod = () => st.days === 'all' ? 'anything kept here' : 'anything in ' + periodWords();
     const whoWords = () => {
       const bits = [];
-      if (st.member) { const m = S.members.get(st.member); bits.push('from ' + (m ? m.name : 'that member')); }
-      if (st.channel) { const c = chan(st.channel); bits.push('in #' + (c ? c.name : 'that channel')); }
+      if (st.member) bits.push('from ' + memberName());
+      if (st.channel) bits.push('in #' + channelName());
       return bits.length ? ' ' + bits.join(' ') : '';
     };
-    const moreBtn = () => h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() }, busy ? h('span', { class: 'spinner' }) : icon('down'), items.length ? 'Load more' : 'Search further back');
+
+    /** What this store can see, said plainly, so a silence is never mistaken for proof. */
+    const drawCover = () => {
+      clear(coverNote);
+      const cov = (last && last.coverage) || {};
+      if (st.source === 'archive') {
+        append(coverNote, [icon('info'), cov.channels
+          ? h('span', null, 'The AI’s stored history: back to the bot’s first day, but only the ',
+              h('b', null, cov.channels + ' channels'), ' it is allowed to chat in. A house or staff channel was never in it.')
+          : h('span', null, 'The AI’s stored history: back to the bot’s first day, across every channel it can chat in.')]);
+        return;
+      }
+      const back = cov.oldest_ts ? 'back to ' + dayMonth(cov.oldest_ts) : 'from the day this was switched on';
+      const bits = ['Every channel the bot can see except #safe-corner, ' + back + '.'];
+      if (cov.text_days) bits.push('Kept for ' + cov.text_days + ' days.');
+      if (cov.skipped) bits.push(plural(cov.skipped, 'channel') + ' on the skip list.');
+      append(coverNote, [icon('info'), h('span', null, bits.join(' '))]);
+      if (cov.enabled === false) coverNote.appendChild(h('b', { class: 'msg-cover-off' }, ' Recording is off, so nothing new is being kept.'));
+    };
+
+    const otherSource = () => h('button', { class: 'btn sm', type: 'button', onclick: () => apply({ source: st.source === 'log' ? 'archive' : 'log' }) },
+      icon(st.source === 'log' ? 'clock' : 'hash'),
+      st.source === 'log' ? 'Look further back in the long archive' : 'Look in every channel instead');
+
+    const moreBtn = () => h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => load() },
+      busy ? h('span', { class: 'spinner' }) : icon('down'), items.length ? 'Load more' : 'Keep looking further back');
+
     const draw = () => {
       clear(summary); clear(list); clear(foot);
+      drawCover();
       box.classList.toggle('is-empty', !items.length);
       if (!items.length && busy) {
-        list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Searching…'));
+        list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading…'));
         foot.hidden = true;
         return;
       }
       if (failed && !items.length) {
-        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t search'), h('p', null, failed),
+        list.appendChild(h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t read the messages'), h('p', null, failed),
           failedStatus === 0 || failedStatus >= 500 ? h('p', { style: 'margin-top:12px' }, h('button', { class: 'btn', type: 'button', onclick: () => load() }, icon('restart'), 'Try again')) : null));
         foot.hidden = true;
         return;
       }
-      const shownQ = '“' + st.q + '”';
-      summary.appendChild(h('span', null, h('b', null, numberFmt.format(items.length) + (items.length === 1 ? ' message' : ' messages')), ' found' + (next ? ' so far' : ''), ' for ', h('b', null, shownQ), whoWords()));
+      const shownQ = st.q ? '“' + st.q + '”' : '';
+      const count = h('b', null, numberFmt.format(items.length) + (items.length === 1 ? ' message' : ' messages'));
+      summary.appendChild(st.q
+        ? h('span', null, count, ' found' + (next ? ' so far' : ''), ' for ', h('b', null, shownQ), whoWords())
+        : h('span', null, next ? 'The newest ' : 'All ', count, st.member ? ' from ' : ' across the server', st.member ? h('b', null, memberName()) : null,
+            st.channel ? ' in #' + channelName() : '', next ? '' : ', newest first'));
       if (!items.length) {
         if (next) {
-          list.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'Nothing yet back to ' + dayMonth(last.scanned_to)),
-            h('p', null, 'The search pauses after a big stretch so the bot stays quick. It can keep looking further back.')));
+          list.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'Nothing yet in what has been read'),
+            h('p', null, 'The read pauses after a long stretch so the bot stays quick. It can keep looking further back.')));
         } else {
-          list.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'No messages found'),
-            h('p', null, 'Nothing in ' + periodWords() + ' matches ' + shownQ + whoWords() + '.'),
-            h('p', { class: 'hint' }, st.days === 'all' ? 'Try fewer words or another spelling.' : 'Try fewer words, another spelling or a longer period.')));
+          list.appendChild(h('div', { class: 'empty' }, icon('search'),
+            h('h3', null, st.q ? 'No messages found' : 'Nothing kept here yet'),
+            h('p', null, st.q ? 'Nothing ' + (st.days === 'all' ? 'kept here' : 'in ' + periodWords()) + ' matches ' + shownQ + whoWords() + '.'
+              : 'There is no ' + inPeriod() + whoWords() + '.'),
+            h('p', { class: 'hint' }, st.source === 'log'
+              ? 'The long archive goes back further, but only covers the channels the bot chats in.'
+              : 'The archive only covers the channels the bot chats in. Every other channel is in the bot’s own copy.'),
+            h('p', { style: 'margin-top:12px' }, otherSource())));
         }
       }
       items.forEach((r) => list.appendChild(msgHit(r)));
-      foot.hidden = false;
+      // With nothing to show, the empty state has already said everything the foot would.
+      foot.hidden = !items.length && !next;
+      if (foot.hidden) return;
       if (failed) foot.appendChild(h('span', { class: 'msg-foot-error' }, icon('alert'), failed));
-      if (next) foot.appendChild(h('span', null, 'Searched back to ' + dayMonth(last.scanned_to)));
-      else foot.appendChild(h('span', null, st.days === 'all' ? 'Searched everything the bot has stored' : 'Searched ' + periodWords() + (last && last.scanned_to ? ', back to ' + dayMonth(last.scanned_to) : '')));
+      const reached = last && (last.scanned_to || (items.length && items[items.length - 1].ts));
+      if (next) foot.appendChild(h('span', null, reached ? 'Read back to ' + dayMonth(reached) : 'There is more below'));
+      else foot.appendChild(h('span', null, st.days === 'all' ? 'That is everything this store has' : 'That is all of ' + periodWords()));
       if (next) foot.appendChild(moreBtn());
+      else if (items.length) foot.appendChild(otherSource());
     };
+
     const load = async () => {
       if (busy) return;
       busy = true; failed = null;
       if (items.length) { const b = foot.querySelector('.btn'); if (b) { b.disabled = true; b.replaceChild(h('span', { class: 'spinner' }), b.firstChild); } } else draw();
-      const p = new URLSearchParams({ q: st.q, days: st.days });
+      const p = new URLSearchParams({ days: st.days });
+      if (st.q) p.set('q', st.q);
       if (st.member) p.set('member', st.member);
       if (st.channel) p.set('channel', st.channel);
       if (next) p.set('before', String(next));
+      const path = st.source === 'archive' ? '/messages/search?' : '/messages?';
       try {
-        const data = await api('GET', '/messages/search?' + p.toString());
+        const data = await api('GET', path + p.toString());
         if (!box.isConnected) return;
         if (data.member && data.member.name && !S.members.has(data.member.id)) S.members.set(data.member.id, { id: data.member.id, name: data.member.name });
         items = items.concat(data.results);
@@ -1627,6 +1687,19 @@
       draw();
       refreshAudit();
     };
+    // The archive can only be searched, never browsed: it needs words to start.
+    if (st.source === 'archive' && Array.from(st.q).length < 2) {
+      drawCover();
+      clear(list); clear(foot);
+      box.classList.add('is-empty');
+      foot.hidden = true;
+      list.appendChild(h('div', { class: 'empty msg-empty' }, icon('search'), h('h3', null, 'Search the long archive'),
+        h('p', null, 'The archive is searched by words, not browsed. Type a word or phrase and press Enter.'),
+        h('p', { class: 'hint' }, 'To read someone’s messages from the beginning instead, look in every channel.'),
+        h('p', { style: 'margin-top:12px' }, otherSource())));
+      setTimeout(() => { if (input.isConnected) input.focus(); }, 0);
+      return;
+    }
     load();
   }
 
@@ -1654,7 +1727,9 @@
           h('span', { class: 'msg-hit-chan', title: ch.thread ? 'A thread in #' + ch.name : null }, h('span', { class: 'glyph' }, '#'), ch.name, ch.thread ? h('small', null, '› thread') : null),
           h('time', { class: 'msg-hit-time', datetime: d.toISOString(), title: fmtFull.format(d) + ' IST' }, msgWhen(r.ts), h('small', null, ' · ' + ago(r.ts)))),
         r.reply_to ? h('p', { class: 'msg-hit-reply' }, icon('reply'), h('span', null, 'replying to ', h('b', null, '@' + (r.reply_to.author || 'someone')), r.reply_to.text ? ': “' + r.reply_to.text + '”' : '')) : null,
-        textEl, more),
+        textEl, more,
+        (r.files || []).length ? h('p', { class: 'msg-hit-files' }, icon(r.files.every((f) => f.image) ? 'image' : 'tag'),
+          r.files.map((f) => f.name).join(', ')) : null),
       h('div', { class: 'msg-hit-actions' }, r.url
         ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + name + '’s message in Discord' }, 'Open in Discord', icon('external'))
         : h('span', { class: 'hint', title: 'The bot didn’t keep this message’s id, so there’s no link.' }, 'No link')));
@@ -5354,7 +5429,7 @@
           p.joined_at ? h('span', null, icon('calendar'), 'Joined ' + fmtDate(p.joined_at * 1000)) : null,
           p.created_at ? h('span', null, icon('user'), 'Account from ' + fmtDate(p.created_at * 1000)) : null,
           p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null,
-          h('a', { class: 'open-link', href: '#/search?member=' + encodeURIComponent(p.id) }, icon('search'), 'Search their messages'),
+          h('a', { class: 'open-link', href: '#/messages?member=' + encodeURIComponent(p.id) }, icon('message'), 'Read their messages'),
           h('a', { class: 'open-link', href: '#/deleted?member=' + encodeURIComponent(p.id) }, icon('trash'), 'Deleted messages')),
         p.roles.length ? h('div', { class: 'chips role-chips' }, p.roles.map((r) => h('span', { class: 'chip role-chip' }, h('span', { class: 'role-dot', style: r.color ? 'background:' + r.color : '' }), h('span', { class: 'chip-text' }, r.name)))) : null)));
 

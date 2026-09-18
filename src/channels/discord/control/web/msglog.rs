@@ -58,8 +58,8 @@ fn read_query(panel: &Panel, q: &LogQuery) -> Result<Asked, ApiError> {
             let id = parse_id(&raw).ok_or_else(|| ApiError::bad("That isn't a channel id."))?;
             let channels = panel.data.channels();
             let name = channels.iter().find(|c| c.id == id.to_string()).map(|c| c.name.clone()).unwrap_or_default();
-            if panel.data.sensitive_channels().contains(&id) || weekly::is_safe_corner(id, &name) {
-                return Err(ApiError::bad("#safe-corner is never logged."));
+            if never_shown(panel).contains(&id) || weekly::is_safe_corner(id, &name) {
+                return Err(ApiError::bad("That channel is never logged."));
             }
             Some(id)
         }
@@ -82,6 +82,17 @@ fn read_query(panel: &Panel, q: &LogQuery) -> Result<Asked, ApiError> {
     Ok(Asked { member, channel, days_key, days, q: text, before, limit })
 }
 
+/// Channels whose messages are never shown on either page: the ones no analysis
+/// may read, and the ones the owner has taken off the log. A channel added to
+/// the skip list hides what was kept from it before it was added, too.
+pub(super) fn never_shown(panel: &Panel) -> Vec<u64> {
+    let mut out = panel.data.sensitive_channels();
+    out.extend(msglog::skip_channels());
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn matches(text: &str, q: &str) -> bool {
     search::find_ci(text, q).is_some()
 }
@@ -95,7 +106,7 @@ fn filter(panel: &Panel, a: &Asked) -> ListFilter {
         q: a.q.clone(),
         matches,
         limit: a.limit,
-        sensitive: panel.data.sensitive_channels(),
+        sensitive: never_shown(panel),
     }
 }
 
@@ -122,7 +133,7 @@ async fn log_look(panel: &Panel, user: u64, what: &str, a: &Asked) -> (Option<St
 }
 
 /// Where a row was posted, as the page shows it, unless it's somewhere never shown.
-fn channel_json(place: &Place, channels: &[ChannelInfo], sensitive: &[u64]) -> Option<Value> {
+pub(super) fn channel_json(place: &Place, channels: &[ChannelInfo], sensitive: &[u64]) -> Option<Value> {
     let listed = |id: u64| channels.iter().find(|c| c.id == id.to_string());
     let parent_name = place.parent_id.and_then(|p| listed(p).map(|c| c.name.clone()));
     if msglog::excluded(place, parent_name.as_deref(), sensitive) {
@@ -140,13 +151,13 @@ fn channel_json(place: &Place, channels: &[ChannelInfo], sensitive: &[u64]) -> O
     }))
 }
 
-async fn houses_for(panel: &Panel, ids: Vec<u64>) -> HashMap<u64, &'static super::super::super::house::House> {
+pub(super) async fn houses_for(panel: &Panel, ids: Vec<u64>) -> HashMap<u64, &'static super::super::super::house::House> {
     let ids: Vec<u64> = ids.into_iter().collect::<HashSet<_>>().into_iter().collect();
     let data = panel.data.clone();
     tokio::task::spawn_blocking(move || ids.into_iter().filter_map(|id| data.member_house(id).map(|h| (id, h))).collect()).await.unwrap_or_default()
 }
 
-fn member_json(panel: &Panel, id: u64, stored_name: &str, stored_avatar: &str) -> Value {
+pub(super) fn member_json(panel: &Panel, id: u64, stored_name: &str, stored_avatar: &str) -> Value {
     let who = panel.data.cached_member(id);
     json!({
         "id": id.to_string(),
@@ -156,11 +167,11 @@ fn member_json(panel: &Panel, id: u64, stored_name: &str, stored_avatar: &str) -
     })
 }
 
-fn house_json(h: Option<&&'static super::super::super::house::House>) -> Value {
+pub(super) fn house_json(h: Option<&&'static super::super::super::house::House>) -> Value {
     h.map(|h| json!({ "key": h.key, "name": h.name, "crest": h.crest, "colour": format!("#{:06x}", h.colour) })).unwrap_or(Value::Null)
 }
 
-fn unavailable(e: anyhow::Error) -> ApiError {
+pub(super) fn unavailable(e: anyhow::Error) -> ApiError {
     tracing::warn!("panel: the message log couldn't be read: {}", e);
     ApiError(StatusCode::SERVICE_UNAVAILABLE, "The message log can't be read right now. Try again in a moment.".into())
 }
@@ -186,7 +197,7 @@ pub async fn deleted(State(panel): State<Panel>, axum::Extension(Caller(user)): 
     let names = log_look(&panel, user, "Deleted", &asked).await;
     let page = panel.data.msglog_deleted(filter(&panel, &asked)).await.map_err(unavailable)?;
     let channels = panel.data.channels();
-    let sensitive = panel.data.sensitive_channels();
+    let sensitive = never_shown(&panel);
     let houses = houses_for(&panel, page.rows.iter().filter_map(|r| r.author_id).collect()).await;
     let guild = panel.data.guild().map(|g| g.id);
     let results: Vec<Value> = page
@@ -227,7 +238,7 @@ pub async fn edited(State(panel): State<Panel>, axum::Extension(Caller(user)): a
     let names = log_look(&panel, user, "Edited", &asked).await;
     let page = panel.data.msglog_edited(filter(&panel, &asked)).await.map_err(unavailable)?;
     let channels = panel.data.channels();
-    let sensitive = panel.data.sensitive_channels();
+    let sensitive = never_shown(&panel);
     let houses = houses_for(&panel, page.rows.iter().map(|r| r.author_id).collect()).await;
     let guild = panel.data.guild().map(|g| g.id);
     let results: Vec<Value> = page

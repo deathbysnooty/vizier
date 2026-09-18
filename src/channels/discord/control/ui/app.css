@@ -2125,6 +2125,19 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .msg-foot-error { display: inline-flex; align-items: center; gap: 6px; color: var(--danger); }
 .msg-foot-error .icon { width: 14px; height: 14px; }
 .msg-empty .hint { margin-top: 8px; }
+.msg-hit-files { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.msg-hit-files .icon { width: 13px; height: 13px; flex: none; color: var(--faint); }
+
+/* The member picker leads: it is the way into the page, not a filter on a search. */
+.messages-filters .msg-search-row { gap: 10px; flex-wrap: wrap; }
+.messages-filters .msg-search-row .picker-btn.wide { width: auto; flex: 0 1 240px; min-width: 190px; height: 46px; border-radius: 12px; }
+.messages-filters .msg-search-row .search-box { flex: 1 1 260px; }
+.messages-filters .msg-search-filters .grow { flex: 1; }
+.msg-sources button { white-space: nowrap; }
+.msg-cover { display: flex; align-items: baseline; gap: 7px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.msg-cover .icon { width: 13px; height: 13px; flex: none; color: var(--faint); transform: translateY(2px); }
+.msg-cover b { color: var(--text-2); font-weight: 600; }
+.msg-cover-off { color: var(--warn); }
 
 @media (max-width: 640px) {
   .msg-search { padding: 12px; }
@@ -2136,6 +2149,10 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .msg-hit-avatar .avatar { width: 32px; height: 32px; }
   .msg-hit-actions { grid-column: 2; justify-content: flex-start; padding-top: 0; }
   .msg-hit-time { flex-basis: 100%; }
+  .messages-filters .msg-search-row .picker-btn.wide { flex: 1 1 100%; min-width: 0; }
+  .messages-filters .msg-search-row .search-box { flex: 1 1 100%; }
+  .messages-filters .msg-search-row .btn.primary { flex: 1 1 100%; }
+  .messages-filters .msg-search-filters .grow { display: none; }
 }
 
 /* --- deleted & edited messages ---------------------------------------------------------- */
