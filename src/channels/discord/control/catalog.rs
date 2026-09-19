@@ -1272,6 +1272,92 @@ pub fn sections() -> Vec<Section> {
             commands: vec![],
         },
         Section {
+            id: "about",
+            title: "About members",
+            icon: "🪪",
+            about: "A few bullet points about a member, answered at once and at no cost: no model is asked when \
+                    someone asks. First the facts, read from the bot's own records when asked - member since, messages \
+                    this month and all time, their three main channels, the games they play most and how they do there, \
+                    house and points this month with their place in the house, frog cards, voice time this month, who \
+                    they talk with most, and a favourite emoji and phrase. Then \"what they're like\": four to six \
+                    bullets a cheap model wrote ahead of time from a sample of their own messages (never #safe-corner), \
+                    and stored. It never mentions health, religion or caste, politics, sexuality or gender, \
+                    relationships, family, where they live, study or work, or when they are online - the model is told \
+                    so and every bullet is checked again afterwards, along with anything quoted word for word or \
+                    unkind. A member can see only their own; mods and admins can look anyone up, and every such lookup \
+                    is written to the activity log. Asking in chat (@Loduchand about @someone, tell me about @someone, \
+                    who is @someone) answers in the asker's DMs. The first build starts when this is switched on and \
+                    runs once a day, within the cap, until everyone who qualifies is covered; after that a weekly run \
+                    rebuilds only members with enough new messages. Every run's model calls and tokens are logged and \
+                    shown on each member's page, where a mod can also rebuild or clear their notes.",
+            settings: vec![
+                setting(
+                    "VIZIER_NOTES",
+                    "Member notes on",
+                    "Switches on /about, the chat ask and the builds. Off: /about says it's off, the chat ask goes to \
+                     the AI as before and nothing is built. /forgetme works either way.",
+                    Kind::Toggle,
+                    "off",
+                ),
+                setting(
+                    "VIZIER_NOTES_MODEL",
+                    "Model that writes them",
+                    "A model on the bot's own provider for writing \"what they're like\" - the same cheap one Name \
+                     Place Animal Thing judges with unless changed. \"agent\" uses the bot's usual model.",
+                    Kind::Text,
+                    "google/gemini-2.5-flash-lite",
+                ),
+                setting(
+                    "VIZIER_NOTES_MIN_MESSAGES",
+                    "Least messages to write about",
+                    "Someone with fewer usable messages than this (one-word replies and bot commands don't count) is \
+                     never sent to the model; their answer says there isn't enough to go on yet.",
+                    number(20, 10_000, "messages"),
+                    "100",
+                ),
+                setting(
+                    "VIZIER_NOTES_NEW_MESSAGES",
+                    "New messages for a rebuild",
+                    "The weekly run rebuilds someone's notes only once they have written at least this many messages \
+                     since the last build.",
+                    number(1, 10_000, "messages"),
+                    "50",
+                ),
+                setting(
+                    "VIZIER_NOTES_MAX_PER_RUN",
+                    "Most builds per run",
+                    "The cap on model calls in one run, first build and weekly alike. Anyone left over waits for the \
+                     next run. 0 stops the builds without switching the rest off.",
+                    number(0, 1000, "members"),
+                    "30",
+                ),
+                setting(
+                    "VIZIER_NOTES_READ_BUDGET",
+                    "Messages read per member",
+                    "How much of a member's own writing the model reads, in tokens: about half from their newest \
+                     messages and the rest spread over their older ones. The whole call costs this plus about 550 for the instructions and 150 for the answer.",
+                    number(500, 30_000, "tokens"),
+                    "4000",
+                ),
+            ],
+            commands: vec![
+                command(
+                    "about",
+                    EVERYONE,
+                    "/about member:",
+                    "Your own notes: the facts and what you're like. Only mods and admins can name someone else, and \
+                     that lookup is logged. Only you see the answer.",
+                ),
+                command(
+                    "forgetme",
+                    EVERYONE,
+                    "/forgetme",
+                    "Deletes your notes and keeps you out of every future build. Facts already public elsewhere \
+                     (points, cards, games) can still show. Run it again, or press the button, to opt back in.",
+                ),
+            ],
+        },
+        Section {
             id: "msglog",
             title: "Message history",
             icon: "🗄️",

@@ -45,6 +45,10 @@ mod frog_store;
 mod frog_trade;
 mod house;
 mod msglog;
+mod notes;
+mod notes_build;
+mod notes_facts;
+mod notes_store;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -165,6 +169,10 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
+        }
+        // Member notes. Not opening only means /about and the builds are unavailable.
+        if let Err(err) = notes_store::open(&self.deps.config.workspace) {
+            tracing::warn!("notes: store not opened: {}", err);
         }
         // Deleted and edited messages for the panel. Not opening only means no log.
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
@@ -1564,6 +1572,8 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), notes::about_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), notes::forgetme_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
@@ -1675,6 +1685,8 @@ impl EventHandler for Handler {
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
         weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
+        // Member notes: the first build once switched on, then the weekly refresh.
+        notes::spawn(ctx.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1765,6 +1777,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("houselist:") || id.starts_with("housedraft:") {
                 house::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("notes:") {
+                notes::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
@@ -2391,6 +2407,14 @@ impl EventHandler for Handler {
             }
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
+            }
+            if command.data.name == "about" {
+                notes::about_command(&ctx, &self.1.storage, &command).await;
+                return;
+            }
+            if command.data.name == "forgetme" {
+                notes::forgetme_command(&ctx, &command).await;
+                return;
             }
             if command.data.name == "today" {
                 standings::today_command(&ctx, &command).await;
@@ -3225,6 +3249,20 @@ impl EventHandler for Handler {
                 }
             }
             return;
+        }
+
+        // "@Loduchand about @someone" (or "tell me about" / "who is") answers
+        // from the stored member notes, like the quote card: no tokens, never
+        // the model, in any channel and in admin-only mode too. Who may see
+        // whose notes is checked inside, and the notes go to the asker's DMs.
+        // A pause still stops it. Only while member notes are switched on.
+        if !is_dm && notes::enabled() && notes::chat_target(&msg.content, ctx.cache.current_user().id.get(), msg.author.id.get()).is_some() {
+            if is_paused(&self.1.storage, &agent_id).await {
+                return;
+            }
+            if notes::on_message(&ctx, &self.1.storage, &msg).await {
+                return;
+            }
         }
 
         // The quiz channel belongs to the quiz: answers are checked there, for

@@ -318,6 +318,7 @@ mod members;
 mod memos;
 mod messages;
 mod msglog;
+mod notes;
 mod posts;
 mod profiles;
 mod rules;
@@ -777,6 +778,51 @@ pub(crate) async fn ask_bot_model_with(prompt: String, model_name: Option<String
     super::super::weekly::ask_model_with(deps, agent_id, prompt, model_name).await
 }
 
+/// The bot's dependencies and agent id, once the panel has started. Member
+/// notes use them for their own model calls.
+pub(crate) fn bot_agent() -> Option<(&'static crate::dependencies::VizierDependencies, &'static str)> {
+    AGENT.get().map(|(deps, agent)| (deps, agent.as_str()))
+}
+
+/// The read-only connection to the stored chat history (vizier.db), if storage is sqlite.
+pub(crate) fn history_conn() -> Option<&'static Mutex<rusqlite::Connection>> {
+    let (deps, _) = AGENT.get()?;
+    members::history_conn(deps)
+}
+
+/// A member's own messages from the stored chat history older than
+/// `before_ms`, newest first, at most `limit`: (seconds, channel, text), never
+/// from a DM. Blocking. For member notes, which reach back past the message log.
+pub(crate) fn stored_messages(user: u64, before_ms: i64, limit: usize) -> Vec<(i64, Option<u64>, String)> {
+    let Some((deps, agent_id)) = AGENT.get() else { return Vec::new() };
+    let Some(conn) = members::history_conn(deps) else { return Vec::new() };
+    let conn = conn.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT channel, timestamp, data FROM session_history INDEXED BY idx_sh_agent_time
+         WHERE agent_id = ?1 AND timestamp < ?2 AND content_type = 'Request' AND data LIKE ?3
+         ORDER BY timestamp DESC LIMIT ?4",
+    ) else {
+        return Vec::new();
+    };
+    let pattern = format!("%(DiscordId: {})%", user);
+    stmt.query_map(rusqlite::params![agent_id, before_ms, pattern, limit as i64], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+    })
+    .map(|rows| {
+        rows.flatten()
+            .filter_map(|(channel, ts, data)| profiles::parse_message(&channel, ts, &data, user))
+            .filter(|m| !m.is_dm)
+            .map(|m| (m.ts, m.channel_id, m.text))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The gateway context, once the bot is ready.
+pub(crate) fn context() -> Option<&'static Context> {
+    CTX.get()
+}
+
 /// Starts the panel once per process and (re)registers `/panel`. Called from
 /// `ready`, which fires again on every reconnect.
 pub fn start(ctx: &Context, deps: &crate::dependencies::VizierDependencies, agent_id: &str) {
@@ -1021,6 +1067,9 @@ pub fn router(panel: Panel) -> Router {
         .route("/members/{id}/memories", get(members::memories))
         .route("/members/{id}/note", put(members::save_note).delete(members::delete_note))
         .route("/members/{id}/note/preview", get(members::preview_saved).post(members::preview_draft))
+        .route("/notes", get(notes::overview))
+        .route("/notes/{id}", get(notes::get).delete(notes::clear))
+        .route("/notes/{id}/rebuild", post(notes::rebuild))
         .route_layer(middleware::from_fn_with_state(panel.clone(), require_admin))
         .route("/login", post(login))
         .route("/logout", post(logout))
@@ -1748,6 +1797,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(left::audit_entry(e));
             } else if e.key == "automod:flags" {
                 obj.extend(automod::audit_entry(e));
+            } else if e.key.starts_with("notes:") {
+                obj.extend(notes::audit_entry(&panel, e));
             } else if e.key.starts_with("frog:") {
                 obj.extend(frogs::audit_entry(&panel, e));
             } else if e.key.starts_with("battle:now:") {

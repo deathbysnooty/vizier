@@ -285,6 +285,25 @@ pub fn rows_between(since: i64, until: i64) -> Vec<Interaction> {
     .unwrap_or_default()
 }
 
+/// The people `user` exchanges replies and mentions with most since `since`,
+/// both ways added up, most first. For member notes.
+pub fn partners(user: u64, since: i64, limit: usize) -> Vec<(u64, i64)> {
+    let Some(db) = DB.get() else { return Vec::new() };
+    let conn = db.lock();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT other, SUM(n) AS total FROM (
+             SELECT to_user AS other, COUNT(*) AS n FROM interactions WHERE from_user = ?1 AND ts >= ?2 GROUP BY to_user
+             UNION ALL
+             SELECT from_user AS other, COUNT(*) AS n FROM interactions WHERE to_user = ?1 AND ts >= ?2 GROUP BY from_user)
+         WHERE other != ?1 GROUP BY other ORDER BY total DESC, other LIMIT ?3",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map(params![user as i64, since, limit as i64], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
 /// When each pair first replied to each other, over everything recorded.
 pub fn first_replies() -> HashMap<(u64, u64), i64> {
     let Some(db) = DB.get() else { return HashMap::new() };

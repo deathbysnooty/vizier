@@ -5399,7 +5399,7 @@
 
   async function renderProfile(page, id, tab) {
     document.title = 'Member · Loduchand';
-    profileState.tab = ['overview', 'seen', 'memories', 'analysis', 'connections'].includes(tab) ? tab : 'overview';
+    profileState.tab = ['overview', 'seen', 'memories', 'analysis', 'connections', 'about'].includes(tab) ? tab : 'overview';
     page.appendChild(h('a', { class: 'back-link', href: '#/members' }, icon('left'), 'Members'));
     const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the profile…'));
     page.appendChild(holder);
@@ -5450,12 +5450,13 @@
       clear(panel);
       if (key === 'connections') profileConnections(panel, p);
       else if (key === 'analysis') profileAnalysis(panel, p, show);
+      else if (key === 'about') profileAbout(panel, p);
       else if (key === 'seen') profileSeen(panel, p);
       else if (key === 'memories') profileMemories(panel, p);
       else profileOverview(panel, p);
     };
     const tabs = h('nav', { class: 'page-tabs', 'aria-label': 'Profile sections' },
-      [['overview', 'Overview', 'overview'], ['connections', 'Connections', 'spark'], ['analysis', 'Bot’s analysis', 'flask'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
+      [['overview', 'Overview', 'overview'], ['connections', 'Connections', 'spark'], ['analysis', 'Bot’s analysis', 'flask'], ['about', '/about notes', 'user'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
         h('a', { href: '#/members/' + p.id + (key === 'overview' ? '' : '/' + key), dataset: { tab: key }, onclick: (e) => { e.preventDefault(); show(key); } }, icon(ic), label)));
     main.appendChild(tabs);
     main.appendChild(panel);
@@ -5570,6 +5571,60 @@
     });
     if (!data.memories.length) list.appendChild(h('li', { class: 'empty' }, icon('bot'), h('h3', null, 'No memories mention them'), h('p', null, 'Searched ' + plural(data.searched, 'memory', 'memories') + ' for ' + data.terms.join(', ') + '.')));
     panel.appendChild(card('pf-memories', 'What the bot remembers', plural(data.memories.length, 'memory', 'memories') + ' naming them, out of ' + numberFmt.format(data.searched) + ' · read-only', list));
+  }
+
+  // What /about says about a member, when "what they're like" was built and
+  // what it cost, who looked them up, and rebuild / clear. Opening this is
+  // itself a lookup and goes in the activity log.
+  async function profileAbout(panel, p) {
+    panel.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading their notes…'));
+    let got, all;
+    try { [got, all] = await Promise.all([api('GET', '/notes/' + p.id), api('GET', '/notes').catch(() => null)]); }
+    catch (e) { clear(panel).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
+    if (!panel.isConnected) return;
+    clear(panel);
+    const again = () => { if (panel.isConnected) { clear(panel); profileAbout(panel, p); } };
+    const tokens = (n) => numberFmt.format(n.input_tokens) + ' in + ' + numberFmt.format(n.output_tokens) + ' out';
+    if (!got.enabled) {
+      panel.appendChild(h('section', { class: 'card' }, h('div', { class: 'empty' }, icon('user'), h('h3', null, 'Member notes are off'),
+        h('p', null, 'Switch them on under Settings → About members (VIZIER_NOTES). Until then /about says they are off and nothing is built.'))));
+    }
+    if (got.preview) {
+      panel.appendChild(card('pf-about-preview', 'What /about shows', 'Exactly the private answer they (or a mod) would get · opening this is logged', h('pre', { class: 'ai-preview' }, got.preview), { pad: true }));
+    }
+    const n = got.note;
+    const rebuild = h('button', { class: 'btn primary sm', type: 'button', disabled: got.opted_out || !got.enabled }, icon('restart'), n ? 'Rebuild now' : 'Build now');
+    rebuild.addEventListener('click', async () => {
+      rebuild.disabled = true; rebuild.lastChild.textContent = 'Asking the model…';
+      try { const r = await api('POST', '/notes/' + p.id + '/rebuild'); toast('Rebuilt · ' + tokens(r.note) + ' tokens'); refreshAudit(); again(); }
+      catch (e) { toast(e.message, 'error'); rebuild.disabled = false; rebuild.lastChild.textContent = n ? 'Rebuild now' : 'Build now'; }
+    });
+    const clearBtn = n ? h('button', { class: 'btn ghost sm', type: 'button' }, icon('trash'), 'Clear') : null;
+    if (clearBtn) clearBtn.addEventListener('click', async () => {
+      const yes = await confirmDialog({ title: 'Clear ' + p.name + '’s notes?', icon: 'trash', danger: true, confirm: 'Clear notes',
+        body: '“What they’re like” is deleted now. They aren’t opted out, so a later run can build it again once they have ' + got.new_messages + ' new messages.' });
+      if (!yes) return;
+      try { await api('DELETE', '/notes/' + p.id); toast('Cleared'); refreshAudit(); again(); } catch (e) { toast(e.message, 'error'); }
+    });
+    let body;
+    if (got.opted_out) body = h('p', { class: 'hint' }, icon('shield'), ' They opted out with /forgetme: nothing is kept and no build will include them until they opt back in.');
+    else if (n) body = h('div', null,
+      h('ul', { class: 'about-bullets' }, n.bullets.map((b) => h('li', null, b))),
+      h('p', { class: 'hint' }, 'Built ' + when(n.built_ts) + ' (' + ago(n.built_ts) + ')' + (n.built_by ? ' by a mod' : ' by the scheduled run') + ' · ' + n.model +
+        ' · read ' + plural(n.messages_used, 'message') + ' · ' + tokens(n) + ' tokens' + (n.rejected ? ' · ' + plural(n.rejected, 'bullet') + ' thrown out by the filter' : '')));
+    else body = h('p', { class: 'hint' }, got.attempt ? 'Not built: ' + got.attempt.outcome + ' (' + ago(got.attempt.ts) + ').' : 'Not built yet. The first build covers members with at least ' + got.min_messages + ' messages.');
+    panel.appendChild(card('pf-about-note', 'What they’re like', 'Written by the notes model, stored, and shown with no model call', body, { pad: true, actions: h('div', { class: 'row-actions' }, rebuild, clearBtn) }));
+    const looks = got.lookups.length
+      ? h('ul', { class: 'about-lookups' }, got.lookups.map((l) => h('li', null, (l.asker_name || l.asker) + ' · ' + l.via + ' · ' + when(l.ts))))
+      : h('p', { class: 'hint' }, 'Nobody has looked them up.');
+    panel.appendChild(card('pf-about-lookups', 'Lookups by mods', 'Newest first · also in the activity log', looks, { pad: true }));
+    if (all) {
+      const runs = all.runs.length
+        ? h('ul', { class: 'about-lookups' }, all.runs.map((r) => h('li', null, when(r.ts) + ' · ' + r.kind + ' · ' + plural(r.asked, 'model call') + ', ' + r.built + ' built, ' + r.skipped + ' too little, ' + r.failed + ' failed · ' + tokens(r) + ' tokens' + (r.waiting ? ' · ' + r.waiting + ' waiting' : ''))))
+        : h('p', { class: 'hint' }, 'No runs yet.');
+      panel.appendChild(card('pf-about-runs', 'All builds', all.built + ' members have notes · ' + all.opted_out + ' opted out · spent ' + tokens(all.spent) + ' tokens · a full first build now: ' +
+        plural(all.estimate.members, 'member') + ', about ' + numberFmt.format(all.estimate.input_tokens) + ' + ' + numberFmt.format(all.estimate.output_tokens) + ' tokens', runs, { pad: true }));
+    }
   }
 
   function markTerms(text, terms) {
