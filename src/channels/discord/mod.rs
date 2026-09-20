@@ -1387,6 +1387,15 @@ impl EventHandler for Handler {
         // takes the better part of a minute, and players notice the silence.
         quiz::resume(&ctx, &self.1.storage, &self.0);
 
+        // Keeping the http client is what lets the shutdown path speak at all,
+        // so it happens on every ready, reconnects included. Saying the bot is
+        // back goes off on its own and goes off early: the games come back in
+        // their own tasks within seconds, while the commands below can take
+        // minutes, and a room told "back up" ten minutes late is worse than
+        // not being told.
+        updates::remember(ctx.http.clone());
+        tokio::spawn(async { updates::back_up().await });
+
         // Control panel: its web server (once per process) and the /panel sign-in command.
         // The agent's storage and id let the panel's Bot behaviour page edit its AI settings.
         control::web::start(&ctx, &self.1, &self.0);
@@ -1782,13 +1791,6 @@ impl EventHandler for Handler {
                 }
             }
         }
-
-        // The games are up and the commands are registered: the rooms that were
-        // told the bot was going can be told it is back. Keeping the http client
-        // here is what lets the shutdown path speak at all, so it happens on
-        // every ready, reconnects included.
-        updates::remember(ctx.http.clone());
-        updates::back_up().await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
