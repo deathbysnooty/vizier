@@ -179,16 +179,21 @@ def main() -> None:
         print("\nnothing written - pass --write")
         return
 
+    # New entries go into the same picture of the bank the merges were made in,
+    # and then every file is written once. Appending first and rewriting after
+    # truncates the appends back out again - which is exactly what happened the
+    # first time a pack landed in files that already existed.
     for where, entries in by_file.items():
         path = os.path.join(HERE, "ai", where + ".jsonl")
-        with open(path, "a", encoding="utf-8") as out:
-            for entry in entries:
-                out.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        files.setdefault(path, []).extend(entries)
         print(f"wrote {len(entries)} to ai/{where}.jsonl")
     for path, entries in files.items():
         with open(path, "w", encoding="utf-8") as out:
             for entry in entries:
                 out.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        written = sum(1 for line in open(path, encoding="utf-8") if line.strip())
+        if written != len(entries):
+            sys.exit(f"{os.path.basename(path)}: wrote {written} of {len(entries)} entries")
 
     images = os.path.join(HERE, "images")
     os.makedirs(images, exist_ok=True)

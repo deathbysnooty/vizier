@@ -808,7 +808,12 @@ pub mod tests {
     /// same list in `moviebank/tools/check_bank.py`.
     /// Already folded, because that is what they are compared against: "with"
     /// reduces to "vith", and the unfolded spelling would never match.
-    const COMMON: [&str; 10] = ["after", "another", "about", "before", "over", "under", "into", "from", "vith", "other"];
+    const COMMON: [&str; 44] = [
+        "about", "after", "also", "another", "before", "bin", "both", "could", "each", "even", "from", "have", "into",
+        "just", "like", "mani", "more", "most", "much", "once", "onli", "other", "over", "should", "some", "such",
+        "than", "that", "thei", "their", "then", "there", "these", "this", "those", "under", "veri", "vhat", "vhen",
+        "vhere", "vhich", "vhile", "vith", "vould",
+    ];
 
     #[test]
     fn a_guess_comes_down_to_the_same_string_however_it_is_typed() {
