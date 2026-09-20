@@ -1229,6 +1229,30 @@ const RETIRED_COMMANDS: &[&str] =
 /// Hides an admin command from members' / menu: only people with Manage Server
 /// see it (Server Settings → Integrations can widen it per command). The bot
 /// still checks its own admin list when the command is used.
+/// A channel one of the games owns.
+///
+/// The bot does not chat with ORDINARY members in one. Games are played by
+/// typing, and Discord counts a REPLY to a message as a mention of its author -
+/// so everyone who answered the card by replying to it was mentioning the bot,
+/// and the agent answered them. Mods are the exception: they still need to be
+/// able to talk to the bot in the room they are running.
+fn is_game_channel(channel: u64) -> bool {
+    [
+        movie::live_channel(),
+        dare::live_channel(),
+        anagram::live_channel(),
+        guess::live_channel(),
+        npat::live_channel(),
+        duel::live_channel(),
+        sudoku::live_channel(),
+        puzzle::live_channel(),
+        chess::live_channel(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|c| c == channel)
+}
+
 fn admin_command(command: CreateCommand) -> CreateCommand {
     command.default_member_permissions(serenity::all::Permissions::MANAGE_GUILD)
 }
@@ -1393,6 +1417,64 @@ impl EventHandler for Handler {
 
         let lobotomy = CreateCommand::new("lobotomy")
             .description("save checkpoint without handover (clean break)");
+
+        // The background tasks come up FIRST, before a single slash command is
+        // registered. Registering the global commands below is ~100 awaited HTTP
+        // calls, and Discord rate-limits global command creation hard: a few
+        // restarts in one day is enough to stall that run for hours. When it
+        // stalled here, `ready` never reached this point, so every game task -
+        // every card, every round, every timer - silently never started while
+        // buttons and messages carried on working, because those are event
+        // handlers and need no task. The games do not depend on the commands
+        // existing, so they must not wait on them.
+        quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
+        // Reminders made on the panel, posted on their schedules.
+        control::scheduler::spawn(ctx.clone());
+
+        // A sorting interrupted by a restart carries on from where it stopped.
+        if let Some(guild) = ctx.cache.guilds().first().copied() {
+            house::resume_draft(&ctx, guild);
+            // Anyone who stepped out before the Muggles role existed gets it.
+            house::sync_muggles(&ctx, guild);
+        }
+        // The hourly house points summary in the houses channel.
+        standings::spawn(ctx.clone());
+        // The House Cup channel: welcome, rules, and the scoreboard card kept last.
+        scoreboard::spawn(ctx.clone());
+        // Tells the common rooms when the points, limits or games change, and
+        // posts the hand-written notes about anything new.
+        announce::spawn(ctx.clone());
+        // A card in the houses channel when a different house takes the lead.
+        standings::spawn_lead_watch(ctx.clone());
+        // The daily battle royale, when switched on in the panel.
+        battle::spawn_daily(ctx.clone());
+        // Snitch drops: restores cards left live by a restart, then schedules.
+        snitch::spawn(ctx.clone());
+        // Chocolate Frogs: closes frogs a restart left open, then schedules.
+        frog::spawn(ctx.clone());
+        // Name Place Animal Thing: resumes or judges a round a restart left, then the lobby.
+        npat::spawn(ctx.clone());
+        // Sudoku: picks up the puzzle a restart left in its channel, or posts one.
+        sudoku::spawn(ctx.clone());
+        // Chess: pays and announces games a restart left, then keeps the clocks.
+        chess::spawn(ctx.clone());
+        puzzle::spawn(ctx.clone());
+        // Letter Duel: settles games a restart left, hands the clocks their
+        // time back, and keeps the one card at the bottom of its channel.
+        duel::spawn(ctx.clone());
+        // Anagrams: picks up the round a restart left in its channel, or sets one.
+        anagram::spawn(ctx.clone());
+        // Guess the Word: picks up the doodle a restart left in its channel, or draws one.
+        guess::spawn(ctx.clone());
+        // Guess the Movie: the same, with a film and one clue about it.
+        movie::spawn(ctx.clone());
+        dare::spawn(ctx.clone());
+        // Daily chat and voice points, settled from the stats tables.
+        activity::spawn(&ctx);
+        // The Sunday evening scan of the discussion channels.
+        weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
+        // Member notes: the first build once switched on, then the weekly refresh.
+        notes::spawn(ctx.clone());
 
         let thinking = CreateCommand::new("thinking").description("toggle showing thinking output");
 
@@ -1667,54 +1749,6 @@ impl EventHandler for Handler {
             )
             .add_option(house::house_option("house", "which house").required(true));
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(sort)).await;
-        quiz::spawn_weekly_news(ctx.clone(), self.1.clone(), self.0.clone());
-        // Reminders made on the panel, posted on their schedules.
-        control::scheduler::spawn(ctx.clone());
-
-        // A sorting interrupted by a restart carries on from where it stopped.
-        if let Some(guild) = ctx.cache.guilds().first().copied() {
-            house::resume_draft(&ctx, guild);
-            // Anyone who stepped out before the Muggles role existed gets it.
-            house::sync_muggles(&ctx, guild);
-        }
-        // The hourly house points summary in the houses channel.
-        standings::spawn(ctx.clone());
-        // The House Cup channel: welcome, rules, and the scoreboard card kept last.
-        scoreboard::spawn(ctx.clone());
-        // Tells the common rooms when the points, limits or games change, and
-        // posts the hand-written notes about anything new.
-        announce::spawn(ctx.clone());
-        // A card in the houses channel when a different house takes the lead.
-        standings::spawn_lead_watch(ctx.clone());
-        // The daily battle royale, when switched on in the panel.
-        battle::spawn_daily(ctx.clone());
-        // Snitch drops: restores cards left live by a restart, then schedules.
-        snitch::spawn(ctx.clone());
-        // Chocolate Frogs: closes frogs a restart left open, then schedules.
-        frog::spawn(ctx.clone());
-        // Name Place Animal Thing: resumes or judges a round a restart left, then the lobby.
-        npat::spawn(ctx.clone());
-        // Sudoku: picks up the puzzle a restart left in its channel, or posts one.
-        sudoku::spawn(ctx.clone());
-        // Chess: pays and announces games a restart left, then keeps the clocks.
-        chess::spawn(ctx.clone());
-        puzzle::spawn(ctx.clone());
-        // Letter Duel: settles games a restart left, hands the clocks their
-        // time back, and keeps the one card at the bottom of its channel.
-        duel::spawn(ctx.clone());
-        // Anagrams: picks up the round a restart left in its channel, or sets one.
-        anagram::spawn(ctx.clone());
-        // Guess the Word: picks up the doodle a restart left in its channel, or draws one.
-        guess::spawn(ctx.clone());
-        // Guess the Movie: the same, with a film and one clue about it.
-        movie::spawn(ctx.clone());
-        dare::spawn(ctx.clone());
-        // Daily chat and voice points, settled from the stats tables.
-        activity::spawn(&ctx);
-        // The Sunday evening scan of the discussion channels.
-        weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
-        // Member notes: the first build once switched on, then the weekly refresh.
-        notes::spawn(ctx.clone());
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
@@ -1781,6 +1815,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("dare") {
                 dare::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("movieready:") {
+                movie::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -3462,6 +3500,13 @@ impl EventHandler for Handler {
                 is_dm
             }
         };
+        // Answering a game's card by replying to it is not talking to the bot,
+        // however Discord counts the mention. Mods keep their reply, so the
+        // people running the room can still ask it things. See [`is_game_channel`].
+        let is_mention = is_mention
+            && (is_dm
+                || !is_game_channel(msg.channel_id.get())
+                || admin_ids().contains(&msg.author.id.get()));
         {
             let mut attachments = vec![];
             for attachment in &msg.attachments {

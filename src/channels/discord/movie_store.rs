@@ -41,10 +41,33 @@ pub const SCHEMA: &str = "
         seconds INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, round_id));
     CREATE INDEX IF NOT EXISTS solves_day ON solves (day);
-    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL DEFAULT 'break',
+        films INTEGER NOT NULL, played INTEGER NOT NULL DEFAULT 0,
+        opened_ts INTEGER NOT NULL, ready_from INTEGER NOT NULL,
+        started_ts INTEGER, ended_ts INTEGER, channel_id INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS matches_status ON matches (status);
+    CREATE TABLE IF NOT EXISTS ready (
+        match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+        PRIMARY KEY (match_id, user_id));
+    CREATE TABLE IF NOT EXISTS prizes (
+        match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, place INTEGER NOT NULL,
+        films INTEGER NOT NULL, points INTEGER NOT NULL, granted INTEGER NOT NULL, ts INTEGER NOT NULL,
+        PRIMARY KEY (match_id, user_id));";
+
+/// `rounds.match_id` arrived with matches, so a database written before them
+/// has to grow the column. SQLite has no `ADD COLUMN IF NOT EXISTS`, and the
+/// error for a column already there is the normal case on every run after the
+/// first - so it is swallowed rather than reported.
+fn migrate(conn: &Connection) {
+    let _ = conn.execute("ALTER TABLE rounds ADD COLUMN match_id INTEGER", []);
+}
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn);
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -400,6 +423,161 @@ pub fn solved_by(conn: &Connection, round: i64, user: u64) -> bool {
         .ok()
         .flatten()
         .is_some()
+}
+
+// --- matches ------------------------------------------------------------------------------
+
+/// Where a match has got to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchStatus {
+    /// Between matches: the ready list fills and the break runs down.
+    Break,
+    Playing,
+    Done,
+}
+
+impl MatchStatus {
+    pub fn key(self) -> &'static str {
+        match self {
+            MatchStatus::Break => "break",
+            MatchStatus::Playing => "playing",
+            MatchStatus::Done => "done",
+        }
+    }
+
+    pub fn from_key(key: &str) -> MatchStatus {
+        match key {
+            "break" => MatchStatus::Break,
+            "playing" => MatchStatus::Playing,
+            _ => MatchStatus::Done,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Match {
+    pub id: i64,
+    pub status: MatchStatus,
+    /// How many films this match runs before it is scored.
+    pub films: i64,
+    pub played: i64,
+    pub opened_ts: i64,
+    /// The earliest it may start, however many people are ready.
+    pub ready_from: i64,
+    pub started_ts: Option<i64>,
+    pub ended_ts: Option<i64>,
+    pub channel: u64,
+}
+
+const MATCH_COLUMNS: &str = "id, status, films, played, opened_ts, ready_from, started_ts, ended_ts, channel_id";
+
+fn read_match(row: &rusqlite::Row) -> rusqlite::Result<Match> {
+    let status: String = row.get(1)?;
+    Ok(Match {
+        id: row.get(0)?,
+        status: MatchStatus::from_key(&status),
+        films: row.get(2)?,
+        played: row.get(3)?,
+        opened_ts: row.get(4)?,
+        ready_from: row.get(5)?,
+        started_ts: row.get(6)?,
+        ended_ts: row.get(7)?,
+        channel: row.get::<_, i64>(8)? as u64,
+    })
+}
+
+/// Opens the break before a match: nobody ready, nothing starting before
+/// `ready_from`.
+pub fn open_match(conn: &Connection, films: i64, channel: u64, now: i64, ready_from: i64) -> rusqlite::Result<Match> {
+    conn.execute(
+        "INSERT INTO matches (status, films, opened_ts, ready_from, channel_id) VALUES ('break', ?1, ?2, ?3, ?4)",
+        params![films, now, ready_from, channel as i64],
+    )?;
+    get_match(conn, conn.last_insert_rowid()).ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn get_match(conn: &Connection, id: i64) -> Option<Match> {
+    conn.query_row(&format!("SELECT {} FROM matches WHERE id = ?1", MATCH_COLUMNS), params![id], read_match).optional().ok().flatten()
+}
+
+/// The match the channel is on, breaking or playing.
+pub fn live_match(conn: &Connection) -> Option<Match> {
+    conn.query_row(
+        &format!("SELECT {} FROM matches WHERE status IN ('break', 'playing') ORDER BY id DESC LIMIT 1", MATCH_COLUMNS),
+        [],
+        read_match,
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Says somebody is ready. `false` means they already were.
+pub fn mark_ready(conn: &Connection, match_id: i64, user: u64, now: i64) -> rusqlite::Result<bool> {
+    conn.execute("INSERT OR IGNORE INTO ready (match_id, user_id, ts) VALUES (?1, ?2, ?3)", params![match_id, user as i64, now])
+        .map(|n| n > 0)
+}
+
+pub fn unready(conn: &Connection, match_id: i64, user: u64) -> rusqlite::Result<bool> {
+    conn.execute("DELETE FROM ready WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64]).map(|n| n > 0)
+}
+
+pub fn is_ready(conn: &Connection, match_id: i64, user: u64) -> bool {
+    conn.query_row("SELECT 1 FROM ready WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+pub fn ready_list(conn: &Connection, match_id: i64) -> Vec<u64> {
+    let Ok(mut stmt) = conn.prepare("SELECT user_id FROM ready WHERE match_id = ?1 ORDER BY ts") else { return Vec::new() };
+    let Ok(rows) = stmt.query_map(params![match_id], |r| r.get::<_, i64>(0)) else { return Vec::new() };
+    rows.filter_map(Result::ok).map(|v| v as u64).collect()
+}
+
+/// Break to playing. Only a break can start, so two ticks cannot start it twice.
+pub fn start_match(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<bool> {
+    conn.execute("UPDATE matches SET status = 'playing', started_ts = ?2 WHERE id = ?1 AND status = 'break'", params![id, now])
+        .map(|n| n > 0)
+}
+
+/// Ties a round to its match and counts it against the total.
+pub fn claim_round(conn: &Connection, match_id: i64, round: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE rounds SET match_id = ?2 WHERE id = ?1", params![round, match_id])?;
+    conn.execute("UPDATE matches SET played = played + 1 WHERE id = ?1", params![match_id]).map(|_| ())
+}
+
+pub fn end_match(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<bool> {
+    conn.execute("UPDATE matches SET status = 'done', ended_ts = ?2 WHERE id = ?1 AND status = 'playing'", params![id, now])
+        .map(|n| n > 0)
+}
+
+/// How many films each person named in a match, best first. Ties are broken by
+/// who got there first, so the order is always the same one the card showed.
+pub fn match_scores(conn: &Connection, match_id: i64) -> Vec<(u64, i64)> {
+    let sql = "SELECT winner, COUNT(*) AS films FROM rounds \
+               WHERE match_id = ?1 AND status = 'solved' AND winner IS NOT NULL \
+               GROUP BY winner ORDER BY films DESC, MIN(solved_ts) ASC";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let Ok(rows) = stmt.query_map(params![match_id], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?))) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+/// Writes down what a match paid. The primary key IS the dedupe: a match can
+/// only ever pay one person once, however often the scoring is retried.
+pub fn add_prize(conn: &Connection, match_id: i64, user: u64, place: i64, films: i64, points: i64, granted: i64, now: i64) -> rusqlite::Result<bool> {
+    conn.execute(
+        "INSERT OR IGNORE INTO prizes (match_id, user_id, place, films, points, granted, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![match_id, user as i64, place, films, points, granted, now],
+    )
+    .map(|n| n > 0)
+}
+
+pub fn prizes_paid(conn: &Connection, match_id: i64) -> bool {
+    conn.query_row("SELECT 1 FROM prizes WHERE match_id = ?1", params![match_id], |_| Ok(())).optional().ok().flatten().is_some()
 }
 
 #[cfg(test)]

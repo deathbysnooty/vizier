@@ -167,7 +167,7 @@ impl Source {
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
             Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
-            Source::Movie => day(super::control::number("VIZIER_CAP_MOVIE", 10)),
+            Source::Movie => day(super::control::number("VIZIER_CAP_MOVIE", 15)),
             Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
             // Nought by default: the puzzle ships paying NO house points at all.
             // An engine solves any of them instantly, so the owner turns this on

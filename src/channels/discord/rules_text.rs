@@ -122,6 +122,13 @@ pub struct MovieRules {
     pub no_repeat_days: i64,
     /// How many tags a tags round puts on the card.
     pub tags_shown: i64,
+    /// How many films one match runs, and what it takes to start one.
+    pub match_films: i64,
+    pub min_players: usize,
+    pub break_minutes: i64,
+    /// The match prize. A film on its own pays no house points at all.
+    pub win_points: i64,
+    pub second_points: i64,
     /// Films in the bank, and stills among them, when there is one.
     pub films: Option<usize>,
     pub stills: Option<usize>,
@@ -1443,8 +1450,14 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t.push_str("• `!skip` moves on to a new film, but only once a hint has been used. It pays nobody.\n");
     t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one film.\n\n", plural(m.idle_minutes, "minute", "minutes")));
 
+    t.push_str("**🎮 Matches**\n");
+    t.push_str(&format!("• The game runs in matches of **{} films**. Whoever names the most films wins the match.\n", m.match_films));
+    t.push_str(&format!("• Between matches there's a break of about **{}**. Press **🎬 I'm ready** on the card; it starts once **{}** are ready and the break is up.\n", plural(m.break_minutes, "minute", "minutes"), m.min_players));
+    t.push_str("• You can join a match that's already running — naming a film IS joining, no button needed.\n\n");
+
     t.push_str("**🏠 House points**\n");
-    t.push_str(&format!("• **{}** for naming the film first.\n", plural(m.points, "house point", "house points")));
+    t.push_str(&format!("• **{}** to the winner of a match, **{}** to the runner-up. A film on its own pays no house points.\n", plural(m.win_points, "house point", "house points"), plural(m.second_points, "house point", "house points")));
+    t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
     t.push_str(&format!("• {}\n", match m.cap {
         Some(n) => format!("Up to **{}** a day from films.", plural(n, "house point", "house points")),
         None => "No daily limit from films.".to_string(),
@@ -1631,6 +1644,11 @@ pub(crate) mod tests {
             idle_minutes: 20,
             no_repeat_days: 30,
             tags_shown: 5,
+            match_films: 10,
+            min_players: 2,
+            break_minutes: 2,
+            win_points: 5,
+            second_points: 2,
             films: Some(20),
             stills: Some(49),
         }

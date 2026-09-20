@@ -35,9 +35,9 @@ use std::time::Duration;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serenity::all::{
-    ChannelId, CommandInteraction, Context, CreateAllowedMentions, CreateAttachment, CreateCommand, CreateEmbed, CreateEmbedFooter,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditAttachments, EditMessage, GetMessages, Message, MessageId,
-    ReactionType,
+    ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateAttachment,
+    CreateButton, CreateCommand, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    EditAttachments, EditMessage, GetMessages, Message, MessageId, ReactionType,
 };
 
 use super::control;
@@ -60,6 +60,9 @@ const COLOUR: u32 = 0xC0392B;
 pub const HOME_CHANNEL: u64 = 1_551_044_377_374_101_594;
 
 /// What someone types to ask for a sharper tag, or to pass on a round.
+/// The button that says somebody wants to play the next match.
+pub const READY_ID: &str = "movieready:";
+
 pub const HINT_WORD: &str = "!hint";
 pub const SKIP_WORD: &str = "!skip";
 
@@ -89,9 +92,35 @@ pub fn live_channel() -> Option<u64> {
     channel_setting().filter(|_| switched_on() && bank::bank().is_some())
 }
 
-/// What naming a film pays.
+/// What naming a film is worth in MOVIE points. House points are not paid per
+/// film any more - they are the match prize, see [`win_points`].
 pub fn round_points() -> i64 {
     control::number("VIZIER_POINTS_MOVIE", 3).min(100) as i64
+}
+
+/// How many films one match runs before it is scored.
+pub fn match_films() -> i64 {
+    control::number("VIZIER_MOVIE_MATCH_FILMS", 10).clamp(1, 200) as i64
+}
+
+/// The fewest people who must press Ready before a match may start.
+pub fn min_players() -> usize {
+    control::number("VIZIER_MOVIE_MIN_PLAYERS", 2).clamp(1, 20) as usize
+}
+
+/// The rest between matches. Nothing starts before it is up, however many are
+/// ready - the break is there so people can arrive, not just so they can skip it.
+pub fn break_minutes() -> i64 {
+    control::number("VIZIER_MOVIE_BREAK_MINUTES", 2).clamp(0, 240) as i64
+}
+
+/// The match prize: house points for first and second.
+pub fn win_points() -> i64 {
+    control::number("VIZIER_POINTS_MOVIE_WIN", 5).min(100) as i64
+}
+
+pub fn second_points() -> i64 {
+    control::number("VIZIER_POINTS_MOVIE_SECOND", 2).min(100) as i64
 }
 
 /// How long a round may sit untouched before the bot moves on by itself.
@@ -146,6 +175,11 @@ pub fn movie_rules() -> MovieRules {
         idle_minutes: idle_minutes(),
         no_repeat_days: no_repeat_days(),
         tags_shown: tags_shown(),
+        match_films: match_films(),
+        min_players: min_players(),
+        break_minutes: break_minutes(),
+        win_points: win_points(),
+        second_points: second_points(),
         films: bank::bank().map(Bank::count),
         stills: bank::bank().map(Bank::shot_count),
     }
@@ -475,6 +509,106 @@ pub fn stale(posted_ts: i64, now: i64, idle_minutes: i64) -> bool {
     now - posted_ts >= idle_minutes.max(1) * 60
 }
 
+// --- matches --------------------------------------------------------------------------------
+
+/// What a match pays each place. First is [`win_points`], second
+/// [`second_points`], and everyone else nothing.
+///
+/// A TIE FOR FIRST pays every tied player the winner's share and skips second
+/// altogether: splitting it would make a draw worth less than a win for no
+/// reason anybody could see, and paying second to a third player behind two
+/// joint winners reads as a mistake. A tie for SECOND pays them all the
+/// runner-up share, for the same reason.
+pub fn prize_table(scores: &[(u64, i64)], win: i64, second: i64) -> Vec<(u64, i64, i64)> {
+    let Some((_, top)) = scores.first().copied() else { return Vec::new() };
+    if top <= 0 {
+        return Vec::new();
+    }
+    let winners: Vec<u64> = scores.iter().filter(|(_, n)| *n == top).map(|(u, _)| *u).collect();
+    let mut out: Vec<(u64, i64, i64)> = winners.iter().map(|u| (*u, 1, win)).collect();
+    // Joint winners take the second place with them: paying a runner-up behind
+    // two people who both came first reads as a mistake to everyone looking at
+    // it. One winner, and the next score down is second - however many hold it.
+    if winners.len() == 1 {
+        if let Some((_, runner)) = scores.iter().find(|(_, n)| *n < top).copied() {
+            if runner > 0 && second > 0 {
+                out.extend(scores.iter().filter(|(_, n)| *n == runner).map(|(u, _)| (*u, 2, second)));
+            }
+        }
+    }
+    out
+}
+
+/// Whether a match may start: enough people ready AND the break served out.
+pub fn may_start(ready: usize, min: usize, now: i64, ready_from: i64) -> bool {
+    ready >= min.max(1) && now >= ready_from
+}
+
+fn plural_u(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", n, if n == 1 { one } else { many })
+}
+
+/// The card between matches.
+pub fn break_text(ready: &[u64], min: usize, films: i64, now: i64, ready_from: i64, last: Option<&MatchResult>) -> String {
+    let mut text = String::from("# 🎬 Guess the Movie\n");
+    if let Some(last) = last {
+        text.push_str(&format!("{}\n", result_line(last)));
+    }
+    text.push_str(&format!("Next match: **{} films**. Press **I'm ready** to play.\n", films));
+    if ready.is_empty() {
+        text.push_str(&format!("Nobody's ready yet — **{}** needed to start.\n", min));
+    } else {
+        let names = ready.iter().map(|id| format!("<@{}>", id)).collect::<Vec<_>>().join(" · ");
+        text.push_str(&format!("**Ready:** {}\n", names));
+        if ready.len() < min {
+            text.push_str(&format!("{} more and it can start.\n", min - ready.len()));
+        }
+    }
+    let left = ready_from - now;
+    if left > 0 {
+        text.push_str(&format!("Starting in **{}**", if left < 60 { format!("{}s", left) } else { format!("{} min", left.div_euclid(60) + 1) }));
+        if ready.len() < min {
+            text.push_str(&format!(" at the earliest, once {} are ready", min));
+        }
+        text.push('\n');
+    } else if ready.len() >= min {
+        text.push_str("Starting now…\n");
+    }
+    text.push_str(&format!("-# 🥇 **{}** house points · 🥈 **{}** · you can join a match already running", win_points(), second_points()));
+    text
+}
+
+/// A match's final table, for the line that ends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchResult {
+    pub id: i64,
+    pub films: i64,
+    /// (who, films named, place, house points the ledger actually paid).
+    pub places: Vec<(u64, i64, i64, i64)>,
+}
+
+pub fn result_line(r: &MatchResult) -> String {
+    if r.places.is_empty() {
+        return format!("🎬 Match #{} ended with nobody on the board.", r.id);
+    }
+    let mut parts = Vec::new();
+    for (who, films, place, paid) in &r.places {
+        let medal = if *place == 1 { "🥇" } else { "🥈" };
+        let pts = if *paid > 0 { format!("+{}", paid) } else { "+0".to_string() };
+        parts.push(format!("{} <@{}> **{}** ({} {})", medal, who, pts, films, if *films == 1 { "film" } else { "films" }));
+    }
+    format!("🎬 **Match #{} done** — {}", r.id, parts.join(" · "))
+}
+
+pub fn scoreboard_line(scores: &[(u64, i64)], played: i64, films: i64) -> String {
+    let mut text = format!("-# match {}/{}", played, films);
+    for (i, (who, n)) in scores.iter().take(3).enumerate() {
+        let medal = ["🥇", "🥈", "🥉"][i];
+        text.push_str(&format!(" · {} <@{}> {}", medal, who, n));
+    }
+    text
+}
+
 // --- shared state ----------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -498,6 +632,11 @@ struct Shared {
     /// When the bot last answered a `!hint` that was already out, or a `!skip`
     /// that was too soon.
     last_nag_ms: i64,
+    /// The break card as it was last drawn, so a countdown that has not changed
+    /// in words does not cost an edit every second.
+    break_shown: String,
+    /// The match just scored, shown on the break card that follows it.
+    last_result: Option<MatchResult>,
 }
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(|| Mutex::new(Shared::default()));
@@ -631,6 +770,35 @@ fn take_nag() -> bool {
     }
     s.last_nag_ms = now;
     true
+}
+
+fn with_db<T>(f: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+    store::db().map(|db| f(&db.lock()))
+}
+
+/// The match the channel is in, opening a fresh break when there is none.
+fn match_now(channel: u64, now: i64) -> Option<store::Match> {
+    let live = with_db(store::live_match).flatten();
+    match live {
+        Some(m) if m.channel == channel => Some(m),
+        // The game moved channels: the old match is abandoned rather than
+        // carried into a room it was not played in.
+        Some(stale) => {
+            let _ = with_db(|c| store::end_match(c, stale.id, now));
+            None
+        }
+        None => None,
+    }
+    .or_else(|| {
+        let from = now + break_minutes() * 60;
+        let m = with_db(|c| store::open_match(c, match_films(), channel, now, from))?.ok()?;
+        tracing::info!("movie: match {} open - {} films, break until {}", m.id, m.films, from);
+        Some(m)
+    })
+}
+
+fn ready_now(match_id: i64) -> Vec<u64> {
+    with_db(|c| store::ready_list(c, match_id)).unwrap_or_default()
 }
 
 fn live_row() -> Option<store::Row> {
@@ -885,7 +1053,7 @@ pub fn card_to_drop(current: Option<(u64, u64)>, ended: Option<u64>) -> Option<(
 }
 
 /// Sets a fresh round and puts its card up.
-async fn post_round(ctx: &Context, channel: u64) -> Option<store::Row> {
+async fn post_round(ctx: &Context, channel: u64, match_id: i64) -> Option<store::Row> {
     let bank = bank::bank()?;
     let now = Utc::now().timestamp();
     let db = store::db()?;
@@ -907,6 +1075,9 @@ async fn post_round(ctx: &Context, channel: u64) -> Option<store::Row> {
             }
         }
     };
+    // The round belongs to the match before its card goes up, so a crash
+    // between the two can never leave a film nobody's score counts.
+    let _ = with_db(|c| store::claim_round(c, match_id, row.id));
     let posted = place_card(ctx, channel, card_message(&row, now).await, false, false).await?;
     if let Some(db) = store::db() {
         let _ = store::set_message(&db.lock(), row.id, posted);
@@ -989,6 +1160,144 @@ async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64) -> (
             (CardAction::Bump, posted)
         }
     }
+}
+
+// --- the ready button -------------------------------------------------------------------------
+
+async fn whisper(ctx: &Context, component: &ComponentInteraction, text: impl Into<String>) {
+    let message =
+        CreateInteractionResponseMessage::new().content(text.into()).ephemeral(true).allowed_mentions(CreateAllowedMentions::new());
+    if let Err(err) = component.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await {
+        tracing::debug!("movie: reply to {} not sent: {}", component.user.id, err);
+    }
+}
+
+/// `🎬 I'm ready`. Pressing it again takes the name off, so somebody who has to
+/// go is not holding a match up.
+pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
+    let Some(match_id) = component.data.custom_id.strip_prefix(READY_ID).and_then(|v| v.parse::<i64>().ok()) else {
+        return;
+    };
+    let user = component.user.id.get();
+    let now = Utc::now().timestamp();
+    let Some(m) = with_db(|c| store::get_match(c, match_id)).flatten() else {
+        return whisper(ctx, component, "That match has moved on.").await;
+    };
+    if m.status != store::MatchStatus::Break {
+        // Joining late needs no button: naming a film is joining.
+        return whisper(ctx, component, "That match is already running — just type a title, you're in.").await;
+    }
+    let held = with_db(|c| store::is_ready(c, match_id, user)).unwrap_or(false);
+    let text = if held {
+        let _ = with_db(|c| store::unready(c, match_id, user));
+        "Taken off the list.".to_string()
+    } else {
+        let _ = with_db(|c| store::mark_ready(c, match_id, user, now));
+        let waiting = ready_now(match_id).len();
+        let min = min_players();
+        match waiting >= min {
+            true => "🎬 You're in — it starts as soon as the break is up.".to_string(),
+            false => format!("🎬 You're in. {} more to start.", min - waiting),
+        }
+    };
+    SHARED.lock().break_shown.clear();
+    whisper(ctx, component, text).await;
+}
+
+// --- the break, and scoring a match -----------------------------------------------------------
+
+fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
+    let embed = CreateEmbed::new()
+        .description(break_text(ready, min_players(), m.films, now, m.ready_from, last))
+        .colour(COLOUR)
+        .footer(CreateEmbedFooter::new("Press I'm ready · a match is 10 films · /moviehelp"));
+    CreateMessage::new()
+        .embed(embed)
+        .components(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
+        ])])
+        .allowed_mentions(CreateAllowedMentions::new())
+}
+
+/// Keeps the break card up. It is only redrawn when its WORDS change, so a
+/// countdown that still reads "2 min" costs nothing.
+async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
+    let ready = ready_now(m.id);
+    let last = SHARED.lock().last_result.clone();
+    let text = break_text(&ready, min_players(), m.films, now, m.ready_from, last.as_ref());
+    let (card, shown) = {
+        let s = SHARED.lock();
+        (s.card, s.break_shown.clone())
+    };
+    let right = card.map(|(c, _)| c) == Some(channel);
+    if card.is_some() && right && shown == text && !SHARED.lock().card_gone {
+        return;
+    }
+    let message = break_message(m, &ready, last.as_ref(), now);
+    if card.is_some() && right && !SHARED.lock().card_gone {
+        if let Some((c, id)) = card {
+            let edit = EditMessage::new()
+                .embed(
+                    CreateEmbed::new()
+                        .description(text.clone())
+                        .colour(COLOUR)
+                        .footer(CreateEmbedFooter::new("Press I'm ready · a match is 10 films · /moviehelp")),
+                )
+                .components(vec![CreateActionRow::Buttons(vec![
+                    CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
+                ])])
+                .allowed_mentions(CreateAllowedMentions::new());
+            match call(ChannelId::new(c).edit_message(&ctx.http, MessageId::new(id), edit)).await {
+                Ok(_) => {
+                    SHARED.lock().break_shown = text;
+                    return;
+                }
+                Err(err) => {
+                    if is_gone(&err) {
+                        SHARED.lock().card_gone = true;
+                    }
+                }
+            }
+        }
+    }
+    if place_card(ctx, channel, message, true, false).await.is_some() {
+        SHARED.lock().break_shown = text;
+    }
+}
+
+/// Scores a finished match and pays the prizes. Every payment carries a dedupe
+/// key naming the match and the person, and the `prizes` row is written whether
+/// the ledger paid or refused, so a retry can never pay twice.
+async fn finish_match(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
+    if !with_db(|c| store::end_match(c, m.id, now)).and_then(Result::ok).unwrap_or(false) {
+        return;
+    }
+    let scores = with_db(|c| store::match_scores(c, m.id)).unwrap_or_default();
+    let mut places = Vec::new();
+    for (user, place, points) in prize_table(&scores, win_points(), second_points()) {
+        let films = scores.iter().find(|(u, _)| *u == user).map(|(_, n)| *n).unwrap_or(0);
+        let paid = if may_play(user) {
+            let reason = format!("Guess the Movie: match {}, place {}", m.id, place);
+            let key = format!("{}match:{}:{}", LEDGER_KEY, m.id, user);
+            match super::house::award_person(user, Source::Movie, points, &reason, None, Some(key), None) {
+                Some((_, Outcome::Granted(n))) => n,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        let _ = with_db(|c| store::add_prize(c, m.id, user, place, films, points, paid, now));
+        places.push((user, films, place, paid));
+    }
+    let result = MatchResult { id: m.id, films: m.films, places };
+    tracing::info!("movie: match {} scored - {:?}", m.id, result.places);
+    say(ctx, channel, result_line(&result)).await;
+    {
+        let mut sh = SHARED.lock();
+        sh.last_result = Some(result);
+        sh.break_shown.clear();
+    }
+    drop_card(ctx).await;
 }
 
 // --- the task --------------------------------------------------------------------------------------
@@ -1074,6 +1383,33 @@ async fn run(ctx: Context) {
             continue;
         };
 
+        // The match is the frame every round sits in: no match, no films. A
+        // break is not a pause in a match - it IS the match, before it starts.
+        let Some(m) = match_now(channel, now) else { continue };
+        if m.status == store::MatchStatus::Break {
+            if live.is_some() {
+                drop_card(&ctx).await;
+                live = None;
+            }
+            let ready = ready_now(m.id);
+            if may_start(ready.len(), min_players(), now, m.ready_from) {
+                if with_db(|c| store::start_match(c, m.id, now)).and_then(Result::ok).unwrap_or(false) {
+                    tracing::info!("movie: match {} started - {} films, {} ready", m.id, m.films, ready.len());
+                    SHARED.lock().break_shown.clear();
+                    drop_card(&ctx).await;
+                }
+                continue;
+            }
+            tend_break_card(&ctx, channel, &m, now).await;
+            continue;
+        }
+        // The last film of the match has been settled: score it and open the
+        // next break.
+        if m.played >= m.films && live.is_none() {
+            finish_match(&ctx, channel, &m, now).await;
+            continue;
+        }
+
         // A mod pressed on: the round is closed here, and told about below like
         // any other ending.
         let mut ending = ended;
@@ -1148,7 +1484,8 @@ async fn run(ctx: Context) {
                     drop(s);
                     Some(row)
                 }
-                None => post_round(&ctx, channel).await,
+                None if m.played < m.films => post_round(&ctx, channel, m.id).await,
+                None => None,
             };
         }
         let Some(row) = live.clone() else { continue };
@@ -1230,15 +1567,11 @@ async fn guessed(ctx: &Context, msg: &Message, row: &store::Row, guess: &str) {
     }
     let seconds = now - row.posted_ts;
     let worth = worth_after_hint(row.points, row.hinted());
-    let granted = if may_play(user) {
-        let reason = format!("Guess the Movie: round {} ({})", row.id, row.title);
-        match super::house::award_person(user, Source::Movie, worth, &reason, None, Some(format!("{}{}", LEDGER_KEY, row.id)), None) {
-            Some((_, Outcome::Granted(n))) => n,
-            _ => 0,
-        }
-    } else {
-        0
-    };
+    // A film pays NO house points on its own any more. House points are the
+    // match prize - see `finish_match` - so twenty films cannot out-pay winning
+    // the thing, and the daily limit means what it says. Movie points are
+    // unchanged: per film, uncapped, everyone.
+    let granted = 0;
     // What the round was worth goes down for EVERY winner, cap or no cap, house
     // or no house: the house points are the ledger's business, the movie points
     // are the game's.
@@ -1461,6 +1794,75 @@ pub fn recent_rounds(limit: usize) -> Vec<store::Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_match_pays_first_and_second_and_nobody_else() {
+        let scores = vec![(7, 5), (8, 3), (9, 1)];
+        assert_eq!(prize_table(&scores, 5, 2), vec![(7, 1, 5), (8, 2, 2)]);
+    }
+
+    /// A tie for first pays BOTH the winner's share and skips second: splitting
+    /// it would make a draw worth less than a win for no visible reason.
+    #[test]
+    fn a_tie_for_first_pays_both_and_skips_second() {
+        let scores = vec![(7, 4), (8, 4), (9, 2)];
+        assert_eq!(prize_table(&scores, 5, 2), vec![(7, 1, 5), (8, 1, 5)]);
+    }
+
+    #[test]
+    fn a_tie_for_second_pays_them_all() {
+        let scores = vec![(7, 6), (8, 2), (9, 2)];
+        assert_eq!(prize_table(&scores, 5, 2), vec![(7, 1, 5), (8, 2, 2), (9, 2, 2)]);
+    }
+
+    /// Nobody named anything, or only one person played: no prize is invented.
+    #[test]
+    fn an_empty_match_pays_nothing() {
+        assert!(prize_table(&[], 5, 2).is_empty());
+        assert!(prize_table(&[(7, 0)], 5, 2).is_empty());
+        assert_eq!(prize_table(&[(7, 3)], 5, 2), vec![(7, 1, 5)], "one player still wins what they won");
+    }
+
+    /// Both conditions, never one: a full lobby still serves the break out, and
+    /// a served-out break still waits for people.
+    #[test]
+    fn a_match_needs_the_people_and_the_clock() {
+        assert!(!may_start(1, 2, 100, 50), "not enough people");
+        assert!(!may_start(2, 2, 40, 50), "break not served");
+        assert!(may_start(2, 2, 50, 50), "both met, on the second");
+        assert!(may_start(9, 2, 999, 50));
+        assert!(may_start(1, 0, 100, 50), "a nonsense minimum still starts");
+    }
+
+    #[test]
+    fn the_break_card_says_what_is_missing() {
+        assert!(break_text(&[], 2, 10, 0, 0, None).contains("Nobody's ready"));
+        assert!(break_text(&[7], 2, 10, 0, 0, None).contains("1 more"));
+        assert!(break_text(&[7, 8], 2, 10, 0, 0, None).contains("Starting now"));
+        assert!(break_text(&[7, 8], 2, 10, 0, 90, None).contains("2 min"));
+        assert!(break_text(&[7, 8], 2, 10, 0, 30, None).contains("30s"));
+        assert!(break_text(&[], 2, 10, 0, 0, None).contains("10 films"));
+    }
+
+    #[test]
+    fn the_result_line_names_the_places() {
+        let r = MatchResult { id: 4, films: 10, places: vec![(7, 6, 1, 5), (8, 3, 2, 2)] };
+        let line = result_line(&r);
+        assert!(line.contains("Match #4"));
+        assert!(line.contains("🥇 <@7> **+5** (6 films)"));
+        assert!(line.contains("🥈 <@8> **+2** (3 films)"));
+        // A capped-out winner still won; the line says +0 rather than lying.
+        assert!(result_line(&MatchResult { id: 5, films: 10, places: vec![(7, 6, 1, 0)] }).contains("**+0**"));
+        assert!(result_line(&MatchResult { id: 6, films: 10, places: vec![] }).contains("nobody on the board"));
+    }
+
+    #[test]
+    fn the_scoreboard_shows_the_top_three() {
+        let line = scoreboard_line(&[(7, 4), (8, 2), (9, 1), (10, 1)], 7, 10);
+        assert!(line.contains("match 7/10"));
+        assert!(line.contains("🥇 <@7> 4") && line.contains("🥉 <@9> 1"));
+        assert!(!line.contains("<@10>"), "only three fit");
+    }
     use crate::channels::discord::movie_bank::tests::fixture;
     use crate::channels::discord::movie_store::tests::{memory, put};
 
