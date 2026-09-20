@@ -625,7 +625,7 @@ pub const NEWS: &[News] = &[News {
            still here to play — it just doesn't decide the House Cup any more.",
 }, News {
     id: "guess-the-movie-matches-2026-09",
-    title: "\\u{1F3AC} Guess the Movie \\u{2014} now played in matches of 10",
+    title: "🎬 Guess the Movie — now played in matches of 10",
     body: "There is always a film waiting in {movie} \u{2014} and it is now played in **matches**.\n\n\u{2022} A match is **10 films**. Whoever names the most of them **wins the match**.\n\u{2022} **5 house points** to the winner, **2** to the runner-up, up to **15 a day**. A single film pays no house points on its own any more \u{2014} the match is the thing worth playing for.\n\u{2022} Joint winners both take the 5, and no runner-up is paid.\n\u{2022} Between matches there is a short break. Press **I'm ready** on the card and it starts once **2** of you are. Turning up late is fine \u{2014} naming a film IS joining.\n\u{2022} **Movie points** are unchanged: every film you name scores them, no daily limit, and mods and the unsorted score them too. `/movietop` is that board.\n\u{2022} Playing is the same \u{2014} the bot asks ONE way each round and you just type the title. Spelling is forgiven, a **sequel number** never is. **`!hint`**, then **`!skip`**.\n\n`/moviehelp` explains the lot.",
 }, News {
     id: "letter-duel-correction-2026-09",
@@ -1204,6 +1204,18 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), NEWS.len());
+    }
+
+    #[test]
+    fn a_release_note_never_shows_its_own_escapes() {
+        // `"\\u{1F3AC}"` is a backslash, a u and some braces - not a clapperboard.
+        // One went out reading "\u{1F3AC} Guess the Movie \u{2014} now played in
+        // matches of 10", in front of the whole server.
+        for entry in NEWS {
+            for (what, text) in [("title", entry.title), ("body", entry.body)] {
+                assert!(!text.contains("\\u{"), "{}'s {} shows an escape: {}", entry.id, what, text);
+            }
+        }
     }
 
     #[test]
