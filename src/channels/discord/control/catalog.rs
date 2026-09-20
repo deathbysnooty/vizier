@@ -701,47 +701,6 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
-            id: "dare",
-            title: "Truth or Dare",
-            icon: "🎭",
-            about: "A social game in its own channel (Game channel below), and the only game here that scores nothing at \
-                    all - no house points, no side tally, no board. Nothing it asks can be checked afterwards, so nothing \
-                    it asks is paid for; what it has instead is a turn, a prompt, and a ✅ on the answer. Nobody is ever \
-                    picked who did not volunteer: the idle card carries an I'm in button, a spin picks only from the \
-                    people who pressed it, and it never lands on whoever pressed Spin, so nobody can hand themselves an \
-                    easy one. Out takes somebody back out at any moment, mid-turn included, with nothing said in the \
-                    channel. The person picked chooses Truth, Dare or Surprise me, gets a prompt, and answers by typing \
-                    in the channel - so leave Send Messages on for @everyone and let the bot send, embed, read history, \
-                    add reactions and manage messages. Anything they are asked can be vetoed: the first veto swaps the \
-                    prompt, the next passes the turn, and passing costs nothing and keeps them in the pool. A turn nobody \
-                    comes back to ends by itself and drops that person from the pool, which is also how the game puts \
-                    itself away - a quiet room drains the pool and goes back to the idle card. The prompts are written \
-                    into the bot rather than read from a file, so the list is reviewed once and shipped: every dare is \
-                    something done by typing in the channel, nothing asks for a photo or anything that leaves it, and no \
-                    prompt names another member or asks about one. Spice below decides how far into that list the bot \
-                    reaches, and its top two tiers are questions only and need the channel marked age-restricted in \
-                    Discord itself. Never runs in #safe-corner.",
-            settings: vec![
-                setting("VIZIER_DARE", "Game on", "Run Truth or Dare in its channel. Off takes the card down, empties the pool and stops new turns.", Kind::Toggle, "off"),
-                setting("VIZIER_DARE_CHANNEL", "Game channel", "The channel the card lives in. Members need to be able to type there - that is how turns are answered. Empty means 🎭 truth-or-dare, the channel the game was made for. Never #safe-corner - and Game on above stays off until you turn it on, so setting this alone starts nothing.", Kind::Channel, "1551090303409192991"),
-                setting("VIZIER_DARE_SPICE", "Spice", "How far into the prompt list the bot reaches. 1 mild - anyone could answer it in front of anyone. 2 sharper - embarrassing rather than exposing. 3 bold - genuinely personal. 4 adult - attraction, dating and the awkward bits. 5 explicit - frank questions about sex. Tiers 4 and 5 are QUESTIONS ONLY: there are no adult dares at either tier and the bot cannot be made to invent one, so nobody is ever instructed to go and do anything. Both also need the channel itself to be marked age-restricted in Discord's own channel settings - setting this to 4 or 5 in an ordinary channel changes nothing, by design, so the age gate is Discord's and not a number in this panel. Whatever this is set to, three people can skip any question with no reason given.", number(1, 5, "tier"), "1"),
-                setting("VIZIER_DARE_START_VOTES", "Votes to put a question up", "How many people have to press Truth, or Dare, before that question goes up. It counts people and not presses, and pressing your own button again takes the vote back.", number(1, 20, "votes"), "2"),
-                setting("VIZIER_DARE_SKIP_VOTES", "Votes to skip a question", "How many people it takes to bin the question that is up, no reason needed. Set it near the start votes and the room can undo itself instantly; set it far above and an unwanted question sits there.", number(1, 20, "votes"), "3"),
-                setting("VIZIER_DARE_ASK_COOLDOWN", "Wait between a member's own questions", "How long before the same person can put another question of their own up. Zero lets one person ask every round, which is how the game becomes theirs.", number(0, 1440, "minutes"), "10"),
-                setting("VIZIER_DARE_MIN_ANSWER", "Shortest answer", "How long a message has to be to count as answering a prompt. Low enough and a lol closes a turn; this is what stops that.", number(1, 500, "characters"), "15"),
-                setting("VIZIER_DARE_IDLE_MINUTES", "Give up on a question after", "How long a question with nobody answering stays up before the bot ends it and opens the voting again. It ends in silence: the room has plainly moved on, and a line about it would be talking to an empty channel.", number(1, 1440, "minutes"), "10"),
-                setting("VIZIER_DARE_NO_REPEAT_DAYS", "Don't repeat a prompt for", "How long before the channel can be served the same question again. Nobody is asked anything individually, so this is the whole room's window rather than one person's.", number(0, 365, "days"), "14"),
-                setting("VIZIER_DARE_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted. Low keeps the card near the bottom at the cost of a delete and a repost every few messages; the other games sit at 5 or 6 for that reason.", number(1, 100, "messages"), "3"),
-                setting("VIZIER_DARE_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "45"),
-            ],
-            commands: vec![
-                command("dare", EVERYONE, "/dare", "Whose turn it is, what they were asked if it is yours, and whether you are in the pool. Only you see it."),
-                command("darehelp", EVERYONE, "/darehelp", "How Truth or Dare works, written from the settings as they are right now: how joining and leaving work, what a veto does, and what the prompts will and will not ask. Only you see it."),
-                command("dareskip", ADMINS, "/dareskip", "Drops the turn that is up. It reads in the channel as a mod dropping it rather than as the player passing, so nobody is left looking like they bottled it."),
-                command("darestop", ADMINS, "/darestop", "Switches Truth or Dare off: the card comes down and the pool is emptied, so coming back on asks people again rather than assuming a room that has moved on."),
-            ],
-        },
-        Section {
             id: "chess",
             title: "Chess",
             icon: "♟️",

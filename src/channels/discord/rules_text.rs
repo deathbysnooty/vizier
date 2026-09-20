@@ -87,7 +87,6 @@ pub struct Rules {
     pub anagrams: AnagramRules,
     pub guess: GuessRules,
     pub movie: MovieRules,
-    pub dare: DareRules,
 }
 
 /// Guess the Word's live settings, for `/guesshelp` and the lines about it in
@@ -132,32 +131,6 @@ pub struct MovieRules {
     /// Films in the bank, and stills among them, when there is one.
     pub films: Option<usize>,
     pub stills: Option<usize>,
-}
-
-/// Truth or Dare's live settings, for `/darehelp`. It has no points and no cap:
-/// nothing it asks can be checked, so nothing it asks is scored.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DareRules {
-    /// The game's channel, only while the game is on — and it is off until a
-    /// mod turns it on, because a game like this should never start by itself.
-    pub channel: Option<u64>,
-    /// The highest tier the bank may reach into, 1 to 5.
-    pub spice: u8,
-    /// Whether the channel is one Discord marks age-restricted. The adult tier
-    /// needs this AND the setting; neither is enough alone.
-    pub adult: bool,
-    /// How many people it takes to put a question up, and to be rid of one.
-    pub start_votes: i64,
-    pub skip_votes: i64,
-    /// How long a question with nobody answering stays up.
-    pub idle_minutes: i64,
-    /// How short a message may be and still count as an answer.
-    pub min_answer: usize,
-    /// How long between one member's own questions, in minutes.
-    pub ask_cooldown: i64,
-    /// How many prompts the tier actually opens up.
-    pub truths: usize,
-    pub dares: usize,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -381,7 +354,6 @@ impl Rules {
             anagrams: super::anagram::anagram_rules(),
             guess: super::guess::guess_rules(),
             movie: super::movie::movie_rules(),
-            dare: super::dare::dare_rules(),
         }
     }
 }
@@ -1489,65 +1461,6 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t
 }
 
-// --- truth or dare --------------------------------------------------------------------------
-
-fn dare_where(id: Option<u64>) -> String {
-    match id {
-        Some(c) => format!("in <#{}>", c),
-        None => "in its channel".to_string(),
-    }
-}
-
-fn spice_words(tier: u8) -> &'static str {
-    match tier {
-        1 => "mild",
-        2 => "sharper",
-        3 => "bold",
-        4 => "adult",
-        _ => "explicit",
-    }
-}
-
-/// What `/darehelp` says: the whole game in one card, from the settings as they
-/// are right now.
-pub fn dare_help_text(d: &DareRules) -> String {
-    let mut t = format!(
-        "**🎭 What it is**\nOne card {} asks the ROOM a question. Nobody is picked and nobody is put on the spot — anyone who fancies it answers, and several usually do. Nothing here is scored; there are no points in this game.\n\n",
-        dare_where(d.channel)
-    );
-
-    t.push_str("**🗳️ Getting a question up**\n");
-    t.push_str(&format!("• Press **💬 Truth** or **🔥 Dare**. The first to reach **{}** puts that question up.\n", plural(d.start_votes, "vote", "votes")));
-    t.push_str("• A tally counts people, not presses — and pressing your own button again takes the vote back.\n\n");
-
-    t.push_str("**💬 Answering**\n");
-    t.push_str(&format!("• Just type in the channel. Anything over **{}** counts, from anyone, as many of you as want to.\n", plural(d.min_answer as i64, "character", "characters")));
-    t.push_str("• The first answer gets a ✅ and the card keeps count. Nothing you type is ever refused or corrected in public.\n\n");
-
-    t.push_str("**⏭️ Getting rid of one**\n");
-    t.push_str(&format!("• Don't like the question? Press **Skip**. **{}** and it's gone, no reason needed, and voting opens again.\n", plural(d.skip_votes, "person", "people")));
-    t.push_str(&format!("• A question nobody answers for **{}** ends quietly by itself.\n\n", plural(d.idle_minutes, "minute", "minutes")));
-
-    t.push_str("**✍️ Ask your own**\n");
-    t.push_str("• Press it and type your own question. It goes up **with your name on it** — that's the deal, there are no anonymous ones.\n");
-    t.push_str("• No mentions, no @everyone, no links or invites, and keep it to a sentence or two.\n");
-    t.push_str(&format!("• One each per **{}**, and the room can skip yours like any other.\n\n", plural(d.ask_cooldown, "minute", "minutes")));
-
-    t.push_str("**🌶️ What it asks**\n");
-    t.push_str(&format!("• The prompts are **{}** right now — {} truths and {} dares at that setting.\n", spice_words(if d.adult { d.spice } else { d.spice.min(3) }), d.truths, d.dares));
-    if d.spice >= 4 && !d.adult {
-        t.push_str("• The adult prompts are **switched on but not in play**: they only ever appear in a channel Discord marks age-restricted, and this one isn't.\n");
-    } else if d.adult && d.spice >= 4 {
-        t.push_str("• This is an age-restricted channel and the adult prompts are **in play** — grown-up questions, and questions only. Dares never go there, whatever the setting says.\n");
-    }
-    t.push_str("• Every dare is something you do by **typing, here**: nothing asks for a photo, a contact, or anything that leaves the channel.\n");
-    t.push_str("• No prompt names a member or asks you about one. If one ever seems to, skip it and tell a mod.\n\n");
-
-    t.push_str("**⌨️ Commands**\n");
-    t.push_str("`/dare` what's up and how the vote stands · `/darehelp` this card · mods: `/dareskip` to take a question down, `/darestop` to switch it off\n");
-    t
-}
-
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1614,22 +1527,6 @@ pub(crate) mod tests {
             anagrams: anagram_defaults(),
             guess: guess_defaults(),
             movie: movie_defaults(),
-            dare: dare_defaults(),
-        }
-    }
-
-    pub(crate) fn dare_defaults() -> DareRules {
-        DareRules {
-            channel: Some(super::super::dare::HOME_CHANNEL),
-            spice: 1,
-            adult: false,
-            start_votes: 2,
-            skip_votes: 3,
-            idle_minutes: 10,
-            min_answer: 15,
-            ask_cooldown: 10,
-            truths: 16,
-            dares: 15,
         }
     }
 

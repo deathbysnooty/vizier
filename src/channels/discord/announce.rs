@@ -628,17 +628,13 @@ pub const NEWS: &[News] = &[News {
     title: "\\u{1F3AC} Guess the Movie \\u{2014} now played in matches of 10",
     body: "There is always a film waiting in {movie} \u{2014} and it is now played in **matches**.\n\n\u{2022} A match is **10 films**. Whoever names the most of them **wins the match**.\n\u{2022} **5 house points** to the winner, **2** to the runner-up, up to **15 a day**. A single film pays no house points on its own any more \u{2014} the match is the thing worth playing for.\n\u{2022} Joint winners both take the 5, and no runner-up is paid.\n\u{2022} Between matches there is a short break. Press **I'm ready** on the card and it starts once **2** of you are. Turning up late is fine \u{2014} naming a film IS joining.\n\u{2022} **Movie points** are unchanged: every film you name scores them, no daily limit, and mods and the unsorted score them too. `/movietop` is that board.\n\u{2022} Playing is the same \u{2014} the bot asks ONE way each round and you just type the title. Spelling is forgiven, a **sequel number** never is. **`!hint`**, then **`!skip`**.\n\n`/moviehelp` explains the lot.",
 }, News {
-    id: "truth-or-dare-2026-09",
-    title: "\u{1F3AD} Truth or Dare is here \u{2014} and it scores nothing at all",
-    body: "A new game in {dare}, and it is the odd one out: **there are no points in it.** No house points, no board, nothing to farm. Nothing it asks can be checked, so nothing it asks is paid for.\n\n\u{2022} **Nobody is ever put on the spot.** The bot asks the ROOM, not a person. Anyone who fancies a question answers it, as many of you as want to, and no one is ever named or picked.\n\u{2022} Press **\u{1F4AC} Truth** or **\u{1F525} Dare** on the card. **2 votes** for either puts that question up.\n\u{2022} Don't like it? Press **\u{23ED}\u{FE0F} Skip**. **3 people** and it's gone, no reason needed, and voting opens again.\n\u{2022} **\u{270D}\u{FE0F} Ask your own** puts your own question up \u{2014} with your name on it. No anonymous ones.\n\u{2022} Answer by typing. The first answer gets a \u{2705}; nothing you say is ever marked wrong.\n\nIt is there to talk, not to win. `/darehelp` explains it, `/dare` shows what is up.",
-}, News {
     id: "letter-duel-correction-2026-09",
     title: "🔠 Letter Duel \u{2014} two corrections",
     body: "The note about Letter Duel had two things wrong in it.\n\n\u{2022} A turn is **four minutes**, not ninety seconds. The very first game showed ninety seconds isn\u{2019}t long            enough to open your rack, read seven tiles and find a word \u{2014} nobody managed a single move.\n\u{2022} It pays **duel points only** for now, not house points. Win, come second or just see the game through            and you score duel points, with no daily limit; `/dueltop` is the board. House points may follow once the            game has been played in properly.\n\nEverything else in that note stands: the lobby, your own tile page, the real rules, and **+50** for using all seven tiles.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
-/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`, `{movie}`, `{dare}`
+/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`, `{movie}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -653,7 +649,6 @@ pub fn fill_channels(body: &str) -> String {
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
         .replace("{duel}", &mention("VIZIER_DUEL_CHANNEL", "the Letter Duel channel"))
         .replace("{movie}", &mention("VIZIER_MOVIE_CHANNEL", "the guess-the-movie channel"))
-        .replace("{dare}", &mention("VIZIER_DARE_CHANNEL", "the truth-or-dare channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
 

@@ -40,10 +40,15 @@ COMMON = {
 }
 
 
+# Compared against folded words, so the list has to be folded too: "with"
+# reduces to "vith", and an unfolded entry would never match anything.
+COMMON_FOLDED = {words(w)[0] for w in COMMON if words(w)}
+
+
 def leaks(text: str, title: str) -> list:
     """Title words that turn up in a clue. "Run, Forrest, run" is no clue."""
     hay = set(words(text))
-    return [w for w in words(title) if len(w) > 3 and w not in COMMON and w in hay]
+    return [w for w in words(title) if len(w) > 3 and w not in COMMON_FOLDED and w in hay]
 
 
 def collides(mine: list, theirs: list) -> str:
@@ -73,6 +78,7 @@ def collides(mine: list, theirs: list) -> str:
 
 
 TIGHT = []
+SHARED = []
 
 
 def check(movies: list) -> list:
@@ -171,7 +177,17 @@ def check(movies: list) -> list:
         for theirs, their_keys in keyed[i + 1:]:
             how = collides(my_keys, their_keys)
             if how == "same":
-                bad(mine, f"reduces to the same answer as {theirs.get('title')!r} — one of them could never be won; rename an alias")
+                # Two DIFFERENT films can share a title - Fighter (2024) and The
+                # Fighter (2010) - and that is fine: an exact answer wins
+                # outright, so whichever is on the card takes the round. What is
+                # broken is the SAME film entered twice, because then the bank
+                # holds two records for one answer and the no-repeat window,
+                # the boards and the clue picking all treat them as strangers.
+                same_film = mine.get("year") == theirs.get("year")
+                if same_film:
+                    bad(mine, f"is the same film as {theirs.get('title')!r}, entered twice — merge them")
+                else:
+                    SHARED.append(f"{mine.get('title')} ({mine.get('year')}) / {theirs.get('title')} ({theirs.get('year')}): one title, two films — both win when they are the one on the card")
             elif how == "near":
                 TIGHT.append(f"{mine.get('title')} / {theirs.get('title')}: typed exactly they are fine, but a typo near either takes neither")
 
@@ -223,6 +239,10 @@ def main() -> None:
           f" · hint lines {sum(len(m.get('hints', [])) for m in movies)}"
           f" · lines {sum(len(m.get('dialogues', [])) for m in movies)}"
           f" · no still {sum(1 for m in movies if not m.get('shots'))}")
+    if SHARED:
+        print(f"\n{len(SHARED)} titles shared by two different films (fine, and deliberate):")
+        for t in SHARED:
+            print(f"  {t}")
     if TIGHT:
         print(f"\n{len(TIGHT)} pairs too close to forgive a typo between (playable, just strict):")
         for t in TIGHT:

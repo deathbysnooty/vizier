@@ -56,9 +56,6 @@ mod guess;
 mod guess_bank;
 mod guess_draw;
 mod guess_store;
-mod dare;
-mod dare_bank;
-mod dare_store;
 mod movie;
 mod movie_bank;
 mod movie_store;
@@ -170,9 +167,6 @@ impl VizierChannel for DiscordChannelReader {
         }
         // The doodle bank, read once. Missing only means Guess the Word is off.
         guess_bank::open(&self.deps.config.workspace);
-        if let Err(err) = dare_store::open(&self.deps.config.workspace) {
-            tracing::warn!("dare: store not opened: {}", err);
-        }
         if let Err(err) = movie_store::open(&self.deps.config.workspace) {
             tracing::warn!("movie: store not opened: {}", err);
         }
@@ -1223,8 +1217,13 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
 }
 
 /// Slash commands the owner retired (2026-09-15), deleted from Discord on start.
-const RETIRED_COMMANDS: &[&str] =
-    &["ping", "new", "session", "abort", "checkpoint", "lobotomy", "thinking", "tool_calls", "adminonly", "awards", "warrior"];
+const RETIRED_COMMANDS: &[&str] = &[
+    "ping", "new", "session", "abort", "checkpoint", "lobotomy", "thinking", "tool_calls", "adminonly", "awards", "warrior",
+    // Truth or Dare, taken out of the bot. Discord keeps a global command until
+    // it is told to drop one, so these stay in the / menu until this list does
+    // it - registering fewer commands is not the same as removing any.
+    "dare", "darehelp", "dareskip", "darestop",
+];
 
 /// Hides an admin command from members' / menu: only people with Manage Server
 /// see it (Server Settings → Integrations can widen it per command). The bot
@@ -1239,7 +1238,6 @@ const RETIRED_COMMANDS: &[&str] =
 fn is_game_channel(channel: u64) -> bool {
     [
         movie::live_channel(),
-        dare::live_channel(),
         anagram::live_channel(),
         guess::live_channel(),
         npat::live_channel(),
@@ -1345,7 +1343,6 @@ impl EventHandler for Handler {
         anagram::on_delete(channel_id, deleted_message_id);
         guess::on_delete(channel_id, deleted_message_id);
         movie::on_delete(channel_id, deleted_message_id);
-        dare::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1468,7 +1465,6 @@ impl EventHandler for Handler {
         guess::spawn(ctx.clone());
         // Guess the Movie: the same, with a film and one clue about it.
         movie::spawn(ctx.clone());
-        dare::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1672,10 +1668,6 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), movie::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), dare::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), dare::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(dare::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(dare::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1811,10 +1803,6 @@ impl EventHandler for Handler {
             }
             if id.starts_with("duel") {
                 duel::on_component(&ctx, component).await;
-                return;
-            }
-            if id.starts_with("dare") {
-                dare::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("movieready:") {
@@ -2036,10 +2024,6 @@ impl EventHandler for Handler {
         if let Interaction::Modal(ref modal) = interaction {
             if modal.data.custom_id.starts_with("frogans:") {
                 frog::on_modal(&ctx, modal).await;
-                return;
-            }
-            if modal.data.custom_id.starts_with("dareask") {
-                dare::on_modal(&ctx, modal).await;
                 return;
             }
             if modal.data.custom_id.starts_with("npatans:") {
@@ -2473,22 +2457,6 @@ impl EventHandler for Handler {
             }
             if command.data.name == "movieskip" {
                 movie::skip_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "dare" {
-                dare::mine_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "darehelp" {
-                dare::help_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "dareskip" {
-                dare::skip_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "darestop" {
-                dare::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "moviestop" {
@@ -3305,8 +3273,6 @@ impl EventHandler for Handler {
         guess::note_message(&ctx, &msg);
         // So does chat in the guess-the-movie channel.
         movie::note_message(&ctx, &msg);
-        // And in the truth-or-dare channel, where answering IS typing.
-        dare::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
@@ -3323,10 +3289,6 @@ impl EventHandler for Handler {
 
         // And Guess the Movie: a guess that names the film wins the round.
         movie::on_message(&ctx, &msg).await;
-
-        // Truth or Dare: the person whose turn it is answers by typing, and
-        // everybody else in that channel is left alone.
-        dare::on_message(&ctx, &msg).await;
 
         let agent_id = self.0.clone();
 

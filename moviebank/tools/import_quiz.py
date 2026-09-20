@@ -45,6 +45,9 @@ def unleak(hint: str, title: str) -> str:
 
 NEW_FILE = os.path.join(HERE, "ai", "hollywood_stills.jsonl")
 
+# How far two release years may differ and still be the same film.
+YEAR_SLACK = 1
+
 
 def bank_files() -> dict:
     files = {}
@@ -79,7 +82,15 @@ def main() -> None:
                 sys.exit(f"{f['file']} is not in moviebank/images/ — copy the images across first")
         source_keys = {key(title)} | {key(a) for a in answers}
 
-        hit = next((m for m, mk, _ in index if mk & source_keys), None)
+        # A shared title is not a shared film. "Don" is a 2006 Hindi thriller
+        # and a 2022 Tamil comedy; "Vikram Vedha" is a Tamil original and its
+        # Hindi remake five years later. Matching on the name alone hangs one
+        # film's pictures on another, which no checker downstream can catch
+        # because the bank looks perfectly well formed afterwards.
+        hit = next((m for m, mk, _ in index if mk & source_keys and abs(m.get("year", 0) - year) <= YEAR_SLACK), None)
+        clash = next((m for m, mk, _ in index if mk & source_keys and abs(m.get("year", 0) - year) > YEAR_SLACK), None)
+        if hit is None and clash is not None:
+            print(f"  skipped {title} ({year}): shares a title with {clash['title']} ({clash['year']}) but is a different film")
         if hit is not None:
             matched += 1
             have = {key(a) for a in hit.get("answers", [])}

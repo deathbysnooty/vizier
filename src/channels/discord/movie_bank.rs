@@ -659,7 +659,9 @@ pub mod tests {
     /// Words a title can contain without a clue that uses them giving anything
     /// away - "One Battle After Another" is not spoiled by "after". Mirrors the
     /// same list in `moviebank/tools/check_bank.py`.
-    const COMMON: [&str; 10] = ["after", "another", "about", "before", "over", "under", "into", "from", "with", "other"];
+    /// Already folded, because that is what they are compared against: "with"
+    /// reduces to "vith", and the unfolded spelling would never match.
+    const COMMON: [&str; 10] = ["after", "another", "about", "before", "over", "under", "into", "from", "vith", "other"];
 
     #[test]
     fn a_guess_comes_down_to_the_same_string_however_it_is_typed() {
@@ -717,6 +719,28 @@ pub mod tests {
         let (mouse, house) = (bank.find("mouse").expect("mouse"), bank.find("house").expect("house"));
         assert!(!bank.wins(mouse, "youse") && !bank.wins(house, "youse"), "one letter from both");
         assert!(bank.wins(mouse, "Mouse.") && bank.wins(house, "HOUSE"), "and each is still its own title typed out");
+    }
+
+    /// Two different films can be called the same thing - Fighter (2024) and
+    /// The Fighter (2010). An exact answer wins outright, before any of the
+    /// near-miss machinery runs, so each of them is won by whoever names it
+    /// while it is the film on the card. Nobody is asked to guess which.
+    #[test]
+    fn one_title_on_two_films_still_wins_whichever_is_up() {
+        let json = r#"{"format": "MOVIEBANK1", "movies": [
+            {"id": "a", "title": "Fighter", "year": 2024, "industry": "bollywood", "era": "modern",
+             "answers": ["fighter"], "tags": ["a squadron", "kashmir", "a dogfight", "a captured pilot"]},
+            {"id": "b", "title": "The Fighter", "year": 2010, "industry": "hollywood", "era": "modern",
+             "answers": ["the fighter"], "tags": ["boxing", "lowell", "a half brother", "a comeback"]}
+        ]}"#;
+        let bank = Bank::from_json(json).expect("a bank");
+        assert_eq!(bank.count(), 2, "both films are kept");
+        assert_eq!(key("Fighter"), key("The Fighter"), "they really do reduce to one answer");
+        for which in 0..2 {
+            assert!(bank.wins(which, "fighter"), "typing it wins whichever is up");
+            assert!(bank.wins(which, "The Fighter"), "however it is typed");
+        }
+        assert!(!bank.wins(0, "figter 2"), "and a sequel number is still exact or nothing");
     }
 
     #[test]
