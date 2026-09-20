@@ -100,6 +100,10 @@ def check(movies: list) -> list:
             bad(m, f"industry {m.get('industry')!r} is not one of {sorted(INDUSTRIES)}")
         if m.get("era") not in ERAS:
             bad(m, f"era {m.get('era')!r} is not one of {sorted(ERAS)}")
+        if not isinstance(m.get("animated", False), bool):
+            bad(m, f"animated {m.get('animated')!r} is not true or false")
+        if "language" in m and not str(m["language"]).strip():
+            bad(m, "language is there but empty")
         if m.get("kind", "film") not in KINDS:
             bad(m, f"kind {m.get('kind')!r} is not one of {sorted(KINDS)}")
         if m.get("difficulty", "easy") not in DIFFICULTIES:

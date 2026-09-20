@@ -276,10 +276,13 @@ pub enum Pool {
     EnglishFilms,
     HindiShows,
     EnglishShows,
+    /// Anime and cartoons together, whatever language they are in.
+    Animation,
 }
 
 impl Pool {
-    pub const ALL: [Pool; 5] = [Pool::HindiFilms, Pool::EnglishFilms, Pool::HindiShows, Pool::EnglishShows, Pool::Mix];
+    pub const ALL: [Pool; 6] =
+        [Pool::HindiFilms, Pool::EnglishFilms, Pool::HindiShows, Pool::EnglishShows, Pool::Animation, Pool::Mix];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -288,6 +291,7 @@ impl Pool {
             Pool::EnglishFilms => "english_films",
             Pool::HindiShows => "hindi_shows",
             Pool::EnglishShows => "english_shows",
+            Pool::Animation => "animation",
         }
     }
 
@@ -303,6 +307,7 @@ impl Pool {
             Pool::EnglishFilms => "🎞️ English films",
             Pool::HindiShows => "📺 Hindi shows",
             Pool::EnglishShows => "🍿 English shows",
+            Pool::Animation => "🎌 Anime & cartoons",
         }
     }
 
@@ -314,18 +319,22 @@ impl Pool {
             Pool::EnglishFilms => "English films",
             Pool::HindiShows => "Hindi TV shows",
             Pool::EnglishShows => "English TV shows",
+            Pool::Animation => "anime and cartoons",
         }
     }
 
     fn holds(self, movie: &Movie) -> bool {
+        // The four live-action corners leave the drawn ones to their own: a
+        // room that voted for English shows did not vote for Dragon Ball.
         let (industry, kind) = match self {
             Pool::Mix => return true,
+            Pool::Animation => return movie.animated,
             Pool::HindiFilms => (Industry::Bollywood, Kind::Film),
             Pool::EnglishFilms => (Industry::Hollywood, Kind::Film),
             Pool::HindiShows => (Industry::Bollywood, Kind::Series),
             Pool::EnglishShows => (Industry::Hollywood, Kind::Series),
         };
-        movie.industry == industry && movie.kind == kind
+        !movie.animated && movie.industry == industry && movie.kind == kind
     }
 }
 
@@ -423,6 +432,16 @@ pub struct Movie {
     /// television existed here stay exactly as they are.
     #[serde(default)]
     pub kind: Kind,
+    /// Drawn rather than filmed: anime and cartoons, which the room votes for
+    /// as one corner of their own. Orthogonal to everything else - an animated
+    /// entry can be a film or a series, Japanese or English - so it is a flag
+    /// and not another kind.
+    #[serde(default)]
+    pub animated: bool,
+    /// What the answer is in, when the industry does not say it: anime is
+    /// neither Hindi nor English, and a card claiming otherwise misleads.
+    #[serde(default)]
+    pub language: Option<String>,
     /// Every spelling that names it, the plain title first.
     pub answers: Vec<String>,
     /// Six to eight, vague first and sharp last. The card shows the first few
@@ -446,6 +465,12 @@ pub struct Movie {
 }
 
 impl Movie {
+    /// The language the card names: the entry's own when it has one, and the
+    /// industry's otherwise.
+    pub fn language(&self) -> &str {
+        self.language.as_deref().unwrap_or_else(|| self.industry.label())
+    }
+
     /// The film's own key, which the store writes down so it doesn't come round
     /// again inside the no-repeat window.
     pub fn key(&self) -> String {

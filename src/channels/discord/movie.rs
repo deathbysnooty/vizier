@@ -250,10 +250,11 @@ pub struct Live {
     /// Who asked for the hint, the letter it gave away, and where the film is
     /// from.
     pub hint: Option<(u64, char, String)>,
-    /// Hindi or English, on every card. With Hindi films, Hindi television and
-    /// English television all in the bank, knowing which language the answer is
-    /// in is the difference between a fair round and a shot in the dark.
-    pub language: &'static str,
+    /// Hindi, English or Japanese, on every card. With Hindi films, Hindi
+    /// television, English television and anime all in one bank, knowing which
+    /// language the answer is in is the difference between a fair round and a
+    /// shot in the dark.
+    pub language: String,
     pub open_secs: i64,
 }
 
@@ -957,7 +958,7 @@ fn live_of(row: &store::Row, film: Option<&Movie>, now: i64) -> Live {
             let where_from = film.map(|f| placing(f.year, f.industry.label())).unwrap_or_default();
             (by, row.first_letter(), where_from)
         }),
-        language: film.map(|f| f.industry.label()).unwrap_or_default(),
+        language: film.map(|f| f.language().to_string()).unwrap_or_default(),
         open_secs: now - row.posted_ts,
     }
 }
@@ -2043,7 +2044,7 @@ mod tests {
             revealed: None,
             points: 3,
             hint: None,
-            language: "Hindi",
+            language: "Hindi".into(),
             open_secs: 130,
         }
     }

@@ -79,6 +79,19 @@ def industry_of(record: dict) -> str:
     return "bollywood" if any(l.lower().startswith("hindi") for l in languages) else "hollywood"
 
 
+def animated(record: dict) -> bool:
+    """Drawn rather than filmed. Anime and cartoons are one corner of the bank
+    of their own, so a pack that says either is marked here."""
+    return record.get("content_type", "").startswith("animated") or record.get("category") in {"anime", "cartoon_network"}
+
+
+def spoken(record: dict) -> str:
+    """The language the card names. Only kept when the industry does not
+    already say it: an anime card must not claim to be English."""
+    language = (record.get("language") or "").strip()
+    return language if language and language not in {"Hindi", "English"} else ""
+
+
 def shots_of(record: dict) -> list:
     shots = []
     for n, still in enumerate(record.get("stills", []), 1):
@@ -86,7 +99,7 @@ def shots_of(record: dict) -> list:
         if not file:
             continue
         hint = unleak((still.get("hint") or "").strip(), record["title"])[:MAX_LINE]
-        what = "episode" if record.get("content_type") == "tv_series" else "still"
+        what = "episode" if record.get("content_type", "").endswith("series") else "still"
         shots.append({"file": "images/" + os.path.basename(file), "hint": hint,
                       "note": f"{what} {n} of {record['title']}"})
     return shots
@@ -111,7 +124,7 @@ def main() -> None:
     merged, fresh, skipped = 0, [], []
     for record in records:
         title, year = record["title"], record["year"]
-        series = record.get("content_type") == "tv_series"
+        series = record.get("content_type", "").endswith("series")
         answers = answers_of(record)
         shots = shots_of(record)
         if not shots:
@@ -139,6 +152,12 @@ def main() -> None:
             for spelling in answers:
                 if key(spelling) not in [key(a) for a in entry.get("answers", [])]:
                     entry.setdefault("answers", []).append(spelling.lower())
+            # A cartoon the bank first met as an ordinary series belongs in the
+            # drawn corner from now on; the themed pack is what knows that.
+            if animated(record) and not entry.get("animated"):
+                entry["animated"] = True
+                if spoken(record):
+                    entry["language"] = spoken(record)
             merged += 1
             continue
 
@@ -146,7 +165,7 @@ def main() -> None:
         # bot can ask about it in words alone as well as with a picture.
         lines = [unleak((s.get("hint") or "").strip(), title)[:MAX_LINE] for s in record.get("stills", [])]
         hints = [lines[-1]] if lines else []
-        fresh.append({
+        entry = {
             "id": f"pk3-{record['id']}",
             "title": title,
             "year": year,
@@ -160,11 +179,18 @@ def main() -> None:
             "hints": hints,
             "shots": shots,
             "category": record.get("category", ""),
-        })
+        }
+        if animated(record):
+            entry["animated"] = True
+        if spoken(record):
+            entry["language"] = spoken(record)
+        fresh.append(entry)
 
     by_file = {}
     for entry in fresh:
-        where = {"indian_tv": "tv_indian", "english_tv": "tv_english"}.get(entry.pop("category", ""), "bollywood_pack3")
+        where = {"indian_tv": "tv_indian", "english_tv": "tv_english", "anime": "anime", "cartoon_network": "cartoons"}.get(
+            entry.pop("category", ""), "bollywood_pack3"
+        )
         by_file.setdefault(where, []).append(entry)
 
     print(f"pack: {len(records)} records")
