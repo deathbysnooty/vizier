@@ -22,6 +22,7 @@ from normalise import STOPWORDS, digits, distance, key, slack, words  # noqa: E4
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDUSTRIES = {"bollywood", "hollywood"}
 ERAS = {"iconic", "modern"}
+KINDS = {"film", "series"}
 DIFFICULTIES = {"easy", "medium", "hard"}
 MAX_TAG = 44
 MAX_DIALOGUE = 160
@@ -99,6 +100,8 @@ def check(movies: list) -> list:
             bad(m, f"industry {m.get('industry')!r} is not one of {sorted(INDUSTRIES)}")
         if m.get("era") not in ERAS:
             bad(m, f"era {m.get('era')!r} is not one of {sorted(ERAS)}")
+        if m.get("kind", "film") not in KINDS:
+            bad(m, f"kind {m.get('kind')!r} is not one of {sorted(KINDS)}")
         if m.get("difficulty", "easy") not in DIFFICULTIES:
             bad(m, f"difficulty {m.get('difficulty')!r} is not one of {sorted(DIFFICULTIES)}")
         if not isinstance(m.get("year"), int) or not 1900 < m["year"] < 2100:

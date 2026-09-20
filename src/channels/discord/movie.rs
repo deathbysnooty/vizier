@@ -181,6 +181,7 @@ pub fn movie_rules() -> MovieRules {
         win_points: win_points(),
         second_points: second_points(),
         films: bank::bank().map(Bank::count),
+        shows: bank::bank().map(Bank::series_count),
         stills: bank::bank().map(Bank::shot_count),
     }
 }
@@ -247,6 +248,10 @@ pub struct Live {
     /// Who asked for the hint, the letter it gave away, and where the film is
     /// from.
     pub hint: Option<(u64, char, String)>,
+    /// Hindi or English, on every card. With Hindi films, Hindi television and
+    /// English television all in the bank, knowing which language the answer is
+    /// in is the difference between a fair round and a shot in the dark.
+    pub language: &'static str,
     pub open_secs: i64,
 }
 
@@ -268,6 +273,9 @@ pub fn card_text(live: &Live) -> String {
                 text.push_str(&format!("🏷️ **{}**\n", tag_line(&live.tags)));
             }
         }
+    }
+    if !live.language.is_empty() {
+        text.push_str(&format!("🗣️ **{}**\n", live.language));
     }
     if let Some(revealed) = &live.revealed {
         text.push_str(&format!("💡 **{}**\n", revealed));
@@ -947,6 +955,7 @@ fn live_of(row: &store::Row, film: Option<&Movie>, now: i64) -> Live {
             let where_from = film.map(|f| placing(f.year, f.industry.label())).unwrap_or_default();
             (by, row.first_letter(), where_from)
         }),
+        language: film.map(|f| f.industry.label()).unwrap_or_default(),
         open_secs: now - row.posted_ts,
     }
 }
@@ -1681,6 +1690,10 @@ pub fn skip_builder() -> CreateCommand {
     CreateCommand::new("movieskip").description("admin only: drop the film that's up and put a fresh one up, no points")
 }
 
+pub fn reload_builder() -> CreateCommand {
+    CreateCommand::new("moviereload").description("admin only: read the film bank off disk again, without restarting")
+}
+
 pub fn stop_builder() -> CreateCommand {
     CreateCommand::new("moviestop").description("admin only: switch Guess the Movie off and take the card down")
 }
@@ -1762,6 +1775,32 @@ pub async fn skip_command(ctx: &Context, command: &CommandInteraction) {
     let text = match live {
         Some(id) => format!("⏭️ Round #{} dropped. A fresh film is on its way — nobody scores for that one.", id),
         None => "⏭️ A fresh film is on its way.".to_string(),
+    };
+    reply(ctx, command, CreateInteractionResponseMessage::new().content(text)).await;
+}
+
+/// `/moviereload` — admins only. A new pack of films is a file that lands in
+/// the bank folder; until this existed, the only way to see it was a restart.
+///
+/// The round that is up is left exactly as it is. It was picked from the old
+/// bank and is answered from the store, so nothing about it depends on what
+/// this reads; the next round comes from whatever is now in play.
+pub async fn reload_command(ctx: &Context, command: &CommandInteraction) {
+    let user = command.user.id.get();
+    if !super::admin_ids().contains(&user) {
+        return reply(ctx, command, CreateInteractionResponseMessage::new().content("Only mods can reload the bank.")).await;
+    }
+    let before = bank::bank().map(|b| (b.count(), b.shot_count()));
+    let text = match bank::reload() {
+        Ok((films, stills)) => {
+            tracing::info!("movie: /moviereload by {} — {} titles, {} stills", user, films, stills);
+            let was = before.map(|(f, s)| format!(" (was {} and {})", f, s)).unwrap_or_default();
+            format!(
+                "📚 Bank read again: **{}** titles and **{}** stills{}.\n-# The round that's up is untouched; the next one comes from this.",
+                films, stills, was
+            )
+        }
+        Err(err) => format!("Couldn't read the bank: {}\n-# Nothing changed — the bank that was in play still is.", err),
     };
     reply(ctx, command, CreateInteractionResponseMessage::new().content(text)).await;
 }
@@ -1894,6 +1933,7 @@ mod tests {
             revealed: None,
             points: 3,
             hint: None,
+            language: "Hindi",
             open_secs: 130,
         }
     }
@@ -1902,7 +1942,8 @@ mod tests {
     fn the_card_asks_the_question_its_clue_asks() {
         // Tags: the words are the whole clue.
         let text = card_text(&live(Clue::Tags));
-        assert!(text.contains("# Name the film"), "{}", text);
+        assert!(text.contains("# Name the film or show"), "{}", text);
+        assert!(text.contains("🗣️ **Hindi**"), "every card says which language the answer is in: {}", text);
         assert!(text.contains("🏷️ **revenge · guns · coal mafia**"), "{}", text);
         assert!(!text.contains("Keh ke lunga"), "a tags round never shows the line too");
         assert!(text.contains("worth **3 points**") && text.contains("up 2 min"), "{}", text);
@@ -1910,13 +1951,13 @@ mod tests {
         let mut dialogue = live(Clue::Dialogue);
         dialogue.tags.clear();
         let text = card_text(&dialogue);
-        assert!(text.contains("# Which film is this line from?") && text.contains("> *Keh ke lunga*"), "{}", text);
+        assert!(text.contains("# Which film or show is this line from?") && text.contains("> *Keh ke lunga*"), "{}", text);
         assert!(!text.contains("🏷️"), "{}", text);
         // A still asks its question and lets the picture do the rest.
         let mut shot = live(Clue::Shot);
         shot.tags.clear();
         let text = card_text(&shot);
-        assert!(text.contains("# Which film is this from?") && !text.contains("🏷️"), "{}", text);
+        assert!(text.contains("# Which film or show is this from?") && !text.contains("🏷️"), "{}", text);
         // A hint says who asked, the letter and where the film is from, and the
         // card is worth a point less by then.
         let hinted = Live { points: 2, hint: Some((77, 'G', "Hindi, 2012".into())), ..live(Clue::Tags) };

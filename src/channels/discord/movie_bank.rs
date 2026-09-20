@@ -44,14 +44,19 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use parking_lot::RwLock;
+
 use serde::Deserialize;
 
 use super::frog_answer::levenshtein;
 use super::sudoku_gen::Rng;
 
-/// The credit TMDB's terms ask for, wherever the stills or the data appear.
+/// The credit TMDB's terms ask for, wherever the stills or the data appear -
+/// and TVmaze's, whose CC BY-SA metadata the television entries are built from.
+/// `moviebank/CREDITS.md` names every series; this is the line that travels
+/// with the game wherever its rules are told.
 pub const ATTRIBUTION: &str =
-    "Film stills and data from TMDB (https://www.themoviedb.org). This product uses the TMDB API but is not endorsed or certified by TMDB.";
+    "Film stills and data from TMDB (https://www.themoviedb.org). This product uses the TMDB API but is not endorsed or certified by TMDB. TV series data from TVmaze (https://www.tvmaze.com), CC BY-SA.";
 
 /// Where a still is actually fetched from. The bank stores only the path, so
 /// nothing is downloaded, cached or served by us.
@@ -68,7 +73,15 @@ const MAX_GUESS: usize = 96;
 /// "gangs wasseypur" still names *Gangs of Wasseypur*.
 const JOINING: [&str; 12] = ["of", "the", "a", "an", "and", "aur", "ki", "ke", "ka", "na", "in", "to"];
 
-static BANK: OnceLock<Bank> = OnceLock::new();
+/// The bank in play, and where it was read from so it can be read again.
+///
+/// The old copy is leaked on purpose when a new one is installed. `&'static` is
+/// what lets a round hold on to a film without copying it, and every caller in
+/// the game is written that way; a reload is something a mod does when a pack
+/// of films lands, not something that runs, so a few megabytes left behind is
+/// the cheaper half of that trade.
+static BANK: RwLock<Option<&'static Bank>> = RwLock::new(None);
+static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 // --- reducing what was typed ------------------------------------------------------------------
 
@@ -225,6 +238,26 @@ impl Industry {
     }
 }
 
+/// A film, or a television series. The bank was films alone to begin with, so
+/// `film` is what an entry means when it says nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Film,
+    Series,
+}
+
+impl Kind {
+    /// What to call one when the answer is known: "film", "show".
+    pub fn word(self) -> &'static str {
+        match self {
+            Kind::Film => "film",
+            Kind::Series => "show",
+        }
+    }
+}
+
 /// Roughly 2010 on is `Modern`; everything older has to have earned it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -262,13 +295,16 @@ impl Clue {
         Clue::ALL.into_iter().find(|c| c.key() == key).unwrap_or(Clue::Tags)
     }
 
-    /// What the card calls it.
+    /// What the card calls it. The bank holds television as well as film now,
+    /// and a card that asked "which film?" about an episode of one would be
+    /// asking the wrong question - so every heading offers both, and which of
+    /// the two it is stays part of the puzzle.
     pub fn heading(self) -> &'static str {
         match self {
-            Clue::Tags => "Name the film",
-            Clue::Hint => "Which film is this?",
-            Clue::Dialogue => "Which film is this line from?",
-            Clue::Shot => "Which film is this from?",
+            Clue::Tags => "Name the film or show",
+            Clue::Hint => "Which film or show is this?",
+            Clue::Dialogue => "Which film or show is this line from?",
+            Clue::Shot => "Which film or show is this from?",
         }
     }
 }
@@ -320,6 +356,10 @@ pub struct Movie {
     pub year: i64,
     pub industry: Industry,
     pub era: Era,
+    /// Film unless it says otherwise - which is how 917 entries written before
+    /// television existed here stay exactly as they are.
+    #[serde(default)]
+    pub kind: Kind,
     /// Every spelling that names it, the plain title first.
     pub answers: Vec<String>,
     /// Six to eight, vague first and sharp last. The card shows the first few
@@ -457,6 +497,11 @@ impl Bank {
     /// is linked and never on disk.
     pub fn shot_path(&self, shot: &Shot) -> Option<std::path::PathBuf> {
         shot.is_local().then(|| self.dir.join(&shot.file))
+    }
+
+    /// How many of them are television rather than film.
+    pub fn series_count(&self) -> usize {
+        self.movies.iter().filter(|m| m.kind == Kind::Series).count()
     }
 
     pub fn shot_count(&self) -> usize {
@@ -603,10 +648,11 @@ pub fn load(dir: &Path) -> anyhow::Result<Bank> {
 /// not an error worth stopping for: the game stays off and says so, once.
 pub fn open(workspace: &str) {
     let dir = crate::utils::build_path(workspace, &["moviebank"]);
+    let _ = DIR.set(dir.clone());
     match load(&dir) {
         Ok(bank) => {
             tracing::info!("movie: {} films and {} stills read from {}", bank.count(), bank.shot_count(), dir.display());
-            let _ = BANK.set(bank);
+            install(bank);
         }
         Err(err) => tracing::warn!(
             "movie: no film bank ({}) — the game stays off. Build moviebank/movies.json with moviebank/tools/build.py.",
@@ -615,9 +661,28 @@ pub fn open(workspace: &str) {
     }
 }
 
+fn install(bank: Bank) {
+    *BANK.write() = Some(Box::leak(Box::new(bank)));
+}
+
+/// Reads the folder again and puts what it finds in play, for `/moviereload`.
+///
+/// Films, tags and dialogue all live in `movies.json`, which was read once at
+/// boot - so until now, a new pack of films meant restarting the bot. Pictures
+/// never did: a still is read off disk as the card goes up. Returns what is in
+/// play afterwards, whether or not that is what was there before.
+pub fn reload() -> anyhow::Result<(usize, usize)> {
+    let dir = DIR.get().ok_or_else(|| anyhow::anyhow!("the bank was never opened"))?;
+    let bank = load(dir)?;
+    let counts = (bank.count(), bank.shot_count());
+    tracing::info!("movie: bank read again — {} titles and {} stills", counts.0, counts.1);
+    install(bank);
+    Ok(counts)
+}
+
 /// The bank, when there is one.
 pub fn bank() -> Option<&'static Bank> {
-    BANK.get()
+    *BANK.read()
 }
 
 #[cfg(test)]
@@ -905,6 +970,15 @@ pub mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("moviebank");
         let Ok(bank) = load(&dir) else { return };
         assert!(bank.count() >= 20, "only {} films", bank.count());
+        // Television arrived in a pack of its own; a film says nothing about
+        // its kind, so the default is what keeps the older entries right.
+        if bank.series_count() > 0 {
+            let series = bank.movies.iter().find(|m| m.kind == Kind::Series).expect("a series");
+            assert!(!series.shots.is_empty(), "{} is a series with nothing to show", series.title);
+            assert_eq!(series.kind.word(), "show");
+            let films = bank.count() - bank.series_count();
+            assert!(films > 0, "the bank went all television");
+        }
         let mut rng = Rng::seeded(2026);
         let mut seen = HashSet::new();
         for _ in 0..200 {

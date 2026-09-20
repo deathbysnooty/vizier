@@ -1651,6 +1651,7 @@ impl EventHandler for Handler {
                 "what they are for",
             ));
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_points)).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::reload_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::pool_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::give_builder())).await;
 
@@ -2564,6 +2565,10 @@ impl EventHandler for Handler {
             }
             if command.data.name == "modpoints" {
                 house::pool_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "moviereload" {
+                movie::reload_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "modgive" {

@@ -15,7 +15,8 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FORMAT = "MOVIEBANK1"
 ATTRIBUTION = (
     "Film stills and data from TMDB (https://www.themoviedb.org). "
-    "This product uses the TMDB API but is not endorsed or certified by TMDB."
+    "This product uses the TMDB API but is not endorsed or certified by TMDB. "
+    "TV series data from TVmaze (https://www.tvmaze.com), CC BY-SA; see moviebank/CREDITS.md."
 )
 
 

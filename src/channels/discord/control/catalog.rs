@@ -712,6 +712,7 @@ pub fn sections() -> Vec<Section> {
                 command("moviehelp", EVERYONE, "/moviehelp", "How Guess the Movie works, written from the settings as they are right now: how to guess, what a round pays, and what !hint and !skip do. Only you see it."),
                 command("movieskip", ADMINS, "/movieskip", "Drops the film that is up, with no points for anyone, says what it was and puts a fresh one up at once. Unlike !skip, no hint is needed first."),
                 command("moviestop", ADMINS, "/moviestop", "Switches Guess the Movie off: the card comes down and no new films go up. Switch Game on back on to play again."),
+                command("moviereload", ADMINS, "/moviereload", "Reads the film bank off disk again, so a new pack of films or TV shows is in play without restarting the bot. The round that is up is left alone; the next one comes from what was just read."),
             ],
         },
         Section {

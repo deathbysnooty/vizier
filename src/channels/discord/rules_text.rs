@@ -131,6 +131,8 @@ pub struct MovieRules {
     /// Films in the bank, and stills among them, when there is one.
     pub films: Option<usize>,
     pub stills: Option<usize>,
+    /// How many of those entries are television series.
+    pub shows: Option<usize>,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -1414,7 +1416,7 @@ fn movie_where(id: Option<u64>) -> String {
 /// out with every telling of the rules.
 pub fn movie_help_text(m: &MovieRules) -> String {
     let mut t = format!(
-        "**🎬 What it is**\nThe bot puts ONE clue about a film up {} — {} words about it, a line out of it, or a still from a scene. Be the first to type the title and your house scores.\n\n",
+        "**🎬 What it is**\nThe bot puts ONE clue up {} — {} words about it, a line out of it, or a still from a scene. It may be a **film or a TV show**, and the card says which language the answer is in. Be the first to type the title and your house scores.\n\n",
         movie_where(m.channel),
         m.tags_shown
     );
@@ -1422,21 +1424,21 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t.push_str("• Just type the title in the channel — no buttons, no commands.\n");
     t.push_str("• Spelling is forgiven, and so is transliteration: `dilwaale dulhaniya le jayenge` takes *Dilwale Dulhania Le Jayenge*, and so does `ddlj`. Capitals, punctuation and a dropped **the** or **of** are all fine.\n");
     t.push_str("• Two things are never forgiven: a **sequel number** has to be right, so `don` can't take *Don 2*; and a guess that fits two films at once takes neither.\n");
-    t.push_str("• The first right guess wins, gets a ✅ on the message, and the next film goes up at once.\n");
+    t.push_str("• The first right guess wins, gets a ✅ on the message, and the next one goes up at once.\n");
     t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
 
     t.push_str("**💡 Stuck?**\n");
-    t.push_str("• `!hint` reveals a **sharper clue** — the next tag, the one the card held back — along with the title's **first letter**, its year and whether it is Hindi or English. One hint to a round, and it takes a point off what that round pays (never below one).\n");
-    t.push_str("• `!skip` moves on to a new film, but only once a hint has been used. It pays nobody.\n");
-    t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one film.\n\n", plural(m.idle_minutes, "minute", "minutes")));
+    t.push_str("• `!hint` reveals a **sharper clue** — the next tag, the one the card held back — along with the title's **first letter** and its year. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!skip` moves on to a new one, but only once a hint has been used. It pays nobody.\n");
+    t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one.\n\n", plural(m.idle_minutes, "minute", "minutes")));
 
     t.push_str("**🎮 Matches**\n");
-    t.push_str(&format!("• The game runs in matches of **{} films**. Whoever names the most films wins the match.\n", m.match_films));
+    t.push_str(&format!("• The game runs in matches of **{} rounds**. Whoever names the most wins the match.\n", m.match_films));
     t.push_str(&format!("• Between matches there's a break of about **{}**. Press **🎬 I'm ready** on the card; it starts once **{}** are ready and the break is up.\n", plural(m.break_minutes, "minute", "minutes"), m.min_players));
-    t.push_str("• You can join a match that's already running — naming a film IS joining, no button needed.\n\n");
+    t.push_str("• You can join a match that's already running — naming one IS joining, no button needed.\n\n");
 
     t.push_str("**🏠 House points**\n");
-    t.push_str(&format!("• **{}** to the winner of a match, **{}** to the runner-up. A film on its own pays no house points.\n", plural(m.win_points, "house point", "house points"), plural(m.second_points, "house point", "house points")));
+    t.push_str(&format!("• **{}** to the winner of a match, **{}** to the runner-up. A single round on its own pays no house points.\n", plural(m.win_points, "house point", "house points"), plural(m.second_points, "house point", "house points")));
     t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
     t.push_str(&format!("• {}\n", match m.cap {
         Some(n) => format!("Up to **{}** a day from films.", plural(n, "house point", "house points")),
@@ -1445,18 +1447,24 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
 
     t.push_str("\n**🎬 Movie points**\n");
-    t.push_str("• Every film you name also scores **movie points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str("• Every film or show you name also scores **movie points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
     t.push_str("• `/movietop` shows the board for today or this month.\n");
     if m.no_repeat_days > 0 {
-        t.push_str(&format!("• Neither the same film nor the same still comes round again for **{}**.\n", plural(m.no_repeat_days, "day", "days")));
+        t.push_str(&format!("• Neither the same title nor the same still comes round again for **{}**.\n", plural(m.no_repeat_days, "day", "days")));
     }
     if let Some(films) = m.films {
         let stills = m.stills.unwrap_or(0);
-        t.push_str(&format!("-# {} in the bank, Hindi and English, old and new — {} of them with a still.\n", plural(films as i64, "film", "films"), stills));
+        let shows = m.shows.unwrap_or(0);
+        let what = if shows > 0 {
+            format!("{} and {} in the bank", plural((films - shows) as i64, "film", "films"), plural(shows as i64, "TV show", "TV shows"))
+        } else {
+            format!("{} in the bank", plural(films as i64, "film", "films"))
+        };
+        t.push_str(&format!("-# {}, Hindi and English, old and new — {} stills among them.\n", what, stills));
     }
 
     t.push_str("\n**⌨️ Commands**\n");
-    t.push_str("`/movie` the film that's up · `/movietop` the board · `/moviehelp` this card · mods: `/movieskip` for a fresh one, `/moviestop` to switch it off\n");
+    t.push_str("`/movie` what's up now · `/movietop` the board · `/moviehelp` this card · mods: `/movieskip` for a fresh one, `/moviestop` to switch it off\n");
     t.push_str(&format!("-# {}", super::movie_bank::ATTRIBUTION));
     t
 }
@@ -1556,6 +1564,7 @@ pub(crate) mod tests {
             second_points: 2,
             films: Some(20),
             stills: Some(49),
+            shows: Some(6),
         }
     }
 
