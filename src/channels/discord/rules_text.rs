@@ -134,7 +134,7 @@ pub struct DareRules {
     /// The game's channel, only while the game is on — and it is off until a
     /// mod turns it on, because a game like this should never start by itself.
     pub channel: Option<u64>,
-    /// The highest tier the bank may reach into, 1 to 4.
+    /// The highest tier the bank may reach into, 1 to 5.
     pub spice: u8,
     /// Whether the channel is one Discord marks age-restricted. The adult tier
     /// needs this AND the setting; neither is enough alone.
@@ -1482,7 +1482,8 @@ fn spice_words(tier: u8) -> &'static str {
         1 => "mild",
         2 => "sharper",
         3 => "bold",
-        _ => "adult",
+        4 => "adult",
+        _ => "explicit",
     }
 }
 

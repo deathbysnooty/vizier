@@ -18,17 +18,22 @@
 //!   the worst gift, the money regret.
 //! * **3 — bold.** Genuinely personal, and off by default. Regrets, fears, the
 //!   apology never given.
-//! * **4 — adult.** Grown-up questions, and **truths only** — see below.
+//! * **4 — adult.** Grown-up questions: attraction, dating, the awkward bits.
+//! * **5 — explicit.** Frank questions about sex. **Truths only**, like tier 4,
+//!   and behind the same age gate.
 //!
 //! # The adult tier
 //!
-//! Tier 4 is not simply tier 3 with the brakes off. Two hard rules hold it:
+//! Tiers 4 and 5 are not simply tier 3 with the brakes off. Two hard rules hold
+//! them, and both are enforced in code rather than left to whoever edits the
+//! list:
 //!
-//! 1. **Truths only.** There are no tier-4 dares and there is a test that keeps
-//!    it that way ([`tests::no_dare_is_ever_adult`]). A spicy question is
-//!    answered by typing a sentence; a spicy *instruction* is something a person
-//!    is told to go and do, which is a different thing entirely and not
-//!    something this bot asks for.
+//! 1. **Truths only.** There are no adult dares at all, at either tier, and a
+//!    test keeps it that way ([`tests::no_dare_is_ever_adult`]). A frank
+//!    question is answered by typing a sentence about your own life; a frank
+//!    *instruction* is something a person is told to go and do, which is a
+//!    different thing entirely and not something this bot will ever ask for —
+//!    no matter how the spice is set or how the room is flagged.
 //! 2. **The channel decides, not the setting.** Turning the spice up is not
 //!    enough on its own: the caller must also say the room is an age-restricted
 //!    one, which [`super::dare`] takes from Discord's own flag on the channel
@@ -106,10 +111,10 @@ pub struct Prompt {
 
 /// The lowest and highest tier a channel may be set to.
 pub const MIN_TIER: u8 = 1;
-pub const MAX_TIER: u8 = 4;
+pub const MAX_TIER: u8 = 5;
 
-/// The tier that only ever plays in an age-restricted channel. Everything at
-/// this tier is a truth; see the module note.
+/// The lowest tier that only ever plays in an age-restricted channel. Tier 4
+/// and everything above it is a truth; see the module note.
 pub const ADULT_TIER: u8 = 4;
 
 /// The highest tier a dare may carry. Dares stay clean whatever the room is.
@@ -184,6 +189,35 @@ const TRUTHS: &[(&str, u8, &str)] = &[
     ("morning_after", 4, "What's the most awkward morning-after you've had?"),
     ("too_soon", 4, "How soon is too soon, honestly?"),
     ("only_after_a_drink", 4, "What would you only ever admit to after a drink?"),
+    // --- 5, explicit. Age-restricted channels only, and truths only --------
+    ("adventurous_place", 5, "What's the most adventurous place you've ever done it?"),
+    ("never_told", 5, "What have you done that you've never told a single friend about?"),
+    ("hard_no", 5, "What's your hard no, and has anyone ever asked for it anyway?"),
+    ("never_asked_for", 5, "What do you actually want that you've never asked for out loud?"),
+    ("loud_or_quiet", 5, "Loud or quiet? And is that a choice or not?"),
+    ("the_best", 5, "What's the best you've ever had, and what made it that?"),
+    ("never_in_person", 5, "What are you into that you'd never admit to someone's face?"),
+    ("ever_faked", 5, "Have you ever faked it? How often, honestly?"),
+    ("nearly_caught_at_it", 5, "Where's the riskiest place you've nearly been caught?"),
+    ("time_of_day", 5, "Morning, night, or whenever it's going? Defend your answer."),
+    ("type_in_practice", 5, "Your type on paper and your type in bed — how far apart are they?"),
+    ("worst_youve_been", 5, "When were you genuinely bad at it, and do you know why?"),
+    ("always_wanted", 5, "What's the one thing you've always wanted to try and still haven't?"),
+    ("embarrassing_turn_on", 5, "What turn-on are you slightly embarrassed by?"),
+    ("the_first", 5, "Your first time — how did it actually go?"),
+    ("longest_shortest", 5, "What's the longest you've gone? And the shortest?"),
+    ("ever_caught", 5, "Have you ever been properly caught? By whom?"),
+    ("lights", 5, "Lights on or off, and tell the truth."),
+    ("only_once", 5, "What have you done exactly once and never again?"),
+    ("boldest_ask", 5, "What's the boldest thing you've ever asked somebody for?"),
+    ("shouldnt_have", 5, "Have you ever wanted someone you absolutely shouldn't have?"),
+    ("most_awkward", 5, "What's the most awkward thing that's ever happened mid-way?"),
+    ("never_fails", 5, "What's the one thing that never fails on you?"),
+    ("instant_regret", 5, "Have you ever sent something you regretted the second it went?"),
+    ("own_red_flag", 5, "What's your biggest red flag in bed?"),
+    ("still_think_about", 5, "Who do you still think about, and why that one?"),
+    ("said_out_loud", 5, "What's the most unexpected thing you've ever said in the moment?"),
+    ("would_never_repeat", 5, "What's something you tried once and would never repeat?"),
 ];
 
 const DARES: &[(&str, u8, &str)] = &[
@@ -338,6 +372,25 @@ mod tests {
             assert!(prompt.tier <= MAX_DARE_TIER, "an adult room still got a dare at tier {}", prompt.tier);
         }
         assert_eq!(count(Kind::Dare, MAX_TIER, true), count(Kind::Dare, MAX_DARE_TIER, false));
+    }
+
+    /// Every tier from ADULT_TIER up is gated, not just the first of them —
+    /// adding tier 5 must not have left a door open above the check.
+    #[test]
+    fn no_tier_above_the_gate_escapes_it() {
+        let seen = HashSet::new();
+        for _ in 0..400 {
+            let mut rng = Rng::fresh();
+            let prompt = pick(Kind::Truth, MAX_TIER, false, &seen, &mut rng).expect("a truth");
+            assert!(prompt.tier < ADULT_TIER, "a tame room served tier {}", prompt.tier);
+        }
+        for tier in ADULT_TIER..=MAX_TIER {
+            assert_eq!(ceiling(Kind::Truth, tier, false), ADULT_TIER - 1, "tier {} leaked into a tame room", tier);
+            assert_eq!(ceiling(Kind::Truth, tier, true), tier);
+            assert_eq!(ceiling(Kind::Dare, tier, true), MAX_DARE_TIER, "tier {} opened a dare", tier);
+        }
+        // And the explicit tier really is a further step, not a relabelling.
+        assert!(count(Kind::Truth, MAX_TIER, true) > count(Kind::Truth, ADULT_TIER, true));
     }
 
     /// The second: turning the spice up is not enough on its own.

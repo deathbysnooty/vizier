@@ -566,71 +566,79 @@ pub const NEWS: &[News] = &[News {
 }, News {
     id: "sudoku-2026-09",
     title: "🔢 Sudoku is here",
-    body: "A sudoku is now always waiting in {sudoku}, and solving it first scores for your house.\n\n           • Press **▶️ Play** on the puzzle card and the bot gives you a private link to fill the grid in - tap a \
-           square, tap a number.\n           • When it's full, press **Copy code** on the page, come back and press **📋 Submit code**.\n           • The first correct code wins: 🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6** points. A new puzzle appears \
-           the moment one is solved.\n           • Stuck? **💡 Hint** fills one square and costs a point off that puzzle. Beaten to it? Your code still \
-           works for a day, so you can see whether you had it right.\n\n           `/sudokuhelp` explains the lot, `/sudoku` finds your puzzles again.",
+    body: "A sudoku is now always waiting in {sudoku}, and solving it first scores for your house.\n\n• Press **▶️ Play** on the puzzle card and the bot gives you a private link to fill the grid in - tap a \
+           square, tap a number.\n• When it's full, press **Copy code** on the page, come back and press **📋 Submit code**.\n• The first correct code wins: 🟢 Easy **2** · 🟡 Medium **4** · 🔴 Hard **6** points. A new puzzle appears \
+           the moment one is solved.\n• Stuck? **💡 Hint** fills one square and costs a point off that puzzle. Beaten to it? Your code still \
+           works for a day, so you can see whether you had it right.\n\n`/sudokuhelp` explains the lot, `/sudoku` finds your puzzles again.",
 }, News {
     id: "chess-2026-09",
     title: "♟️ Chess is here",
-    body: "Challenge anyone to a game of chess in {chess}.\n\n           • `/chess @someone` sends a challenge; they press **Accept**. Pick **casual** (hours per move) or \
-           **live** (play it out there and then).\n           • Press **♟️ Open board** for your own board - tap a piece, tap where it goes - or **✍️ Type move** \
-           if you prefer `e4`, `Nf3`, `O-O`.\n           • The card in the channel shows the board after every move, so everyone can follow along, and **👀 Watch** \
-           opens a live board for anyone. Finished games can be replayed.\n           • Winning scores **chess points** — the game's own score, which has no daily limit and is nothing to do \
-           with the House Cup. Whichever houses you are both in.\n\n           `/chesshelp` explains everything, `/chess` on its own lists your games, `/chesstop` is the board.",
+    body: "Challenge anyone to a game of chess in {chess}.\n\n• `/chess @someone` sends a challenge; they press **Accept**. Pick **casual** (hours per move) or \
+           **live** (play it out there and then).\n• Press **♟️ Open board** for your own board - tap a piece, tap where it goes - or **✍️ Type move** \
+           if you prefer `e4`, `Nf3`, `O-O`.\n• The card in the channel shows the board after every move, so everyone can follow along, and **👀 Watch** \
+           opens a live board for anyone. Finished games can be replayed.\n• Winning scores **chess points** — the game's own score, which has no daily limit and is nothing to do \
+           with the House Cup. Whichever houses you are both in.\n\n`/chesshelp` explains everything, `/chess` on its own lists your games, `/chesstop` is the board.",
 }, News {
     id: "anagrams-2026-09",
     title: "🔀 Anagrams is here",
-    body: "A scrambled word is now always waiting in {anagram} — and this one you play by **typing**.\n\n           • The letters go up spaced out: **T S A B E**. Work out the word and just type it in the channel. No \
-           buttons, no commands.\n           • **Any** word that uses all the letters counts, not only the one I scrambled — those letters are taken \
-           by `beast`, `bates` and `tabes` alike.\n           • First right answer gets a ✅ and the house points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or \
-           more (up to 10 a day). The next word goes up straight away.\n           • That same number is your **anagram points** as well, and those have no daily limit — they keep counting \
-           after your house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for anagrams.\n           • Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
-           letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n           `/anagramhelp` explains the lot, `/anagram` shows the round that's up, `/anagramtop` is the anagram points board.",
+    body: "A scrambled word is now always waiting in {anagram} — and this one you play by **typing**.\n\n• The letters go up spaced out: **T S A B E**. Work out the word and just type it in the channel. No \
+           buttons, no commands.\n• **Any** word that uses all the letters counts, not only the one I scrambled — those letters are taken \
+           by `beast`, `bates` and `tabes` alike.\n• First right answer gets a ✅ and the house points: **1** for 4–5 letters, **2** for 6–7, **3** for 8 or \
+           more (up to 10 a day). The next word goes up straight away.\n• That same number is your **anagram points** as well, and those have no daily limit — they keep counting \
+           after your house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for anagrams.\n• Wrong guesses are ignored, so guess as much as you like. Stuck? **`!hint`** gives away the first \
+           letter (a point off the round), and **`!skip`** moves on once a hint is out.\n\n`/anagramhelp` explains the lot, `/anagram` shows the round that's up, `/anagramtop` is the anagram points board.",
 }, News {
     id: "guess-the-word-2026-09",
     title: "🎨 Guess the Word is here",
-    body: "There's a doodle waiting in {guess}, and all you have to do is say what it is.\n\n           • Somebody really drew it — every picture comes from Google's Quick, Draw! dataset, so they're quick, wobbly and \
-           human.\n           • Just type your guess in the channel. Capitals, spaces and hyphens don't matter (`Ice-Cream`, `ice cream` \
+    body: "There's a doodle waiting in {guess}, and all you have to do is say what it is.\n\n• Somebody really drew it — every picture comes from Google's Quick, Draw! dataset, so they're quick, wobbly and \
+           human.\n• Just type your guess in the channel. Capitals, spaces and hyphens don't matter (`Ice-Cream`, `ice cream` \
            and `icecream` are all the same answer), and a spelling slip is forgiven on longer words — `gitar` wins a \
-           guitar.\n           • First right guess gets a ✅ and **2** house points (up to 10 a day), and the next doodle goes up \
-           straight away.\n           • Those 2 are your **guess points** as well, and those have no daily limit — they keep counting after your \
-           house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for this game.\n           • Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
-           off the round), and **`!skip`** moves on once a hint is out.\n\n           `/guesshelp` explains the lot, `/guess` shows the doodle that's up, `/guesstop` is the guess points board.",
+           guitar.\n• First right guess gets a ✅ and **2** house points (up to 10 a day), and the next doodle goes up \
+           straight away.\n• Those 2 are your **guess points** as well, and those have no daily limit — they keep counting after your \
+           house points stop for the day, everyone scores them, and the most of them takes the day's 🐸 frog card for this game.\n• Stuck? **`!hint`** puts a **second drawing of the same thing** up and gives away the first letter (a point \
+           off the round), and **`!skip`** moves on once a hint is out.\n\n`/guesshelp` explains the lot, `/guess` shows the doodle that's up, `/guesstop` is the guess points board.",
 }, News {
     id: "chat-points-off-2026-09",
     title: "💬 Chatting no longer earns points",
-    body: "From now on, **text messages do not earn house points**. People were spamming to hit the message count \u{2014}            \"6 msgs, 5 to go\" \u{2014} and that is not what this server is for.\n\n           \u{2022} Everything else pays exactly as before: the games, voice, the 🪄 Snitch, 🐸 frogs, the arena, all of it.\n           \u{2022} Your messages are **still counted** \u{2014} the panel, the most-active lists and the day's 🐸 frog card for chat all work the same.\n           \u{2022} Spam is now taken down automatically, and the mods can see what was removed.\n\n           Talk because you want to talk. Play the games for points.",
+    body: "From now on, **text messages do not earn house points**. People were spamming to hit the message count \u{2014}            \"6 msgs, 5 to go\" \u{2014} and that is not what this server is for.\n\n\u{2022} Everything else pays exactly as before: the games, voice, the 🪄 Snitch, 🐸 frogs, the arena, all of it.\n\u{2022} Your messages are **still counted** \u{2014} the panel, the most-active lists and the day's 🐸 frog card for chat all work the same.\n\u{2022} Spam is now taken down automatically, and the mods can see what was removed.\n\nTalk because you want to talk. Play the games for points.",
 }, News {
     id: "letter-duel-2026-09",
     title: "🔠 Letter Duel is here",
-    body: "A board, a bag of tiles and up to four of you — Letter Duel is now in {duel}.\n\n           • `/duel`, or **⚔️ Start a duel** on the card, opens a lobby. Anyone can press **⚔️ Join**; it starts \
-           early when the seats fill, and is called off with nothing lost if too few turn up.\n           • Press **🔤 Open my rack** for a board of your own. Tap a tile, tap a square. Nobody else sees your \
-           tiles, and the page tells you what a play scores **before** you commit it.\n           • Proper rules: first word over the middle ★, every word made — sideways ones too — has to be real, \
+    body: "A board, a bag of tiles and up to four of you — Letter Duel is now in {duel}.\n\n• `/duel`, or **⚔️ Start a duel** on the card, opens a lobby. Anyone can press **⚔️ Join**; it starts \
+           early when the seats fill, and is called off with nothing lost if too few turn up.\n• Press **🔤 Open my rack** for a board of your own. Tap a tile, tap a square. Nobody else sees your \
+           tiles, and the page tells you what a play scores **before** you commit it.\n• Proper rules: first word over the middle ★, every word made — sideways ones too — has to be real, \
            premium squares double and triple, all seven tiles is **+50**, blanks score nothing. Swap or pass if \
-           you're stuck. **Four minutes** a turn; three missed turns and you're out.\n           • **Duel points** for everyone who plays, with no daily limit — the winner most, then the runner-up, then \
-           anyone who sees it through. `/dueltop` is that board.\n\n           `/duelhelp` explains the lot.",
+           you're stuck. **Four minutes** a turn; three missed turns and you're out.\n• **Duel points** for everyone who plays, with no daily limit — the winner most, then the runner-up, then \
+           anyone who sees it through. `/dueltop` is that board.\n\n`/duelhelp` explains the lot.",
 }, News {
     id: "sudoku-solver-points-back-2026-09",
     title: "⚖️ Sudoku: some points have been taken back",
-    body: "A few sudoku puzzles have been solved in times that are not humanly possible. A medium puzzle has about fifty            empty squares, and some were handed in **14 to 19 seconds** after the page was first opened \u{2014} faster than the            digits can be typed, never mind worked out. A solver app does that. A person doesn\u{2019}t.\n\n           \u{2022} **66 points have been taken back**, from the members and from their house.\n           \u{2022} This is checked, not guessed: the bot records when each player opened a puzzle and when their code arrived.\n           \u{2022} Nobody is named here, one of them owned up when asked, and solves that merely look quick have been left            alone \u{2014} being good at sudoku is not cheating.\n\n           Use a solver for fun if you like. Just don\u{2019}t hand the code in for points.",
+    body: "A few sudoku puzzles have been solved in times that are not humanly possible. A medium puzzle has about fifty            empty squares, and some were handed in **14 to 19 seconds** after the page was first opened \u{2014} faster than the            digits can be typed, never mind worked out. A solver app does that. A person doesn\u{2019}t.\n\n\u{2022} **66 points have been taken back**, from the members and from their house.\n\u{2022} This is checked, not guessed: the bot records when each player opened a puzzle and when their code arrived.\n\u{2022} Nobody is named here, one of them owned up when asked, and solves that merely look quick have been left            alone \u{2014} being good at sudoku is not cheating.\n\nUse a solver for fun if you like. Just don\u{2019}t hand the code in for points.",
 }, News {
     id: "sudoku-sudoku-points-2026-09",
     title: "🧩 Sudoku keeps its own score now",
     body: "Sudoku in {sudoku} has stopped paying house points. The puzzles, the difficulties, the hints, the codes and \
            the late window are all exactly as they were — what changes is what a solve is worth: **sudoku points**, \
-           the game's own score, which doesn't move the House Cup.\n\n           • A solve scores the puzzle's value with your own hints taken off, and **nothing is capped** — a good day \
-           keeps counting all the way.\n           • **Everyone** has sudoku points, houses or no houses. Mods and Muggles score too.\n           • **The house points already earned stay exactly where they are.** Nothing is taken back by this.\n           • `/sudokutop` is the new board, today or this month; `/sudoku` shows where you stand; the day's top \
-           scorer still gets the 🐸 frog card.\n\n           Why: a grid handed to a solver app was paying a house the same as a grid worked out by a person. Sudoku is \
+           the game's own score, which doesn't move the House Cup.\n\n• A solve scores the puzzle's value with your own hints taken off, and **nothing is capped** — a good day \
+           keeps counting all the way.\n• **Everyone** has sudoku points, houses or no houses. Mods and Muggles score too.\n• **The house points already earned stay exactly where they are.** Nothing is taken back by this.\n• `/sudokutop` is the new board, today or this month; `/sudoku` shows where you stand; the day's top \
+           scorer still gets the 🐸 frog card.\n\nWhy: a grid handed to a solver app was paying a house the same as a grid worked out by a person. Sudoku is \
            still here to play — it just doesn't decide the House Cup any more.",
+}, News {
+    id: "guess-the-movie-2026-09",
+    title: "\u{1F3AC} Guess the Movie is here",
+    body: "There is always a film waiting in {movie}, and naming it first scores for your house.\n\n\u{2022} The bot asks about it ONE way each round \u{2014} **five words** about it, a **line** out of it, or a **still** from a scene. Work out the film and just type the title in the channel. No buttons, no commands.\n\u{2022} First right answer gets a \u{2705} and **3 house points**, up to **10 a day**, and the next film goes up at once.\n\u{2022} That same number is your **movie points** as well, and those have **no daily limit** \u{2014} they keep counting after your house points stop for the day, and mods and the unsorted score them too. `/movietop` is that board.\n\u{2022} Spelling is forgiven, and so is transliteration \u{2014} `dilwaale dulhaniya le jayenge` wins, and so does `ddlj`. But a **sequel number** has to be right: `don` will never take *Don 2*.\n\u{2022} Wrong guesses are ignored, so guess freely. Stuck? **`!hint`** gives a sharper clue plus the first letter, the year and where it is from (a point off that round), and **`!skip`** moves on once a hint is out.\n\n`/moviehelp` explains the lot, `/movie` shows the film that is up.",
+}, News {
+    id: "truth-or-dare-2026-09",
+    title: "\u{1F3AD} Truth or Dare is here \u{2014} and it scores nothing at all",
+    body: "A new game in {dare}, and it is the odd one out: **there are no points in it.** No house points, no board, nothing to farm. Nothing it asks can be checked, so nothing it asks is paid for.\n\n\u{2022} **Nobody is ever put on the spot.** The bot asks the ROOM, not a person. Anyone who fancies a question answers it, as many of you as want to, and no one is ever named or picked.\n\u{2022} Press **\u{1F4AC} Truth** or **\u{1F525} Dare** on the card. **2 votes** for either puts that question up.\n\u{2022} Don't like it? Press **\u{23ED}\u{FE0F} Skip**. **3 people** and it's gone, no reason needed, and voting opens again.\n\u{2022} **\u{270D}\u{FE0F} Ask your own** puts your own question up \u{2014} with your name on it. No anonymous ones.\n\u{2022} Answer by typing. The first answer gets a \u{2705}; nothing you say is ever marked wrong.\n\nIt is there to talk, not to win. `/darehelp` explains it, `/dare` shows what is up.",
 }, News {
     id: "letter-duel-correction-2026-09",
     title: "🔠 Letter Duel \u{2014} two corrections",
-    body: "The note about Letter Duel had two things wrong in it.\n\n           \u{2022} A turn is **four minutes**, not ninety seconds. The very first game showed ninety seconds isn\u{2019}t long            enough to open your rack, read seven tiles and find a word \u{2014} nobody managed a single move.\n           \u{2022} It pays **duel points only** for now, not house points. Win, come second or just see the game through            and you score duel points, with no daily limit; `/dueltop` is the board. House points may follow once the            game has been played in properly.\n\n           Everything else in that note stands: the lobby, your own tile page, the real rules, and **+50** for using all seven tiles.",
+    body: "The note about Letter Duel had two things wrong in it.\n\n\u{2022} A turn is **four minutes**, not ninety seconds. The very first game showed ninety seconds isn\u{2019}t long            enough to open your rack, read seven tiles and find a word \u{2014} nobody managed a single move.\n\u{2022} It pays **duel points only** for now, not house points. Win, come second or just see the game through            and you score duel points, with no daily limit; `/dueltop` is the board. House points may follow once the            game has been played in properly.\n\nEverything else in that note stands: the lobby, your own tile page, the real rules, and **+50** for using all seven tiles.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
-/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`
+/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`, `{movie}`, `{dare}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -644,6 +652,8 @@ pub fn fill_channels(body: &str) -> String {
         .replace("{guess}", &mention("VIZIER_GUESS_CHANNEL", "the guess-the-word channel"))
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
         .replace("{duel}", &mention("VIZIER_DUEL_CHANNEL", "the Letter Duel channel"))
+        .replace("{movie}", &mention("VIZIER_MOVIE_CHANNEL", "the guess-the-movie channel"))
+        .replace("{dare}", &mention("VIZIER_DARE_CHANNEL", "the truth-or-dare channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
 

@@ -168,7 +168,7 @@ fn ask_cooldown_minutes() -> i64 {
 }
 
 fn bump_messages() -> u64 {
-    control::number("VIZIER_DARE_BUMP_MESSAGES", 6).max(1)
+    control::number("VIZIER_DARE_BUMP_MESSAGES", 3).max(1)
 }
 
 fn bump_seconds() -> i64 {
@@ -201,7 +201,8 @@ pub fn spice_words(tier: u8) -> &'static str {
         1 => "mild",
         2 => "sharper",
         3 => "bold",
-        _ => "adult",
+        4 => "adult",
+        _ => "explicit",
     }
 }
 
@@ -231,7 +232,7 @@ pub fn voting_text(t: Tally, need: i64, tier: u8, adult: bool) -> String {
     text.push_str(&format!("What next? **{}** for either one puts it up.\n", plural(need, "vote", "votes")));
     text.push_str(&format!("💬 Truth **{}**/{} · 🔥 Dare **{}**/{}\n", t.truth, need, t.dare, need));
     text.push_str("Or **Ask your own** — your question, your name on it.\n");
-    let tier = if adult && tier >= bank::ADULT_TIER { "adult" } else { spice_words(tier.min(bank::ADULT_TIER - 1)) };
+    let tier = spice_words(if adult { tier } else { tier.min(bank::ADULT_TIER - 1) });
     text.push_str(&format!("-# {} prompts · nobody is ever picked — anyone who wants to answers", tier));
     text
 }
