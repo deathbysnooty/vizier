@@ -94,9 +94,20 @@ pub struct Spot {
     pub city_km: Option<f64>,
     /// Where the picture is, relative to the bank folder.
     pub file: String,
-    /// The KartaView contributor who drove it, credited on the reveal.
+    /// The contributor who took it, credited on the reveal. Mapillary's
+    /// licence asks for the individual photographer by name, so this is a
+    /// licence term and not a courtesy.
     pub by: String,
+    /// Which archive it came from: `kartaview` (the default, for the photos
+    /// banked before there were two) or `mapillary`.
+    pub source: Option<String>,
     pub shot: String,
+}
+
+impl Spot {
+    pub fn source(&self) -> &str {
+        self.source.as_deref().unwrap_or("kartaview")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +120,10 @@ struct PlacesFile {
 #[derive(Debug, Deserialize)]
 struct SpotsFile {
     format: String,
+    /// The credit the photos' licences ask for. It travels with the bank
+    /// rather than being written into the code, because which archives are in
+    /// it is a property of the bank somebody built, not of this build.
+    attribution: Option<String>,
     spots: Vec<Spot>,
 }
 
@@ -253,6 +268,7 @@ pub struct Bank {
     states: Vec<StatePlace>,
     cities: Vec<City>,
     spots: Vec<Spot>,
+    attribution: String,
     state_keys: HashMap<String, usize>,
     city_keys: HashMap<String, usize>,
     /// Where the pictures are, remembered from the load so the game can find
@@ -267,6 +283,11 @@ impl Bank {
 
     pub fn count(&self) -> usize {
         self.spots.len()
+    }
+
+    /// The credit that has to go wherever the photos do.
+    pub fn attribution(&self) -> &str {
+        &self.attribution
     }
 
     /// The states the bank can actually set a round in, in play order. The
@@ -352,6 +373,12 @@ impl Bank {
         }
     }
 
+    /// Who took the photo, as the reveal credits them.
+    pub fn credit(&self, spot: &Spot) -> String {
+        let archive = if spot.source() == "mapillary" { "Mapillary" } else { "KartaView" };
+        format!("📷 {} · {}", spot.by, archive)
+    }
+
     /// The answer as the reveal states it: the town, where the photo sits near
     /// one, and the state either way.
     pub fn answer_line(&self, spot: &Spot) -> String {
@@ -428,6 +455,7 @@ pub fn load(dir: &Path) -> anyhow::Result<Bank> {
         states: places.states,
         cities: places.cities,
         spots,
+        attribution: spots_file.attribution.unwrap_or_else(|| ATTRIBUTION.to_string()),
         state_keys,
         city_keys,
         dir: dir.to_path_buf(),
@@ -484,12 +512,12 @@ pub mod tests {
             Spot {
                 id: "kv1".into(), lat: 17.390, lon: 78.490, state: "Telangana".into(),
                 city: Some("Hyderabad".into()), city_km: Some(0.6),
-                file: "images/kv1.jpg".into(), by: "someone".into(), shot: "2021-03-08".into(),
+                file: "images/kv1.jpg".into(), by: "someone".into(), source: None, shot: "2021-03-08".into(),
             },
             Spot {
                 id: "kv2".into(), lat: 26.913, lon: 75.803, state: "Rajasthan".into(),
                 city: Some("Jaipur".into()), city_km: Some(1.6),
-                file: "images/kv2.jpg".into(), by: "someone".into(), shot: "2019-06-06".into(),
+                file: "images/kv2.jpg".into(), by: "someone".into(), source: None, shot: "2019-06-06".into(),
             },
         ];
         let mut state_keys = HashMap::new();
@@ -504,7 +532,7 @@ pub mod tests {
                 city_keys.insert(k.clone(), i);
             }
         }
-        Bank { states, cities, spots, state_keys, city_keys, dir: PathBuf::new() }
+        Bank { states, cities, spots, attribution: ATTRIBUTION.to_string(), state_keys, city_keys, dir: PathBuf::new() }
     }
 
     #[test]
@@ -562,7 +590,7 @@ pub mod tests {
         let spot = Spot {
             id: "kv3".into(), lat: 28.650, lon: 77.220, state: "Delhi".into(),
             city: Some("Delhi".into()), city_km: Some(0.3),
-            file: "images/kv3.jpg".into(), by: "x".into(), shot: "2021-12-22".into(),
+            file: "images/kv3.jpg".into(), by: "x".into(), source: None, shot: "2021-12-22".into(),
         };
         assert_eq!(bank.readings("delhi").len(), 2);
         assert!(matches!(bank.judge(&spot, "delhi"), Verdict::Bullseye(_)));

@@ -10,8 +10,9 @@ geobank/
   places.json     the answers  — 36 states/UTs + 2,928 towns   (tracked in git)
   spots.json      the photos   — where each one was taken       (tracked in git)
   images/         the photos themselves, ~1280x720 JPEGs        (NOT in git)
-  tools/build.py      places.json, from the GeoNames India dump
-  tools/harvest.py    spots.json + images/, from KartaView
+  tools/build.py             places.json, from the GeoNames India dump
+  tools/harvest.py           spots.json + images/, from KartaView
+  tools/harvest_mapillary.py the same, from Mapillary, for the states KartaView misses
 ```
 
 `images/` is gitignored for the same reason `moviebank/images/` is: it runs to
@@ -30,7 +31,16 @@ python3 geobank/tools/build.py IN.txt admin1.txt
 
 # the photos: ~40 minutes, mostly waiting on the API
 python3 geobank/tools/harvest.py
+
+# and the states KartaView misses, which needs a free Mapillary token
+export MAPILLARY_TOKEN='MLY|...'
+python3 geobank/tools/harvest_mapillary.py
 ```
+
+The Mapillary token is used **here**, when the bank is built, and never by the
+bot: nothing about it goes into the config, the repo or the server. Register an
+application at <https://www.mapillary.com/dashboard/developers> with READ scope
+only and copy its client token.
 
 `harvest.py` **merges**: photos already on disk are kept and each state is only
 topped up to `TARGET_PER_STATE`, so re-running fills gaps rather than starting
@@ -48,25 +58,37 @@ rsync -a geobank/places.json geobank/spots.json geobank/images/ \
 
 ## What the photos are
 
-Real dashcam frames contributed to [KartaView](https://kartaview.org/), CC
-BY-SA 4.0, credited wherever they appear (`geo_bank::ATTRIBUTION`). Nobody
-curated them for beauty: they are roads, shopfronts, signboards, traffic and
-the occasional windscreen wiper. That is the point — the clues are the things a
-photo of a real street happens to contain.
+Street-level photographs contributed by the public to two archives, both CC
+BY-SA 4.0, credited wherever they appear. Nobody curated them for beauty: they
+are roads, shopfronts, signboards, traffic and the occasional windscreen wiper.
+That is the point — the clues are the things a photo of a real street happens
+to contain.
 
-It also means the coverage is wherever somebody drove with a dashcam, which is
-**13 states** and not 36. Tamil Nadu and Telangana alone are most of the raw
-supply.
+**[KartaView](https://kartaview.org/)** is dashcam footage, and almost every
+frame faces the road. Uniform and very playable, but it pools where a few
+people drove: 13 states, and Tamil Nadu and Telangana alone are most of the raw
+supply. Needs no token.
+
+**[Mapillary](https://www.mapillary.com/)** reaches most of the rest — Mumbai,
+Chennai, Ahmedabad, Kochi, Guwahati and Bhubaneswar all have imagery there and
+none on KartaView — but it is a mixed bag, because it also holds phone photos
+taken on foot. A photograph of the side of a parked van is not a round anybody
+can win, so `harvest_mapillary.py` is fussier than its sibling: flat images
+only, `quality_score` above 0.5, and a frame only counts when several photos
+from the **same sequence** sit in the same neighbourhood, which is what a drive
+looks like and a snapshot does not.
+
+Mapillary's licence asks for the individual photographer, so every spot keeps
+its contributor in `by` and the reveal credits them.
 
 **This is why the game draws a state first and a photo second.** Sampling
 photos directly would make "Tamil Nadu" a winning guess without looking at the
-screen. `harvest.py` caps each state at `TARGET_PER_STATE` and drops any state
+screen. Both harvesters cap each state at `TARGET_PER_STATE` and drop any state
 that cannot reach `MIN_SPOTS`, and `geo::pick` then draws evenly among the
 states that survived.
 
-To widen the map beyond 13 states, the next source is Mapillary: broader Indian
-coverage, but it needs a free API token, so it is a decision for the owner
-rather than something the harvester can do on its own.
+Run KartaView first and Mapillary second: the Mapillary pass only tops up
+states that are short, so the better imagery wins wherever it exists.
 
 ## How a guess is judged
 

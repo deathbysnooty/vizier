@@ -1031,6 +1031,11 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
     let scores = row.match_id.and_then(|id| with_db(|c| store::match_scores(c, id)));
     let played = row.match_id.and_then(|id| with_db(|c| store::get_match(c, id)).flatten());
     let mut text = line;
+    // Both archives are CC BY-SA and Mapillary's licence asks for the
+    // photographer by name, so the credit goes where people actually look.
+    if let (Some(bank), Some(spot)) = (bank::bank(), spot_of(row)) {
+        text.push_str(&format!("\n-# {}", bank.credit(spot)));
+    }
     if let (Some(scores), Some(m)) = (scores, played) {
         text.push('\n');
         text.push_str(&scoreboard_line(&scores, m.played, m.rounds));

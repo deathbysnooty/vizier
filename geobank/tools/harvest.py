@@ -44,6 +44,19 @@ DAY_FROM, DAY_TO = 6, 18   # keep daylight shots; night frames are unguessable
 ATTRIBUTION = "Street imagery from KartaView contributors and Grab, CC BY-SA 4.0."
 
 
+def dedupe(spots):
+    """One row per photo, keeping the first. Both harvesters merge into the
+    same file and either can be run twice, so without this the bank grows
+    copies and a duplicated frame becomes likelier to be drawn than the rest."""
+    seen, out = set(), []
+    for spot in spots:
+        if spot["id"] in seen:
+            continue
+        seen.add(spot["id"])
+        out.append(spot)
+    return out
+
+
 def haversine(a_lat, a_lon, b_lat, b_lon):
     r = 6371.0
     p1, p2 = math.radians(a_lat), math.radians(b_lat)
@@ -86,6 +99,10 @@ def relabel():
         cities.append(c)
 
     bank = json.loads(OUT.read_text(encoding="utf-8"))
+    before = len(bank["spots"])
+    bank["spots"] = dedupe(bank["spots"])
+    if len(bank["spots"]) < before:
+        print(f"dropped {before - len(bank['spots'])} duplicate rows")
     moved = 0
     for spot in bank["spots"]:
         best, best_km = None, 1e9
@@ -111,6 +128,17 @@ def relabel():
     bank["spots"] = [s for s in bank["spots"] if s["state"] not in thin]
     bank["states"] = sorted({s["state"] for s in bank["spots"]})
     OUT.write_text(json.dumps(bank, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    # Photos the bank no longer points at - from a state that fell below the
+    # floor, or a duplicate - are build output nothing will read again, and
+    # they would otherwise ride along in every rsync.
+    wanted = {Path(s["file"]).name for s in bank["spots"]}
+    orphans = [f for f in IMAGES.iterdir() if f.is_file() and f.name not in wanted]
+    for f in orphans:
+        f.unlink()
+    if orphans:
+        print(f"removed {len(orphans)} photos the bank no longer names")
+
     print(f"{moved} photos moved state; {len(bank['spots'])} places across {len(bank['states'])} states")
     return 0
 

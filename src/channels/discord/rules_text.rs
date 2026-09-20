@@ -1593,7 +1593,10 @@ pub fn geo_help_text(g: &GeoRules) -> String {
 
     t.push_str("\n**⌨️ Commands**\n");
     t.push_str("`/geo` the place that's up · `/geotop` the board · `/geohelp` this card · mods: `/geoskip` for a fresh one, `/geostop` to switch it off\n");
-    t.push_str(&format!("-# {}", super::geo_bank::ATTRIBUTION));
+    // The credit travels with the bank, because which archives are in it is a
+    // property of the bank somebody built, not of this build.
+    let credit = super::geo_bank::bank().map(|b| b.attribution().to_string()).unwrap_or_else(|| super::geo_bank::ATTRIBUTION.to_string());
+    t.push_str(&format!("-# {}", credit));
     t
 }
 
