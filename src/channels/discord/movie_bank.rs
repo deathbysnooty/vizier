@@ -266,6 +266,69 @@ pub enum Era {
     Modern,
 }
 
+/// A corner of the bank a match can be played in, chosen by the room before it
+/// starts. `Mix` is everything, and what a match plays when nobody says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Pool {
+    #[default]
+    Mix,
+    HindiFilms,
+    EnglishFilms,
+    HindiShows,
+    EnglishShows,
+}
+
+impl Pool {
+    pub const ALL: [Pool; 5] = [Pool::HindiFilms, Pool::EnglishFilms, Pool::HindiShows, Pool::EnglishShows, Pool::Mix];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Pool::Mix => "mix",
+            Pool::HindiFilms => "hindi_films",
+            Pool::EnglishFilms => "english_films",
+            Pool::HindiShows => "hindi_shows",
+            Pool::EnglishShows => "english_shows",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Pool {
+        Pool::ALL.into_iter().find(|p| p.key() == key).unwrap_or(Pool::Mix)
+    }
+
+    /// What the button says.
+    pub fn label(self) -> &'static str {
+        match self {
+            Pool::Mix => "🎲 Mix",
+            Pool::HindiFilms => "🎬 Hindi films",
+            Pool::EnglishFilms => "🎞️ English films",
+            Pool::HindiShows => "📺 Hindi shows",
+            Pool::EnglishShows => "🍿 English shows",
+        }
+    }
+
+    /// What the channel is told a match is playing.
+    pub fn about(self) -> &'static str {
+        match self {
+            Pool::Mix => "anything in the bank",
+            Pool::HindiFilms => "Hindi films",
+            Pool::EnglishFilms => "English films",
+            Pool::HindiShows => "Hindi TV shows",
+            Pool::EnglishShows => "English TV shows",
+        }
+    }
+
+    fn holds(self, movie: &Movie) -> bool {
+        let (industry, kind) = match self {
+            Pool::Mix => return true,
+            Pool::HindiFilms => (Industry::Bollywood, Kind::Film),
+            Pool::EnglishFilms => (Industry::Hollywood, Kind::Film),
+            Pool::HindiShows => (Industry::Bollywood, Kind::Series),
+            Pool::EnglishShows => (Industry::Hollywood, Kind::Series),
+        };
+        movie.industry == industry && movie.kind == kind
+    }
+}
+
 /// What a round puts up. One to a round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Clue {
@@ -531,22 +594,41 @@ impl Bank {
     /// widens rather than the channel sitting empty, and when every film has
     /// been used the window starts over.
     pub fn pick(&self, used: &HashSet<String>, hindi: u64, modern: u64, rng: &mut Rng) -> Option<usize> {
+        self.pick_in(Pool::Mix, used, hindi, modern, rng)
+    }
+
+    /// The same, inside the corner a match voted for.
+    ///
+    /// A voted pool is a rule where the shares are only a lean: a match that
+    /// asked for Hindi shows is never quietly handed an English film. When
+    /// everything in that corner has been up lately the window starts over
+    /// inside it, and only a corner with nothing in it at all widens - which
+    /// can happen when the room votes for a pool the bank has yet to be given.
+    pub fn pick_in(&self, pool: Pool, used: &HashSet<String>, hindi: u64, modern: u64, rng: &mut Rng) -> Option<usize> {
         if self.movies.is_empty() {
             return None;
         }
+        let inside: Vec<usize> = (0..self.movies.len()).filter(|i| pool.holds(&self.movies[*i])).collect();
+        let inside = if inside.is_empty() { (0..self.movies.len()).collect() } else { inside };
         let want_hindi = rng.below(100) < hindi.min(100) as usize;
         let want_modern = rng.below(100) < modern.min(100) as usize;
         let industry = if want_hindi { Industry::Bollywood } else { Industry::Hollywood };
         let era = if want_modern { Era::Modern } else { Era::Iconic };
         let fresh = |i: &usize| !used.contains(&self.movies[*i].key());
-        let start = rng.below(self.movies.len());
-        let order: Vec<usize> = (0..self.movies.len()).map(|step| (start + step) % self.movies.len()).collect();
+        let start = rng.below(inside.len());
+        let order: Vec<usize> = (0..inside.len()).map(|step| inside[(start + step) % inside.len()]).collect();
         // The corner asked for, then either half of it, then anything fresh at
         // all, then — every film having been up lately — anything.
         let exact = order.iter().copied().find(|i| fresh(i) && self.movies[*i].industry == industry && self.movies[*i].era == era);
         let same_industry = || order.iter().copied().find(|i| fresh(i) && self.movies[*i].industry == industry);
         let any_fresh = || order.iter().copied().find(fresh);
-        exact.or_else(same_industry).or_else(any_fresh).or(Some(start))
+        exact.or_else(same_industry).or_else(any_fresh).or_else(|| order.first().copied())
+    }
+
+    /// How many titles a pool holds, for the buttons: a corner with nothing in
+    /// it is not offered to vote for.
+    pub fn pool_count(&self, pool: Pool) -> usize {
+        self.movies.iter().filter(|m| pool.holds(m)).count()
     }
 
     /// Which clue to put up: a kind first, so a film with six stills and one
@@ -961,6 +1043,52 @@ pub mod tests {
         let empty = tempfile::tempdir().expect("a folder");
         open(&empty.path().display().to_string());
         assert!(bank().is_none());
+    }
+
+    #[test]
+    fn a_voted_corner_is_a_rule_and_not_a_lean() {
+        // Two of each corner, so a pick can only be right by honouring it.
+        let json = r#"{"format": "MOVIEBANK1", "movies": [
+            {"id": "hf1", "title": "Sholay", "year": 1975, "industry": "bollywood", "era": "iconic",
+             "answers": ["sholay"], "tags": ["a water tank", "two friends", "a village", "a bandit"]},
+            {"id": "hf2", "title": "Queen", "year": 2013, "industry": "bollywood", "era": "modern",
+             "answers": ["queen"], "tags": ["a honeymoon alone", "paris", "amsterdam", "a called-off wedding"]},
+            {"id": "ef1", "title": "Whiplash", "year": 2014, "industry": "hollywood", "era": "modern",
+             "answers": ["whiplash"], "tags": ["a drummer", "a conservatory", "a thrown chair", "bleeding hands"]},
+            {"id": "ef2", "title": "Alien", "year": 1979, "industry": "hollywood", "era": "iconic",
+             "answers": ["alien"], "tags": ["a cargo ship", "an egg", "a cat", "a distress call"]},
+            {"id": "hs1", "title": "Panchayat", "year": 2020, "industry": "bollywood", "era": "modern", "kind": "series",
+             "answers": ["panchayat"], "tags": ["a village office", "a water tank", "an engineer", "a solar panel"]},
+            {"id": "hs2", "title": "Kota Factory", "year": 2019, "industry": "bollywood", "era": "modern", "kind": "series",
+             "answers": ["kota factory"], "tags": ["coaching classes", "black and white", "a hostel", "a physics teacher"]},
+            {"id": "es1", "title": "Severance", "year": 2022, "industry": "hollywood", "era": "modern", "kind": "series",
+             "answers": ["severance"], "tags": ["a lift", "two lives", "a green corridor", "a desk job"]},
+            {"id": "es2", "title": "Fargo", "year": 2014, "industry": "hollywood", "era": "modern", "kind": "series",
+             "answers": ["fargo"], "tags": ["snow", "a drifter", "a small town", "an insurance man"]}
+        ]}"#;
+        let bank = Bank::from_json(json).expect("a bank");
+        let mut rng = Rng::seeded(11);
+        // Every pool the sample can fill hands back only its own, whatever the
+        // shares ask for - a hundred means "Hindi please" and nought means
+        // "English please", and neither may override the corner.
+        for pool in Pool::ALL {
+            if pool == Pool::Mix || bank.pool_count(pool) == 0 {
+                continue;
+            }
+            for shares in [(100, 100), (0, 0), (50, 65)] {
+                for _ in 0..40 {
+                    let which = bank.pick_in(pool, &HashSet::new(), shares.0, shares.1, &mut rng).expect("a film");
+                    let film = bank.movie(which).expect("a film");
+                    assert!(pool.holds(film), "{} came out of {}", film.title, pool.key());
+                }
+            }
+        }
+        // A corner the bank cannot fill widens rather than leaving the channel
+        // with no round at all.
+        let empty = Pool::ALL.into_iter().find(|p| bank.pool_count(*p) == 0);
+        if let Some(empty) = empty {
+            assert!(bank.pick_in(empty, &HashSet::new(), 50, 65, &mut rng).is_some(), "an empty corner left no film");
+        }
     }
 
     /// The shipped bank when it is there - it is data, kept beside the code

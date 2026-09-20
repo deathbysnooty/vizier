@@ -41,7 +41,7 @@ use serenity::all::{
 };
 
 use super::control;
-use super::movie_bank::{self as bank, ATTRIBUTION, Bank, Clue, Movie, Shot};
+use super::movie_bank::{self as bank, ATTRIBUTION, Bank, Clue, Movie, Pool, Shot};
 use super::movie_store::{self as store, Status};
 use super::points::{Cap, Outcome, Source};
 use super::rules_text::{self, MovieRules};
@@ -62,6 +62,8 @@ pub const HOME_CHANNEL: u64 = 1_551_044_377_374_101_594;
 /// What someone types to ask for a sharper tag, or to pass on a round.
 /// The button that says somebody wants to play the next match.
 pub const READY_ID: &str = "movieready:";
+/// `moviepool:<match>:<pool>` — the vote for what the next match plays.
+pub const POOL_ID: &str = "moviepool:";
 
 pub const HINT_WORD: &str = "!hint";
 pub const SKIP_WORD: &str = "!skip";
@@ -1066,11 +1068,13 @@ async fn post_round(ctx: &Context, channel: u64, match_id: i64) -> Option<store:
     let bank = bank::bank()?;
     let now = Utc::now().timestamp();
     let db = store::db()?;
+    let pool = with_db(|c| store::get_match(c, match_id)).flatten().map(|m| m.pool).unwrap_or_default();
     let row = {
         let conn = db.lock();
         let since = now - no_repeat_days() * 86_400;
         let mut rng = Rng::fresh();
-        let which = bank.pick(&store::movies_since(&conn, since), hindi_share(), modern_share(), &mut rng)?;
+        let used = store::movies_since(&conn, since);
+        let which = bank.pick_in(pool, &used, hindi_share(), modern_share(), &mut rng)?;
         let film = bank.movie(which)?;
         let key = film.key();
         // Not only a film nobody has had lately, but a clue nobody has seen:
@@ -1184,6 +1188,9 @@ async fn whisper(ctx: &Context, component: &ComponentInteraction, text: impl Int
 /// `🎬 I'm ready`. Pressing it again takes the name off, so somebody who has to
 /// go is not holding a match up.
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
+    if let Some(rest) = component.data.custom_id.strip_prefix(POOL_ID) {
+        return on_pool_vote(ctx, component, rest).await;
+    }
     let Some(match_id) = component.data.custom_id.strip_prefix(READY_ID).and_then(|v| v.parse::<i64>().ok()) else {
         return;
     };
@@ -1213,19 +1220,98 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     whisper(ctx, component, text).await;
 }
 
+// --- what the next match plays ----------------------------------------------------------------
+
+/// The corners worth voting for: Mix always, and any the bank can actually
+/// fill. A room that votes for Hindi shows should get Hindi shows, so a corner
+/// with nothing in it is not on the card at all.
+pub fn pools_on_offer() -> Vec<Pool> {
+    let Some(bank) = bank::bank() else { return vec![Pool::Mix] };
+    Pool::ALL.into_iter().filter(|p| *p == Pool::Mix || bank.pool_count(*p) >= POOL_MINIMUM).collect()
+}
+
+/// How many titles a corner needs before the room may vote for it: a match is
+/// ten rounds, and a corner thinner than that would repeat itself.
+const POOL_MINIMUM: usize = 12;
+
+/// Which corner won: most votes, a tie broken at random, the mix when nobody
+/// voted at all. Given the tally rather than reading it, so the whole rule is
+/// one function with nothing to mock.
+pub fn winning_pool(tally: &[(Pool, usize)], roll: usize) -> Pool {
+    let top = tally.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    if top == 0 {
+        return Pool::Mix;
+    }
+    let tied: Vec<Pool> = tally.iter().filter(|(_, n)| *n == top).map(|(p, _)| *p).collect();
+    tied[roll % tied.len()]
+}
+
+/// The buttons, each with its tally, the leader highlighted - the quiz's vote
+/// card, in a game that already had a break to hold it.
+fn pool_buttons(match_id: i64, tally: &[(Pool, usize)]) -> Vec<CreateActionRow> {
+    let count = |pool: Pool| tally.iter().find(|(p, _)| *p == pool).map(|(_, n)| *n).unwrap_or(0);
+    let offered = pools_on_offer();
+    let top = offered.iter().map(|p| count(*p)).max().unwrap_or(0);
+    let buttons: Vec<CreateButton> = offered
+        .iter()
+        .map(|pool| {
+            let n = count(*pool);
+            CreateButton::new(format!("{}{}:{}", POOL_ID, match_id, pool.key()))
+                .label(if n > 0 { format!("{} · {}", pool.label(), n) } else { pool.label().to_string() })
+                .style(if n > 0 && n == top { ButtonStyle::Primary } else { ButtonStyle::Secondary })
+        })
+        .collect();
+    buttons.chunks(5).map(|row| CreateActionRow::Buttons(row.to_vec())).collect()
+}
+
+/// What the break card says about the vote as it stands.
+pub fn vote_line(tally: &[(Pool, usize)]) -> String {
+    let votes: usize = tally.iter().map(|(_, n)| n).sum();
+    if votes == 0 {
+        return "🗳️ **Vote for what the next match plays** — nobody has yet, so it's a mix of everything.".to_string();
+    }
+    let said: Vec<String> = tally.iter().filter(|(_, n)| *n > 0).map(|(p, n)| format!("{} {}", p.label(), n)).collect();
+    format!("🗳️ **The vote so far:** {} · most wins, a tie is settled at random", said.join(" · "))
+}
+
+/// `moviepool:` — one press, one vote, and the same button again takes it back.
+async fn on_pool_vote(ctx: &Context, component: &ComponentInteraction, rest: &str) {
+    let Some((id, key)) = rest.split_once(':') else { return };
+    let Some(match_id) = id.parse::<i64>().ok() else { return };
+    let pool = Pool::from_key(key);
+    let user = component.user.id.get();
+    let now = Utc::now().timestamp();
+    let Some(m) = with_db(|c| store::get_match(c, match_id)).flatten() else {
+        return whisper(ctx, component, "That match has moved on.").await;
+    };
+    if m.status != store::MatchStatus::Break {
+        return whisper(ctx, component, format!("That match is already running — it's playing {}.", m.pool.about())).await;
+    }
+    let kept = with_db(|c| store::cast_vote(c, match_id, user, pool, now)).and_then(Result::ok).unwrap_or(false);
+    SHARED.lock().break_shown.clear();
+    let text = if kept {
+        format!("🗳️ Voted for **{}**. Press it again to take it back.", pool.label())
+    } else {
+        "🗳️ Vote taken back.".to_string()
+    };
+    whisper(ctx, component, text).await;
+}
+
 // --- the break, and scoring a match -----------------------------------------------------------
 
 fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
+    let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
+    let mut text = break_text(ready, min_players(), m.films, now, m.ready_from, last);
+    text.push_str(&format!("\n\n{}", vote_line(&tally)));
     let embed = CreateEmbed::new()
-        .description(break_text(ready, min_players(), m.films, now, m.ready_from, last))
+        .description(text)
         .colour(COLOUR)
-        .footer(CreateEmbedFooter::new("Press I'm ready · a match is 10 films · /moviehelp"));
-    CreateMessage::new()
-        .embed(embed)
-        .components(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
-        ])])
-        .allowed_mentions(CreateAllowedMentions::new())
+        .footer(CreateEmbedFooter::new("Press I'm ready · vote for what it plays · a match is 10 rounds · /moviehelp"));
+    let mut rows = vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
+    ])];
+    rows.extend(pool_buttons(m.id, &tally));
+    CreateMessage::new().embed(embed).components(rows).allowed_mentions(CreateAllowedMentions::new())
 }
 
 /// Keeps the break card up. It is only redrawn when its WORDS change, so a
@@ -1233,7 +1319,8 @@ fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, no
 async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
     let ready = ready_now(m.id);
     let last = SHARED.lock().last_result.clone();
-    let text = break_text(&ready, min_players(), m.films, now, m.ready_from, last.as_ref());
+    let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
+    let text = format!("{}\n{}", break_text(&ready, min_players(), m.films, now, m.ready_from, last.as_ref()), vote_line(&tally));
     let (card, shown) = {
         let s = SHARED.lock();
         (s.card, s.break_shown.clone())
@@ -1403,9 +1490,32 @@ async fn run(ctx: Context) {
             let ready = ready_now(m.id);
             if may_start(ready.len(), min_players(), now, m.ready_from) {
                 if with_db(|c| store::start_match(c, m.id, now)).and_then(Result::ok).unwrap_or(false) {
-                    tracing::info!("movie: match {} started - {} films, {} ready", m.id, m.films, ready.len());
+                    // The vote is settled the moment the match starts, and
+                    // written down: every round of it then asks the same
+                    // corner, and a restart mid-match carries on in it.
+                    let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
+                    let pool = winning_pool(&tally, Rng::fresh().below(64));
+                    let _ = with_db(|c| store::set_pool(c, m.id, pool));
+                    tracing::info!(
+                        "movie: match {} started - {} films, {} ready, playing {}",
+                        m.id,
+                        m.films,
+                        ready.len(),
+                        pool.key()
+                    );
                     SHARED.lock().break_shown.clear();
                     drop_card(&ctx).await;
+                    let votes: usize = tally.iter().map(|(_, n)| n).sum();
+                    let said = match (pool, votes) {
+                        (Pool::Mix, 0) => "🎬 **Match on!** Nobody voted, so it's a mix of everything.".to_string(),
+                        (pool, n) => format!(
+                            "🎬 **Match on!** {} wins the vote with **{}** — this match is {}.",
+                            pool.label(),
+                            plural(n as i64, "vote", "votes"),
+                            pool.about()
+                        ),
+                    };
+                    let _ = crate::utils::discord::send_message(ctx.http.clone(), &ChannelId::new(channel), said).await;
                 }
                 continue;
             }
@@ -1936,6 +2046,33 @@ mod tests {
             language: "Hindi",
             open_secs: 130,
         }
+    }
+
+    #[test]
+    fn the_vote_takes_the_most_and_settles_a_tie_at_random() {
+        // Nobody voted: the match plays everything, which is what it always did.
+        assert_eq!(winning_pool(&[], 0), Pool::Mix);
+        assert_eq!(winning_pool(&[(Pool::HindiShows, 0)], 0), Pool::Mix);
+        // A clear winner is the winner however the roll falls.
+        let clear = [(Pool::HindiFilms, 3), (Pool::EnglishShows, 1)];
+        for roll in 0..8 {
+            assert_eq!(winning_pool(&clear, roll), Pool::HindiFilms);
+        }
+        // Two on the same count: both are reachable, and neither by anything
+        // but the roll.
+        let tied = [(Pool::HindiShows, 2), (Pool::EnglishFilms, 2), (Pool::Mix, 1)];
+        assert_eq!(winning_pool(&tied, 0), Pool::HindiShows);
+        assert_eq!(winning_pool(&tied, 1), Pool::EnglishFilms);
+        assert_eq!(winning_pool(&tied, 2), Pool::HindiShows);
+    }
+
+    #[test]
+    fn the_break_card_says_where_the_vote_stands() {
+        assert!(vote_line(&[]).contains("nobody has yet"), "{}", vote_line(&[]));
+        let line = vote_line(&[(Pool::HindiShows, 2), (Pool::Mix, 1)]);
+        assert!(line.contains("📺 Hindi shows 2") && line.contains("🎲 Mix 1"), "{}", line);
+        // A corner nobody picked is not listed as nought.
+        assert!(!vote_line(&[(Pool::HindiShows, 2), (Pool::EnglishFilms, 0)]).contains("English films"));
     }
 
     #[test]

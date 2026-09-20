@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::movie_bank::{Clue, clue_key};
+use super::movie_bank::{Clue, Pool, clue_key};
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -51,6 +51,9 @@ pub const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS ready (
         match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, ts INTEGER NOT NULL,
         PRIMARY KEY (match_id, user_id));
+    CREATE TABLE IF NOT EXISTS votes (
+        match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, pool TEXT NOT NULL, ts INTEGER NOT NULL,
+        PRIMARY KEY (match_id, user_id));
     CREATE TABLE IF NOT EXISTS prizes (
         match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, place INTEGER NOT NULL,
         films INTEGER NOT NULL, points INTEGER NOT NULL, granted INTEGER NOT NULL, ts INTEGER NOT NULL,
@@ -62,6 +65,10 @@ pub const SCHEMA: &str = "
 /// first - so it is swallowed rather than reported.
 fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE rounds ADD COLUMN match_id INTEGER", []);
+    // The pool a match is playing, once the room could vote for one. A match
+    // written before that says nothing and means the mix, which is what every
+    // match was.
+    let _ = conn.execute("ALTER TABLE matches ADD COLUMN pool TEXT NOT NULL DEFAULT 'mix'", []);
 }
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -467,9 +474,11 @@ pub struct Match {
     pub started_ts: Option<i64>,
     pub ended_ts: Option<i64>,
     pub channel: u64,
+    /// The corner of the bank this match is playing, as the room voted.
+    pub pool: Pool,
 }
 
-const MATCH_COLUMNS: &str = "id, status, films, played, opened_ts, ready_from, started_ts, ended_ts, channel_id";
+const MATCH_COLUMNS: &str = "id, status, films, played, opened_ts, ready_from, started_ts, ended_ts, channel_id, pool";
 
 fn read_match(row: &rusqlite::Row) -> rusqlite::Result<Match> {
     let status: String = row.get(1)?;
@@ -483,6 +492,7 @@ fn read_match(row: &rusqlite::Row) -> rusqlite::Result<Match> {
         started_ts: row.get(6)?,
         ended_ts: row.get(7)?,
         channel: row.get::<_, i64>(8)? as u64,
+        pool: Pool::from_key(&row.get::<_, String>(9).unwrap_or_default()),
     })
 }
 
@@ -534,6 +544,48 @@ pub fn ready_list(conn: &Connection, match_id: i64) -> Vec<u64> {
     let Ok(mut stmt) = conn.prepare("SELECT user_id FROM ready WHERE match_id = ?1 ORDER BY ts") else { return Vec::new() };
     let Ok(rows) = stmt.query_map(params![match_id], |r| r.get::<_, i64>(0)) else { return Vec::new() };
     rows.filter_map(Result::ok).map(|v| v as u64).collect()
+}
+
+/// One person's vote for what the next match plays. Pressing the same button
+/// again takes it back; pressing another moves it.
+pub fn cast_vote(conn: &Connection, match_id: i64, user: u64, pool: Pool, now: i64) -> rusqlite::Result<bool> {
+    let held = vote_of(conn, match_id, user);
+    if held == Some(pool) {
+        conn.execute("DELETE FROM votes WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64])?;
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO votes (match_id, user_id, pool, ts) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (match_id, user_id) DO UPDATE SET pool = excluded.pool, ts = excluded.ts",
+        params![match_id, user as i64, pool.key(), now],
+    )?;
+    Ok(true)
+}
+
+pub fn vote_of(conn: &Connection, match_id: i64, user: u64) -> Option<Pool> {
+    conn.query_row("SELECT pool FROM votes WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64], |r| {
+        r.get::<_, String>(0)
+    })
+    .optional()
+    .ok()
+    .flatten()
+    .map(|key| Pool::from_key(&key))
+}
+
+/// Every vote cast for this match, as (pool, how many), most first.
+pub fn vote_tally(conn: &Connection, match_id: i64) -> Vec<(Pool, usize)> {
+    let sql = "SELECT pool, COUNT(*) FROM votes WHERE match_id = ?1 GROUP BY pool ORDER BY COUNT(*) DESC, pool";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let Ok(rows) = stmt.query_map(params![match_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).map(|(key, n)| (Pool::from_key(&key), n as usize)).collect()
+}
+
+/// What a match is playing, written when it starts so every round of it agrees
+/// - and so a restart mid-match carries on with the same corner.
+pub fn set_pool(conn: &Connection, id: i64, pool: Pool) -> rusqlite::Result<usize> {
+    conn.execute("UPDATE matches SET pool = ?2 WHERE id = ?1", params![id, pool.key()])
 }
 
 /// Break to playing. Only a break can start, so two ticks cannot start it twice.
