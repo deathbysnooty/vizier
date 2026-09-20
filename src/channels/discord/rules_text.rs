@@ -950,8 +950,16 @@ pub fn earn_text(r: &Rules) -> String {
     if r.guess.channel.is_some() && r.guess.points > 0 {
         more.push(format!("🎨 Guess the Word {} first to name it {}", r.guess.points, max_words(r.guess.cap)));
     }
-    if r.movie.channel.is_some() && r.movie.points > 0 {
-        more.push(format!("🎬 Guess the Movie {} first to name the film {}", r.movie.points, max_words(r.movie.cap)));
+    // A film pays no house points on its own: the match does. `movie.points` is
+    // the MOVIE-point value and would read here as a house-point one.
+    if r.movie.channel.is_some() && r.movie.win_points > 0 {
+        more.push(format!(
+            "🎬 Guess the Movie win a match of {} +{} · 2nd +{} {}",
+            r.movie.match_films,
+            r.movie.win_points,
+            r.movie.second_points,
+            max_words(r.movie.cap)
+        ));
     }
     if !more.is_empty() {
         lines.push(more.join(" · "));
