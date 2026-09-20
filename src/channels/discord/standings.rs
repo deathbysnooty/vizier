@@ -503,12 +503,24 @@ fn today_lines(head: &str, who: Option<&str>, sources: &HashMap<String, i64>, me
         format!("{} {}/{} · {} min{}, next point at {}", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company, next)
     });
     let mut left = 0;
-    // Sudoku is not here: it pays sudoku points now, its own score, and nothing
-    // to the House Cup. Whatever it paid before is still in the ledger and still
-    // in the month's `/mypoints` breakdown.
-    for s in
-        [Source::Quiz, Source::Koto, Source::Anagram, Source::Guess, Source::Cat, Source::Arena, Source::Snitch, Source::Frog, Source::Npat, Source::Chess]
-    {
+    // What is NOT here pays the Cup nothing, and a line reading "0/8" for a game
+    // that can never pay is worse than no line: sudoku and chess keep their own
+    // scores, Letter Duel and the chess puzzle have their limits set to nought.
+    // Whatever any of them paid before is still in the ledger and still in the
+    // month's `/mypoints` breakdown.
+    for s in [
+        Source::Quiz,
+        Source::Koto,
+        Source::Anagram,
+        Source::Guess,
+        Source::Movie,
+        Source::Geo,
+        Source::Cat,
+        Source::Arena,
+        Source::Snitch,
+        Source::Frog,
+        Source::Npat,
+    ] {
         match s.cap() {
             ledger::Cap::PerDay(cap) if pts(s) >= cap => lines.push(format!("{} ✅ maxed {}/{}", s.label(), pts(s), cap)),
             ledger::Cap::PerDay(cap) => {
@@ -806,6 +818,12 @@ mod tests {
         assert!(text.contains("🥇 Golden Snitch +6"), "{}", text);
         assert!(text.contains("🐸 Chocolate Frog 0 · no limit"), "{}", text);
         assert!(text.contains("🔤 Name Place Animal Thing 0/6"), "{}", text);
+        // The two match games pay the Cup, so the day has to show them - and
+        // the games that pay it nothing must not be listed as if they might.
+        assert!(text.contains("🎬 Guess the Movie 0/15"), "{}", text);
+        assert!(text.contains("🗺️ Geo 0/15"), "{}", text);
+        assert!(!text.contains("♟️ Chess"), "chess pays the Cup nothing: {}", text);
+        assert!(!text.contains("🔢 Sudoku"), "{}", text);
         assert!(text.contains("still up for grabs"), "{}", text);
     }
 
