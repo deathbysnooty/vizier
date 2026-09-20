@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.62] - 2026-09-19
+
+### 🚀 Features
+
+- *(notes)* Member notes - free facts plus a stored "what they're like", answered with no model call
 ## [0.11.61] - 2026-09-18
 
 ### 🚀 Features
@@ -11,6 +16,10 @@ All notable changes to this project will be documented in this file.
 ### 🧪 Testing
 
 - The handle check only means something for a real-sized id
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.11.61
 ## [0.11.60] - 2026-09-18
 
 ### 🚀 Features
