@@ -716,6 +716,48 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "geo",
+            title: "Geo",
+            icon: "🗺️",
+            about: "GeoGuessr for India. A street photo taken somewhere in the country goes up in its own channel \
+                    (Game channel below) and the first person to say WHERE takes the round, so leave Send Messages on \
+                    for @everyone and let the bot send, embed, read history, add reactions and manage messages. A guess \
+                    is a place name at whatever scale the person knows: the state is worth 2, a town within 60 km of the \
+                    photo 4, and a town within 15 km 5. Naming the town gives its state for free, so nobody has to know \
+                    both - but the state is a GATE, and a town in the wrong state scores nothing however near the \
+                    kilometres look. A town at the far end of the right state is a wrong town and a right state, and \
+                    still earns the 2. Old names work (Bombay takes Mumbai, Benares takes Varanasi, Gurgaon takes \
+                    Gurugram), spelling and punctuation are forgiven, and where two towns share a name the bigger one \
+                    wins it. Typing !hint gives the state's first letter and the quarter of the country it is in, once a \
+                    round, and takes a point off; !skip opens up only after a hint and pays nobody. The game runs in \
+                    matches and pays house points for WINNING one, not per photo. The photos come from geobank/ in the \
+                    bot's workspace, read at start: with no bank there the game stays off and says so in the log. They \
+                    are real dashcam frames contributed to KartaView, so the bank only covers the states people have \
+                    actually driven - thirteen of them today, and the game draws a STATE first and a photo second so \
+                    that every state it does hold comes up as often as every other. Never runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_GEO", "Game on", "Run Geo in its channel. Off takes the card down and stops new rounds; the round that was up is left as it is. The game also stays off, whatever this says, when there is no place bank to play with.", Kind::Toggle, "off"),
+                setting("VIZIER_GEO_CHANNEL", "Game channel", "The channel the photo card lives in. Members need to be able to type there - that is how guesses are given. Empty means the game stays off until you point this at a room. Never #safe-corner.", Kind::Channel, ""),
+                setting("VIZIER_GEO_MATCH_ROUNDS", "Places in a match", "How many photos the game plays before it scores the match and takes a break. Whoever scored the most across them wins it, so one bullseye beats two states.", number(1, 50, "places"), "5"),
+                setting("VIZIER_GEO_MIN_PLAYERS", "People needed to start", "How many have to press I'm ready before a match can begin. Joining a match already running needs no button - placing a photo is joining.", number(1, 20, "people"), "2"),
+                setting("VIZIER_GEO_BREAK_MINUTES", "Break between matches", "The rest after a match is scored. Nothing starts before it is up however many are ready, so people arriving late can still get in.", number(0, 240, "minutes"), "2"),
+                setting("VIZIER_POINTS_GEO_WIN", "House points for winning a match", "What the winner of a match earns. Joint winners each take this and no runner-up is paid.", number(0, 100, "points"), "5"),
+                setting("VIZIER_POINTS_GEO_SECOND", "House points for the runner-up", "What second place earns, when there is a single winner ahead of them.", number(0, 100, "points"), "2"),
+                setting("VIZIER_CAP_GEO", "Daily limit", "The most house points one person can earn from this game in a day - that is, from winning matches. The geo points the game keeps alongside are never capped, so the board goes on counting after this is full. 100 or more means no limit.", number(0, 100, "points a day"), "15"),
+                setting("VIZIER_GEO_IDLE_MINUTES", "Replace a round after", "How long a photo nobody places and nobody skips stays up before the bot says where it was and puts a new one up by itself.", number(1, 1440, "minutes"), "10"),
+                setting("VIZIER_GEO_NO_REPEAT_DAYS", "Don't repeat a photo for", "How long a photo is held back before it can come round again.", number(0, 365, "days"), "30"),
+                setting("VIZIER_GEO_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_GEO_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "120"),
+            ],
+            commands: vec![
+                command("geo", EVERYONE, "/geo", "The place that is up now, sent privately: whether the hint has gone, and how you have done today. Only you see it."),
+                command("geotop", EVERYONE, "/geotop", "The geo points board, today or this month: the top 10 and, if you are not on it, your own line. Geo points are the game's own score - every round at what it was worth, hint taken off but no daily limit - so they keep counting after the house-points limit is full, and mods and Muggles have them too."),
+                command("geohelp", EVERYONE, "/geohelp", "How Geo works, written from the settings as they are right now: what each kind of answer pays, and what !hint and !skip do. Only you see it."),
+                command("geoskip", ADMINS, "/geoskip", "Drops the photo that is up, with no points for anyone, says where it was and puts a fresh one up at once. Unlike !skip, no hint is needed first."),
+                command("geostop", ADMINS, "/geostop", "Switches Geo off: the card comes down and no new photos go up. Switch Game on back on to play again."),
+            ],
+        },
+        Section {
             id: "chess",
             title: "Chess",
             icon: "♟️",

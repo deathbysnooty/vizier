@@ -87,6 +87,7 @@ pub struct Rules {
     pub anagrams: AnagramRules,
     pub guess: GuessRules,
     pub movie: MovieRules,
+    pub geo: GeoRules,
 }
 
 /// Guess the Word's live settings, for `/guesshelp` and the lines about it in
@@ -133,6 +134,30 @@ pub struct MovieRules {
     pub stills: Option<usize>,
     /// How many of those entries are television series.
     pub shows: Option<usize>,
+}
+
+/// Geo's live settings, for `/geohelp` and the lines about it in the House Cup
+/// posts. A place on its own pays no house points: the match does, which is why
+/// there is no per-round value here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeoRules {
+    /// The game's channel, only while the game is on and there is a bank.
+    pub channel: Option<u64>,
+    pub cap: Option<i64>,
+    /// How long a place nobody names stays up.
+    pub idle_minutes: i64,
+    /// How long the same photo is held back.
+    pub no_repeat_days: i64,
+    /// How many places one match runs, and what it takes to start one.
+    pub match_rounds: i64,
+    pub min_players: usize,
+    pub break_minutes: i64,
+    /// The match prize.
+    pub win_points: i64,
+    pub second_points: i64,
+    /// Photos in the bank, and how many states they cover, when there is one.
+    pub places: Option<usize>,
+    pub states: Option<usize>,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -356,6 +381,7 @@ impl Rules {
             anagrams: super::anagram::anagram_rules(),
             guess: super::guess::guess_rules(),
             movie: super::movie::movie_rules(),
+            geo: super::geo::geo_rules(),
         }
     }
 }
@@ -471,6 +497,13 @@ pub fn welcome_text(r: &Rules) -> String {
     }
     // Two guessing games are two rooms but one line: this list is already at
     // Discord's message limit, and a line each would push the welcome over it.
+    //
+    // Geo is the THIRD and is deliberately not here. Measured 2026-09-21: this
+    // message is 1978 of Discord's 2000 characters with the two, and naming geo
+    // as briefly as "🗺️ <#…> · places" puts it over. Members meet the game
+    // through its announcement, the House Cup post and `/geohelp` instead. To
+    // put it in, something else on this list has to give — the chess line is
+    // the longest at 106 characters and repeats what `/chesshelp` says.
     match (channel(r.guess.channel), channel(r.movie.channel)) {
         (Some(g), Some(m)) => action.push(format!("🎨 {} · guess the doodle · 🎬 {} · guess the film", g, m)),
         (Some(g), None) => action.push(format!("🎨 {} · guess the word — say what the doodle is", g)),
@@ -933,6 +966,16 @@ pub fn earn_text(r: &Rules) -> String {
             r.movie.win_points,
             r.movie.second_points,
             max_words(r.movie.cap)
+        ));
+    }
+    // Like Guess the Movie, a single place pays nothing: the match is the prize.
+    if r.geo.channel.is_some() && r.geo.win_points > 0 {
+        more.push(format!(
+            "🗺️ Geo win a match of {} +{} · 2nd +{} {}",
+            r.geo.match_rounds,
+            r.geo.win_points,
+            r.geo.second_points,
+            max_words(r.geo.cap)
         ));
     }
     if !more.is_empty() {
@@ -1469,6 +1512,91 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t
 }
 
+// --- geo ------------------------------------------------------------------------------------
+
+pub const GEO_RULES_TITLE: &str = "🗺️ How Geo works";
+
+fn geo_where(id: Option<u64>) -> String {
+    match channel(id) {
+        Some(c) => format!("in {}", c),
+        None => "in its own channel (a mod has to set one)".to_string(),
+    }
+}
+
+/// What `/geohelp` says: the whole game in one card, from the settings as they
+/// are now. The photos are KartaView contributors', so the credit their licence
+/// asks for goes out with every telling of the rules.
+pub fn geo_help_text(g: &GeoRules) -> String {
+    let mut t = format!(
+        "**🗺️ What it is**\nThe bot puts up ONE street photo taken somewhere in India {} and asks where it was taken. Say where first, and nearest, and your house scores.\n\n",
+        geo_where(g.channel)
+    );
+
+    t.push_str("**⌨️ How to play**\n");
+    t.push_str("• Just type a place in the channel — no buttons, no commands.\n");
+    t.push_str("• Name the **state** for **2**. Name a **town within 60 km** for **4**, or one **within 15 km** for **5**. You never have to know the town: the state alone always scores.\n");
+    t.push_str("• Naming the town gives you its state for free, so `Warangal` also says Telangana.\n");
+    t.push_str("• **The state is a gate.** A town in the wrong state scores nothing, however near the kilometres look — but a town at the far end of the RIGHT state still earns the state's 2.\n");
+    t.push_str("• Old names are fine: `Bombay` takes Mumbai, `Benares` takes Varanasi, `Gurgaon` takes Gurugram. Spelling, capitals and punctuation are all forgiven.\n");
+    t.push_str("• Where two towns share a name, the bigger one wins it — `Hyderabad` is the one in Telangana.\n");
+    t.push_str("• The first right guess ends the round, gets a ✅ on the message, and the next photo goes up at once.\n");
+    t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
+
+    t.push_str("**💡 Stuck?**\n");
+    t.push_str("• `!hint` gives the state's **first letter** and the quarter of the country it is in. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!skip` moves on to a new place, but only once a hint has been used. It pays nobody.\n");
+    t.push_str(&format!(
+        "• A place nobody gets is replaced after **{}**, so the channel is never stuck on one photo.\n\n",
+        plural(g.idle_minutes, "minute", "minutes")
+    ));
+
+    t.push_str("**🎮 Matches**\n");
+    t.push_str(&format!(
+        "• The game runs in matches of **{}**. Whoever scores the most across them wins the match — so one bullseye beats two states.\n",
+        plural(g.match_rounds, "place", "places")
+    ));
+    t.push_str(&format!(
+        "• Between matches there's a break of about **{}**. Press **🗺 I'm ready** on the card; it starts once **{}** are ready and the break is up.\n",
+        plural(g.break_minutes, "minute", "minutes"),
+        g.min_players
+    ));
+    t.push_str("• You can join a match that's already running — placing a photo IS joining, no button needed.\n");
+    t.push_str("• No two places in one match come from the same state, while there are states left to draw.\n\n");
+
+    t.push_str("**🏠 House points**\n");
+    t.push_str(&format!(
+        "• **{}** to the winner of a match, **{}** to the runner-up. A place on its own pays no house points.\n",
+        plural(g.win_points, "house point", "house points"),
+        plural(g.second_points, "house point", "house points")
+    ));
+    t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
+    t.push_str(&format!("• {}\n", match g.cap {
+        Some(n) => format!("Up to **{}** a day from Geo.", plural(n, "house point", "house points")),
+        None => "No daily limit from Geo.".to_string(),
+    }));
+    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+
+    t.push_str("\n**🗺️ Geo points**\n");
+    t.push_str("• Every place you take also scores **geo points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str("• `/geotop` shows the board for today or this month.\n");
+    if g.no_repeat_days > 0 {
+        t.push_str(&format!("• The same photo does not come round again for **{}**.\n", plural(g.no_repeat_days, "day", "days")));
+    }
+    if let Some(places) = g.places {
+        let states = g.states.unwrap_or(0);
+        t.push_str(&format!(
+            "-# {} in the bank, across **{}**. The photos are real dashcam footage, so the bank only covers the states people have actually driven — every state in it comes up as often as every other.\n",
+            plural(places as i64, "place", "places"),
+            plural(states as i64, "state", "states")
+        ));
+    }
+
+    t.push_str("\n**⌨️ Commands**\n");
+    t.push_str("`/geo` the place that's up · `/geotop` the board · `/geohelp` this card · mods: `/geoskip` for a fresh one, `/geostop` to switch it off\n");
+    t.push_str(&format!("-# {}", super::geo_bank::ATTRIBUTION));
+    t
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1535,6 +1663,7 @@ pub(crate) mod tests {
             anagrams: anagram_defaults(),
             guess: guess_defaults(),
             movie: movie_defaults(),
+            geo: geo_defaults(),
         }
     }
 
@@ -1565,6 +1694,22 @@ pub(crate) mod tests {
             films: Some(20),
             stills: Some(49),
             shows: Some(6),
+        }
+    }
+
+    pub(crate) fn geo_defaults() -> GeoRules {
+        GeoRules {
+            channel: Some(1_552_000_000_000_000_001),
+            cap: Some(15),
+            idle_minutes: 10,
+            no_repeat_days: 30,
+            match_rounds: 5,
+            min_players: 2,
+            break_minutes: 2,
+            win_points: 5,
+            second_points: 2,
+            places: Some(600),
+            states: Some(12),
         }
     }
 
@@ -1713,6 +1858,12 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn zz_dump_welcome() {
+        println!("TOTAL {}", welcome_text(&defaults()).chars().count());
+        println!("HUGE  {}", welcome_text(&huge()).chars().count());
+    }
+
+    #[test]
     fn the_welcome_uses_live_channels_and_drops_unset_ones() {
         let r = defaults();
         let text = welcome_text(&r);
@@ -1731,7 +1882,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, guess: GuessRules { channel: None, ..guess_defaults() }, movie: MovieRules { channel: None, ..movie_defaults() }, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, guess: GuessRules { channel: None, ..guess_defaults() }, movie: MovieRules { channel: None, ..movie_defaults() }, geo: GeoRules { channel: None, ..geo_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 

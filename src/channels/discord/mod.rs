@@ -59,6 +59,9 @@ mod guess_store;
 mod movie;
 mod movie_bank;
 mod movie_store;
+mod geo;
+mod geo_bank;
+mod geo_store;
 mod updates;
 mod chess;
 mod chess_board;
@@ -185,6 +188,11 @@ impl VizierChannel for DiscordChannelReader {
         }
         // The film bank, read once. Missing only means Guess the Movie is off.
         movie_bank::open(&self.deps.config.workspace);
+        if let Err(err) = geo_store::open(&self.deps.config.workspace) {
+            tracing::warn!("geo: store not opened: {}", err);
+        }
+        // The place bank, read once. Missing only means Geo is off.
+        geo_bank::open(&self.deps.config.workspace);
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
         }
@@ -1251,6 +1259,7 @@ const RETIRED_COMMANDS: &[&str] = &[
 fn is_game_channel(channel: u64) -> bool {
     [
         movie::live_channel(),
+        geo::live_channel(),
         anagram::live_channel(),
         guess::live_channel(),
         npat::live_channel(),
@@ -1356,6 +1365,7 @@ impl EventHandler for Handler {
         anagram::on_delete(channel_id, deleted_message_id);
         guess::on_delete(channel_id, deleted_message_id);
         movie::on_delete(channel_id, deleted_message_id);
+        geo::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1487,6 +1497,8 @@ impl EventHandler for Handler {
         guess::spawn(ctx.clone());
         // Guess the Movie: the same, with a film and one clue about it.
         movie::spawn(ctx.clone());
+        // Geo: the same again, with a street photo and a map to place it on.
+        geo::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1693,6 +1705,11 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), movie::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), geo::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), geo::top_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), geo::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(geo::skip_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(geo::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1832,6 +1849,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("movieready:") {
                 movie::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("geoready:") {
+                geo::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -2486,6 +2507,26 @@ impl EventHandler for Handler {
             }
             if command.data.name == "moviestop" {
                 movie::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "geo" {
+                geo::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "geotop" {
+                geo::top_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "geohelp" {
+                geo::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "geoskip" {
+                geo::skip_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "geostop" {
+                geo::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -3310,6 +3351,8 @@ impl EventHandler for Handler {
         guess::note_message(&ctx, &msg);
         // So does chat in the guess-the-movie channel.
         movie::note_message(&ctx, &msg);
+        // And in the geo channel.
+        geo::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
@@ -3326,6 +3369,10 @@ impl EventHandler for Handler {
 
         // And Guess the Movie: a guess that names the film wins the round.
         movie::on_message(&ctx, &msg).await;
+
+        // And Geo: a place name in the right state takes the round, and how
+        // much it pays depends on how near it lands.
+        geo::on_message(&ctx, &msg).await;
 
         let agent_id = self.0.clone();
 

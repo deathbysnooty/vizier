@@ -19,6 +19,12 @@ quizbank/api/
 # megabytes. The bank names them; a workspace that hasn't got them simply asks
 # with tags and hint lines instead.
 moviebank/images/
+
+# place bank: the same, and more so - the street photos are the whole game, so
+# a workspace without them keeps Geo switched off rather than posting a card
+# with nothing on it. Rebuild them with geobank/tools/harvest.py, or rsync them
+# to the server beside movies.json.
+geobank/images/
 moviebank/tools/source_quiz.sqlite
 quizbank/wikidata/.cache/
 quizbank/reviews/

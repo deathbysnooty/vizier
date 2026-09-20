@@ -555,6 +555,10 @@ pub struct News {
 }
 
 pub const NEWS: &[News] = &[News {
+    id: "geo-2026-09",
+    title: "\u{1F5FA}\u{FE0F} Geo is here \u{2014} GeoGuessr, but only India",
+    body: "A photo of a street somewhere in India goes up in {geo}, and you say where it is.\n\n           \u{2022} Real dashcam photos \u{2014} no landmark picked out for you. A road, the shops on it, the signboards. Read them.\n           \u{2022} Type a place. The **state** is worth **2**, a town **within 60 km** is **4**, a town **within 15 km** is **5**.\n           \u{2022} You never have to know the town: the state alone always scores, and a town hands you its state free. `Kerala` is safe, `Kochi` is greedy.\n           \u{2022} The state is a **gate** \u{2014} a town in the WRONG state scores nothing, however near it looks.\n           \u{2022} Old names and bad spelling both work: `Bombay`, `Benares`, `Gurgaon`.\n           \u{2022} **Matches of 5 places.** Most points wins: **5 house points**, **2** for second, up to **15 a day**. One photo alone pays none. Press **I'm ready** to play.\n           \u{2022} **`!hint`** gives the state's first letter for a point off; **`!skip`** works after a hint.\n\n           Only **13 states** so far \u{2014} that is where people have driven with a dashcam. Every state it has comes up as often as every other.\n\n           `/geohelp` explains the lot, `/geotop` is the board.",
+}, News {
     id: "koto-scoring-guesses-2026-09",
     title: "🔤 Koto now pays for every guess that scores",
     body: "Koto points have changed, and they're kinder.\n\n\
@@ -634,7 +638,7 @@ pub const NEWS: &[News] = &[News {
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,
-/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`, `{movie}`
+/// `{anagram}`, `{guess}`, `{npat}`, `{duel}`, `{movie}`, `{geo}`
 /// and `{scoreboard}` become `<#id>`, or a plain name when that channel isn't
 /// set, so a note never shows a broken link.
 pub fn fill_channels(body: &str) -> String {
@@ -649,6 +653,7 @@ pub fn fill_channels(body: &str) -> String {
         .replace("{npat}", &mention("VIZIER_NPAT_CHANNEL", "the word-game channel"))
         .replace("{duel}", &mention("VIZIER_DUEL_CHANNEL", "the Letter Duel channel"))
         .replace("{movie}", &mention("VIZIER_MOVIE_CHANNEL", "the guess-the-movie channel"))
+        .replace("{geo}", &mention("VIZIER_GEO_CHANNEL", "the geo channel"))
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
 
