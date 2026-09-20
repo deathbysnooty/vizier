@@ -825,13 +825,21 @@ async fn arrange(ctx: &Context, mode: Mode) -> Result<String, String> {
             }
         }
     }
-    let states: Vec<PartState> = (0..3)
-        .map(|i| PartState {
-            wanted: wanted[i].is_some(),
-            present: present[i],
-            changed: wanted[i].as_ref().is_some_and(|c| hashes[i].as_deref() != Some(c.hash.as_str())),
+    // Zipped, not counted: this used to read `(0..3)`, and when Geo became a
+    // fourth post the loop simply never looked at it — the post was built every
+    // minute and silently dropped. Zipping makes the length impossible to get
+    // wrong when the next slot is added.
+    let states: Vec<PartState> = wanted
+        .iter()
+        .zip(present.iter())
+        .zip(hashes.iter())
+        .map(|((want, present), hash)| PartState {
+            wanted: want.is_some(),
+            present: *present,
+            changed: want.as_ref().is_some_and(|c| hash.as_deref() != Some(c.hash.as_str())),
         })
         .collect();
+    debug_assert_eq!(states.len(), Slot::ALL.len(), "every slot must be considered");
     let (steps, mut card_again) = plan(&states, mode == Mode::Refresh);
     if card_on && !card_again {
         card_again = match (mode, card_id) {
@@ -1271,6 +1279,32 @@ mod tests {
             Body::Text(_) => panic!("the guide is embeds"),
         }
         assert!(!SNITCH_HOW.is_empty() && FROG_HOW.starts_with(b"\x89PNG"));
+    }
+
+    /// The bug that kept Geo off the channel for a whole release: `arrange`
+    /// counted `(0..3)` while there were four slots, so the fourth was built
+    /// every minute and then never looked at.
+    #[test]
+    fn every_slot_is_considered() {
+        let r = rules_text::tests::defaults();
+        let wanted = contents(&r, true, true, true, true);
+        assert_eq!(wanted.len(), Slot::ALL.len());
+        let present = vec![false; Slot::ALL.len()];
+        let hashes: Vec<Option<String>> = vec![None; Slot::ALL.len()];
+        let states: Vec<PartState> = wanted
+            .iter()
+            .zip(present.iter())
+            .zip(hashes.iter())
+            .map(|((want, present), hash)| PartState {
+                wanted: want.is_some(),
+                present: *present,
+                changed: want.as_ref().is_some_and(|c| hash.as_deref() != Some(c.hash.as_str())),
+            })
+            .collect();
+        assert_eq!(states.len(), Slot::ALL.len());
+        let (steps, _) = plan(&states, false);
+        assert_eq!(steps.len(), Slot::ALL.len());
+        assert!(steps.iter().all(|s| *s == Step::Post), "all four are missing, so all four go up: {steps:?}");
     }
 
     /// Geo has a post of its own because the welcome has no room for a line.
