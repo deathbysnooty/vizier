@@ -46,6 +46,8 @@ pub enum Source {
     Chess,
     /// Guess the Word: the first person to name the doodle on the card.
     Guess,
+    /// Guess the Movie: the first person to name the film from a clue.
+    Movie,
     /// Letter Duel: a whole game of tiles, paid by where each player finished.
     Duel,
     /// The chess puzzle: the FIRST person to crack each one, and nobody else.
@@ -65,7 +67,7 @@ pub enum Cap {
 pub const NO_LIMIT: u64 = 100;
 
 impl Source {
-    pub const ALL: [Source; 20] = [
+    pub const ALL: [Source; 21] = [
         Source::Chat,
         Source::Voice,
         Source::Quiz,
@@ -84,6 +86,7 @@ impl Source {
         Source::Sudoku,
         Source::Chess,
         Source::Guess,
+        Source::Movie,
         Source::Duel,
         Source::Puzzle,
     ];
@@ -108,6 +111,7 @@ impl Source {
             Source::Sudoku => "sudoku",
             Source::Chess => "chess",
             Source::Guess => "guess",
+            Source::Movie => "movie",
             Source::Duel => "duel",
             Source::Puzzle => "puzzle",
         }
@@ -137,6 +141,7 @@ impl Source {
             Source::Sudoku => "🔢 Sudoku",
             Source::Chess => "♟️ Chess",
             Source::Guess => "🎨 Guess the Word",
+            Source::Movie => "🎬 Guess the Movie",
             Source::Duel => "🔠 Letter Duel",
             Source::Puzzle => "🧩 Chess puzzle",
         }
@@ -162,6 +167,7 @@ impl Source {
             Source::Sudoku => day(super::control::number("VIZIER_CAP_SUDOKU", 20)),
             Source::Chess => day(super::control::number("VIZIER_CAP_CHESS", 8)),
             Source::Guess => day(super::control::number("VIZIER_CAP_GUESS", 10)),
+            Source::Movie => day(super::control::number("VIZIER_CAP_MOVIE", 10)),
             Source::Duel => day(super::control::number("VIZIER_CAP_DUEL", 8)),
             // Nought by default: the puzzle ships paying NO house points at all.
             // An engine solves any of them instantly, so the owner turns this on

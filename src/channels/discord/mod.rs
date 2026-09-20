@@ -56,6 +56,12 @@ mod guess;
 mod guess_bank;
 mod guess_draw;
 mod guess_store;
+mod dare;
+mod dare_bank;
+mod dare_store;
+mod movie;
+mod movie_bank;
+mod movie_store;
 mod chess;
 mod chess_board;
 mod chess_rules;
@@ -164,6 +170,14 @@ impl VizierChannel for DiscordChannelReader {
         }
         // The doodle bank, read once. Missing only means Guess the Word is off.
         guess_bank::open(&self.deps.config.workspace);
+        if let Err(err) = dare_store::open(&self.deps.config.workspace) {
+            tracing::warn!("dare: store not opened: {}", err);
+        }
+        if let Err(err) = movie_store::open(&self.deps.config.workspace) {
+            tracing::warn!("movie: store not opened: {}", err);
+        }
+        // The film bank, read once. Missing only means Guess the Movie is off.
+        movie_bank::open(&self.deps.config.workspace);
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
         }
@@ -1306,6 +1320,8 @@ impl EventHandler for Handler {
         duel::on_delete(channel_id, deleted_message_id);
         anagram::on_delete(channel_id, deleted_message_id);
         guess::on_delete(channel_id, deleted_message_id);
+        movie::on_delete(channel_id, deleted_message_id);
+        dare::on_delete(channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1569,6 +1585,15 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), guess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), movie::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), movie::top_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), movie::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::skip_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), dare::mine_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), dare::help_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(dare::skip_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(dare::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
@@ -1681,6 +1706,9 @@ impl EventHandler for Handler {
         anagram::spawn(ctx.clone());
         // Guess the Word: picks up the doodle a restart left in its channel, or draws one.
         guess::spawn(ctx.clone());
+        // Guess the Movie: the same, with a film and one clue about it.
+        movie::spawn(ctx.clone());
+        dare::spawn(ctx.clone());
         // Daily chat and voice points, settled from the stats tables.
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
@@ -1749,6 +1777,10 @@ impl EventHandler for Handler {
             }
             if id.starts_with("duel") {
                 duel::on_component(&ctx, component).await;
+                return;
+            }
+            if id.starts_with("dare") {
+                dare::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("frogcatch:") || id.starts_with("frogpage:") || id == "frogmine" {
@@ -1966,6 +1998,10 @@ impl EventHandler for Handler {
         if let Interaction::Modal(ref modal) = interaction {
             if modal.data.custom_id.starts_with("frogans:") {
                 frog::on_modal(&ctx, modal).await;
+                return;
+            }
+            if modal.data.custom_id.starts_with("dareask") {
+                dare::on_modal(&ctx, modal).await;
                 return;
             }
             if modal.data.custom_id.starts_with("npatans:") {
@@ -2383,6 +2419,42 @@ impl EventHandler for Handler {
             }
             if command.data.name == "guessstop" {
                 guess::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "movie" {
+                movie::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "movietop" {
+                movie::top_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "moviehelp" {
+                movie::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "movieskip" {
+                movie::skip_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "dare" {
+                dare::mine_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "darehelp" {
+                dare::help_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "dareskip" {
+                dare::skip_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "darestop" {
+                dare::stop_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "moviestop" {
+                movie::stop_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "frogdrop" {
@@ -3193,6 +3265,10 @@ impl EventHandler for Handler {
         anagram::note_message(&ctx, &msg);
         // And chat in the guess-the-word channel buries the doodle card the same way.
         guess::note_message(&ctx, &msg);
+        // So does chat in the guess-the-movie channel.
+        movie::note_message(&ctx, &msg);
+        // And in the truth-or-dare channel, where answering IS typing.
+        dare::note_message(&ctx, &msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
@@ -3206,6 +3282,13 @@ impl EventHandler for Handler {
         // Guess the Word is played the same way: a guess that names the doodle
         // wins the round, and !hint / !skip steer it.
         guess::on_message(&ctx, &msg).await;
+
+        // And Guess the Movie: a guess that names the film wins the round.
+        movie::on_message(&ctx, &msg).await;
+
+        // Truth or Dare: the person whose turn it is answers by typing, and
+        // everybody else in that channel is left alone.
+        dare::on_message(&ctx, &msg).await;
 
         let agent_id = self.0.clone();
 

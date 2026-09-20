@@ -655,6 +655,87 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "movie",
+            title: "Guess the Movie",
+            icon: "🎬",
+            about: "A film is always waiting in its own channel (Game channel below), and the first person to type its title \
+                    wins house points. The bot asks about it ONE way each round - five tags about it (revenge, guns, coal \
+                    mafia, uttar pradesh, a butcher's family), a line of dialogue out of it, or a still from a scene - and \
+                    members type the title straight into the channel, so leave Send Messages on for @everyone and let the \
+                    bot send, embed, read history, add reactions and manage messages. Spelling is forgiven generously, and \
+                    so is transliteration: dilwaale dulhaniya le jayenge takes Dilwale Dulhania Le Jayenge, and so does \
+                    ddlj. Two things are never forgiven - a sequel number has to be exactly right, so don cannot take Don \
+                    2, and a guess that fits two films at once takes neither. The first right guess gets a ✅, a line \
+                    naming the winner and the film, and the next one at once; wrong guesses are ignored in silence. Typing \
+                    !hint reveals the sharper tag the card held back, plus the title's first letter, its year and whether \
+                    it is Hindi or English, once a round, and takes a point off what the round pays; !skip opens up only \
+                    after a hint and pays nobody. Neither a film nor any single clue about it comes round again inside the \
+                    no-repeat window. The films come from moviebank/movies.json in the bot's workspace, read at start: \
+                    with no bank there the game simply stays off and says so in the log. The stills stay on TMDB's own \
+                    servers and the bank holds only their paths - every one of them was looked at by hand before it went \
+                    in, and a film with no still worth showing simply plays tags and dialogue. Never runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_MOVIE", "Game on", "Run Guess the Movie in its channel. Off takes the card down and stops new rounds; the round that was up is left as it is. The game also stays off, whatever this says, when there is no film bank to play with.", Kind::Toggle, "off"),
+                setting("VIZIER_MOVIE_CHANNEL", "Game channel", "The channel the film card lives in. Members need to be able to type there - that is how guesses are given. Empty means 🎬 guess-the-movie, the channel the game was made for. Never #safe-corner.", Kind::Channel, "1551044377374101594"),
+                setting("VIZIER_POINTS_MOVIE", "Points for naming it", "House points for the first person to type the title. A hint takes one off, never below one.", number(0, 100, "points"), "3"),
+                setting("VIZIER_CAP_MOVIE", "Daily limit", "The most house points one person can earn from films in a day. The movie points the game keeps alongside are never capped, so the board goes on counting after this is full. 100 or more means no limit.", number(0, 100, "points a day"), "10"),
+                setting("VIZIER_MOVIE_TAGS_SHOWN", "Tags on the card", "How many tags a tags round puts up. They are written vague first and sharp last, so showing fewer makes the game harder; a hint reveals the next one down whatever this is set to.", number(3, 7, "tags"), "5"),
+                setting("VIZIER_MOVIE_HINDI_SHARE", "Lean Hindi", "Out of a hundred rounds, how many should be Hindi films rather than English ones. It is a lean and not a rule: when nothing fresh fits, the bot widens rather than leaving the channel empty.", number(0, 100, "%"), "50"),
+                setting("VIZIER_MOVIE_MODERN_SHARE", "Lean recent", "Out of a hundred rounds, how many should be recent films rather than the older classics. Same lean, same widening.", number(0, 100, "%"), "65"),
+                setting("VIZIER_MOVIE_IDLE_MINUTES", "Replace a round after", "How long a film nobody names and nobody skips stays up before the bot says what it was and puts a new one up by itself.", number(1, 1440, "minutes"), "20"),
+                setting("VIZIER_MOVIE_NO_REPEAT_DAYS", "Don't repeat a film for", "How long a film is held back before it can come round again - and, inside that, how long each particular still and each particular line is held back, so the same picture is never shown twice.", number(0, 365, "days"), "30"),
+                setting("VIZIER_MOVIE_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted.", number(1, 100, "messages"), "5"),
+                setting("VIZIER_MOVIE_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "120"),
+            ],
+            commands: vec![
+                command("movie", EVERYONE, "/movie", "The film that is up now, sent privately with its clue: what it is worth, whether the hint has gone, and how you have done today. Only you see it."),
+                command("movietop", EVERYONE, "/movietop", "The movie points board, today or this month: the top 10 and, if you are not on it, your own line. Movie points are the game's own score - every solve at what the round was worth, hint taken off but no daily limit - so they keep counting after the house-points limit is full, and mods and Muggles have them too. Only you see it."),
+                command("moviehelp", EVERYONE, "/moviehelp", "How Guess the Movie works, written from the settings as they are right now: how to guess, what a round pays, and what !hint and !skip do. Only you see it."),
+                command("movieskip", ADMINS, "/movieskip", "Drops the film that is up, with no points for anyone, says what it was and puts a fresh one up at once. Unlike !skip, no hint is needed first."),
+                command("moviestop", ADMINS, "/moviestop", "Switches Guess the Movie off: the card comes down and no new films go up. Switch Game on back on to play again."),
+            ],
+        },
+        Section {
+            id: "dare",
+            title: "Truth or Dare",
+            icon: "🎭",
+            about: "A social game in its own channel (Game channel below), and the only game here that scores nothing at \
+                    all - no house points, no side tally, no board. Nothing it asks can be checked afterwards, so nothing \
+                    it asks is paid for; what it has instead is a turn, a prompt, and a ✅ on the answer. Nobody is ever \
+                    picked who did not volunteer: the idle card carries an I'm in button, a spin picks only from the \
+                    people who pressed it, and it never lands on whoever pressed Spin, so nobody can hand themselves an \
+                    easy one. Out takes somebody back out at any moment, mid-turn included, with nothing said in the \
+                    channel. The person picked chooses Truth, Dare or Surprise me, gets a prompt, and answers by typing \
+                    in the channel - so leave Send Messages on for @everyone and let the bot send, embed, read history, \
+                    add reactions and manage messages. Anything they are asked can be vetoed: the first veto swaps the \
+                    prompt, the next passes the turn, and passing costs nothing and keeps them in the pool. A turn nobody \
+                    comes back to ends by itself and drops that person from the pool, which is also how the game puts \
+                    itself away - a quiet room drains the pool and goes back to the idle card. The prompts are written \
+                    into the bot rather than read from a file, so the list is reviewed once and shipped: every dare is \
+                    something done by typing in the channel, nothing asks for a photo or anything that leaves it, and no \
+                    prompt names another member or asks about one. Spice below decides how far into that list the bot \
+                    reaches. Never runs in #safe-corner.",
+            settings: vec![
+                setting("VIZIER_DARE", "Game on", "Run Truth or Dare in its channel. Off takes the card down, empties the pool and stops new turns.", Kind::Toggle, "off"),
+                setting("VIZIER_DARE_CHANNEL", "Game channel", "The channel the card lives in. Members need to be able to type there - that is how turns are answered. Empty means 🎭 truth-or-dare, the channel the game was made for. Never #safe-corner - and Game on above stays off until you turn it on, so setting this alone starts nothing.", Kind::Channel, "1551090303409192991"),
+                setting("VIZIER_DARE_SPICE", "Spice", "How far into the prompt list the bot reaches. 1 mild - anyone could answer it in front of anyone. 2 sharper - embarrassing rather than exposing. 3 bold - genuinely personal. 4 adult - grown-up questions, and QUESTIONS ONLY: there are no adult dares and the bot cannot be made to invent one. Tier 4 also needs the channel itself to be marked age-restricted in Discord's own channel settings - setting this to 4 in an ordinary channel changes nothing, by design, so the age gate is Discord's and not a number in this panel. Whatever this is set to, a veto costs nothing.", number(1, 4, "tier"), "1"),
+                setting("VIZIER_DARE_START_VOTES", "Votes to put a question up", "How many people have to press Truth, or Dare, before that question goes up. It counts people and not presses, and pressing your own button again takes the vote back.", number(1, 20, "votes"), "2"),
+                setting("VIZIER_DARE_SKIP_VOTES", "Votes to skip a question", "How many people it takes to bin the question that is up, no reason needed. Set it near the start votes and the room can undo itself instantly; set it far above and an unwanted question sits there.", number(1, 20, "votes"), "3"),
+                setting("VIZIER_DARE_ASK_COOLDOWN", "Wait between a member's own questions", "How long before the same person can put another question of their own up. Zero lets one person ask every round, which is how the game becomes theirs.", number(0, 1440, "minutes"), "10"),
+                setting("VIZIER_DARE_MIN_ANSWER", "Shortest answer", "How long a message has to be to count as answering a prompt. Low enough and a lol closes a turn; this is what stops that.", number(1, 500, "characters"), "15"),
+                setting("VIZIER_DARE_IDLE_MINUTES", "Give up on a question after", "How long a question with nobody answering stays up before the bot ends it and opens the voting again. It ends in silence: the room has plainly moved on, and a line about it would be talking to an empty channel.", number(1, 1440, "minutes"), "10"),
+                setting("VIZIER_DARE_NO_REPEAT_DAYS", "Don't repeat a prompt for", "How long before the channel can be served the same question again. Nobody is asked anything individually, so this is the whole room's window rather than one person's.", number(0, 365, "days"), "14"),
+                setting("VIZIER_DARE_BUMP_MESSAGES", "Messages before the card moves", "How many messages from other people have to land under the card before it is posted again at the bottom and the old copy deleted.", number(1, 100, "messages"), "6"),
+                setting("VIZIER_DARE_BUMP_SECONDS", "Wait between moves", "The shortest time between two of those moves, however busy the channel gets. Both this and the message count have to be met.", number(10, 3600, "seconds"), "45"),
+            ],
+            commands: vec![
+                command("dare", EVERYONE, "/dare", "Whose turn it is, what they were asked if it is yours, and whether you are in the pool. Only you see it."),
+                command("darehelp", EVERYONE, "/darehelp", "How Truth or Dare works, written from the settings as they are right now: how joining and leaving work, what a veto does, and what the prompts will and will not ask. Only you see it."),
+                command("dareskip", ADMINS, "/dareskip", "Drops the turn that is up. It reads in the channel as a mod dropping it rather than as the player passing, so nobody is left looking like they bottled it."),
+                command("darestop", ADMINS, "/darestop", "Switches Truth or Dare off: the card comes down and the pool is emptied, so coming back on asks people again rather than assuming a room that has moved on."),
+            ],
+        },
+        Section {
             id: "chess",
             title: "Chess",
             icon: "♟️",

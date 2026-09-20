@@ -35,6 +35,7 @@ pub const ACTIVITIES: &[(&str, &[&str])] = &[
     ("koto", &["koto"]),
     ("anagram", &["anagram"]),
     ("guess", &["guess"]),
+    ("movie", &["movie"]),
     ("cat", &["cat"]),
     ("wordle", &["wordle"]),
     ("arena", &["arena"]),
@@ -52,6 +53,7 @@ pub fn activity_label(key: &str) -> String {
         "npat" => "🔤 Name Place Animal Thing".to_string(),
         "sudoku" => "🔢 Sudoku".to_string(),
         "guess" => "🎨 Guess the Word".to_string(),
+        "movie" => "🎬 Guess the Movie".to_string(),
         "chess" => "♟️ Chess".to_string(),
         other => Source::from_key(other).map(|s| s.label().to_string()).unwrap_or_else(|| other.to_string()),
     }
@@ -120,7 +122,7 @@ fn activity_of(row: &LedgerRow) -> Option<&'static str> {
 /// their own store knows nothing about: `with_anagram_measured`,
 /// `with_guess_measured` and `with_sudoku_measured` decide a real day on each
 /// game's own uncapped points instead.
-const COUNTED: &[&str] = &["quiz", "koto", "anagram", "guess", "cat", "arena", "snitch", "sudoku"];
+const COUNTED: &[&str] = &["quiz", "koto", "anagram", "guess", "movie", "cat", "arena", "snitch", "sudoku"];
 
 /// The top of each activity from a day's rows (in ledger order). Wordle and
 /// frogs: the most points. Quiz, Koto, Anagram, Cat Bot, fights, the Snitch and

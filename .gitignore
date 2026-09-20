@@ -14,6 +14,12 @@ webui/.react-router/
 
 # quiz bank: downloaded third-party dumps, fetch cache and fact-check logs stay local
 quizbank/api/
+
+# movie bank: the stills are downloaded third-party dumps and run to hundreds of
+# megabytes. The bank names them; a workspace that hasn't got them simply asks
+# with tags and hint lines instead.
+moviebank/images/
+moviebank/tools/source_quiz.sqlite
 quizbank/wikidata/.cache/
 quizbank/reviews/
 __pycache__/

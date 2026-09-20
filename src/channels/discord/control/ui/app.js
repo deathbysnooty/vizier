@@ -4735,7 +4735,7 @@
     { id: 'chat', label: 'Chat', icon: '💬', sources: ['chat'] },
     { id: 'voice', label: 'Voice', icon: '🎙️', sources: ['voice'] },
     { id: 'quiz', label: 'Quiz', icon: '🧠', sources: ['quiz'] },
-    { id: 'games', label: 'Koto, anagram, cats, Wordle, frogs', icon: '🔤', sources: ['koto', 'anagram', 'guess', 'cat', 'wordle', 'frog'] },
+    { id: 'games', label: 'Koto, anagram, cats, Wordle, frogs', icon: '🔤', sources: ['koto', 'anagram', 'guess', 'movie', 'cat', 'wordle', 'frog'] },
     { id: 'arena', label: 'Arena & royale', icon: '⚔️', sources: ['arena', 'royale'] },
     { id: 'snitch', label: 'Snitch', icon: '🪽', sources: ['snitch', 'golden_snitch'] },
     { id: 'weekly', label: 'Weekly posts', icon: '📝', sources: ['weekly'] },
@@ -5535,7 +5535,7 @@
     return h('div', { class: 'stat' }, h('span', { class: 'stat-label' }, label), h('b', null, value), sub ? h('small', null, sub) : null);
   }
   function sourceLabel(key) {
-    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', guess: '🎨 Guess the Word', cat: '🐱 Cat Bot', wordle: '🟩 Wordle', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', frog: '🐸 Chocolate Frog', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
+    const labels = { chat: '💬 Chat', voice: '🎙️ Voice', quiz: '🧠 Quiz', koto: '🔤 Koto', anagram: '🔡 Anagram', guess: '🎨 Guess the Word', movie: '🎬 Guess the Movie', cat: '🐱 Cat Bot', wordle: '🟩 Wordle', arena: '⚔️ Arena', royale: '👑 Battle Royale', snitch: '🪽 Snitch', golden_snitch: '🥇 Golden Snitch', frog: '🐸 Chocolate Frog', weekly: '📝 Weekly posts', mod: '🛡️ Mods' };
     return labels[key] || key;
   }
 

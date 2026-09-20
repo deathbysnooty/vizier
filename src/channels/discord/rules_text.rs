@@ -86,6 +86,8 @@ pub struct Rules {
     pub chess: ChessRules,
     pub anagrams: AnagramRules,
     pub guess: GuessRules,
+    pub movie: MovieRules,
+    pub dare: DareRules,
 }
 
 /// Guess the Word's live settings, for `/guesshelp` and the lines about it in
@@ -103,6 +105,52 @@ pub struct GuessRules {
     pub no_repeat_days: i64,
     /// Words in the bank, when there is one.
     pub words: Option<usize>,
+}
+
+/// Guess the Movie's live settings, for `/moviehelp` and the lines about it in
+/// the House Cup posts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovieRules {
+    /// The game's channel, only while the game is on and there is a bank.
+    pub channel: Option<u64>,
+    /// What naming a film pays.
+    pub points: i64,
+    pub cap: Option<i64>,
+    /// How long a round nobody names stays up.
+    pub idle_minutes: i64,
+    /// How long a film - and each clue about it - is held back.
+    pub no_repeat_days: i64,
+    /// How many tags a tags round puts on the card.
+    pub tags_shown: i64,
+    /// Films in the bank, and stills among them, when there is one.
+    pub films: Option<usize>,
+    pub stills: Option<usize>,
+}
+
+/// Truth or Dare's live settings, for `/darehelp`. It has no points and no cap:
+/// nothing it asks can be checked, so nothing it asks is scored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DareRules {
+    /// The game's channel, only while the game is on — and it is off until a
+    /// mod turns it on, because a game like this should never start by itself.
+    pub channel: Option<u64>,
+    /// The highest tier the bank may reach into, 1 to 4.
+    pub spice: u8,
+    /// Whether the channel is one Discord marks age-restricted. The adult tier
+    /// needs this AND the setting; neither is enough alone.
+    pub adult: bool,
+    /// How many people it takes to put a question up, and to be rid of one.
+    pub start_votes: i64,
+    pub skip_votes: i64,
+    /// How long a question with nobody answering stays up.
+    pub idle_minutes: i64,
+    /// How short a message may be and still count as an answer.
+    pub min_answer: usize,
+    /// How long between one member's own questions, in minutes.
+    pub ask_cooldown: i64,
+    /// How many prompts the tier actually opens up.
+    pub truths: usize,
+    pub dares: usize,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -325,6 +373,8 @@ impl Rules {
             chess: super::chess::chess_rules(),
             anagrams: super::anagram::anagram_rules(),
             guess: super::guess::guess_rules(),
+            movie: super::movie::movie_rules(),
+            dare: super::dare::dare_rules(),
         }
     }
 }
@@ -438,8 +488,13 @@ pub fn welcome_text(r: &Rules) -> String {
     if let Some(c) = channel(r.anagrams.channel) {
         action.push(format!("🔀 {} · anagrams — unscramble the letters and type the word", c));
     }
-    if let Some(c) = channel(r.guess.channel) {
-        action.push(format!("🎨 {} · guess the word — say what the doodle is", c));
+    // Two guessing games are two rooms but one line: this list is already at
+    // Discord's message limit, and a line each would push the welcome over it.
+    match (channel(r.guess.channel), channel(r.movie.channel)) {
+        (Some(g), Some(m)) => action.push(format!("🎨 {} · guess the doodle · 🎬 {} · guess the film", g, m)),
+        (Some(g), None) => action.push(format!("🎨 {} · guess the word — say what the doodle is", g)),
+        (None, Some(m)) => action.push(format!("🎬 {} · guess the movie — name the film from a clue", m)),
+        (None, None) => {}
     }
     if let Some(c) = channel(r.fight_channel) {
         let what = if r.battle_daily { "fights and the daily Battle Royale" } else { "fights and Battle Royales" };
@@ -733,6 +788,14 @@ fn game_lines(r: &Rules) -> Vec<String> {
             max_words(r.guess.cap)
         ));
     }
+    if let Some(c) = channel(r.movie.channel).filter(|_| r.movie.points > 0) {
+        lines.push(format!(
+            "🎬 **Guess the Movie** in {} — a film is always up as tags, a line or a still; first to type the title wins **{}** {}",
+            c,
+            r.movie.points,
+            max_words(r.movie.cap)
+        ));
+    }
     if r.arena_win > 0 {
         lines.push(format!("⚔️ **1v1 fights** — `/fight` someone, win **{}** {}", r.arena_win, max_words(r.arena_cap)));
     }
@@ -879,6 +942,9 @@ pub fn earn_text(r: &Rules) -> String {
     }
     if r.guess.channel.is_some() && r.guess.points > 0 {
         more.push(format!("🎨 Guess the Word {} first to name it {}", r.guess.points, max_words(r.guess.cap)));
+    }
+    if r.movie.channel.is_some() && r.movie.points > 0 {
+        more.push(format!("🎬 Guess the Movie {} first to name the film {}", r.movie.points, max_words(r.movie.cap)));
     }
     if !more.is_empty() {
         lines.push(more.join(" · "));
@@ -1345,6 +1411,121 @@ pub fn guess_help_text(g: &GuessRules) -> String {
     t
 }
 
+// --- guess the movie ------------------------------------------------------------------------
+
+pub const MOVIE_RULES_TITLE: &str = "🎬 How Guess the Movie works";
+
+fn movie_where(id: Option<u64>) -> String {
+    match channel(id) {
+        Some(c) => format!("in {}", c),
+        None => "in its own channel (a mod has to set one)".to_string(),
+    }
+}
+
+/// What `/moviehelp` says: the whole game in one card, from the settings as
+/// they are now. The stills are TMDB's, so the credit their terms ask for goes
+/// out with every telling of the rules.
+pub fn movie_help_text(m: &MovieRules) -> String {
+    let mut t = format!(
+        "**🎬 What it is**\nThe bot puts ONE clue about a film up {} — {} words about it, a line out of it, or a still from a scene. Be the first to type the title and your house scores.\n\n",
+        movie_where(m.channel),
+        m.tags_shown
+    );
+    t.push_str("**⌨️ How to play**\n");
+    t.push_str("• Just type the title in the channel — no buttons, no commands.\n");
+    t.push_str("• Spelling is forgiven, and so is transliteration: `dilwaale dulhaniya le jayenge` takes *Dilwale Dulhania Le Jayenge*, and so does `ddlj`. Capitals, punctuation and a dropped **the** or **of** are all fine.\n");
+    t.push_str("• Two things are never forgiven: a **sequel number** has to be right, so `don` can't take *Don 2*; and a guess that fits two films at once takes neither.\n");
+    t.push_str("• The first right guess wins, gets a ✅ on the message, and the next film goes up at once.\n");
+    t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
+
+    t.push_str("**💡 Stuck?**\n");
+    t.push_str("• `!hint` reveals a **sharper clue** — the next tag, the one the card held back — along with the title's **first letter**, its year and whether it is Hindi or English. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!skip` moves on to a new film, but only once a hint has been used. It pays nobody.\n");
+    t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one film.\n\n", plural(m.idle_minutes, "minute", "minutes")));
+
+    t.push_str("**🏠 House points**\n");
+    t.push_str(&format!("• **{}** for naming the film first.\n", plural(m.points, "house point", "house points")));
+    t.push_str(&format!("• {}\n", match m.cap {
+        Some(n) => format!("Up to **{}** a day from films.", plural(n, "house point", "house points")),
+        None => "No daily limit from films.".to_string(),
+    }));
+    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+
+    t.push_str("\n**🎬 Movie points**\n");
+    t.push_str("• Every film you name also scores **movie points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str("• `/movietop` shows the board for today or this month.\n");
+    if m.no_repeat_days > 0 {
+        t.push_str(&format!("• Neither the same film nor the same still comes round again for **{}**.\n", plural(m.no_repeat_days, "day", "days")));
+    }
+    if let Some(films) = m.films {
+        let stills = m.stills.unwrap_or(0);
+        t.push_str(&format!("-# {} in the bank, Hindi and English, old and new — {} of them with a still.\n", plural(films as i64, "film", "films"), stills));
+    }
+
+    t.push_str("\n**⌨️ Commands**\n");
+    t.push_str("`/movie` the film that's up · `/movietop` the board · `/moviehelp` this card · mods: `/movieskip` for a fresh one, `/moviestop` to switch it off\n");
+    t.push_str(&format!("-# {}", super::movie_bank::ATTRIBUTION));
+    t
+}
+
+// --- truth or dare --------------------------------------------------------------------------
+
+fn dare_where(id: Option<u64>) -> String {
+    match id {
+        Some(c) => format!("in <#{}>", c),
+        None => "in its channel".to_string(),
+    }
+}
+
+fn spice_words(tier: u8) -> &'static str {
+    match tier {
+        1 => "mild",
+        2 => "sharper",
+        3 => "bold",
+        _ => "adult",
+    }
+}
+
+/// What `/darehelp` says: the whole game in one card, from the settings as they
+/// are right now.
+pub fn dare_help_text(d: &DareRules) -> String {
+    let mut t = format!(
+        "**🎭 What it is**\nOne card {} asks the ROOM a question. Nobody is picked and nobody is put on the spot — anyone who fancies it answers, and several usually do. Nothing here is scored; there are no points in this game.\n\n",
+        dare_where(d.channel)
+    );
+
+    t.push_str("**🗳️ Getting a question up**\n");
+    t.push_str(&format!("• Press **💬 Truth** or **🔥 Dare**. The first to reach **{}** puts that question up.\n", plural(d.start_votes, "vote", "votes")));
+    t.push_str("• A tally counts people, not presses — and pressing your own button again takes the vote back.\n\n");
+
+    t.push_str("**💬 Answering**\n");
+    t.push_str(&format!("• Just type in the channel. Anything over **{}** counts, from anyone, as many of you as want to.\n", plural(d.min_answer as i64, "character", "characters")));
+    t.push_str("• The first answer gets a ✅ and the card keeps count. Nothing you type is ever refused or corrected in public.\n\n");
+
+    t.push_str("**⏭️ Getting rid of one**\n");
+    t.push_str(&format!("• Don't like the question? Press **Skip**. **{}** and it's gone, no reason needed, and voting opens again.\n", plural(d.skip_votes, "person", "people")));
+    t.push_str(&format!("• A question nobody answers for **{}** ends quietly by itself.\n\n", plural(d.idle_minutes, "minute", "minutes")));
+
+    t.push_str("**✍️ Ask your own**\n");
+    t.push_str("• Press it and type your own question. It goes up **with your name on it** — that's the deal, there are no anonymous ones.\n");
+    t.push_str("• No mentions, no @everyone, no links or invites, and keep it to a sentence or two.\n");
+    t.push_str(&format!("• One each per **{}**, and the room can skip yours like any other.\n\n", plural(d.ask_cooldown, "minute", "minutes")));
+
+    t.push_str("**🌶️ What it asks**\n");
+    t.push_str(&format!("• The prompts are **{}** right now — {} truths and {} dares at that setting.\n", spice_words(if d.adult { d.spice } else { d.spice.min(3) }), d.truths, d.dares));
+    if d.spice >= 4 && !d.adult {
+        t.push_str("• The adult prompts are **switched on but not in play**: they only ever appear in a channel Discord marks age-restricted, and this one isn't.\n");
+    } else if d.adult && d.spice >= 4 {
+        t.push_str("• This is an age-restricted channel and the adult prompts are **in play** — grown-up questions, and questions only. Dares never go there, whatever the setting says.\n");
+    }
+    t.push_str("• Every dare is something you do by **typing, here**: nothing asks for a photo, a contact, or anything that leaves the channel.\n");
+    t.push_str("• No prompt names a member or asks you about one. If one ever seems to, skip it and tell a mod.\n\n");
+
+    t.push_str("**⌨️ Commands**\n");
+    t.push_str("`/dare` what's up and how the vote stands · `/darehelp` this card · mods: `/dareskip` to take a question down, `/darestop` to switch it off\n");
+    t
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1410,6 +1591,23 @@ pub(crate) mod tests {
             chess: chess_defaults(),
             anagrams: anagram_defaults(),
             guess: guess_defaults(),
+            movie: movie_defaults(),
+            dare: dare_defaults(),
+        }
+    }
+
+    pub(crate) fn dare_defaults() -> DareRules {
+        DareRules {
+            channel: Some(super::super::dare::HOME_CHANNEL),
+            spice: 1,
+            adult: false,
+            start_votes: 2,
+            skip_votes: 3,
+            idle_minutes: 10,
+            min_answer: 15,
+            ask_cooldown: 10,
+            truths: 16,
+            dares: 15,
         }
     }
 
@@ -1421,6 +1619,19 @@ pub(crate) mod tests {
             idle_minutes: 15,
             no_repeat_days: 14,
             words: Some(240),
+        }
+    }
+
+    pub(crate) fn movie_defaults() -> MovieRules {
+        MovieRules {
+            channel: Some(super::super::movie::HOME_CHANNEL),
+            points: 3,
+            cap: Some(10),
+            idle_minutes: 20,
+            no_repeat_days: 30,
+            tags_shown: 5,
+            films: Some(20),
+            stills: Some(49),
         }
     }
 
@@ -1587,7 +1798,7 @@ pub(crate) mod tests {
         let text = welcome_text(&bare);
         assert!(!text.contains("🧠 <#") && !text.contains("⚔️ <#"), "{}", text);
         assert!(text.contains("where the 🪽 Golden Snitch appears"), "{}", text);
-        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, guess: GuessRules { channel: None, ..guess_defaults() }, ..defaults() };
+        let none = Rules { house_channel: None, quiz_channel: None, fight_channel: None, frogs_on: false, snitch_on: false, npat: NpatRules { channel: None, ..npat_defaults() }, sudoku: SudokuRules { channel: None, ..sudoku_defaults() }, chess: ChessRules { channel: None, ..chess_defaults() }, anagrams: AnagramRules { channel: None, ..anagram_defaults() }, guess: GuessRules { channel: None, ..guess_defaults() }, movie: MovieRules { channel: None, ..movie_defaults() }, ..defaults() };
         assert!(!welcome_text(&none).contains("Where the action is"));
     }
 
