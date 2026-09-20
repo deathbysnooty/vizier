@@ -565,9 +565,9 @@ pub fn break_text(ready: &[u64], min: usize, films: i64, votes: usize, now: i64,
     if let Some(last) = last {
         text.push_str(&format!("{}\n", result_line(last)));
     }
-    text.push_str(&format!("Next match: **{} films**. Press **I'm ready** to play.\n", films));
+    text.push_str(&format!("Next match: **{} rounds**. **Pick a category below** — that's your vote and your seat.\n", films));
     if ready.is_empty() {
-        text.push_str(&format!("Nobody's ready yet — **{}** needed to start.\n", min));
+        text.push_str(&format!("Nobody's in yet — **{}** needed to start.\n", min));
     } else {
         let names = ready.iter().map(|id| format!("<@{}>", id)).collect::<Vec<_>>().join(" · ");
         text.push_str(&format!("**Ready:** {}\n", names));
@@ -585,7 +585,7 @@ pub fn break_text(ready: &[u64], min: usize, films: i64, votes: usize, now: i64,
     } else if ready.len() >= min && votes > 0 {
         text.push_str("Starting now…\n");
     }
-    if votes == 0 {
+    if votes == 0 && !ready.is_empty() {
         text.push_str("Waiting on the vote — **one press below** and it can start.\n");
     }
     text.push_str(&format!("-# 🥇 **{}** house points · 🥈 **{}** · you can join a match already running", win_points(), second_points()));
@@ -1215,10 +1215,8 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         let _ = with_db(|c| store::mark_ready(c, match_id, user, now));
         let waiting = ready_now(match_id).len();
         let min = min_players();
-        match waiting >= min {
-            true => "🎬 You're in — it starts as soon as the break is up.".to_string(),
-            false => format!("🎬 You're in. {} more to start.", min - waiting),
-        }
+        let short = if waiting >= min { String::new() } else { format!(" {} more to start.", min - waiting) };
+        format!("🎬 You're in.{} Pick a category as well — a match won't start until somebody has.", short)
     };
     SHARED.lock().break_shown.clear();
     whisper(ctx, component, text).await;
@@ -1278,6 +1276,9 @@ pub fn vote_line(tally: &[(Pool, usize)]) -> String {
     format!("🗳️ **The vote so far:** {} · most wins, a tie is settled at random", said.join(" · "))
 }
 
+/// The old I'm-ready button. Cards posted before the categories replaced it are
+/// still in the channel, so the press still works - it just says what to do now.
+///
 /// `moviepool:` — one press, one vote, and the same button again takes it back.
 async fn on_pool_vote(ctx: &Context, component: &ComponentInteraction, rest: &str) {
     let Some((id, key)) = rest.split_once(':') else { return };
@@ -1292,18 +1293,31 @@ async fn on_pool_vote(ctx: &Context, component: &ComponentInteraction, rest: &st
         return whisper(ctx, component, format!("That match is already running — it's playing {}.", m.pool.about())).await;
     }
     let kept = with_db(|c| store::cast_vote(c, match_id, user, pool, now)).and_then(Result::ok).unwrap_or(false);
+    // Choosing a category IS joining. Pressing one used to leave you voting
+    // for a match you were not in, which nobody could have guessed from a card
+    // that asked for both.
+    if kept {
+        let _ = with_db(|c| store::mark_ready(c, match_id, user, now));
+    } else {
+        let _ = with_db(|c| store::unready(c, match_id, user));
+    }
     SHARED.lock().break_shown.clear();
     let text = if kept {
-        format!("🗳️ Voted for **{}**. Press it again to take it back.", pool.label())
+        let waiting = ready_now(match_id).len();
+        let min = min_players();
+        match waiting >= min {
+            true => format!("🗳️ **{}** it is — you're in, and it starts as soon as the break is up.", pool.label()),
+            false => format!("🗳️ **{}** it is — you're in. {} more to start.", pool.label(), min - waiting),
+        }
     } else {
-        "🗳️ Vote taken back.".to_string()
+        "🗳️ Vote taken back — and you're off the list.".to_string()
     };
     whisper(ctx, component, text).await;
 }
 
 // --- the break, and scoring a match -----------------------------------------------------------
 
-const BREAK_FOOTER: &str = "Press I'm ready · vote for what it plays · a match is 10 rounds · /moviehelp";
+const BREAK_FOOTER: &str = "Pick a category to join · a match is 10 rounds · /moviehelp";
 
 /// What the break card says and what it carries, worked out once.
 ///
@@ -1316,11 +1330,7 @@ fn break_body(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: 
     let votes: usize = tally.iter().map(|(_, n)| n).sum();
     let mut text = break_text(ready, min_players(), m.films, votes, now, m.ready_from, last);
     text.push_str(&format!("\n\n{}", vote_line(&tally)));
-    let mut rows = vec![CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
-    ])];
-    rows.extend(pool_buttons(m.id, &tally));
-    (text, rows)
+    (text, pool_buttons(m.id, &tally))
 }
 
 fn break_embed(text: &str) -> CreateEmbed {
@@ -1998,12 +2008,15 @@ mod tests {
 
     #[test]
     fn the_break_card_says_what_is_missing() {
-        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("Nobody's ready"));
+        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("Nobody's in yet"));
         assert!(break_text(&[7], 2, 10, 1, 0, 0, None).contains("1 more"));
         assert!(break_text(&[7, 8], 2, 10, 1, 0, 0, None).contains("Starting now"));
         assert!(break_text(&[7, 8], 2, 10, 1, 0, 90, None).contains("2 min"));
         assert!(break_text(&[7, 8], 2, 10, 1, 0, 30, None).contains("30s"));
-        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("10 films"));
+        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("10 rounds"));
+        // One press does both jobs, so the card asks for one thing.
+        assert!(break_text(&[], 2, 10, 0, 0, 0, None).contains("Pick a category"));
+        assert!(!break_text(&[], 2, 10, 0, 0, 0, None).contains("I'm ready"));
         // Everyone ready and nobody voted: it says which of the two is missing,
         // and does not claim to be starting.
         let unvoted = break_text(&[7, 8], 2, 10, 0, 0, 0, None);
@@ -2073,6 +2086,12 @@ mod tests {
         // come from break_body now, and this is what says so.
         let rows = pool_buttons(7, &[(Pool::HindiFilms, 1)]);
         assert!(!rows.is_empty(), "the vote has no buttons at all");
+        // Six categories and nothing else: joining and choosing are one press.
+        let buttons: usize = rows.iter().map(|r| match r {
+            CreateActionRow::Buttons(b) => b.len(),
+            _ => 0,
+        }).sum();
+        assert_eq!(buttons, pools_on_offer().len(), "a button that is not a category");
         // Six corners fit in two rows of five; whatever the bank can fill, the
         // mix is always one of them.
         assert!(rows.len() <= 2, "{} rows of buttons", rows.len());
