@@ -1303,20 +1303,33 @@ async fn on_pool_vote(ctx: &Context, component: &ComponentInteraction, rest: &st
 
 // --- the break, and scoring a match -----------------------------------------------------------
 
-fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
+const BREAK_FOOTER: &str = "Press I'm ready · vote for what it plays · a match is 10 rounds · /moviehelp";
+
+/// What the break card says and what it carries, worked out once.
+///
+/// Both the first posting and every refresh after it come through here. They
+/// used to build their own: the refresh hand-rolled an embed and a single
+/// I'm-ready button, so the moment a countdown ticked it quietly replaced the
+/// card with one that had no vote on it at all.
+fn break_body(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> (String, Vec<CreateActionRow>) {
     let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
     let votes: usize = tally.iter().map(|(_, n)| n).sum();
     let mut text = break_text(ready, min_players(), m.films, votes, now, m.ready_from, last);
     text.push_str(&format!("\n\n{}", vote_line(&tally)));
-    let embed = CreateEmbed::new()
-        .description(text)
-        .colour(COLOUR)
-        .footer(CreateEmbedFooter::new("Press I'm ready · vote for what it plays · a match is 10 rounds · /moviehelp"));
     let mut rows = vec![CreateActionRow::Buttons(vec![
         CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
     ])];
     rows.extend(pool_buttons(m.id, &tally));
-    CreateMessage::new().embed(embed).components(rows).allowed_mentions(CreateAllowedMentions::new())
+    (text, rows)
+}
+
+fn break_embed(text: &str) -> CreateEmbed {
+    CreateEmbed::new().description(text).colour(COLOUR).footer(CreateEmbedFooter::new(BREAK_FOOTER))
+}
+
+fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
+    let (text, rows) = break_body(m, ready, last, now);
+    CreateMessage::new().embed(break_embed(&text)).components(rows).allowed_mentions(CreateAllowedMentions::new())
 }
 
 /// Keeps the break card up. It is only redrawn when its WORDS change, so a
@@ -1324,13 +1337,7 @@ fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, no
 async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
     let ready = ready_now(m.id);
     let last = SHARED.lock().last_result.clone();
-    let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
-    let votes: usize = tally.iter().map(|(_, n)| n).sum();
-    let text = format!(
-        "{}\n{}",
-        break_text(&ready, min_players(), m.films, votes, now, m.ready_from, last.as_ref()),
-        vote_line(&tally)
-    );
+    let (text, rows) = break_body(m, &ready, last.as_ref(), now);
     let (card, shown) = {
         let s = SHARED.lock();
         (s.card, s.break_shown.clone())
@@ -1343,15 +1350,8 @@ async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64
     if card.is_some() && right && !SHARED.lock().card_gone {
         if let Some((c, id)) = card {
             let edit = EditMessage::new()
-                .embed(
-                    CreateEmbed::new()
-                        .description(text.clone())
-                        .colour(COLOUR)
-                        .footer(CreateEmbedFooter::new("Press I'm ready · a match is 10 films · /moviehelp")),
-                )
-                .components(vec![CreateActionRow::Buttons(vec![
-                    CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready").style(ButtonStyle::Success),
-                ])])
+                .embed(break_embed(&text))
+                .components(rows.clone())
                 .allowed_mentions(CreateAllowedMentions::new());
             match call(ChannelId::new(c).edit_message(&ctx.http, MessageId::new(id), edit)).await {
                 Ok(_) => {
@@ -2064,6 +2064,19 @@ mod tests {
             language: "Hindi".into(),
             open_secs: 130,
         }
+    }
+
+    #[test]
+    fn every_drawing_of_the_break_card_carries_the_vote() {
+        // The refresh used to hand-roll its own embed and one button, so a
+        // countdown tick replaced the card with a voteless copy. Both drawings
+        // come from break_body now, and this is what says so.
+        let rows = pool_buttons(7, &[(Pool::HindiFilms, 1)]);
+        assert!(!rows.is_empty(), "the vote has no buttons at all");
+        // Six corners fit in two rows of five; whatever the bank can fill, the
+        // mix is always one of them.
+        assert!(rows.len() <= 2, "{} rows of buttons", rows.len());
+        assert!(pools_on_offer().contains(&Pool::Mix));
     }
 
     #[test]
