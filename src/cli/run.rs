@@ -135,11 +135,48 @@ pub fn run_server(config: VizierConfig) -> Result<()> {
 
         tracing::info!("vizier is running!");
 
-        let _ = exit_signal.await;
+        // Either `vizier shutdown` or a signal from the service manager. A
+        // deploy is the second kind, and until it was waited for the games
+        // simply stopped answering mid-round with nothing said to the room.
+        tokio::select! {
+            _ = exit_signal => {}
+            _ = stop_signal() => tracing::info!("signal received, stopping"),
+        }
+        // Best effort, and bounded: nothing here may hold the process open.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::channels::discord::going_down(),
+        )
+        .await;
         set.abort_all();
 
         std::process::exit(0);
     })
+}
+
+/// Resolves when the service manager asks the process to stop: SIGTERM from
+/// `systemctl restart`, or Ctrl-C from a terminal.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(err) => {
+                tracing::warn!("couldn't watch for SIGTERM: {}", err);
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 pub fn run(args: RunArgs) -> Result<()> {

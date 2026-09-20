@@ -59,6 +59,7 @@ mod guess_store;
 mod movie;
 mod movie_bank;
 mod movie_store;
+mod updates;
 mod chess;
 mod chess_board;
 mod chess_rules;
@@ -114,6 +115,16 @@ impl DiscordChannelReader {
     }
 }
 
+/// Tells every room with a game up that the bot is going away, and leaves the
+/// note that says this was asked for, so the next process says it is back.
+///
+/// The process's shutdown path calls this: it holds no Discord client of its
+/// own, and by the time the tasks are aborted there is nothing left to speak
+/// with. Bounded, and silent when the bot never reached `ready`.
+pub async fn going_down() {
+    updates::going_down().await;
+}
+
 #[async_trait::async_trait]
 impl VizierChannel for DiscordChannelReader {
     async fn run(&self) -> Result<()> {
@@ -122,6 +133,8 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = control::open(&self.deps.config.workspace) {
             tracing::warn!("control: store not opened: {}", err);
         }
+        // Where the "this restart was asked for" note is left and read.
+        updates::open(&self.deps.config.workspace);
         // Activity counts for /awards. Failing to open them must not take the
         // bot down - it only means nothing is counted this run.
         if let Err(err) = stats::open(&self.deps.config.workspace, &allowed_channels()) {
@@ -1629,6 +1642,8 @@ impl EventHandler for Handler {
                 "what they are for",
             ));
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_points)).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::pool_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::give_builder())).await;
 
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(snitch::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
@@ -1767,6 +1782,13 @@ impl EventHandler for Handler {
                 }
             }
         }
+
+        // The games are up and the commands are registered: the rooms that were
+        // told the bot was going can be told it is back. Keeping the http client
+        // here is what lets the shutdown path speak at all, so it happens on
+        // every ready, reconnects included.
+        updates::remember(ctx.http.clone());
+        updates::back_up().await;
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -2536,6 +2558,14 @@ impl EventHandler for Handler {
             }
             if command.data.name == "housecards" {
                 frog_house::housecards_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "modpoints" {
+                house::pool_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "modgive" {
+                house::give_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "housepoints" {
