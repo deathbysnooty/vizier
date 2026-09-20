@@ -551,8 +551,8 @@ pub fn prize_table(scores: &[(u64, i64)], win: i64, second: i64) -> Vec<(u64, i6
 }
 
 /// Whether a match may start: enough people ready AND the break served out.
-pub fn may_start(ready: usize, min: usize, now: i64, ready_from: i64) -> bool {
-    ready >= min.max(1) && now >= ready_from
+pub fn may_start(ready: usize, min: usize, votes: usize, now: i64, ready_from: i64) -> bool {
+    ready >= min.max(1) && votes > 0 && now >= ready_from
 }
 
 fn plural_u(n: usize, one: &str, many: &str) -> String {
@@ -560,7 +560,7 @@ fn plural_u(n: usize, one: &str, many: &str) -> String {
 }
 
 /// The card between matches.
-pub fn break_text(ready: &[u64], min: usize, films: i64, now: i64, ready_from: i64, last: Option<&MatchResult>) -> String {
+pub fn break_text(ready: &[u64], min: usize, films: i64, votes: usize, now: i64, ready_from: i64, last: Option<&MatchResult>) -> String {
     let mut text = String::from("# 🎬 Guess the Movie\n");
     if let Some(last) = last {
         text.push_str(&format!("{}\n", result_line(last)));
@@ -582,8 +582,11 @@ pub fn break_text(ready: &[u64], min: usize, films: i64, now: i64, ready_from: i
             text.push_str(&format!(" at the earliest, once {} are ready", min));
         }
         text.push('\n');
-    } else if ready.len() >= min {
+    } else if ready.len() >= min && votes > 0 {
         text.push_str("Starting now…\n");
+    }
+    if votes == 0 {
+        text.push_str("Waiting on the vote — **one press below** and it can start.\n");
     }
     text.push_str(&format!("-# 🥇 **{}** house points · 🥈 **{}** · you can join a match already running", win_points(), second_points()));
     text
@@ -1302,7 +1305,8 @@ async fn on_pool_vote(ctx: &Context, component: &ComponentInteraction, rest: &st
 
 fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
     let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
-    let mut text = break_text(ready, min_players(), m.films, now, m.ready_from, last);
+    let votes: usize = tally.iter().map(|(_, n)| n).sum();
+    let mut text = break_text(ready, min_players(), m.films, votes, now, m.ready_from, last);
     text.push_str(&format!("\n\n{}", vote_line(&tally)));
     let embed = CreateEmbed::new()
         .description(text)
@@ -1321,7 +1325,12 @@ async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64
     let ready = ready_now(m.id);
     let last = SHARED.lock().last_result.clone();
     let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
-    let text = format!("{}\n{}", break_text(&ready, min_players(), m.films, now, m.ready_from, last.as_ref()), vote_line(&tally));
+    let votes: usize = tally.iter().map(|(_, n)| n).sum();
+    let text = format!(
+        "{}\n{}",
+        break_text(&ready, min_players(), m.films, votes, now, m.ready_from, last.as_ref()),
+        vote_line(&tally)
+    );
     let (card, shown) = {
         let s = SHARED.lock();
         (s.card, s.break_shown.clone())
@@ -1489,7 +1498,8 @@ async fn run(ctx: Context) {
                 live = None;
             }
             let ready = ready_now(m.id);
-            if may_start(ready.len(), min_players(), now, m.ready_from) {
+            let cast: usize = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default().iter().map(|(_, n)| n).sum();
+            if may_start(ready.len(), min_players(), cast, now, m.ready_from) {
                 if with_db(|c| store::start_match(c, m.id, now)).and_then(Result::ok).unwrap_or(false) {
                     // The vote is settled the moment the match starts, and
                     // written down: every round of it then asks the same
@@ -1973,25 +1983,32 @@ mod tests {
         assert_eq!(prize_table(&[(7, 3)], 5, 2), vec![(7, 1, 5)], "one player still wins what they won");
     }
 
-    /// Both conditions, never one: a full lobby still serves the break out, and
-    /// a served-out break still waits for people.
+    /// All three, never two: a full lobby still serves the break out, a
+    /// served-out break still waits for people, and neither starts a match
+    /// nobody has chosen a category for.
     #[test]
-    fn a_match_needs_the_people_and_the_clock() {
-        assert!(!may_start(1, 2, 100, 50), "not enough people");
-        assert!(!may_start(2, 2, 40, 50), "break not served");
-        assert!(may_start(2, 2, 50, 50), "both met, on the second");
-        assert!(may_start(9, 2, 999, 50));
-        assert!(may_start(1, 0, 100, 50), "a nonsense minimum still starts");
+    fn a_match_needs_the_people_the_vote_and_the_clock() {
+        assert!(!may_start(1, 2, 1, 100, 50), "not enough people");
+        assert!(!may_start(2, 2, 1, 40, 50), "break not served");
+        assert!(!may_start(9, 2, 0, 999, 50), "nobody voted");
+        assert!(may_start(2, 2, 1, 50, 50), "all three met, on the second");
+        assert!(may_start(9, 2, 4, 999, 50));
+        assert!(may_start(1, 0, 1, 100, 50), "a nonsense minimum still starts");
     }
 
     #[test]
     fn the_break_card_says_what_is_missing() {
-        assert!(break_text(&[], 2, 10, 0, 0, None).contains("Nobody's ready"));
-        assert!(break_text(&[7], 2, 10, 0, 0, None).contains("1 more"));
-        assert!(break_text(&[7, 8], 2, 10, 0, 0, None).contains("Starting now"));
-        assert!(break_text(&[7, 8], 2, 10, 0, 90, None).contains("2 min"));
-        assert!(break_text(&[7, 8], 2, 10, 0, 30, None).contains("30s"));
-        assert!(break_text(&[], 2, 10, 0, 0, None).contains("10 films"));
+        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("Nobody's ready"));
+        assert!(break_text(&[7], 2, 10, 1, 0, 0, None).contains("1 more"));
+        assert!(break_text(&[7, 8], 2, 10, 1, 0, 0, None).contains("Starting now"));
+        assert!(break_text(&[7, 8], 2, 10, 1, 0, 90, None).contains("2 min"));
+        assert!(break_text(&[7, 8], 2, 10, 1, 0, 30, None).contains("30s"));
+        assert!(break_text(&[], 2, 10, 1, 0, 0, None).contains("10 films"));
+        // Everyone ready and nobody voted: it says which of the two is missing,
+        // and does not claim to be starting.
+        let unvoted = break_text(&[7, 8], 2, 10, 0, 0, 0, None);
+        assert!(unvoted.contains("Waiting on the vote"), "{}", unvoted);
+        assert!(!unvoted.contains("Starting now"), "{}", unvoted);
     }
 
     #[test]
