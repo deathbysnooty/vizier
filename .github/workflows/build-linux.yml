@@ -1,0 +1,67 @@
+# Builds the one binary the server runs, and nothing else.
+#
+# `release.yml` bumps versions, writes a changelog and cuts a GitHub release.
+# That is right for a release and far too much for "put today's work on the
+# server". This builds x86_64-unknown-linux-gnu from whatever ref you point it
+# at and hands back the binary as an artefact.
+#
+#   gh workflow run build-linux.yml --ref <branch>
+#   gh run download <id> -n vizier-linux-x86_64
+name: Build Linux binary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: webui/package-lock.json
+
+      # build.rs runs this itself when node_modules is present, so the WebUI is
+      # built here and the modules cleared before cargo ever starts.
+      - name: Build WebUI
+        run: |
+          cd webui
+          npm ci
+          npm run build
+
+      - name: Clear node_modules to prevent rebuild during cargo
+        run: rm -rf webui/node_modules
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev python3-dev libclang-dev clang perl make
+
+      - name: Clear stale sherpa-onnx prebuilt libs
+        run: rm -rf target/sherpa-onnx-prebuilt
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vizier-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/vizier
+          retention-days: 7
