@@ -647,6 +647,120 @@ fn shared_seconds(sittings: &[Sitting], bots: &HashSet<u64>) -> HashMap<u64, i64
     out
 }
 
+// --- who sits with whom -------------------------------------------------------------------
+
+/// How long two people were in voice together, and how much of that was with
+/// nobody else in the room.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VoicePair {
+    /// The lower id of the two, so a pair is the same pair either way round.
+    pub a: u64,
+    pub b: u64,
+    /// Seconds in the same room at the same time.
+    pub together: i64,
+    /// Of those, the seconds when the room held exactly the two of them.
+    pub alone: i64,
+    /// The last moment they were in a room together.
+    pub last_ts: i64,
+    /// The room they shared the longest, and for how long.
+    pub top_room: Option<(u64, i64)>,
+}
+
+/// Every pair's shared time, from stretches already cleaned up by `sittings`.
+/// Bots are not company and get no pairs of their own.
+///
+/// A room's arrivals and departures are walked in order, so the company is
+/// known at every moment without comparing every stretch to every other one:
+/// between two marks the room holds a fixed set of people, and each of its
+/// pairs gets that stretch - the whole of it as time together, and, when the
+/// two of them are all that is there, as time alone as well.
+fn pair_seconds(sittings: &[Sitting], bots: &HashSet<u64>) -> Vec<VoicePair> {
+    let mut by_room: HashMap<u64, Vec<&Sitting>> = HashMap::new();
+    for s in sittings.iter().filter(|s| s.end > s.start && !bots.contains(&s.user)) {
+        by_room.entry(s.room).or_default().push(s);
+    }
+    // (together, alone, last moment, seconds per room)
+    let mut totals: HashMap<(u64, u64), (i64, i64, i64, HashMap<u64, i64>)> = HashMap::new();
+    for (room, list) in by_room {
+        let mut marks: Vec<(i64, i8, u64)> = Vec::with_capacity(list.len() * 2);
+        for s in &list {
+            marks.push((s.start, 1, s.user));
+            marks.push((s.end, -1, s.user));
+        }
+        // Leaving sorts before arriving at the same moment: someone who leaves
+        // as another arrives was never there with them.
+        marks.sort_unstable();
+        let mut here: HashMap<u64, i32> = HashMap::new();
+        let mut prev = 0i64;
+        for (ts, delta, user) in marks {
+            if here.len() >= 2 && ts > prev {
+                let span = ts - prev;
+                let only_two = here.len() == 2;
+                let mut who: Vec<u64> = here.keys().copied().collect();
+                who.sort_unstable();
+                for (i, &a) in who.iter().enumerate() {
+                    for &b in &who[i + 1..] {
+                        let e = totals.entry((a, b)).or_default();
+                        e.0 += span;
+                        if only_two {
+                            e.1 += span;
+                        }
+                        e.2 = e.2.max(ts);
+                        *e.3.entry(room).or_insert(0) += span;
+                    }
+                }
+            }
+            prev = ts;
+            if delta > 0 {
+                *here.entry(user).or_insert(0) += 1;
+            } else if let Some(n) = here.get_mut(&user) {
+                *n -= 1;
+                if *n <= 0 {
+                    here.remove(&user);
+                }
+            }
+        }
+    }
+    let mut out: Vec<VoicePair> = totals
+        .into_iter()
+        .map(|((a, b), (together, alone, last_ts, rooms))| VoicePair {
+            a,
+            b,
+            together,
+            alone,
+            last_ts,
+            top_room: rooms.into_iter().max_by_key(|&(room, secs)| (secs, std::cmp::Reverse(room))),
+        })
+        .collect();
+    out.sort_by(|x, y| y.together.cmp(&x.together).then(y.alone.cmp(&x.alone)).then((x.a, x.b).cmp(&(y.a, y.b))));
+    out
+}
+
+/// Seconds every pair spent in voice together inside `[start, end)`, counted
+/// exactly as voice points are: the AFK room, excluded rooms and stretches over
+/// `MAX_SITTING` are nothing, deafened time is cut out when that rule is on,
+/// and a room still open counts up to `now`. Most time first. Read-only.
+pub(crate) fn voice_pairs(conn: &Connection, start: i64, end: i64, now: i64) -> rusqlite::Result<Vec<VoicePair>> {
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
+    // Pairs need everybody's events, not one person's.
+    let mut stmt = conn.prepare(
+        "SELECT user_id, action, channel_id, ts FROM voice_events WHERE ts >= ?1 AND ts < ?2 ORDER BY user_id, ts, msg_id",
+    )?;
+    let events: Vec<VoiceEvent> = stmt
+        .query_map(params![start - MAX_SITTING, end + MAX_SITTING], |r| {
+            Ok(VoiceEvent {
+                user: r.get::<_, i64>(0)? as u64,
+                left: r.get::<_, String>(1)? == "left",
+                room: r.get::<_, i64>(2)? as u64,
+                ts: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let real = undeafened_sittings(conn, &events, (start, end), &exclude, afk, now, None)?;
+    Ok(pair_seconds(&real, &BOTS.lock().clone()))
+}
+
 /// The awards owed for one day: a chat point per tier reached and a voice point
 /// per full hour (with company, when that rule is on). The same rows always give
 /// the same list, and each key names the person, the day and the tier, so a
@@ -731,6 +845,125 @@ mod tests {
 
     fn secs(events: &[VoiceEvent], now: Option<i64>) -> HashMap<u64, i64> {
         voice_seconds(events, bounds(), &excluded(), Some(AFK), now)
+    }
+
+    /// Pairs from events given in any order - the reader wants them by person,
+    /// the way the query hands them over.
+    fn pairs(events: &[VoiceEvent]) -> Vec<VoicePair> {
+        pair_seconds(&by_person(events), &HashSet::new())
+    }
+
+    fn by_person(events: &[VoiceEvent]) -> Vec<Sitting> {
+        let mut events = events.to_vec();
+        events.sort_by_key(|e| (e.user, e.ts));
+        sittings(&events, bounds(), &excluded(), Some(AFK), None)
+    }
+
+    #[test]
+    fn two_people_in_a_room_are_together_and_alone() {
+        let s = bounds().0;
+        let list = pairs(&[
+            ev(ME, "joined", ROOM, s + H),
+            ev(YOU, "joined", ROOM, s + H),
+            ev(ME, "left", ROOM, s + 3 * H),
+            ev(YOU, "left", ROOM, s + 3 * H),
+        ]);
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].a, list[0].b), (ME, YOU));
+        assert_eq!(list[0].together, 2 * H);
+        assert_eq!(list[0].alone, 2 * H);
+        assert_eq!(list[0].top_room, Some((ROOM, 2 * H)));
+    }
+
+    #[test]
+    fn a_third_person_ends_the_time_alone_but_not_the_time_together() {
+        let s = bounds().0;
+        let third = 33;
+        let list = pairs(&[
+            ev(ME, "joined", ROOM, s),
+            ev(YOU, "joined", ROOM, s),
+            ev(third, "joined", ROOM, s + H),
+            ev(third, "left", ROOM, s + 2 * H),
+            ev(ME, "left", ROOM, s + 3 * H),
+            ev(YOU, "left", ROOM, s + 3 * H),
+        ]);
+        let mine = list.iter().find(|p| (p.a, p.b) == (ME, YOU)).expect("the pair");
+        assert_eq!(mine.together, 3 * H);
+        assert_eq!(mine.alone, 2 * H);
+        // The hour of three is company for all three pairs, alone for none.
+        for p in list.iter().filter(|p| p.b == third || p.a == third) {
+            assert_eq!((p.together, p.alone), (H, 0));
+        }
+    }
+
+    #[test]
+    fn different_rooms_at_the_same_time_are_not_together() {
+        let s = bounds().0;
+        assert!(
+            pairs(&[
+                ev(ME, "joined", ROOM, s),
+                ev(YOU, "joined", OTHER_ROOM, s),
+                ev(ME, "left", ROOM, s + 2 * H),
+                ev(YOU, "left", OTHER_ROOM, s + 2 * H),
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_afk_room_and_excluded_rooms_are_no_company() {
+        let s = bounds().0;
+        assert!(
+            pairs(&[
+                ev(ME, "joined", AFK, s),
+                ev(YOU, "joined", AFK, s),
+                ev(ME, "left", AFK, s + 2 * H),
+                ev(YOU, "left", AFK, s + 2 * H),
+            ])
+            .is_empty()
+        );
+        assert!(
+            pairs(&[
+                ev(ME, "joined", MOD_ROOM, s),
+                ev(YOU, "joined", MOD_ROOM, s),
+                ev(ME, "left", MOD_ROOM, s + 2 * H),
+                ev(YOU, "left", MOD_ROOM, s + 2 * H),
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn leaving_as_another_arrives_is_no_time_together() {
+        let s = bounds().0;
+        assert!(
+            pairs(&[
+                ev(ME, "joined", ROOM, s),
+                ev(ME, "left", ROOM, s + H),
+                ev(YOU, "joined", ROOM, s + H),
+                ev(YOU, "left", ROOM, s + 2 * H),
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_bot_in_the_room_is_not_company_and_keeps_no_pair() {
+        let s = bounds().0;
+        let bot = 77;
+        let list = pair_seconds(
+            &by_person(&[
+                    ev(ME, "joined", ROOM, s),
+                    ev(YOU, "joined", ROOM, s),
+                    ev(bot, "joined", ROOM, s),
+                    ev(bot, "left", ROOM, s + 2 * H),
+                    ev(ME, "left", ROOM, s + 2 * H),
+                    ev(YOU, "left", ROOM, s + 2 * H),
+            ]),
+            &[bot].into_iter().collect(),
+        );
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].together, list[0].alone), (2 * H, 2 * H));
     }
 
     #[test]

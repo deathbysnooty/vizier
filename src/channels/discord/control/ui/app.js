@@ -6152,13 +6152,21 @@
   // --- insights -------------------------------------------------------------------------------
 
   const INSIGHT_PERIODS = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All recorded']];
-  const insightState = { period: '7d', talkTab: 'magnets', data: null, rebuild: null };
+  const insightState = { period: '7d', talkTab: 'magnets', vcTab: 'together', data: null, rebuild: null };
 
   function who(p) {
     const name = (p && p.name) || 'Former member';
     return h('a', { class: 'who-link', href: '#/members/' + p.id }, name);
   }
   function whoPlain(p) { return (p && p.name) || 'Former member'; }
+
+  // Voice time reads better as hours: 2h 05m, 45m.
+  function hoursWords(secs) {
+    const mins = Math.round((secs || 0) / 60);
+    if (mins < 60) return mins + 'm';
+    const rest = mins % 60;
+    return Math.floor(mins / 60) + 'h' + (rest ? ' ' + String(rest).padStart(2, '0') + 'm' : '');
+  }
 
   function dayPart(ts) {
     const d = new Date((ts + 19800) * 1000);
@@ -6178,6 +6186,10 @@
     if (d.duos[0]) {
       const p = d.duos[0];
       cards.push(card('👯', [h('b', null, whoPlain(p.a)), ' and ', h('b', null, whoPlain(p.b)), ' replied to each other ', h('b', null, p.replies + ' times'), ', more than any other pair'], () => openPair(p.a.id, p.b.id)));
+    }
+    if (d.vc_alone && d.vc_alone[0]) {
+      const v = d.vc_alone[0];
+      cards.push(card('🎧', [h('b', null, whoPlain(v.a)), ' and ', h('b', null, whoPlain(v.b)), ' spent ', h('b', null, hoursWords(v.alone)), ' in a voice room with nobody else'], () => openPair(v.a.id, v.b.id)));
     }
     if (d.magnets[0]) {
       const m = d.magnets[0];
@@ -6255,6 +6267,28 @@
           p.top_channel && p.top_channel.name ? h('span', { class: 'duo-ch' }, '#' + p.top_channel.name) : null),
         h('span', { class: 'duo-last' }, ago(p.last_ts))))));
       body.appendChild(card('ins-duos', 'Top duos', 'Replies both ways · click a pair for the detail', h('div', { class: 'card-body' }, duoList)));
+
+      // voice: who sits in a room with whom, and who sits there with no one else
+      const vcLists = { together: ['Together', (x) => x.together], alone: ['Just the two', (x) => x.alone] };
+      const vcBody = h('div', null);
+      const drawVc = () => {
+        clear(vcBody);
+        const pick = vcLists[st.vcTab][1];
+        const list = (st.vcTab === 'alone' ? d.vc_alone : d.vc_together) || [];
+        const max = Math.max(1, ...list.map(pick));
+        vcBody.appendChild(list.length ? h('ol', { class: 'duo-list' }, list.map((p, i) => h('li', null, h('button', { type: 'button', class: 'duo', onclick: () => openPair(p.a.id, p.b.id) },
+          h('span', { class: 'sr-rank' }, i + 1),
+          h('span', { class: 'duo-names' }, avatar(p.a.avatar, whoPlain(p.a), 'xs'), h('b', null, whoPlain(p.a)), h('span', { class: 'duo-amp' }, '🎙️'), avatar(p.b.avatar, whoPlain(p.b), 'xs'), h('b', null, whoPlain(p.b))),
+          h('span', { class: 'duo-bar' }, h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.round((pick(p) / max) * 100) + '%' })), h('small', null, hoursWords(pick(p)))),
+          h('span', { class: 'duo-meta' },
+            h('span', { class: 'badge' + (p.alone_share >= 0.5 ? ' on' : '') }, hoursWords(p.alone) + ' alone'),
+            st.vcTab === 'alone' ? h('span', null, hoursWords(p.together) + ' in all') : null,
+            p.room && p.room.name ? h('span', { class: 'duo-ch' }, '#' + p.room.name) : null),
+          h('span', { class: 'duo-last' }, ago(p.last_ts)))))) : h('p', { class: 'empty-small', style: 'padding:14px 16px' }, 'No voice time counted this period.'));
+      };
+      drawVc();
+      body.appendChild(card('ins-vc', 'Voice together', 'Hours in the same voice room · “alone” means the two of them and nobody else · AFK and staff rooms left out',
+        h('div', { class: 'card-body' }, h('div', { class: 'talk-tabs' }, segmented(Object.keys(vcLists).map((k) => [k, vcLists[k][0]]), st.vcTab, 'List', (v) => { st.vcTab = v; drawVc(); })), vcBody)));
 
       // who talks most
       const talkLists = { magnets: ['Replied to', d.magnets, (m) => plural(m.people, 'person', 'people') + ' · ' + plural(m.count, 'reply', 'replies')], replies_sent: ['Replies sent', d.replies_sent, (m) => plural(m.count, 'reply', 'replies') + ' to ' + plural(m.people, 'person', 'people')], mentions_sent: ['Mentions sent', d.mentions_sent, (m) => plural(m.count, 'mention') + ' of ' + plural(m.people, 'person', 'people')], mentioned: ['Mentioned', d.mentioned, (m) => plural(m.count, 'mention') + ' from ' + plural(m.people, 'person', 'people')] };
@@ -6368,6 +6402,9 @@
         stat(nameB + ' → ' + nameA, String(s.b_to_a), 'replies'),
         stat('Mentions', String(s.mentions_a_to_b + s.mentions_b_to_a), s.mentions_a_to_b + ' · ' + s.mentions_b_to_a),
         stat('Arena', d.arena.a_wins + '–' + d.arena.b_wins, 'head to head')),
+      d.voice ? h('p', { class: 'pair-run' }, '🎙️ In voice together: ', h('b', null, hoursWords(d.voice.together)),
+        ', of which ', h('b', null, hoursWords(d.voice.alone)), ' with nobody else in the room',
+        d.voice.room && d.voice.room.name ? ' · mostly in #' + d.voice.room.name : '') : null,
       s.longest ? h('p', { class: 'pair-run' }, '🏓 Longest back-and-forth: ', h('b', null, s.longest.len + ' replies'), (s.longest.channel ? ' in #' + s.longest.channel : '') + ', ' + dayPart(s.longest.start_ts) + ' ' + fmtDate(s.longest.start_ts * 1000) + (s.longest.minutes > 1 ? ' · ' + s.longest.minutes + ' min' : '')) : null,
       h('section', { class: 'form-card' }, h('h3', null, icon('chart'), 'Replies per day'),
         d.days.length ? [h('div', { class: 'legend' }, h('span', { class: 'legend-item' }, h('i', { style: 'background:var(--s1)' }), nameA + ' → ' + nameB), h('span', { class: 'legend-item' }, h('i', { style: 'background:var(--s2)' }), nameB + ' → ' + nameA)), chart,
@@ -6388,7 +6425,8 @@
       let d;
       try { d = await api('GET', '/members/' + p.id + '/connections?period=' + period); } catch (e) { clear(list).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
       clear(list);
-      if (!d.partners.length) { list.appendChild(h('div', { class: 'card empty' }, icon('users'), h('h3', null, 'No connections counted'), h('p', null, 'Replies and mentions with other members show up here.'))); return; }
+      const vc = d.voice || [];
+      if (!d.partners.length && !vc.length) { list.appendChild(h('div', { class: 'card empty' }, icon('users'), h('h3', null, 'No connections counted'), h('p', null, 'Replies and mentions with other members show up here.'))); return; }
       const max = Math.max(1, ...d.partners.map((x) => Math.max(x.to_them, x.from_them)));
       list.appendChild(card('pf-conn', 'Connections', p.name + ' sent ' + plural(d.sent, 'reply', 'replies') + ' and got ' + d.received + ' back · click a row for the pair', h('div', { class: 'card-body' },
         h('ul', { class: 'conn-list' }, d.partners.map((x) => h('li', null, h('button', { type: 'button', class: 'conn', onclick: () => openPair(p.id, x.member.id, period) },
@@ -6401,6 +6439,19 @@
               x.arena.wins || x.arena.losses ? h('span', null, '⚔️ ' + x.arena.wins + '–' + x.arena.losses) : null,
               h('span', { class: 'muted' }, ago(x.last_ts)))),
           icon('right'))))))));
+      if (vc.length) {
+        const vcMax = Math.max(1, ...vc.map((x) => x.together));
+        list.appendChild(card('pf-vc', 'Voice together', 'Hours in the same voice room · “alone” means just the two of them', h('div', { class: 'card-body' },
+          h('ul', { class: 'conn-list' }, vc.map((x) => h('li', null, h('button', { type: 'button', class: 'conn', onclick: () => openPair(p.id, x.member.id, period) },
+            avatar(x.member.avatar, whoPlain(x.member), 'lg'),
+            h('span', { class: 'conn-main' }, h('b', null, whoPlain(x.member)),
+              h('span', { class: 'conn-bar' }, h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.round((x.together / vcMax) * 100) + '%' })), h('small', null, hoursWords(x.together))),
+              h('span', { class: 'conn-facts' },
+                h('span', null, '🎧 ' + hoursWords(x.alone) + ' alone'),
+                x.room && x.room.name ? h('span', null, '#' + x.room.name) : null,
+                h('span', { class: 'muted' }, ago(x.last_ts)))),
+            icon('right'))))))));
+      }
     };
     periodHolder.appendChild(segmented(INSIGHT_PERIODS.filter((x) => x[0] !== 'today'), period, 'Period', (v) => { period = v; load(); }));
     append(panel, [periodHolder, list]);

@@ -187,6 +187,10 @@ pub trait PanelData: Send + Sync + 'static {
     fn hour_counts(&self, _since_day: &str) -> Vec<(u64, i64, i64, i64)> {
         Vec::new()
     }
+    /// Who sat in voice with whom since `since`, longest first.
+    fn voice_pairs(&self, _since: i64, _now: i64) -> Vec<super::super::activity::VoicePair> {
+        Vec::new()
+    }
     /// The bot's own user id.
     fn bot_id(&self) -> Option<u64> {
         None
@@ -658,6 +662,13 @@ impl PanelData for LiveData {
         stmt.query_map(rusqlite::params![since_day], |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
+    }
+
+    fn voice_pairs(&self, since: i64, now: i64) -> Vec<super::super::activity::VoicePair> {
+        let Some(db) = super::super::stats::db() else { return Vec::new() };
+        let conn = db.lock();
+        // now + 1: a room still open at this moment counts up to it.
+        super::super::activity::voice_pairs(&conn, since, now + 1, now).unwrap_or_default()
     }
 
     fn bot_id(&self) -> Option<u64> {

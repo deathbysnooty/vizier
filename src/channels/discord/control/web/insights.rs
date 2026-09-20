@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::super::super::activity::VoicePair;
 use super::super::insights::{self, BackfillRules, Interaction, Kind, Pair, StoredRequest};
 use super::{ApiError, ApiResult, Panel, ok, parse_id};
 
@@ -115,6 +116,27 @@ fn pair_json(panel: &Panel, p: &Pair) -> Value {
     })
 }
 
+/// One pair's time in voice together. `alone` is the part of it with nobody
+/// else in the room - the number the page is really about.
+fn vc_json(panel: &Panel, p: &VoicePair) -> Value {
+    json!({
+        "a": person(panel, p.a),
+        "b": person(panel, p.b),
+        "together": p.together,
+        "alone": p.alone,
+        "hours": p.together as f64 / 3600.0,
+        "alone_hours": p.alone as f64 / 3600.0,
+        "alone_share": if p.together > 0 { p.alone as f64 / p.together as f64 } else { 0.0 },
+        "last_ts": p.last_ts,
+        "room": p.top_room.map(|(room, secs)| json!({ "name": channel_name(panel, room), "seconds": secs })),
+    })
+}
+
+/// The period's pairs with bots taken out, longest first.
+fn vc_pairs(panel: &Panel, since: i64, now: i64) -> Vec<VoicePair> {
+    panel.data.voice_pairs(since, now).into_iter().filter(|p| !is_bot(panel, p.a) && !is_bot(panel, p.b)).collect()
+}
+
 /// Tallies per member of one kind, as (member, count, distinct others).
 fn tally(rows: &[Interaction], kind: Kind, by_sender: bool) -> Vec<(u64, usize, usize)> {
     let mut counts: HashMap<u64, (usize, HashSet<u64>)> = HashMap::new();
@@ -186,6 +208,12 @@ pub async fn overview(State(panel): State<Panel>, Query(q): Query<PeriodQuery>) 
             .collect::<Vec<_>>()
     };
 
+    // Voice: who sits in a room with whom, and who sits there with nobody
+    // else. Bots, the AFK room and the excluded rooms count for nothing.
+    let vc = vc_pairs(&panel, since, now);
+    let mut vc_alone: Vec<&VoicePair> = vc.iter().filter(|p| p.alone > 0).collect();
+    vc_alone.sort_by(|x, y| y.alone.cmp(&x.alone).then(y.together.cmp(&x.together)));
+
     let firsts = insights::first_replies();
     let mut new_pairs: Vec<&Pair> = if period == Period::All {
         Vec::new()
@@ -218,6 +246,8 @@ pub async fn overview(State(panel): State<Panel>, Query(q): Query<PeriodQuery>) 
         "mentioned": people(tally(&rows, Kind::Mention, false)),
         "one_sided": one_sided.iter().take(LIST).map(|(f, t, n, back)| json!({ "from": person(&panel, *f), "to": person(&panel, *t), "replies": n, "back": back })).collect::<Vec<_>>(),
         "arena": arena,
+        "vc_together": vc.iter().take(LIST).map(|p| vc_json(&panel, p)).collect::<Vec<_>>(),
+        "vc_alone": vc_alone.iter().take(LIST).map(|p| vc_json(&panel, p)).collect::<Vec<_>>(),
         "night_owls": share_list(|h| h.1),
         "early_birds": share_list(|h| h.2),
         "new_connections": new_pairs.iter().take(LIST).map(|p| {
@@ -274,11 +304,13 @@ pub async fn pair(State(panel): State<Panel>, Query(q): Query<PairQuery>) -> Api
         .collect();
     let duels: Vec<(u64, u64, i64)> = panel.data.duels(since).into_iter().filter(|(w, l, _)| insights::key(*w, *l) == (a, b)).collect();
     let (a_wins, b_wins) = duels.iter().fold((0, 0), |acc, (w, _, _)| if *w == a { (acc.0 + 1, acc.1) } else { (acc.0, acc.1 + 1) });
+    let voice = vc_pairs(&panel, since, now).into_iter().find(|p| (p.a, p.b) == (a, b));
     ok(json!({
         "period": period.key(),
         "a": person(&panel, a),
         "b": person(&panel, b),
         "summary": pair.as_ref().map(|p| pair_json(&panel, p)),
+        "voice": voice.as_ref().map(|p| vc_json(&panel, p)),
         "days": days.into_iter().map(|(d, (x, y))| json!({ "day": d, "a_to_b": x, "b_to_a": y })).collect::<Vec<_>>(),
         "channels": channels.iter().take(10).map(|(c, n)| json!({ "name": channel_name(&panel, *c), "replies": n })).collect::<Vec<_>>(),
         "recent": recent,
@@ -320,12 +352,23 @@ pub async fn connections(State(panel): State<Panel>, Path(id): Path<String>, Que
             })
         })
         .collect();
+    let voice: Vec<Value> = vc_pairs(&panel, since, now)
+        .iter()
+        .filter(|p| p.a == id || p.b == id)
+        .take(10)
+        .map(|p| {
+            let mut v = vc_json(&panel, p);
+            v["member"] = person(&panel, if p.a == id { p.b } else { p.a });
+            v
+        })
+        .collect();
     ok(json!({
         "period": period.key(),
         "member": person(&panel, id),
         "sent": rows.iter().filter(|r| r.from_user == id && r.kind == Kind::Reply).count(),
         "received": rows.iter().filter(|r| r.to_user == id && r.kind == Kind::Reply).count(),
         "partners": partners,
+        "voice": voice,
     }))
 }
 
