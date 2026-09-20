@@ -264,6 +264,20 @@ pub fn sections() -> Vec<Section> {
                     "/housepoints house: points: reason:",
                     "Gives a house points, or takes them away with a negative number. Posted publicly.",
                 ),
+                command(
+                    "modpoints",
+                    ADMINS,
+                    "/modpoints",
+                    "The points a mod has earned from the games and not yet given away. Mods are in no house, so what they \
+                    win is held for them instead of going to a house. Private.",
+                ),
+                command(
+                    "modgive",
+                    ADMINS,
+                    "/modgive house: points:",
+                    "Gives a house the points the mod is holding - all of them, or as many as asked for. Posted publicly, \
+                    so the Cup can be checked.",
+                ),
                 command("housecaptain", ADMINS, "/housecaptain who:", "Makes a member captain of the house they are in, replacing the old captain."),
                 command("sort", ADMINS, "/sort who: house:", "Puts a member into a house by hand, or moves them."),
                 command(

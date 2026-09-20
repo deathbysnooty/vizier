@@ -183,6 +183,103 @@ impl Source {
     }
 }
 
+/// Points earned by somebody who has no house to put them in.
+///
+/// A mod plays the games like anybody else, but the ledger has no room for
+/// their points: every row in it belongs to a house at the moment it is
+/// written, which is what keeps the House Cup honest. So a mod's earnings wait
+/// here until they give them to a house, and only then does a ledger row exist.
+///
+/// The table is shaped like the ledger on purpose - same user, source and day -
+/// so a mod meets exactly the caps a member does, from the same query. And like
+/// the ledger it is append-only: giving points away writes a NEGATIVE row
+/// rather than editing anything, so the balance is always just the sum and the
+/// history of where it went survives.
+pub const POOL_SOURCE_GIFT: &str = "gift";
+
+/// What one mod is holding, unassigned.
+pub fn pool_balance(conn: &Connection, user: u64) -> i64 {
+    conn.query_row("SELECT COALESCE(SUM(points), 0) FROM pool WHERE user_id = ?1", params![user as i64], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+/// Everyone holding anything, biggest first - for the panel and `/modpoints`.
+pub fn pool_holders(conn: &Connection) -> Vec<(u64, i64)> {
+    let sql = "SELECT user_id, SUM(points) AS held FROM pool GROUP BY user_id HAVING held > 0 ORDER BY held DESC, user_id";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Earning into the pool, under the same daily limit a member would meet.
+pub fn pool_write(conn: &Connection, user: u64, source: Source, scope: Option<String>, points: i64, reason: &str, dedupe: Option<String>, ts: i64) -> rusqlite::Result<Outcome> {
+    if let Some(key) = &dedupe {
+        let seen: Option<i64> = conn.query_row("SELECT 1 FROM pool WHERE dedupe = ?1", params![key], |r| r.get(0)).optional()?;
+        if seen.is_some() {
+            return Ok(Outcome::Duplicate);
+        }
+    }
+    // The same cap, read the same way, against this table instead of the ledger.
+    let granted = if points > 0 {
+        let used: i64 = match source.cap() {
+            Cap::PerDay(_) => conn.query_row(
+                "SELECT COALESCE(SUM(points), 0) FROM pool WHERE user_id = ?1 AND source = ?2 AND day = ?3 AND points > 0",
+                params![user as i64, source.key(), ist_day(ts)],
+                |r| r.get(0),
+            )?,
+            Cap::PerWeekPerChannel(_) => conn.query_row(
+                "SELECT COALESCE(SUM(points), 0) FROM pool
+                 WHERE user_id = ?1 AND source = ?2 AND scope IS ?3 AND day >= ?4 AND points > 0",
+                params![user as i64, source.key(), scope, week_start_day(ts)],
+                |r| r.get(0),
+            )?,
+            Cap::None => 0,
+        };
+        match source.cap() {
+            Cap::PerDay(limit) | Cap::PerWeekPerChannel(limit) => points.min(limit - used).max(0),
+            Cap::None => points,
+        }
+    } else {
+        points
+    };
+    let capped = granted == 0 && points > 0;
+    if capped && dedupe.is_none() {
+        return Ok(Outcome::Capped);
+    }
+    conn.execute(
+        "INSERT INTO pool (user_id, source, scope, points, reason, day, ts, dedupe) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![user as i64, source.key(), scope, granted, reason, ist_day(ts), ts, dedupe],
+    )?;
+    Ok(if capped { Outcome::Capped } else { Outcome::Granted(granted) })
+}
+
+/// Giving pool points to a house: a negative row here, and a real ledger row
+/// there. Never more than is held, and never a negative gift.
+pub fn pool_give(conn: &Connection, user: u64, house: &'static House, points: i64, ts: i64) -> rusqlite::Result<i64> {
+    let held = pool_balance(conn, user);
+    let giving = points.min(held).max(0);
+    if giving == 0 {
+        return Ok(0);
+    }
+    conn.execute(
+        "INSERT INTO pool (user_id, source, points, reason, day, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![user as i64, POOL_SOURCE_GIFT, -giving, format!("given to {}", house.name), ist_day(ts), ts],
+    )?;
+    let entry = Entry {
+        user: None,
+        house,
+        source: Source::Mod,
+        scope: None,
+        points: giving,
+        reason: &format!("points earned by <@{}> and given to {}", user, house.name),
+        by: Some(user),
+        dedupe: None,
+    };
+    write(conn, &entry, ts)?;
+    Ok(giving)
+}
+
 /// What happened to an entry.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -208,7 +305,19 @@ pub const SCHEMA: &str = "
         ts INTEGER NOT NULL,
         dedupe TEXT UNIQUE);
     CREATE INDEX IF NOT EXISTS ledger_cap ON ledger (user_id, source, day);
-    CREATE INDEX IF NOT EXISTS ledger_house_ts ON ledger (house, ts);";
+    CREATE INDEX IF NOT EXISTS ledger_house_ts ON ledger (house, ts);
+    CREATE TABLE IF NOT EXISTS pool (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        scope TEXT,
+        points INTEGER NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        day TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        dedupe TEXT UNIQUE);
+    CREATE INDEX IF NOT EXISTS pool_cap ON pool (user_id, source, day);
+    CREATE INDEX IF NOT EXISTS pool_user ON pool (user_id, ts);";
 
 /// Folds the old house-only `awards` rows into the ledger. Safe at every start:
 /// each old row carries its own dedupe key, so it lands exactly once.

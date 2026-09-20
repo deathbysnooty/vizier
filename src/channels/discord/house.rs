@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
-    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateChannel, CreateCommandOption,
+    CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateChannel, CreateCommand, CreateCommandOption,
     CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
     EditRole, GuildId, Member, PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId, UserId,
 };
@@ -1326,8 +1326,21 @@ pub(super) fn award_person_at(
     if opted_out(user) {
         return None;
     }
-    let house = house_of(user)?;
     let db = DB.get()?;
+    let Some(house) = house_of(user) else {
+        // A mod has no house, so the ledger has nowhere to put this. It waits in
+        // their pool until they give it to a house, under the same daily limit
+        // a member would meet. Anyone else without a house earns nothing, as
+        // before. The caller still sees `None`: no house was paid.
+        if super::admin_ids().contains(&user) {
+            let reason = reason.to_string();
+            let result = super::points::pool_write(&db.lock(), user, source, scope, points, &reason, dedupe, at);
+            if let Err(err) = result {
+                tracing::warn!("house: {} points for mod {} not pooled: {}", source.key(), user, err);
+            }
+        }
+        return None;
+    };
     let entry = super::points::Entry { user: Some(user), house, source, scope, points, reason, by, dedupe };
     match super::points::write(&db.lock(), &entry, at) {
         Ok(outcome) => Some((house, outcome)),
@@ -1336,6 +1349,103 @@ pub(super) fn award_person_at(
             None
         }
     }
+}
+
+/// `/modpoints` - what a mod is holding that no house has yet.
+pub fn pool_builder() -> CreateCommand {
+    CreateCommand::new("modpoints").description("admin only: the points you have earned and not yet given to a house")
+}
+
+/// `/modgive <house> [points]` - hands pooled points to a house.
+pub fn give_builder() -> CreateCommand {
+    CreateCommand::new("modgive")
+        .description("admin only: give the points you have earned to a house")
+        .add_option(house_option("house", "which house gets them").required(true))
+        .add_option(CreateCommandOption::new(
+            serenity::all::CommandOptionType::Integer,
+            "points",
+            "how many (leave empty to give all of them)",
+        ))
+}
+
+pub async fn pool_command(ctx: &Context, command: &CommandInteraction) {
+    let user = command.user.id.get();
+    if !super::admin_ids().contains(&user) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods hold points this way.")).await;
+        return;
+    }
+    let Some(db) = DB.get() else { return };
+    let held = super::points::pool_balance(&db.lock(), user);
+    let text = if held > 0 {
+        format!(
+            "🎒 You are holding **{} {}**, earned playing and not yet given to anyone.\n-# `/modgive <house>` hands them over. They count for that house the moment you do.",
+            held,
+            if held == 1 { "point" } else { "points" }
+        )
+    } else {
+        "🎒 You are holding nothing yet. Play the games and your points wait here until you give them to a house.".to_string()
+    };
+    let _ = command.create_response(&ctx.http, whisper(&text)).await;
+}
+
+/// Giving is answered in the open, not whispered: points arriving in a house
+/// from a mod is exactly the kind of thing the Cup should be able to see.
+pub async fn give_command(ctx: &Context, command: &CommandInteraction) {
+    let user = command.user.id.get();
+    if !super::admin_ids().contains(&user) {
+        let _ = command.create_response(&ctx.http, whisper("Only mods hold points this way.")).await;
+        return;
+    }
+    let Some(db) = DB.get() else { return };
+    let chosen = command.data.options.iter().find(|o| o.name == "house").and_then(|o| match &o.value {
+        serenity::all::CommandDataOptionValue::String(v) => house(v),
+        _ => None,
+    });
+    let Some(house) = chosen else {
+        let _ = command.create_response(&ctx.http, whisper("Which house?")).await;
+        return;
+    };
+    let held = super::points::pool_balance(&db.lock(), user);
+    let asked = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "points")
+        .and_then(|o| match &o.value {
+            serenity::all::CommandDataOptionValue::Integer(v) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(held);
+    if held <= 0 {
+        let _ = command.create_response(&ctx.http, whisper("You are holding nothing to give.")).await;
+        return;
+    }
+    if asked <= 0 {
+        let _ = command.create_response(&ctx.http, whisper("Give a positive number - this is not a way to take points away.")).await;
+        return;
+    }
+    let given = {
+        let conn = db.lock();
+        super::points::pool_give(&conn, user, house, asked, Utc::now().timestamp()).unwrap_or(0)
+    };
+    if given == 0 {
+        let _ = command.create_response(&ctx.http, whisper("Nothing was given - check what you are holding with `/modpoints`.")).await;
+        return;
+    }
+    tracing::info!("house: mod {} gave {} points to {}", user, given, house.name);
+    let left = super::points::pool_balance(&db.lock(), user);
+    let text = format!(
+        "{} <@{}> gave **{} {}** to **{} {}**.\n-# Earned by playing, and held until now. {} left to give.",
+        house.crest,
+        user,
+        given,
+        if given == 1 { "point" } else { "points" },
+        house.crest,
+        house.name,
+        left
+    );
+    let message = CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(message)).await;
 }
 
 /// `/housepoints <house> <points> [reason]` - mods only. A negative number
