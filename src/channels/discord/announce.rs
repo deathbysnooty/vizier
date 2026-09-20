@@ -828,6 +828,27 @@ fn channels() -> Vec<u64> {
     control::ids("VIZIER_ANNOUNCE_CHANNELS").into_iter().filter(|id| *id != 0).collect()
 }
 
+/// Where a note actually goes.
+///
+/// `VIZIER_ANNOUNCE_CHANNELS` when it is set, and otherwise what this module
+/// has always claimed in its own first paragraph: the four house common rooms,
+/// found by name, and the houses channel. That setting being empty used to mean
+/// announcements went NOWHERE, silently, which is a poor way to say "not
+/// configured" - every release note since the feature was written sat unposted.
+fn channels_for(ctx: &Context) -> Vec<u64> {
+    let set = channels();
+    if !set.is_empty() {
+        return set;
+    }
+    let mut out = house::common_room_ids(ctx);
+    if let Some(houses) = control::id("VIZIER_HOUSE_CHANNEL").filter(|id| *id != 0) {
+        if !out.contains(&houses) {
+            out.push(houses);
+        }
+    }
+    out
+}
+
 /// A channel that failed last time gets another go before anything else.
 async fn retry(ctx: &Context) -> bool {
     let Some(waiting) = house::meta_get(RETRY).filter(|t| !t.is_empty()).and_then(|t| serde_json::from_str::<Retry>(&t).ok())
@@ -926,7 +947,7 @@ pub async fn poll(ctx: &Context) {
         return;
     }
     let now = Utc::now().timestamp();
-    let channels = channels();
+    let channels = channels_for(ctx);
     if !control::on("VIZIER_ANNOUNCE", true) || channels.is_empty() {
         // Switched off, or nowhere to say it: keep the snapshot fresh so that
         // switching it on doesn't announce months of history at once. Release
@@ -985,11 +1006,11 @@ pub async fn command(ctx: &Context, command: &CommandInteraction) {
         })
         .unwrap_or_default();
     let _ = command.defer_ephemeral(&ctx.http).await;
-    let channels = channels();
+    let channels = channels_for(ctx);
     let reply = if text.is_empty() {
         "There was nothing to say.".to_string()
     } else if channels.is_empty() {
-        "No announcement channels are set - add them on the panel under Announcements.".to_string()
+        "No announcement channels are set, and the four common rooms could not be found by name either - add them on the panel under Announcements.".to_string()
     } else {
         let post = Post::new("📣 Announcement", &text);
         let failed = send(ctx, &channels, &post).await;

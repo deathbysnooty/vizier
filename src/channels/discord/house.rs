@@ -761,6 +761,28 @@ pub(crate) fn common_room_names() -> Vec<(&'static str, &'static str)> {
     COMMON_ROOMS.iter().map(|(key, name, _)| (*key, name.split_once('│').map_or(*name, |(_, room)| room))).collect()
 }
 
+/// The four common rooms as they stand in the guild right now, found by name
+/// the way [`common_room_names`] writes them.
+///
+/// The rooms are made by this bot and never stored as ids, so anything that
+/// wants to post in all four has to look them up. Rooms it cannot find are
+/// simply missing from the list - a rename is a room that misses one post, not
+/// a crash.
+pub(crate) fn common_room_ids(ctx: &Context) -> Vec<u64> {
+    let names = common_room_names();
+    let mut out = Vec::new();
+    for guild in ctx.cache.guilds() {
+        let Some(guild) = ctx.cache.guild(guild) else { continue };
+        for channel in guild.channels.values() {
+            let name = channel.name.to_lowercase();
+            if names.iter().any(|(_, room)| name.contains(&room.to_lowercase())) && !out.contains(&channel.id.get()) {
+                out.push(channel.id.get());
+            }
+        }
+    }
+    out
+}
+
 /// What a member of the house may do in their own room.
 fn room_rights() -> Permissions {
     Permissions::VIEW_CHANNEL
