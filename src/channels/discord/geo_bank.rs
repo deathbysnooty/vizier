@@ -589,6 +589,42 @@ pub mod tests {
         assert_eq!(bank.playable_states(), vec!["Rajasthan".to_string(), "Telangana".to_string()]);
     }
 
+    /// The bank as it is actually shipped, when the photos are there. It is
+    /// skipped rather than failed where they are not: `geobank/images/` is
+    /// gitignored, so a fresh clone has the json and none of the pictures.
+    #[test]
+    fn the_shipped_bank_plays_if_it_is_there() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("geobank");
+        let Ok(bank) = load(&dir) else { return };
+        assert!(bank.count() >= 100, "only {} places", bank.count());
+
+        let states = bank.playable_states();
+        assert!(states.len() >= 5, "only {} states: {:?}", states.len(), states);
+        for state in &states {
+            // A state too thin to play would come up as often as a full one,
+            // because rounds are drawn by state. harvest.py's MIN_SPOTS.
+            assert!(bank.spots_in(state).len() >= 20, "{} has only {} places", state, bank.spots_in(state).len());
+        }
+
+        for spot in bank.spots() {
+            // Every photo answers to its own state, or the round is
+            // unwinnable. Not always with `State`: Delhi is a union territory
+            // AND a city, so naming it can be a bullseye — which is the
+            // two-readings rule doing its job on real data.
+            let named_state = bank.judge(spot, &fold(&spot.state));
+            assert!(named_state.won(), "{} does not answer to {}", spot.id, spot.state);
+            assert!(named_state.worth() >= Verdict::State.worth(), "{}: {} scored {:?}", spot.id, spot.state, named_state);
+            // And to the town it sits in, where the gazetteer put one nearby.
+            if let (Some(city), Some(km)) = (&spot.city, spot.city_km)
+                && km <= BULLSEYE_KM
+            {
+                let verdict = bank.judge(spot, &fold(city));
+                assert!(verdict.worth() >= Verdict::Near(0.0).worth(), "{}: {} only scored {:?}", spot.id, city, verdict);
+            }
+            assert!(dir.join(&spot.file).exists(), "{} is not on disk", spot.file);
+        }
+    }
+
     #[test]
     fn distance_is_measured_on_the_ground() {
         // Hyderabad to Warangal is about 135 km.

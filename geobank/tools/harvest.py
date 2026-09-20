@@ -74,6 +74,47 @@ def daylight(item):
         return True
 
 
+def relabel():
+    """Re-derive every banked photo's state from its nearest town, and re-apply
+    the MIN_SPOTS floor. Needs no network: the coordinates are already here."""
+    places = json.loads(PLACES.read_text(encoding="utf-8"))
+    seen, cities = set(), []
+    for c in places["cities"]:
+        if c["id"] in seen:
+            continue
+        seen.add(c["id"])
+        cities.append(c)
+
+    bank = json.loads(OUT.read_text(encoding="utf-8"))
+    moved = 0
+    for spot in bank["spots"]:
+        best, best_km = None, 1e9
+        for c in cities:
+            km = haversine(spot["lat"], spot["lon"], c["lat"], c["lon"])
+            if km < best_km:
+                best, best_km = c, km
+        if best is None:
+            continue
+        if best["state"] != spot["state"]:
+            print(f"  {spot['id']}: {spot['state']} -> {best['state']} ({best['name']}, {best_km:.1f} km)")
+            moved += 1
+        spot["state"] = best["state"]
+        spot["city"] = best["name"]
+        spot["city_km"] = round(best_km, 1)
+
+    counts = {}
+    for spot in bank["spots"]:
+        counts[spot["state"]] = counts.get(spot["state"], 0) + 1
+    thin = {s for s, n in counts.items() if n < MIN_SPOTS}
+    if thin:
+        print("too thin to play, dropped:", ", ".join(f"{s} ({counts[s]})" for s in sorted(thin)))
+    bank["spots"] = [s for s in bank["spots"] if s["state"] not in thin]
+    bank["states"] = sorted({s["state"] for s in bank["spots"]})
+    OUT.write_text(json.dumps(bank, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"{moved} photos moved state; {len(bank['spots'])} places across {len(bank['states'])} states")
+    return 0
+
+
 def main():
     places = json.loads(PLACES.read_text(encoding="utf-8"))
     by_state = {}
@@ -158,11 +199,17 @@ def main():
         for item in taken:
             lat, lon = float(item["lat"]), float(item["lng"])
             city, km = nearest_city(lat, lon)
+            # The state comes from the NEAREST TOWN, not from whichever town we
+            # happened to look around. Puducherry is an enclave inside Tamil
+            # Nadu: a frame found 4 km from a Puducherry town can stand in Tamil
+            # Nadu, and labelling it Puducherry would have the reveal name a
+            # town the game then refuses as an answer. Nearest-town keeps the
+            # answer and the reveal in agreement, always.
             spots.append({
                 "id": f"kv{item['id']}",
                 "lat": round(lat, 5),
                 "lon": round(lon, 5),
-                "state": state,
+                "state": city["state"] if city else state,
                 "city": city["name"] if city else None,
                 "city_km": round(km, 1) if city else None,
                 "file": f"images/kv{item['id']}.jpg",
@@ -213,4 +260,6 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # --relabel re-derives states from the coordinates already banked; the
+    # plain run goes back to KartaView for more photos.
+    raise SystemExit(relabel() if "--relabel" in sys.argv else main())
