@@ -66,8 +66,8 @@ to contain.
 
 **[KartaView](https://kartaview.org/)** is dashcam footage, and almost every
 frame faces the road. Uniform and very playable, but it pools where a few
-people drove: 13 states, and Tamil Nadu and Telangana alone are most of the raw
-supply. Needs no token.
+people drove: 13 states on its own, and Tamil Nadu and Telangana alone are most
+of its raw supply. Needs no token.
 
 **[Mapillary](https://www.mapillary.com/)** reaches most of the rest — Mumbai,
 Chennai, Ahmedabad, Kochi, Guwahati and Bhubaneswar all have imagery there and

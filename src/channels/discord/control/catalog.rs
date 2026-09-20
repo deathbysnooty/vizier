@@ -732,9 +732,10 @@ pub fn sections() -> Vec<Section> {
                     round, and takes a point off; !skip opens up only after a hint and pays nobody. The game runs in \
                     matches and pays house points for WINNING one, not per photo. The photos come from geobank/ in the \
                     bot's workspace, read at start: with no bank there the game stays off and says so in the log. They \
-                    are real dashcam frames contributed to KartaView, so the bank only covers the states people have \
-                    actually driven - thirteen of them today, and the game draws a STATE first and a photo second so \
-                    that every state it does hold comes up as often as every other. Never runs in #safe-corner.",
+                    are street photos contributed by the public to KartaView and Mapillary, so the bank only covers \
+                    the states people have actually driven - twenty-two of them today, and the game draws a STATE \
+                    first and a photo second so that every state it does hold comes up as often as every other. \
+                    Never runs in #safe-corner.",
             settings: vec![
                 setting("VIZIER_GEO", "Game on", "Run Geo in its channel. Off takes the card down and stops new rounds; the round that was up is left as it is. The game also stays off, whatever this says, when there is no place bank to play with.", Kind::Toggle, "off"),
                 setting("VIZIER_GEO_CHANNEL", "Game channel", "The channel the photo card lives in. Members need to be able to type there - that is how guesses are given. Empty means the game stays off until you point this at a room. Never #safe-corner.", Kind::Channel, ""),

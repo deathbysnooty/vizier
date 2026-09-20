@@ -1759,8 +1759,8 @@ pub(crate) mod tests {
             break_minutes: 2,
             win_points: 5,
             second_points: 2,
-            places: Some(640),
-            states: Some(13),
+            places: Some(1530),
+            states: Some(22),
         }
     }
 
