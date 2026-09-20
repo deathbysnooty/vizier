@@ -509,16 +509,20 @@ enum Slot {
     Welcome,
     Cards,
     Guide,
+    /// Geo's own post. It has one because the welcome is full — see
+    /// [`rules_text::geo_post_text`].
+    Geo,
 }
 
 impl Slot {
-    const ALL: [Slot; 3] = [Slot::Welcome, Slot::Cards, Slot::Guide];
+    const ALL: [Slot; 4] = [Slot::Welcome, Slot::Cards, Slot::Guide, Slot::Geo];
 
     fn key(self) -> &'static str {
         match self {
             Slot::Welcome => "welcome",
             Slot::Cards => "snitchcards",
             Slot::Guide => "guide",
+            Slot::Geo => "geo",
         }
     }
 
@@ -527,6 +531,7 @@ impl Slot {
             Slot::Welcome => "the welcome",
             Slot::Cards => "the Snitch & cards post",
             Slot::Guide => "the guide",
+            Slot::Geo => "the Geo post",
         }
     }
 }
@@ -578,13 +583,15 @@ fn content(body: Body, images: Vec<&'static str>) -> Content {
 }
 
 /// What each slot should hold now; `None` for a post that's switched off.
-fn contents(r: &Rules, welcome_on: bool, cards_on: bool, guide_on: bool) -> [Option<Content>; 3] {
+fn contents(r: &Rules, welcome_on: bool, cards_on: bool, guide_on: bool, geo_on: bool) -> [Option<Content>; 4] {
     let cards = rules_text::snitch_cards_text(r).filter(|_| cards_on);
     let cards_above = cards.is_some();
     [
         welcome_on.then(|| content(text_body(rules_text::welcome_text(r), 0xE8B923), Vec::new())),
         cards.map(|t| content(text_body(t, 0xF1C40F), rules_text::snitch_cards_images(r))),
         guide_on.then(|| content(Body::Embeds(rules_text::guide(r, cards_above)), Vec::new())),
+        // Nothing to say while the game is off, and the post comes down.
+        geo_on.then(|| rules_text::geo_post_text(&r.geo).map(|t| content(text_body(t, 0x1ABC9C), Vec::new()))).flatten(),
     ]
 }
 
@@ -782,6 +789,7 @@ async fn arrange(ctx: &Context, mode: Mode) -> Result<String, String> {
         super::control::on("VIZIER_SCOREBOARD_WELCOME", true),
         super::control::on("VIZIER_SCOREBOARD_SNITCH_CARDS", true),
         super::control::on("VIZIER_SCOREBOARD_GUIDE", true),
+        super::control::on("VIZIER_SCOREBOARD_GEO", true),
     );
     let card_on = super::control::on("VIZIER_SCOREBOARD", true);
 
@@ -797,7 +805,7 @@ async fn arrange(ctx: &Context, mode: Mode) -> Result<String, String> {
                 let _ = old.delete_message(&ctx.http, MessageId::new(*id)).await;
             }
         }
-        ids = vec![None; 3];
+        ids = vec![None; Slot::ALL.len()];
         card_id = None;
         house::meta_set("scoreboard_message", "");
     }
@@ -1248,7 +1256,7 @@ mod tests {
         let b = content(Body::Text("same".into()), vec!["snitch"]);
         assert_ne!(a.hash, b.hash, "switching frogs off changes the pictures, so the post changes");
         let r = rules_text::tests::defaults();
-        let posts = contents(&r, true, true, true);
+        let posts = contents(&r, true, true, true, true);
         assert!(posts.iter().all(|p| p.is_some()));
         assert!(matches!(posts[0].as_ref().unwrap().body, Body::Text(_)));
         assert_eq!(posts[1].as_ref().unwrap().images, vec!["snitch", "frog"]);
@@ -1256,12 +1264,32 @@ mod tests {
             Body::Embeds(p) => assert!(p[0].body.contains("post above")),
             Body::Text(_) => panic!("the guide is embeds"),
         }
-        let no_cards = contents(&r, false, false, true);
-        assert!(no_cards[0].is_none() && no_cards[1].is_none());
+        let no_cards = contents(&r, false, false, true, false);
+        assert!(no_cards[0].is_none() && no_cards[1].is_none() && no_cards[3].is_none());
         match &no_cards[2].as_ref().unwrap().body {
             Body::Embeds(p) => assert!(!p[0].body.contains("post above")),
             Body::Text(_) => panic!("the guide is embeds"),
         }
         assert!(!SNITCH_HOW.is_empty() && FROG_HOW.starts_with(b"\x89PNG"));
+    }
+
+    /// Geo has a post of its own because the welcome has no room for a line.
+    /// It has to say where the game is and what an answer is worth, and it has
+    /// to come down by itself when the game is off.
+    #[test]
+    fn the_geo_post_names_its_channel_and_what_an_answer_pays() {
+        let r = rules_text::tests::defaults();
+        let posts = contents(&r, true, true, true, true);
+        let geo = posts[3].as_ref().expect("a geo post");
+        let Body::Text(text) = &geo.body else { panic!("the geo post is plain text") };
+        assert!(text.contains(&format!("<#{}>", r.geo.channel.expect("a channel"))), "{}", text);
+        assert!(text.contains("**2**") && text.contains("**4**") && text.contains("**5**"), "{}", text);
+        assert!(text.contains("wrong state scores nothing"), "{}", text);
+        assert!(text.chars().count() <= rules_text::MESSAGE_LIMIT, "{} chars", text.chars().count());
+
+        // Off, or with nowhere to play, and the post is not there at all.
+        let off = Rules { geo: rules_text::GeoRules { channel: None, ..r.geo.clone() }, ..rules_text::tests::defaults() };
+        assert!(contents(&off, true, true, true, true)[3].is_none());
+        assert!(contents(&r, true, true, true, false)[3].is_none());
     }
 }

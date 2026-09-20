@@ -1597,6 +1597,54 @@ pub fn geo_help_text(g: &GeoRules) -> String {
     t
 }
 
+/// Geo's own post in the scoreboard channel.
+///
+/// The game has one because the welcome could not take it: that message is
+/// 1978 of Discord's 2000 characters with the two older guessing games on it.
+/// A post of its own says more than a line would have anyway — what each kind
+/// of answer is worth is the thing people need to see before they play.
+///
+/// `None` while the game is off or has no channel, and the post comes down.
+pub fn geo_post_text(g: &GeoRules) -> Option<String> {
+    let room = channel(g.channel)?;
+    let mut t = format!("# 🗺️ Geo — GeoGuessr, but only India\nA photo of a street somewhere in India is waiting in {}. Say where it was taken.\n\n", room);
+
+    t.push_str("**What your answer is worth**\n");
+    t.push_str("🏵️ the **state** — **2**\n");
+    t.push_str(&format!("📍 a **town within {:.0} km** — **4**\n", super::geo_bank::NEAR_KM));
+    t.push_str(&format!("🎯 a **town within {:.0} km** — **5**\n", super::geo_bank::BULLSEYE_KM));
+    t.push_str("-# Naming a town gives you its state too, so you never have to know both. `Kerala` is safe, `Kochi` is greedy — choosing is the game.\n\n");
+
+    t.push_str("**The state is a gate**\nA town in the **wrong state scores nothing**, however near it looks on a map. A town at the far end of the **right** state still earns the 2.\n");
+    t.push_str("-# Old names work — `Bombay`, `Benares`, `Gurgaon` — and so does bad spelling.\n\n");
+
+    t.push_str("**🏠 House points**\n");
+    t.push_str(&format!(
+        "Come from **winning a match of {}**: **{}** to the winner, **{}** to the runner-up{}. One photo on its own pays none, and joint winners both take the winner's share.\n\n",
+        plural(g.match_rounds, "place", "places"),
+        plural(g.win_points, "house point", "house points"),
+        g.second_points,
+        match g.cap {
+            Some(n) => format!(", up to **{}** a day", n),
+            None => String::new(),
+        }
+    ));
+
+    t.push_str("**🗺️ Geo points**\nThe game's own score: every place you take, at what the round was worth, with **no daily limit**. Mods and Muggles have them too. `/geotop` is that board.\n\n");
+
+    t.push_str(&format!(
+        "Press **I'm ready** on the card to start a match — it goes once **{}** are in, and turning up late is fine. Stuck? **`!hint`** for the state's first letter, a point off; **`!skip`** after a hint.\n",
+        g.min_players
+    ));
+    if let Some(states) = g.states {
+        t.push_str(&format!(
+            "-# The photos are real dashcam frames, so they only cover **{}** so far — wherever people have actually driven. Every state in the bank comes up as often as every other. `/geohelp` explains the lot.",
+            plural(states as i64, "state", "states")
+        ));
+    }
+    Some(t)
+}
+
 /// The rules post as it goes up: plain text under a heading when it fits one
 /// message, otherwise `None` and it goes in an embed with the title.
 pub fn npat_rules_message(n: &NpatRules) -> Option<String> {
@@ -1708,8 +1756,8 @@ pub(crate) mod tests {
             break_minutes: 2,
             win_points: 5,
             second_points: 2,
-            places: Some(600),
-            states: Some(12),
+            places: Some(640),
+            states: Some(13),
         }
     }
 
