@@ -427,6 +427,21 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)]) -> String {
     text
 }
 
+/// `/mypoints` for a mod: the month's earnings and what is still to give.
+fn mod_mypoints_text(breakdown: &[(Source, i64)], held: i64) -> String {
+    let total: i64 = breakdown.iter().map(|(_, n)| n).sum();
+    let mut text = format!("🛡️ **Mods** · this month you've earned **{}** point{}", total, if total == 1 { "" } else { "s" });
+    if !breakdown.is_empty() {
+        let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
+        text.push_str(&format!("\n{}", parts.join(" · ")));
+    }
+    text.push_str(&format!(
+        "\n-# You're in no house, so these are held for you: **{}** left to give. `/modgive` hands them to a house.",
+        held
+    ));
+    text
+}
+
 pub fn today_builder() -> CreateCommand {
     CreateCommand::new("today")
         .description("your points today and which daily limits are maxed - or a housemate's")
@@ -440,11 +455,28 @@ pub fn today_builder() -> CreateCommand {
 /// One line per activity for a member's day: chat and voice progress towards
 /// their point, each capped game against its daily limit, and anything extra.
 fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64) -> String {
+    today_lines(&format!("{} **{}**", h.crest, h.name), who, sources, messages, voice_secs)
+}
+
+/// The same day, for a mod: they are in no house, so what they win waits in
+/// their pool instead of moving the Cup. Same lines, same limits - only where
+/// the points are sitting is different.
+fn mod_today_text(who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64, held: i64) -> String {
+    let mut text = today_lines("🛡️ **Mods**", who, sources, messages, voice_secs);
+    text.push_str(&format!(
+        "\n-# Held for {}, not paid to a house: **{}** in all. `/modgive` hands them to whichever house you like.",
+        if who.is_some() { "them" } else { "you" },
+        held
+    ));
+    text
+}
+
+fn today_lines(head: &str, who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64) -> String {
     let pts = |s: Source| sources.get(s.key()).copied().unwrap_or(0);
     let total: i64 = sources.values().sum();
     let subject = who.map(|name| format!("**{}** has", name)).unwrap_or_else(|| "you've".to_string());
     let mut lines =
-        vec![format!("{} **{}** · today {} earned **{}** point{}", h.crest, h.name, subject, total, if total == 1 { "" } else { "s" })];
+        vec![format!("{} · today {} earned **{}** point{}", head, subject, total, if total == 1 { "" } else { "s" })];
     let tiers = super::activity::chat_tier_bars();
     let chat_cap = match Source::Chat.cap() {
         ledger::Cap::PerDay(n) => n.min(tiers.len() as i64),
@@ -571,6 +603,34 @@ pub(super) fn today_for(user: u64, name: Option<&str>) -> String {
             })
             .unwrap_or((0, 0));
         today_text(h, name, &sources, messages, voice_secs)
+    } else if super::admin_ids().contains(&user) {
+        // A mod earns exactly as everyone else does; the points wait in their
+        // pool rather than moving a house. Reading the ledger for them would
+        // always say nought, which is what `/today` used to do.
+        let now = Utc::now().timestamp();
+        let day = ledger::ist_day(now);
+        let start = ist_hour_floor(now) - ist_hour(now) * 3600;
+        let (sources, held) = house::db()
+            .map(|db| {
+                let conn = db.lock();
+                (ledger::pool_day(&conn, user, &day), ledger::pool_balance(&conn, user))
+            })
+            .unwrap_or_default();
+        let (messages, voice_secs) = super::stats::db()
+            .map(|db| {
+                let conn = db.lock();
+                let messages = super::activity::messages_on(&conn, &day, Some(user))
+                    .ok()
+                    .and_then(|m| m.get(&user).copied())
+                    .unwrap_or(0);
+                let voice = super::activity::voice_points_between(&conn, Some(user), start, start + 86_400, now)
+                    .ok()
+                    .and_then(|v| v.get(&user).copied())
+                    .unwrap_or(0);
+                (messages, voice)
+            })
+            .unwrap_or((0, 0));
+        mod_today_text(name, &sources, messages, voice_secs, held)
     } else if someone_else {
         format!("{} isn't in a house, so there are no points to show.", name.unwrap_or("They"))
     } else {
@@ -587,6 +647,15 @@ pub async fn mypoints_command(ctx: &Context, command: &CommandInteraction) {
         let since = ledger::month_start(Utc::now().timestamp());
         let breakdown = house::db().and_then(|db| ledger::breakdown(&db.lock(), user, since).ok()).unwrap_or_default();
         mypoints_text(h, &breakdown)
+    } else if super::admin_ids().contains(&user) {
+        let since = ledger::month_start(Utc::now().timestamp());
+        let (breakdown, held) = house::db()
+            .map(|db| {
+                let conn = db.lock();
+                (ledger::pool_breakdown(&conn, user, since), ledger::pool_balance(&conn, user))
+            })
+            .unwrap_or_default();
+        mod_mypoints_text(&breakdown, held)
     } else {
         "You're not in a house yet.".to_string()
     };
@@ -738,6 +807,33 @@ mod tests {
         assert!(text.contains("🐸 Chocolate Frog 0 · no limit"), "{}", text);
         assert!(text.contains("🔤 Name Place Animal Thing 0/6"), "{}", text);
         assert!(text.contains("still up for grabs"), "{}", text);
+    }
+
+    #[test]
+    fn a_mods_day_reads_like_anyone_elses_but_says_where_the_points_are() {
+        // A mod is in no house, so `/today` read their ledger and found nought
+        // - they played Guess the Word all evening and it said nothing at all.
+        // The pool is what to read for them.
+        let sources: HashMap<String, i64> = [("guess".to_string(), 10), ("anagram".to_string(), 4)].into_iter().collect();
+        let text = mod_today_text(None, &sources, 12, 0, 27);
+        assert!(text.contains("🛡️ **Mods** · today you've earned **14** points"), "{}", text);
+        assert!(text.contains("🎨 Guess the Word ✅ maxed 10/10"), "{}", text);
+        assert!(text.contains("🔡 Anagram 4/10"), "{}", text);
+        assert!(text.contains("**27** in all"), "{}", text);
+        assert!(text.contains("/modgive"), "{}", text);
+        assert!(mod_today_text(Some("Riya"), &sources, 0, 0, 3).contains("today **Riya** has earned"));
+    }
+
+    #[test]
+    fn a_mods_month_is_the_pool_not_the_ledger() {
+        let text = mod_mypoints_text(&[(Source::Guess, 30), (Source::Voice, 12)], 42);
+        assert!(text.contains("this month you've earned **42** points"), "{}", text);
+        assert!(text.contains("🎨 Guess the Word 30"), "{}", text);
+        assert!(text.contains("**42** left to give"), "{}", text);
+        // Nothing earned yet reads plainly, with no empty line of sources.
+        let empty = mod_mypoints_text(&[], 0);
+        assert!(empty.contains("earned **0** points"), "{}", empty);
+        assert!(!empty.contains(" · 0"), "{}", empty);
     }
 
     #[test]

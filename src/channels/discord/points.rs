@@ -203,6 +203,33 @@ pub fn pool_balance(conn: &Connection, user: u64) -> i64 {
         .unwrap_or(0)
 }
 
+/// What a mod earned on one India day, by source key - the pool's answer to the
+/// query `/today` runs against the ledger. The give rows are left out: handing
+/// points to a house is not un-earning them, and a day that reads `-13` after a
+/// give would be nonsense.
+pub fn pool_day(conn: &Connection, user: u64, day: &str) -> HashMap<String, i64> {
+    let sql = "SELECT source, SUM(points) FROM pool WHERE user_id = ?1 AND day = ?2 AND source != ?3 GROUP BY source";
+    let Ok(mut stmt) = conn.prepare(sql) else { return HashMap::new() };
+    stmt.query_map(params![user as i64, day, POOL_SOURCE_GIFT], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// The same for a stretch of time, biggest first - `/mypoints` for a mod.
+pub fn pool_breakdown(conn: &Connection, user: u64, since: i64) -> Vec<(Source, i64)> {
+    let sql = "SELECT source, SUM(points) FROM pool WHERE user_id = ?1 AND ts >= ?2 AND source != ?3 GROUP BY source";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let Ok(rows) = stmt.query_map(params![user as i64, since, POOL_SOURCE_GIFT], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    }) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Source, i64)> =
+        rows.flatten().filter_map(|(key, sum)| Source::from_key(&key).map(|s| (s, sum))).filter(|(_, n)| *n != 0).collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
+
 /// Everyone holding anything, biggest first - for the panel and `/modpoints`.
 pub fn pool_holders(conn: &Connection) -> Vec<(u64, i64)> {
     let sql = "SELECT user_id, SUM(points) AS held FROM pool GROUP BY user_id HAVING held > 0 ORDER BY held DESC, user_id";
