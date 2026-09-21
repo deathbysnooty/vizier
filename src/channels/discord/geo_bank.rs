@@ -32,9 +32,20 @@
 //! somebody who means the other one is out of luck the way they would be in any
 //! room.
 //!
-//! If either file is missing the game simply never starts: [`open`] says so once
-//! in the log and leaves [`bank`] empty, and every part of the game checks it
-//! before doing anything.
+//! ## Two scopes
+//!
+//! A round is either an **India** round or a **World** round, and the only
+//! thing that changes between them is what the gate is. An India round is
+//! gated by the STATE, and a town inside the right one is scored on distance.
+//! A World round is gated by the COUNTRY and asks for nothing finer: the room
+//! was asked to name the country, so naming the right one - or any town in it,
+//! which says the same thing - is the whole answer. The World files are
+//! `world.json` and `world_spots.json`, built by `build_world.py` and
+//! `harvest_world.py`; without them the bank simply has no World rounds.
+//!
+//! If the India files are missing the game simply never starts: [`open`] says
+//! so once in the log and leaves [`bank`] empty, and every part of the game
+//! checks it before doing anything.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +59,7 @@ pub const ATTRIBUTION: &str = "Street imagery from KartaView contributors and Gr
 /// The formats this code knows how to read. A later one is not guessed at.
 pub const PLACES_FORMAT: &str = "GEOPLACES1";
 pub const SPOTS_FORMAT: &str = "GEOSPOTS1";
+pub const WORLD_FORMAT: &str = "GEOWORLD1";
 
 /// Naming a town this near the photo is a bullseye.
 pub const BULLSEYE_KM: f64 = 15.0;
@@ -81,13 +93,119 @@ pub struct City {
     pub keys: Vec<String>,
 }
 
-/// One photo, and where on the ground it was taken.
+/// Which kind of round a photo belongs to, and so what its gate is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scope {
+    /// Gated by the state; a town inside it is scored on distance.
+    India,
+    /// Gated by the country, and nothing finer is asked for.
+    World,
+}
+
+impl Scope {
+    pub fn key(self) -> &'static str {
+        match self {
+            Scope::India => "india",
+            Scope::World => "world",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Scope {
+        if key == "world" { Scope::World } else { Scope::India }
+    }
+}
+
+/// What a match plays, as the room votes for it at the break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Pool {
+    India,
+    World,
+    /// India and the world, a round of either drawn at random.
+    #[default]
+    Mix,
+}
+
+impl Pool {
+    pub const ALL: [Pool; 3] = [Pool::India, Pool::World, Pool::Mix];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Pool::India => "india",
+            Pool::World => "world",
+            Pool::Mix => "mix",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Pool {
+        Pool::ALL.into_iter().find(|p| p.key() == key).unwrap_or_default()
+    }
+
+    /// What the button says.
+    pub fn label(self) -> &'static str {
+        match self {
+            Pool::India => "🇮🇳 India",
+            Pool::World => "🌍 World",
+            Pool::Mix => "🎲 Mix",
+        }
+    }
+
+    /// What the match is, said in a sentence.
+    pub fn about(self) -> &'static str {
+        match self {
+            Pool::India => "India — name the state, or the town for more",
+            Pool::World => "the World — name the country",
+            Pool::Mix => "a Mix — India and the World, round by round",
+        }
+    }
+
+    /// Which kinds of round the match draws from.
+    pub fn scopes(self) -> &'static [Scope] {
+        match self {
+            Pool::India => &[Scope::India],
+            Pool::World => &[Scope::World],
+            Pool::Mix => &[Scope::India, Scope::World],
+        }
+    }
+}
+
+/// One country: the gate of a World round.
 #[derive(Debug, Clone, Deserialize)]
+pub struct Country {
+    /// ISO 3166 alpha-2, which is what a World photo's region holds.
+    pub code: String,
+    pub name: String,
+    /// Two letters: AS, EU, AF, NA, SA, OC, AN. What a World hint gives away.
+    pub continent: String,
+    pub keys: Vec<String>,
+}
+
+/// A town somewhere in the world, carrying its country. Naming one in a World
+/// round names its country.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorldCity {
+    pub name: String,
+    pub country: String,
+    pub pop: i64,
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorldFile {
+    format: String,
+    countries: Vec<Country>,
+    cities: Vec<WorldCity>,
+}
+
+/// One photo, and where on the ground it was taken.
+#[derive(Debug, Clone)]
 pub struct Spot {
     pub id: String,
     pub lat: f64,
     pub lon: f64,
-    pub state: String,
+    pub scope: Scope,
+    /// The gate's answer: a state's name for an India photo, a country's code
+    /// for a World one.
+    pub region: String,
     /// The nearest town in the gazetteer, for the reveal. Not the answer — the
     /// answer is wherever the guess lands.
     pub city: Option<String>,
@@ -110,6 +228,45 @@ impl Spot {
     }
 }
 
+/// A photo as the file holds it. The India file calls its gate `state` and
+/// the World file calls it `country`; both become a [`Spot`]'s `region`.
+#[derive(Debug, Deserialize)]
+struct RawSpot {
+    id: String,
+    lat: f64,
+    lon: f64,
+    state: Option<String>,
+    country: Option<String>,
+    city: Option<String>,
+    city_km: Option<f64>,
+    file: String,
+    by: String,
+    source: Option<String>,
+    shot: String,
+}
+
+impl RawSpot {
+    fn into_spot(self, scope: Scope) -> Option<Spot> {
+        let region = match scope {
+            Scope::India => self.state?,
+            Scope::World => self.country?,
+        };
+        Some(Spot {
+            id: self.id,
+            lat: self.lat,
+            lon: self.lon,
+            scope,
+            region,
+            city: self.city,
+            city_km: self.city_km,
+            file: self.file,
+            by: self.by,
+            source: self.source,
+            shot: self.shot,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PlacesFile {
     format: String,
@@ -124,7 +281,7 @@ struct SpotsFile {
     /// rather than being written into the code, because which archives are in
     /// it is a property of the bank somebody built, not of this build.
     attribution: Option<String>,
-    spots: Vec<Spot>,
+    spots: Vec<RawSpot>,
 }
 
 /// How a typed name was read. A name that is both a state and a town appears
@@ -133,6 +290,8 @@ struct SpotsFile {
 pub enum Named {
     State(usize),
     City(usize),
+    Country(usize),
+    WorldCity(usize),
 }
 
 /// What a guess was worth.
@@ -149,6 +308,9 @@ pub enum Verdict {
     Near(f64),
     /// The right state and a town within [`BULLSEYE_KM`].
     Bullseye(f64),
+    /// A World round's whole answer: the right country, named outright or by
+    /// naming a town in it.
+    Country,
 }
 
 impl Verdict {
@@ -165,6 +327,9 @@ impl Verdict {
             Verdict::State => 2,
             Verdict::Near(_) => 4,
             Verdict::Bullseye(_) => 5,
+            // The same as a state: both are the coarse answer that always
+            // scores, and a World round asks for nothing finer.
+            Verdict::Country => 2,
         }
     }
 
@@ -175,6 +340,7 @@ impl Verdict {
             Verdict::State => "right state",
             Verdict::Near(_) => "close",
             Verdict::Bullseye(_) => "bullseye",
+            Verdict::Country => "right country",
         }
     }
 }
@@ -267,10 +433,14 @@ pub fn haversine(a_lat: f64, a_lon: f64, b_lat: f64, b_lon: f64) -> f64 {
 pub struct Bank {
     states: Vec<StatePlace>,
     cities: Vec<City>,
+    countries: Vec<Country>,
+    world_cities: Vec<WorldCity>,
     spots: Vec<Spot>,
     attribution: String,
     state_keys: HashMap<String, usize>,
     city_keys: HashMap<String, usize>,
+    country_keys: HashMap<String, usize>,
+    world_city_keys: HashMap<String, usize>,
     /// Where the pictures are, remembered from the load so the game can find
     /// one without knowing the workspace.
     dir: PathBuf,
@@ -290,20 +460,38 @@ impl Bank {
         &self.attribution
     }
 
-    /// The states the bank can actually set a round in, in play order. The
-    /// picture supply is wildly uneven between them, so the game picks a state
-    /// from THIS list and then a photo inside it: sampling photos directly
-    /// would make Tamil Nadu a third of every match and the game guessable
-    /// without looking.
-    pub fn playable_states(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.spots.iter().map(|s| s.state.clone()).collect();
+    /// The regions a round of this scope can be set in - states for India,
+    /// countries for World - in play order. The picture supply is wildly
+    /// uneven between them, so the game picks a region from THIS list and
+    /// then a photo inside it: sampling photos directly would make Tamil Nadu
+    /// a third of every India match and the game guessable without looking.
+    pub fn playable(&self, scope: Scope) -> Vec<String> {
+        let mut names: Vec<String> = self.spots.iter().filter(|s| s.scope == scope).map(|s| s.region.clone()).collect();
         names.sort();
         names.dedup();
         names
     }
 
-    pub fn spots_in(&self, state: &str) -> Vec<&Spot> {
-        self.spots.iter().filter(|s| s.state == state).collect()
+    /// The India regions, for the places that only ever meant India.
+    pub fn playable_states(&self) -> Vec<String> {
+        self.playable(Scope::India)
+    }
+
+    pub fn count_in(&self, scope: Scope) -> usize {
+        self.spots.iter().filter(|s| s.scope == scope).count()
+    }
+
+    pub fn spots_in(&self, scope: Scope, region: &str) -> Vec<&Spot> {
+        self.spots.iter().filter(|s| s.scope == scope && s.region == region).collect()
+    }
+
+    /// How a photo's region is said out loud: a state's own name, or a
+    /// country's name rather than its code.
+    pub fn region_name(&self, spot: &Spot) -> String {
+        match spot.scope {
+            Scope::India => spot.region.clone(),
+            Scope::World => self.countries.iter().find(|c| c.code == spot.region).map(|c| c.name.clone()).unwrap_or_else(|| spot.region.clone()),
+        }
     }
 
     /// Where a photo lives on disk.
@@ -314,12 +502,31 @@ impl Bank {
     /// Every way a typed name can be read. Empty means the bank has never
     /// heard of it.
     pub fn readings(&self, folded: &str) -> Vec<Named> {
+        self.readings_in(Scope::India, folded)
+    }
+
+    /// Every way a typed name can be read in a round of this scope. An India
+    /// round knows states and Indian towns; a World round knows countries and
+    /// the world's towns.
+    pub fn readings_in(&self, scope: Scope, folded: &str) -> Vec<Named> {
         let mut out = Vec::new();
-        if let Some(&i) = self.state_keys.get(folded) {
-            out.push(Named::State(i));
-        }
-        if let Some(&i) = self.city_keys.get(folded) {
-            out.push(Named::City(i));
+        match scope {
+            Scope::India => {
+                if let Some(&i) = self.state_keys.get(folded) {
+                    out.push(Named::State(i));
+                }
+                if let Some(&i) = self.city_keys.get(folded) {
+                    out.push(Named::City(i));
+                }
+            }
+            Scope::World => {
+                if let Some(&i) = self.country_keys.get(folded) {
+                    out.push(Named::Country(i));
+                }
+                if let Some(&i) = self.world_city_keys.get(folded) {
+                    out.push(Named::WorldCity(i));
+                }
+            }
         }
         out
     }
@@ -340,7 +547,7 @@ impl Bank {
     /// state's own credit — naming Jaisalmer for a photo in Jaipur is a wrong
     /// town but a right state, and the game says so.
     pub fn judge(&self, spot: &Spot, folded: &str) -> Verdict {
-        self.readings(folded)
+        self.readings_in(spot.scope, folded)
             .into_iter()
             .map(|reading| self.judge_one(spot, reading))
             .max_by(|a, b| a.worth().cmp(&b.worth()))
@@ -350,15 +557,31 @@ impl Bank {
     fn judge_one(&self, spot: &Spot, reading: Named) -> Verdict {
         match reading {
             Named::State(i) => {
-                if self.states[i].name == spot.state {
+                if self.states[i].name == spot.region {
                     Verdict::State
+                } else {
+                    Verdict::Wrong
+                }
+            }
+            // A World round asks for the country and nothing finer: the
+            // country itself, or a town that is in it, both say it.
+            Named::Country(i) => {
+                if self.countries[i].code == spot.region {
+                    Verdict::Country
+                } else {
+                    Verdict::Wrong
+                }
+            }
+            Named::WorldCity(i) => {
+                if self.world_cities[i].country == spot.region {
+                    Verdict::Country
                 } else {
                     Verdict::Wrong
                 }
             }
             Named::City(i) => {
                 let city = &self.cities[i];
-                if city.state != spot.state {
+                if city.state != spot.region {
                     return Verdict::Wrong;
                 }
                 let km = haversine(city.lat, city.lon, spot.lat, spot.lon);
@@ -382,18 +605,44 @@ impl Bank {
     /// The answer as the reveal states it: the town, where the photo sits near
     /// one, and the state either way.
     pub fn answer_line(&self, spot: &Spot) -> String {
-        match (&spot.city, spot.city_km) {
-            (Some(city), Some(km)) if km <= BULLSEYE_KM => format!("**{}**, {}", city, spot.state),
-            (Some(city), Some(km)) => format!("**{}** — {:.0} km from {}", spot.state, km, city),
-            _ => format!("**{}**", spot.state),
+        let region = self.region_name(spot);
+        match (spot.scope, &spot.city, spot.city_km) {
+            // A World round asked for the country, so the country leads; the
+            // town is just colour, said only when the photo sits near one.
+            (Scope::World, Some(city), Some(km)) if km <= NEAR_KM => format!("**{}** — near {}", region, city),
+            (Scope::World, _, _) => format!("**{}**", region),
+            (Scope::India, Some(city), Some(km)) if km <= BULLSEYE_KM => format!("**{}**, {}", city, region),
+            (Scope::India, Some(city), Some(km)) => format!("**{}** — {:.0} km from {}", region, km, city),
+            (Scope::India, _, _) => format!("**{}**", region),
         }
     }
 
     /// What a hint gives away: the state's first letter and the part of the
     /// country it is in. Enough to narrow the list, not enough to hand it over.
     pub fn hint_line(&self, spot: &Spot) -> String {
-        let letter = spot.state.chars().next().unwrap_or('?').to_ascii_uppercase();
-        format!("Starts with **{}**, somewhere in the **{}**.", letter, region(spot.lat, spot.lon))
+        let name = self.region_name(spot);
+        let letter = name.chars().next().unwrap_or('?').to_ascii_uppercase();
+        match spot.scope {
+            Scope::India => format!("Starts with **{}**, somewhere in the **{}**.", letter, region(spot.lat, spot.lon)),
+            Scope::World => {
+                let continent = self.countries.iter().find(|c| c.code == spot.region).map(|c| continent_name(&c.continent)).unwrap_or("world");
+                format!("Starts with **{}**, somewhere in **{}**.", letter, continent)
+            }
+        }
+    }
+}
+
+/// A continent code, said the way a hint says it.
+pub fn continent_name(code: &str) -> &'static str {
+    match code {
+        "AS" => "Asia",
+        "EU" => "Europe",
+        "AF" => "Africa",
+        "NA" => "North America",
+        "SA" => "South America",
+        "OC" => "Oceania",
+        "AN" => "Antarctica",
+        _ => "the world",
     }
 }
 
@@ -443,7 +692,8 @@ pub fn load(dir: &Path) -> anyhow::Result<Bank> {
     }
 
     let before = spots_file.spots.len();
-    let spots: Vec<Spot> = spots_file.spots.into_iter().filter(|s| dir.join(&s.file).exists()).collect();
+    let mut spots: Vec<Spot> =
+        spots_file.spots.into_iter().filter_map(|s| s.into_spot(Scope::India)).filter(|s| dir.join(&s.file).exists()).collect();
     if spots.len() < before {
         tracing::warn!("geo: {} of {} photos named by the bank are not on disk", before - spots.len(), before);
     }
@@ -451,15 +701,74 @@ pub fn load(dir: &Path) -> anyhow::Result<Bank> {
         anyhow::bail!("no photos on disk");
     }
 
+    // The World files are optional: without them the bank simply has no World
+    // rounds and the vote does not offer one.
+    let (countries, world_cities, country_keys, world_city_keys, world_credit) = match load_world(dir) {
+        Ok((world, raw, credit)) => {
+            let n = raw.len();
+            let world_spots: Vec<Spot> =
+                raw.into_iter().filter_map(|s| s.into_spot(Scope::World)).filter(|s| dir.join(&s.file).exists()).collect();
+            if world_spots.len() < n {
+                tracing::warn!("geo: {} of {} World photos are not on disk", n - world_spots.len(), n);
+            }
+            spots.extend(world_spots);
+            let mut country_keys = HashMap::new();
+            for (i, c) in world.countries.iter().enumerate() {
+                for key in &c.keys {
+                    country_keys.insert(key.clone(), i);
+                }
+            }
+            let mut world_city_keys: HashMap<String, usize> = HashMap::new();
+            for (i, c) in world.cities.iter().enumerate() {
+                for key in &c.keys {
+                    match world_city_keys.get(key) {
+                        Some(&held) if world.cities[held].pop >= c.pop => {}
+                        _ => {
+                            world_city_keys.insert(key.clone(), i);
+                        }
+                    }
+                }
+            }
+            (world.countries, world.cities, country_keys, world_city_keys, credit)
+        }
+        Err(err) => {
+            tracing::info!("geo: no World bank ({}) - India rounds only", err);
+            (Vec::new(), Vec::new(), HashMap::new(), HashMap::new(), None)
+        }
+    };
+
+    // The credit covers every archive whose photos are in play.
+    let mut attribution = spots_file.attribution.unwrap_or_else(|| ATTRIBUTION.to_string());
+    if let Some(extra) = world_credit.filter(|c| !attribution.contains(c.as_str())) {
+        attribution = format!("{} {}", attribution, extra);
+    }
+
     Ok(Bank {
         states: places.states,
         cities: places.cities,
+        countries,
+        world_cities,
         spots,
-        attribution: spots_file.attribution.unwrap_or_else(|| ATTRIBUTION.to_string()),
+        attribution,
         state_keys,
         city_keys,
+        country_keys,
+        world_city_keys,
         dir: dir.to_path_buf(),
     })
+}
+
+/// The World gazetteer and its photos, when both are there.
+fn load_world(dir: &Path) -> anyhow::Result<(WorldFile, Vec<RawSpot>, Option<String>)> {
+    let world: WorldFile = serde_json::from_slice(&std::fs::read(dir.join("world.json"))?)?;
+    if world.format != WORLD_FORMAT {
+        anyhow::bail!("world.json is {}, this build reads {}", world.format, WORLD_FORMAT);
+    }
+    let spots: SpotsFile = serde_json::from_slice(&std::fs::read(dir.join("world_spots.json"))?)?;
+    if spots.format != SPOTS_FORMAT {
+        anyhow::bail!("world_spots.json is {}, this build reads {}", spots.format, SPOTS_FORMAT);
+    }
+    Ok((world, spots.spots, spots.attribution))
 }
 
 /// Reads `<workspace>/geobank/` once, at start. A bank that isn't there is not
@@ -469,9 +778,11 @@ pub fn open(workspace: &str) {
     match load(&dir) {
         Ok(bank) => {
             tracing::info!(
-                "geo: {} places across {} states read from {}",
-                bank.count(),
-                bank.playable_states().len(),
+                "geo: {} India places across {} states, {} World places across {} countries, read from {}",
+                bank.count_in(Scope::India),
+                bank.playable(Scope::India).len(),
+                bank.count_in(Scope::World),
+                bank.playable(Scope::World).len(),
                 dir.display()
             );
             let _ = BANK.set(bank);
@@ -510,12 +821,12 @@ pub mod tests {
         ];
         let spots = vec![
             Spot {
-                id: "kv1".into(), lat: 17.390, lon: 78.490, state: "Telangana".into(),
+                id: "kv1".into(), lat: 17.390, lon: 78.490, scope: Scope::India, region: "Telangana".into(),
                 city: Some("Hyderabad".into()), city_km: Some(0.6),
                 file: "images/kv1.jpg".into(), by: "someone".into(), source: None, shot: "2021-03-08".into(),
             },
             Spot {
-                id: "kv2".into(), lat: 26.913, lon: 75.803, state: "Rajasthan".into(),
+                id: "kv2".into(), lat: 26.913, lon: 75.803, scope: Scope::India, region: "Rajasthan".into(),
                 city: Some("Jaipur".into()), city_km: Some(1.6),
                 file: "images/kv2.jpg".into(), by: "someone".into(), source: None, shot: "2019-06-06".into(),
             },
@@ -532,7 +843,57 @@ pub mod tests {
                 city_keys.insert(k.clone(), i);
             }
         }
-        Bank { states, cities, spots, attribution: ATTRIBUTION.to_string(), state_keys, city_keys, dir: PathBuf::new() }
+        let countries = vec![
+            Country { code: "JP".into(), name: "Japan".into(), continent: "AS".into(), keys: vec!["japan".into()] },
+            Country { code: "BR".into(), name: "Brazil".into(), continent: "SA".into(), keys: vec!["brazil".into()] },
+            Country {
+                code: "US".into(),
+                name: "United States".into(),
+                continent: "NA".into(),
+                keys: vec!["united states".into(), "usa".into(), "america".into()],
+            },
+        ];
+        let world_cities = vec![
+            WorldCity { name: "Tokyo".into(), country: "JP".into(), pop: 9_733_276, keys: vec!["tokyo".into()] },
+            WorldCity { name: "Yokohama".into(), country: "JP".into(), pop: 3_574_443, keys: vec!["yokohama".into()] },
+            WorldCity { name: "Sao Paulo".into(), country: "BR".into(), pop: 12_400_232, keys: vec!["sao paulo".into()] },
+        ];
+        let mut spots = spots;
+        spots.push(Spot {
+            id: "mly1".into(), lat: 35.44, lon: 139.65, scope: Scope::World, region: "JP".into(),
+            city: Some("Yokohama".into()), city_km: Some(3.1),
+            file: "images/mly1.jpg".into(), by: "someone".into(), source: Some("mapillary".into()), shot: "2025-08-15".into(),
+        });
+        spots.push(Spot {
+            id: "mly2".into(), lat: -23.55, lon: -46.63, scope: Scope::World, region: "BR".into(),
+            city: Some("Sao Paulo".into()), city_km: Some(0.4),
+            file: "images/mly2.jpg".into(), by: "someone".into(), source: Some("mapillary".into()), shot: "2020-09-05".into(),
+        });
+        let mut country_keys = HashMap::new();
+        for (i, c) in countries.iter().enumerate() {
+            for k in &c.keys {
+                country_keys.insert(k.clone(), i);
+            }
+        }
+        let mut world_city_keys = HashMap::new();
+        for (i, c) in world_cities.iter().enumerate() {
+            for k in &c.keys {
+                world_city_keys.insert(k.clone(), i);
+            }
+        }
+        Bank {
+            states,
+            cities,
+            countries,
+            world_cities,
+            spots,
+            attribution: ATTRIBUTION.to_string(),
+            state_keys,
+            city_keys,
+            country_keys,
+            world_city_keys,
+            dir: PathBuf::new(),
+        }
     }
 
     #[test]
@@ -588,7 +949,7 @@ pub mod tests {
     fn a_name_that_reads_two_ways_takes_the_better_one() {
         let bank = fixture();
         let spot = Spot {
-            id: "kv3".into(), lat: 28.650, lon: 77.220, state: "Delhi".into(),
+            id: "kv3".into(), lat: 28.650, lon: 77.220, scope: Scope::India, region: "Delhi".into(),
             city: Some("Delhi".into()), city_km: Some(0.3),
             file: "images/kv3.jpg".into(), by: "x".into(), source: None, shot: "2021-12-22".into(),
         };
@@ -615,6 +976,63 @@ pub mod tests {
     fn states_are_listed_once_each_in_play_order() {
         let bank = fixture();
         assert_eq!(bank.playable_states(), vec!["Rajasthan".to_string(), "Telangana".to_string()]);
+        assert_eq!(bank.playable(Scope::World), vec!["BR".to_string(), "JP".to_string()]);
+    }
+
+    fn world(bank: &Bank, code: &str) -> Spot {
+        bank.spots().iter().find(|s| s.scope == Scope::World && s.region == code).expect("a World photo").clone()
+    }
+
+    /// A World round asks for the country and nothing finer.
+    #[test]
+    fn a_world_round_is_won_by_the_country() {
+        let bank = fixture();
+        let japan = world(&bank, "JP");
+        assert_eq!(bank.judge(&japan, "japan"), Verdict::Country);
+        assert_eq!(bank.judge(&japan, "brazil"), Verdict::Wrong);
+    }
+
+    /// Naming a town names its country - but earns no more than the country,
+    /// because the room was asked for the country.
+    #[test]
+    fn a_town_in_a_world_round_counts_as_its_country() {
+        let bank = fixture();
+        let japan = world(&bank, "JP");
+        assert_eq!(bank.judge(&japan, "tokyo"), Verdict::Country, "Tokyo is in Japan");
+        assert_eq!(bank.judge(&japan, "yokohama"), Verdict::Country, "and no bullseye for being right on it");
+        assert_eq!(bank.judge(&japan, "sao paulo"), Verdict::Wrong, "a town in another country");
+    }
+
+    /// The aliases people actually type.
+    #[test]
+    fn a_country_answers_to_what_people_call_it() {
+        let bank = fixture();
+        let us = Spot {
+            id: "mly3".into(), lat: 34.05, lon: -118.24, scope: Scope::World, region: "US".into(),
+            city: None, city_km: None, file: "images/mly3.jpg".into(), by: "x".into(), source: None, shot: "2017-04-30".into(),
+        };
+        for name in ["usa", "america", "united states"] {
+            assert_eq!(bank.judge(&us, name), Verdict::Country, "{name}");
+        }
+    }
+
+    /// The two scopes never answer for each other. An Indian state is not a
+    /// country, and a country is not an Indian state.
+    #[test]
+    fn the_scopes_do_not_leak_into_each_other() {
+        let bank = fixture();
+        let japan = world(&bank, "JP");
+        assert_eq!(bank.judge(&japan, "telangana"), Verdict::Wrong);
+        assert_eq!(bank.judge(&bank.spots()[0], "japan"), Verdict::Wrong);
+    }
+
+    #[test]
+    fn a_world_reveal_and_hint_name_the_country_not_its_code() {
+        let bank = fixture();
+        let japan = world(&bank, "JP");
+        assert_eq!(bank.region_name(&japan), "Japan");
+        assert_eq!(bank.answer_line(&japan), "**Japan** — near Yokohama");
+        assert_eq!(bank.hint_line(&japan), "Starts with **J**, somewhere in **Asia**.");
     }
 
     /// The bank as it is actually shipped, when the photos are there. It is
@@ -631,7 +1049,13 @@ pub mod tests {
         for state in &states {
             // A state too thin to play would come up as often as a full one,
             // because rounds are drawn by state. harvest.py's MIN_SPOTS.
-            assert!(bank.spots_in(state).len() >= 20, "{} has only {} places", state, bank.spots_in(state).len());
+            let n = bank.spots_in(Scope::India, state).len();
+            assert!(n >= 20, "{} has only {} places", state, n);
+        }
+        // And a country for a World round, where the floor is harvest_world.py's.
+        for country in bank.playable(Scope::World) {
+            let n = bank.spots_in(Scope::World, &country).len();
+            assert!(n >= 12, "{} has only {} World places", country, n);
         }
 
         for spot in bank.spots() {
@@ -639,11 +1063,12 @@ pub mod tests {
             // unwinnable. Not always with `State`: Delhi is a union territory
             // AND a city, so naming it can be a bullseye — which is the
             // two-readings rule doing its job on real data.
-            let named_state = bank.judge(spot, &fold(&spot.state));
-            assert!(named_state.won(), "{} does not answer to {}", spot.id, spot.state);
-            assert!(named_state.worth() >= Verdict::State.worth(), "{}: {} scored {:?}", spot.id, spot.state, named_state);
+            let name = bank.region_name(spot);
+            let named_state = bank.judge(spot, &fold(&name));
+            assert!(named_state.won(), "{} does not answer to {}", spot.id, name);
+            assert!(named_state.worth() >= Verdict::State.worth(), "{}: {} scored {:?}", spot.id, name, named_state);
             // And to the town it sits in, where the gazetteer put one nearby.
-            if let (Some(city), Some(km)) = (&spot.city, spot.city_km)
+            if let (Scope::India, Some(city), Some(km)) = (spot.scope, &spot.city, spot.city_km)
                 && km <= BULLSEYE_KM
             {
                 let verdict = bank.judge(spot, &fold(city));

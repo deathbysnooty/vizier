@@ -29,6 +29,15 @@
 //! without looking at the screen. So a round draws a STATE first, evenly, and
 //! only then a photo inside it ([`pick`]).
 //!
+//! ## India, the World, or a Mix
+//!
+//! Between matches the room VOTES for what the next one plays, the way the
+//! quiz and Guess the Movie do: pressing a button is both your vote and your
+//! seat. **India** asks for the state, and pays more for a town near the
+//! photo. **World** asks for the country and nothing finer - naming a town
+//! just names its country. **Mix** draws each round from either. Most votes
+//! wins; a tie is settled at random, and nobody voting at all means a Mix.
+//!
 //! ## Steering a round
 //!
 //! `!hint` gives the state's first letter and the quarter of the country it is
@@ -54,7 +63,7 @@ use serenity::all::{
 };
 
 use super::control;
-use super::geo_bank::{self as bank, ATTRIBUTION, Bank, Spot, Verdict};
+use super::geo_bank::{self as bank, Bank, Pool, Scope, Spot, Verdict};
 use super::geo_store::{self as store, Status};
 use super::points::{Cap, Outcome, Source};
 use super::rules_text::{self, GeoRules};
@@ -72,8 +81,13 @@ const TICK_MARK: &str = "✅";
 const CARD_FOOTER: &str = "Type a state or a town · !hint · !skip";
 const LEDGER_KEY: &str = "geo:";
 
-/// The button that says somebody wants to play the next match.
+/// The button that said somebody wanted to play the next match, before there
+/// was a vote. Still answered - a break card posted before the upgrade carries
+/// it - and read as a vote for a Mix.
 pub const READY_ID: &str = "geoready:";
+/// `geopool:<match>:<pool>` - the vote for what the next match plays, which is
+/// also the press that takes a seat in it.
+pub const POOL_ID: &str = "geopool:";
 
 pub const HINT_WORD: &str = "!hint";
 pub const SKIP_WORD: &str = "!skip";
@@ -167,8 +181,10 @@ pub fn geo_rules() -> GeoRules {
         break_minutes: break_minutes(),
         win_points: win_points(),
         second_points: second_points(),
-        places: bank.map(Bank::count),
-        states: bank.map(|b| b.playable_states().len()),
+        places: bank.map(|b| b.count_in(Scope::India)),
+        states: bank.map(|b| b.playable(Scope::India).len()),
+        world_places: bank.map(|b| b.count_in(Scope::World)),
+        countries: bank.map(|b| b.playable(Scope::World).len()),
     }
 }
 
@@ -205,17 +221,33 @@ pub fn near_words(verdict: Verdict) -> String {
         Verdict::Near(km) => format!("{:.0} km away", km),
         Verdict::Bullseye(km) if km < 1.0 => "right on it".to_string(),
         Verdict::Bullseye(km) => format!("{:.0} km away", km),
+        Verdict::Country => "the right country".to_string(),
     }
 }
 
-pub fn card_title(round: i64) -> String {
-    format!("🗺️ Where in India is this? · round {}", round)
+pub fn card_title(scope: Scope, round: i64) -> String {
+    match scope {
+        Scope::India => format!("🇮🇳 Where in India is this? · round {}", round),
+        Scope::World => format!("🌍 Which country is this? · round {}", round),
+    }
+}
+
+/// The most a round can pay, before a hint comes off it: a bullseye in
+/// India, the country in the World.
+pub fn best_worth(scope: Scope) -> i64 {
+    match scope {
+        Scope::India => Verdict::Bullseye(0.0).worth(),
+        Scope::World => Verdict::Country.worth(),
+    }
 }
 
 /// The line under the photo: what it is worth, and the hint if one is out.
-pub fn card_text(worth: i64, hint: Option<(u64, String)>, open_secs: i64) -> String {
+pub fn card_text(scope: Scope, worth: i64, hint: Option<(u64, String)>, open_secs: i64) -> String {
     let mut text = String::new();
-    text.push_str("Name the **state** for 2, or the **town** for up to 5.\n");
+    text.push_str(match scope {
+        Scope::India => "Name the **state** for 2, or the **town** for up to 5.\n",
+        Scope::World => "Name the **country** for 2.\n",
+    });
     if let Some((by, line)) = hint {
         text.push_str(&format!("💡 <@{}> asked for a hint: {}\n", by, line));
     }
@@ -273,16 +305,21 @@ pub fn stale(posted_ts: i64, now: i64, idle_minutes: i64) -> bool {
 /// States already played in this match are held back, and so are photos seen
 /// recently — but both give way rather than fail: a match longer than the bank
 /// is wide will repeat a state before it posts nothing.
-pub fn pick<'a>(bank: &'a Bank, used_spots: &HashSet<String>, states_played: &[String], rng: &mut Rng) -> Option<&'a Spot> {
-    let all = bank.playable_states();
-    if all.is_empty() {
+pub fn pick<'a>(bank: &'a Bank, pool: Pool, used_spots: &HashSet<String>, states_played: &[String], rng: &mut Rng) -> Option<&'a Spot> {
+    // A Mix draws the KIND of round first, evenly, from the kinds the bank can
+    // actually set - so a Mix is half India and half World, not weighted by
+    // which bank happens to be bigger.
+    let scopes: Vec<Scope> = pool.scopes().iter().copied().filter(|s| !bank.playable(*s).is_empty()).collect();
+    if scopes.is_empty() {
         return None;
     }
+    let scope = scopes[rng.below(scopes.len())];
+    let all = bank.playable(scope);
     let fresh: Vec<&String> = all.iter().filter(|s| !states_played.contains(s)).collect();
     let pool: Vec<&String> = if fresh.is_empty() { all.iter().collect() } else { fresh };
     let state = pool[rng.below(pool.len())];
 
-    let spots = bank.spots_in(state);
+    let spots = bank.spots_in(scope, state);
     if spots.is_empty() {
         return None;
     }
@@ -320,9 +357,48 @@ pub fn prize_table(scores: &[(u64, i64)], win: i64, second: i64) -> Vec<(u64, i6
     out
 }
 
-/// Whether a match may start: enough people ready AND the break served out.
-pub fn may_start(ready: usize, min: usize, now: i64, ready_from: i64) -> bool {
-    ready >= min.max(1) && now >= ready_from
+/// Whether a match may start: enough people seated, the break served out -
+/// and a vote cast, since a seat is taken by voting.
+pub fn may_start(ready: usize, min: usize, votes: usize, now: i64, ready_from: i64) -> bool {
+    ready >= min.max(1) && votes > 0 && now >= ready_from
+}
+
+/// The pools the room may vote for: every one the bank can actually play. A
+/// World button with no World photos behind it would be a promise the game
+/// could not keep.
+pub fn pools_on_offer() -> Vec<Pool> {
+    let Some(bank) = bank::bank() else { return vec![Pool::India] };
+    let world = !bank.playable(Scope::World).is_empty();
+    Pool::ALL.into_iter().filter(|p| world || *p == Pool::India).collect()
+}
+
+/// Which pool won: most votes, a tie broken at random, a Mix when nobody voted.
+/// Given the tally rather than reading it, so the rule is one function with
+/// nothing to mock - the same rule Guess the Movie settled on.
+pub fn winning_pool(tally: &[(Pool, usize)], roll: usize) -> Pool {
+    let top = tally.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    if top == 0 {
+        return Pool::Mix;
+    }
+    let tied: Vec<Pool> = tally.iter().filter(|(_, n)| *n == top).map(|(p, _)| *p).collect();
+    tied[roll % tied.len()]
+}
+
+/// The vote buttons, each with its count so far.
+fn pool_buttons(match_id: i64, tally: &[(Pool, usize)]) -> Vec<CreateActionRow> {
+    let count = |pool: Pool| tally.iter().find(|(p, _)| *p == pool).map(|(_, n)| *n).unwrap_or(0);
+    let offered = pools_on_offer();
+    let top = offered.iter().map(|p| count(*p)).max().unwrap_or(0);
+    let buttons: Vec<CreateButton> = offered
+        .iter()
+        .map(|pool| {
+            let n = count(*pool);
+            CreateButton::new(format!("{}{}:{}", POOL_ID, match_id, pool.key()))
+                .label(if n > 0 { format!("{} · {}", pool.label(), n) } else { pool.label().to_string() })
+                .style(if n > 0 && n == top { ButtonStyle::Success } else { ButtonStyle::Secondary })
+        })
+        .collect();
+    vec![CreateActionRow::Buttons(buttons)]
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -362,7 +438,10 @@ pub fn break_text(ready: &[u64], min: usize, rounds: i64, now: i64, ready_from: 
     if let Some(last) = last {
         text.push_str(&format!("{}\n", result_line(last)));
     }
-    text.push_str(&format!("Next match: **{}**, anywhere in India. Press **I'm ready** to play.\n", plural(rounds, "place", "places")));
+    text.push_str(&format!(
+        "Next match: **{}**. **Vote below** for India, the World or a Mix — your vote is your seat.\n",
+        plural(rounds, "place", "places")
+    ));
     if ready.is_empty() {
         text.push_str(&format!("Nobody's ready yet — **{}** needed to start.\n", min));
     } else {
@@ -628,10 +707,10 @@ fn hint_shown(row: &store::Row) -> Option<(u64, String)> {
 }
 
 fn card_embed(row: &store::Row, has_picture: bool, now: i64) -> CreateEmbed {
-    let worth = worth_after_hint(Verdict::Bullseye(0.0).worth(), row.hinted());
+    let worth = worth_after_hint(best_worth(row.scope), row.hinted());
     let mut embed = CreateEmbed::new()
-        .title(card_title(row.id))
-        .description(card_text(worth, hint_shown(row), now - row.posted_ts))
+        .title(card_title(row.scope, row.id))
+        .description(card_text(row.scope, worth, hint_shown(row), now - row.posted_ts))
         .colour(COLOUR)
         .footer(CreateEmbedFooter::new(CARD_FOOTER));
     if has_picture {
@@ -691,14 +770,15 @@ async fn post_round(ctx: &Context, channel: u64, match_id: i64) -> Option<store:
     let since = now - no_repeat_days() * 86_400;
     let used = with_db(|c| store::spots_since(c, since)).unwrap_or_default();
     let played = with_db(|c| store::states_in_match(c, match_id)).unwrap_or_default();
+    let pool = with_db(|c| store::get_match(c, match_id)).flatten().map(|m| m.pool).unwrap_or_default();
     let mut rng = Rng::fresh();
-    let spot = pick(bank, &used, &played, &mut rng)?;
-    let row = with_db(|c| store::add_round(c, &spot.id, &spot.state, spot.lat, spot.lon, channel, now))?.ok()?;
+    let spot = pick(bank, pool, &used, &played, &mut rng)?;
+    let row = with_db(|c| store::add_round(c, &spot.id, spot.scope, &spot.region, spot.lat, spot.lon, channel, now))?.ok()?;
     let _ = with_db(|c| store::claim_round(c, match_id, row.id));
     let message = card_message(&row, now).await;
     let posted = place_card(ctx, channel, message, true, false).await?;
     let _ = with_db(|c| store::set_message(c, row.id, posted));
-    tracing::info!("geo: round {} up in {} — {} ({})", row.id, channel, spot.state, spot.id);
+    tracing::info!("geo: round {} up in {} — {} {} ({})", row.id, channel, spot.scope.key(), spot.region, spot.id);
     store::db().map(|db| store::get(&db.lock(), row.id)).flatten()
 }
 
@@ -778,39 +858,42 @@ async fn tend_card(ctx: &Context, channel: u64, row: &store::Row, now: i64) {
 
 // --- the break card --------------------------------------------------------------------------
 
-fn break_message(m: &store::Match, ready: &[u64], last: Option<&MatchResult>, now: i64) -> CreateMessage {
+fn break_message(m: &store::Match, ready: &[u64], tally: &[(Pool, usize)], last: Option<&MatchResult>, now: i64) -> CreateMessage {
     let text = break_text(ready, min_players(), m.rounds, now, m.ready_from, last);
-    let button = CreateButton::new(format!("{}{}", READY_ID, m.id)).label("I'm ready").style(ButtonStyle::Success).emoji('🗺');
-    CreateMessage::new().content(text).components(vec![CreateActionRow::Buttons(vec![button])]).allowed_mentions(CreateAllowedMentions::new())
+    CreateMessage::new().content(text).components(pool_buttons(m.id, tally)).allowed_mentions(CreateAllowedMentions::new())
 }
 
 async fn tend_break_card(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
     let ready = ready_now(m.id);
+    let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
     let last = SHARED.lock().last_result.clone();
+    // The tally is part of what is shown, so a vote that changes nothing in
+    // the words still changes the card.
     let text = break_text(&ready, min_players(), m.rounds, now, m.ready_from, last.as_ref());
+    let shown_key = format!("{}|{:?}", text, tally);
     let (card, shown, gone) = {
         let s = SHARED.lock();
         (s.card, s.break_shown.clone(), s.card_gone)
     };
     let right_channel = card.is_some_and(|(c, _)| c == channel);
     if card.is_none() || gone || !right_channel {
-        let message = break_message(m, &ready, last.as_ref(), now);
+        let message = break_message(m, &ready, &tally, last.as_ref(), now);
         if place_card(ctx, channel, message, true, false).await.is_some() {
-            SHARED.lock().break_shown = text;
+            SHARED.lock().break_shown = shown_key;
         }
         return;
     }
-    // The countdown only costs an edit when its WORDS change, not every second.
-    if text == shown {
+    // The countdown only costs an edit when its WORDS or the tally change,
+    // not every second.
+    if shown_key == shown {
         return;
     }
     let Some((c, message)) = card else { return };
-    let button = CreateButton::new(format!("{}{}", READY_ID, m.id)).label("I'm ready").style(ButtonStyle::Success).emoji('🗺');
-    let edit = EditMessage::new().content(&text).components(vec![CreateActionRow::Buttons(vec![button])]);
+    let edit = EditMessage::new().content(&text).components(pool_buttons(m.id, &tally));
     if let Err(err) = call(ChannelId::new(c).edit_message(&ctx.http, MessageId::new(message), edit)).await {
         tracing::debug!("geo: break card not edited: {}", err);
     } else {
-        SHARED.lock().break_shown = text;
+        SHARED.lock().break_shown = shown_key;
     }
 }
 
@@ -821,30 +904,48 @@ async fn whisper(ctx: &Context, component: &ComponentInteraction, text: impl Int
     }
 }
 
+/// `geopool:<match>:<pool>`, or the older `geoready:<match>` read as a Mix.
+/// One press is one vote and one seat; the same press again takes both back.
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
-    let Some(match_id) = component.data.custom_id.strip_prefix(READY_ID).and_then(|v| v.parse::<i64>().ok()) else {
+    let id = component.data.custom_id.as_str();
+    let (match_id, pool) = if let Some(rest) = id.strip_prefix(POOL_ID) {
+        let Some((m, key)) = rest.split_once(':') else { return };
+        let Some(m) = m.parse::<i64>().ok() else { return };
+        (m, Pool::from_key(key))
+    } else if let Some(m) = id.strip_prefix(READY_ID).and_then(|v| v.parse::<i64>().ok()) {
+        (m, Pool::Mix)
+    } else {
         return;
     };
     let user = component.user.id.get();
     let now = Utc::now().timestamp();
     let Some(m) = with_db(|c| store::get_match(c, match_id)).flatten() else {
-        whisper(ctx, component, "That match is over.").await;
-        return;
+        return whisper(ctx, component, "That match has moved on.").await;
     };
     if m.status != store::MatchStatus::Break {
-        whisper(ctx, component, "That match has already started.").await;
-        return;
+        return whisper(ctx, component, format!("That match is already running — it's playing {}.", m.pool.about())).await;
     }
-    let held = with_db(|c| store::is_ready(c, match_id, user)).unwrap_or(false);
-    if held {
-        let _ = with_db(|c| store::unready(c, match_id, user));
-        whisper(ctx, component, "Taken off the list.").await;
-    } else {
+    let kept = with_db(|c| store::cast_vote(c, match_id, user, pool, now)).and_then(Result::ok).unwrap_or(false);
+    // Voting IS joining, as it is in Guess the Movie: a vote with no seat
+    // would be a vote for a match you were not in.
+    if kept {
         let _ = with_db(|c| store::mark_ready(c, match_id, user, now));
-        let waiting = ready_now(match_id).len();
-        whisper(ctx, component, format!("You're in — {} of {} ready.", waiting, min_players())).await;
+    } else {
+        let _ = with_db(|c| store::unready(c, match_id, user));
     }
     SHARED.lock().break_shown.clear();
+    let text = if kept {
+        let waiting = ready_now(match_id).len();
+        let min = min_players();
+        if waiting >= min {
+            format!("🗳️ **{}** it is — you're in, and it starts as soon as the break is up.", pool.label())
+        } else {
+            format!("🗳️ **{}** it is — you're in. {} more to start.", pool.label(), min - waiting)
+        }
+    } else {
+        "🗳️ Vote taken back — and you're off the list.".to_string()
+    };
+    whisper(ctx, component, text).await;
 }
 
 async fn finish_match(ctx: &Context, channel: u64, m: &store::Match, now: i64) {
@@ -950,11 +1051,23 @@ async fn run(ctx: Context) {
                 live = None;
             }
             let ready = ready_now(m.id);
-            if may_start(ready.len(), min_players(), now, m.ready_from) {
+            let tally = with_db(|c| store::vote_tally(c, m.id)).unwrap_or_default();
+            let votes: usize = tally.iter().map(|(_, n)| *n).sum();
+            if may_start(ready.len(), min_players(), votes, now, m.ready_from) {
+                // A pool the bank can no longer play - the World photos gone -
+                // falls back to India rather than posting nothing.
+                let chosen = winning_pool(&tally, Rng::fresh().below(64));
+                let pool = if pools_on_offer().contains(&chosen) { chosen } else { Pool::India };
+                let _ = with_db(|c| store::set_pool(c, m.id, pool));
                 if with_db(|c| store::start_match(c, m.id, now)).and_then(Result::ok).unwrap_or(false) {
-                    tracing::info!("geo: match {} started - {} places, {} ready", m.id, m.rounds, ready.len());
+                    tracing::info!("geo: match {} started - {} places, {} ready, {} votes, playing {}", m.id, m.rounds, ready.len(), votes, pool.key());
                     SHARED.lock().break_shown.clear();
                     drop_card(&ctx).await;
+                    let said = match votes {
+                        0 => format!("🗺️ Nobody voted, so it's {}.", pool.about()),
+                        n => format!("🗳️ **{}** wins the vote ({} cast) — this match is {}.", pool.label(), n, pool.about()),
+                    };
+                    say(&ctx, channel, said).await;
                 }
                 continue;
             }
@@ -1012,6 +1125,7 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
     let line = match (row.status, row.winner) {
         (Status::Solved, Some(user)) => {
             let verdict = match (row.verdict.as_deref(), row.km) {
+                (Some("country"), _) => Verdict::Country,
                 (Some("bullseye"), Some(km)) => Verdict::Bullseye(km),
                 (Some("near"), Some(km)) => Verdict::Near(km),
                 _ => Verdict::State,
@@ -1100,6 +1214,7 @@ async fn guessed(ctx: &Context, msg: &Message, row: &store::Row, spot: &Spot, ba
     }
     let worth = worth_after_hint(verdict.worth(), row.hinted());
     let (key, km) = match verdict {
+        Verdict::Country => ("country", None),
         Verdict::Bullseye(km) => ("bullseye", Some(km)),
         Verdict::Near(km) => ("near", Some(km)),
         _ => ("state", None),
@@ -1140,7 +1255,7 @@ async fn hint_asked(ctx: &Context, msg: &Message, row: &store::Row, channel: u64
         return;
     }
     let line = spot_of(row).and_then(|spot| bank::bank().map(|b| b.hint_line(spot))).unwrap_or_default();
-    let worth = worth_after_hint(Verdict::Bullseye(0.0).worth(), true);
+    let worth = worth_after_hint(best_worth(row.scope), true);
     SHARED.lock().dirty = true;
     tracing::info!("geo: round {} hinted by {}", row.id, user);
     say(ctx, channel, format!("💡 <@{}> asked. {} The round is now worth **{}**.", user, line, worth)).await;
@@ -1350,8 +1465,8 @@ mod tests {
         let mut seen = std::collections::HashMap::new();
         let mut rng = Rng::seeded(7);
         for _ in 0..400 {
-            let spot = pick(&bank, &HashSet::new(), &[], &mut rng).expect("a place");
-            *seen.entry(spot.state.clone()).or_insert(0) += 1;
+            let spot = pick(&bank, Pool::India, &HashSet::new(), &[], &mut rng).expect("a place");
+            *seen.entry(spot.region.clone()).or_insert(0) += 1;
         }
         assert_eq!(seen.len(), 2, "both states should come up: {seen:?}");
         for (state, n) in &seen {
@@ -1364,8 +1479,8 @@ mod tests {
         let bank = fixture();
         let mut rng = Rng::seeded(3);
         for _ in 0..20 {
-            let spot = pick(&bank, &HashSet::new(), &["Telangana".to_string()], &mut rng).expect("a place");
-            assert_eq!(spot.state, "Rajasthan");
+            let spot = pick(&bank, Pool::India, &HashSet::new(), &["Telangana".to_string()], &mut rng).expect("a place");
+            assert_eq!(spot.region, "Rajasthan");
         }
     }
 
@@ -1375,7 +1490,7 @@ mod tests {
         let bank = fixture();
         let mut rng = Rng::seeded(5);
         let played = vec!["Telangana".to_string(), "Rajasthan".to_string()];
-        assert!(pick(&bank, &HashSet::new(), &played, &mut rng).is_some());
+        assert!(pick(&bank, Pool::India, &HashSet::new(), &played, &mut rng).is_some());
     }
 
     #[test]
@@ -1384,7 +1499,7 @@ mod tests {
         let mut rng = Rng::seeded(11);
         let used: HashSet<String> = ["kv1".to_string()].into_iter().collect();
         for _ in 0..20 {
-            let spot = pick(&bank, &used, &["Rajasthan".to_string()], &mut rng).expect("a place");
+            let spot = pick(&bank, Pool::India, &used, &["Rajasthan".to_string()], &mut rng).expect("a place");
             assert_eq!(spot.id, "kv1", "only kv1 is in Telangana, so it comes back rather than nothing");
         }
     }
@@ -1409,10 +1524,66 @@ mod tests {
     }
 
     #[test]
-    fn a_match_needs_the_people_and_the_clock() {
-        assert!(!may_start(1, 2, 100, 100), "not enough people");
-        assert!(!may_start(2, 2, 90, 100), "break not served out");
-        assert!(may_start(2, 2, 100, 100));
+    fn a_match_needs_the_people_the_vote_and_the_clock() {
+        assert!(!may_start(1, 2, 1, 100, 100), "not enough people");
+        assert!(!may_start(2, 2, 2, 90, 100), "break not served out");
+        assert!(!may_start(2, 2, 0, 100, 100), "nobody voted");
+        assert!(may_start(2, 2, 2, 100, 100));
+    }
+
+    /// Each pool plays only its own kind of round.
+    #[test]
+    fn a_pool_draws_only_its_own_rounds() {
+        let bank = fixture();
+        let mut rng = Rng::seeded(9);
+        for _ in 0..50 {
+            assert_eq!(pick(&bank, Pool::India, &HashSet::new(), &[], &mut rng).expect("a place").scope, Scope::India);
+            assert_eq!(pick(&bank, Pool::World, &HashSet::new(), &[], &mut rng).expect("a place").scope, Scope::World);
+        }
+    }
+
+    /// A Mix draws the KIND of round evenly, not by which bank is bigger.
+    #[test]
+    fn a_mix_is_half_india_and_half_world() {
+        let bank = fixture();
+        let mut rng = Rng::seeded(21);
+        let world = (0..400).filter(|_| pick(&bank, Pool::Mix, &HashSet::new(), &[], &mut rng).expect("a place").scope == Scope::World).count();
+        assert!((140..260).contains(&world), "{world} of 400 were World");
+    }
+
+    #[test]
+    fn the_vote_goes_to_the_most_and_a_tie_to_chance() {
+        assert_eq!(winning_pool(&[], 0), Pool::Mix, "nobody voted");
+        assert_eq!(winning_pool(&[(Pool::World, 3), (Pool::India, 1)], 5), Pool::World);
+        let tied = [(Pool::India, 2), (Pool::World, 2)];
+        let seen: HashSet<Pool> = (0..8).map(|roll| winning_pool(&tied, roll)).collect();
+        assert_eq!(seen.len(), 2, "a tie can go either way");
+    }
+
+    /// Every vote button carries the prefix `mod.rs` routes to Geo. Guess the
+    /// Movie shipped buttons whose presses reached nothing because the router
+    /// only knew an older prefix.
+    #[test]
+    fn every_vote_button_is_one_the_router_sends_here() {
+        for row in pool_buttons(7, &[]) {
+            let CreateActionRow::Buttons(buttons) = row else { panic!("a row of buttons") };
+            for b in buttons {
+                let json = serde_json::to_value(&b).expect("a button");
+                let id = json["custom_id"].as_str().expect("an id");
+                assert!(id.starts_with(POOL_ID), "{id} would reach nothing");
+                let (_, key) = id.trim_start_matches(POOL_ID).split_once(':').expect("match:pool");
+                assert_eq!(Pool::from_key(key).key(), key, "{key} is not a pool");
+            }
+        }
+    }
+
+    #[test]
+    fn a_world_card_asks_for_the_country() {
+        assert!(card_title(Scope::World, 3).contains("Which country"));
+        assert!(card_text(Scope::World, 2, None, 5).contains("**country**"));
+        assert!(card_title(Scope::India, 3).contains("Where in India"));
+        assert_eq!(best_worth(Scope::World), 2);
+        assert_eq!(best_worth(Scope::India), 5);
     }
 
     #[test]

@@ -1860,7 +1860,11 @@ impl EventHandler for Handler {
                 movie::on_component(&ctx, component).await;
                 return;
             }
-            if id.starts_with("geoready:") {
+            // Both prefixes: `geopool:` is the vote, and `geoready:` is the
+            // button on a break card posted before there was one. Routing only
+            // the old prefix is exactly how Guess the Movie's category buttons
+            // once reached nothing and Discord said the app had failed.
+            if id.starts_with(geo::POOL_ID) || id.starts_with(geo::READY_ID) {
                 geo::on_component(&ctx, component).await;
                 return;
             }

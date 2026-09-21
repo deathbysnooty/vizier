@@ -160,6 +160,10 @@ pub struct GeoRules {
     /// Photos in the bank, and how many states they cover, when there is one.
     pub places: Option<usize>,
     pub states: Option<usize>,
+    /// The World bank: photos and countries. Nought when there is none, and
+    /// then the vote offers India alone.
+    pub world_places: Option<usize>,
+    pub countries: Option<usize>,
 }
 
 /// The Anagrams game's live settings, for `/anagramhelp` and the lines about it
@@ -1557,22 +1561,32 @@ fn geo_where(id: Option<u64>) -> String {
 /// asks for goes out with every telling of the rules.
 pub fn geo_help_text(g: &GeoRules) -> String {
     let mut t = format!(
-        "**🗺️ What it is**\nThe bot puts up ONE street photo taken somewhere in India {} and asks where it was taken. Say where first, and nearest, and your house scores.\n\n",
+        "**🗺️ What it is**\nThe bot puts up ONE street photo {} and asks where it was taken — somewhere in India, or somewhere in the world. Say where first, and nearest, and your house scores.\n\n",
         geo_where(g.channel)
     );
 
-    t.push_str("**⌨️ How to play**\n");
+    t.push_str("**🗳️ India, World or Mix**\n");
+    t.push_str("• Between matches the room **votes** for what the next one plays. Pressing a button is your vote AND your seat — no separate Ready.\n");
+    t.push_str("• **🇮🇳 India** — name the state, or a town near the photo for more.\n");
+    t.push_str("• **🌍 World** — name the **country**, and that's the whole answer. Naming a town in it counts as the country.\n");
+    t.push_str("• **🎲 Mix** — each round is India or the World, drawn at random.\n");
+    t.push_str("• Most votes wins; a tie is settled at random, and a break where nobody votes plays a Mix.\n\n");
+
+    t.push_str("**⌨️ How to play (India)**\n");
     t.push_str("• Just type a place in the channel — no buttons, no commands.\n");
     t.push_str("• Name the **state** for **2**. Name a **town within 60 km** for **4**, or one **within 15 km** for **5**. You never have to know the town: the state alone always scores.\n");
     t.push_str("• Naming the town gives you its state for free, so `Warangal` also says Telangana.\n");
     t.push_str("• **The state is a gate.** A town in the wrong state scores nothing, however near the kilometres look — but a town at the far end of the RIGHT state still earns the state's 2.\n");
     t.push_str("• Old names are fine: `Bombay` takes Mumbai, `Benares` takes Varanasi, `Gurgaon` takes Gurugram. Spelling, capitals and punctuation are all forgiven.\n");
-    t.push_str("• Where two towns share a name, the bigger one wins it — `Hyderabad` is the one in Telangana.\n");
+    t.push_str("• Where two towns share a name, the bigger one wins it — `Hyderabad` is the one in Telangana.\n\n");
+    t.push_str("**⌨️ How to play (World)**\n");
+    t.push_str("• Name the country for **2**. `USA`, `America`, `UK`, `Britain`, `UAE`, `Holland` and `Burma` all work.\n");
+    t.push_str("• A town is fine too — `Tokyo` says Japan — but it earns the same 2: the question was the country.\n");
     t.push_str("• The first right guess ends the round, gets a ✅ on the message, and the next photo goes up at once.\n");
     t.push_str("• A wrong guess is simply ignored — nobody is corrected in public, so guess away.\n\n");
 
     t.push_str("**💡 Stuck?**\n");
-    t.push_str("• `!hint` gives the state's **first letter** and the quarter of the country it is in. One hint to a round, and it takes a point off what that round pays (never below one).\n");
+    t.push_str("• `!hint` gives the **first letter** of the answer, and the quarter of India or the continent it is in. One hint to a round, and it takes a point off what that round pays (never below one).\n");
     t.push_str("• `!skip` moves on to a new place, but only once a hint has been used. It pays nobody.\n");
     t.push_str(&format!(
         "• A place nobody gets is replaced after **{}**, so the channel is never stuck on one photo.\n\n",
@@ -1585,7 +1599,7 @@ pub fn geo_help_text(g: &GeoRules) -> String {
         plural(g.match_rounds, "place", "places")
     ));
     t.push_str(&format!(
-        "• Between matches there's a break of about **{}**. Press **🗺 I'm ready** on the card; it starts once **{}** are ready and the break is up.\n",
+        "• Between matches there's a break of about **{}**. Vote on the card; it starts once **{}** have voted and the break is up.\n",
         plural(g.break_minutes, "minute", "minutes"),
         g.min_players
     ));
@@ -1614,9 +1628,11 @@ pub fn geo_help_text(g: &GeoRules) -> String {
     if let Some(places) = g.places {
         let states = g.states.unwrap_or(0);
         t.push_str(&format!(
-            "-# {} in the bank, across **{}**. The photos are real dashcam footage, so the bank only covers the states people have actually driven — every state in it comes up as often as every other.\n",
+            "-# India: {} across **{}**. World: {} across **{}**. The photos are real street footage, so the bank only covers where people have actually driven — and every state or country in it comes up as often as every other.\n",
             plural(places as i64, "place", "places"),
-            plural(states as i64, "state", "states")
+            plural(states as i64, "state", "states"),
+            plural(g.world_places.unwrap_or(0) as i64, "place", "places"),
+            plural(g.countries.unwrap_or(0) as i64, "country", "countries")
         ));
     }
 
@@ -1639,16 +1655,18 @@ pub fn geo_help_text(g: &GeoRules) -> String {
 /// `None` while the game is off or has no channel, and the post comes down.
 pub fn geo_post_text(g: &GeoRules) -> Option<String> {
     let room = channel(g.channel)?;
-    let mut t = format!("# 🗺️ Geo — GeoGuessr, but only India\nA photo of a street somewhere in India is waiting in {}. Say where it was taken.\n\n", room);
+    let mut t = format!("# 🗺️ Geo — GeoGuessr, India and the World\nA street photo is waiting in {}. Say where it was taken.\n\n", room);
 
-    t.push_str("**What your answer is worth**\n");
+    t.push_str("**🗳️ Vote before each match**\n🇮🇳 **India** · 🌍 **World** · 🎲 **Mix** — your vote is your seat.\n\n");
+
+    t.push_str("**🇮🇳 India — what your answer is worth**\n");
     t.push_str("🏵️ the **state** — **2**\n");
     t.push_str(&format!("📍 a **town within {:.0} km** — **4**\n", super::geo_bank::NEAR_KM));
     t.push_str(&format!("🎯 a **town within {:.0} km** — **5**\n", super::geo_bank::BULLSEYE_KM));
     t.push_str("-# Naming a town gives you its state too, so you never have to know both. `Kerala` is safe, `Kochi` is greedy — choosing is the game.\n\n");
 
-    t.push_str("**The state is a gate**\nA town in the **wrong state scores nothing**, however near it looks on a map. A town at the far end of the **right** state still earns the 2.\n");
-    t.push_str("-# Old names work — `Bombay`, `Benares`, `Gurgaon` — and so does bad spelling.\n\n");
+    t.push_str("A town in the **wrong state scores nothing**, however near it looks. Old names work — `Bombay`, `Gurgaon`.\n\n");
+    t.push_str("**🌍 World** — name the **country** for **2**. `USA`, `UK`, `UAE` all work, and a town counts as its country.\n\n");
 
     t.push_str("**🏠 House points**\n");
     t.push_str(&format!(
@@ -1665,13 +1683,14 @@ pub fn geo_post_text(g: &GeoRules) -> Option<String> {
     t.push_str("**🗺️ Geo points**\nThe game's own score: every place you take, at what the round was worth, with **no daily limit**. Mods and Muggles have them too. `/geotop` is that board.\n\n");
 
     t.push_str(&format!(
-        "Press **I'm ready** on the card to start a match — it goes once **{}** are in, and turning up late is fine. Stuck? **`!hint`** for the state's first letter, a point off; **`!skip`** after a hint.\n",
+        "A match starts once **{}** have voted, and turning up late is fine. Stuck? **`!hint`** for the first letter, a point off; **`!skip`** after a hint.\n",
         g.min_players
     ));
     if let Some(states) = g.states {
         t.push_str(&format!(
-            "-# The photos are real dashcam frames, so they only cover **{}** so far — wherever people have actually driven. Every state in the bank comes up as often as every other. `/geohelp` explains the lot.",
-            plural(states as i64, "state", "states")
+            "-# Real street photos: **{}** in India, **{}** worldwide. Every one comes up as often as every other. `/geohelp` explains the lot.",
+            plural(states as i64, "state", "states"),
+            plural(g.countries.unwrap_or(0) as i64, "country", "countries")
         ));
     }
     Some(t)
@@ -1791,6 +1810,8 @@ pub(crate) mod tests {
             second_points: 2,
             places: Some(1530),
             states: Some(22),
+            world_places: Some(2204),
+            countries: Some(69),
         }
     }
 

@@ -719,7 +719,10 @@ pub fn sections() -> Vec<Section> {
             id: "geo",
             title: "Geo",
             icon: "🗺️",
-            about: "GeoGuessr for India. A street photo taken somewhere in the country goes up in its own channel \
+            about: "GeoGuessr for India and the World. Before each match the room VOTES - India, World or Mix - and \
+                    pressing a button is both the vote and the seat, the way Guess the Movie works. A World round asks \
+                    for the COUNTRY and nothing finer: naming it pays 2, and naming a town in it counts as the country. \
+                    An India round is the original game. A street photo taken somewhere in the country goes up in its own channel \
                     (Game channel below) and the first person to say WHERE takes the round, so leave Send Messages on \
                     for @everyone and let the bot send, embed, read history, add reactions and manage messages. A guess \
                     is a place name at whatever scale the person knows: the state is worth 2, a town within 60 km of the \

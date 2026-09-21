@@ -1,18 +1,26 @@
 # Place bank: how Geo's photos and answers are built
 
-Geo is GeoGuessr for India: the bot posts a street photo and the room types
-where it was taken. Two files feed it, and the bot reads both once at boot.
+Geo is GeoGuessr for India and the World: the bot posts a street photo and the
+room types where it was taken. Before each match the room votes India, World
+or Mix. An India round is gated by the **state**; a World round asks for the
+**country** and nothing finer. The bot reads every file here once at boot.
 
 ## Files
 
 ```
 geobank/
-  places.json     the answers  — 36 states/UTs + 2,928 towns   (tracked in git)
-  spots.json      the photos   — where each one was taken       (tracked in git)
-  images/         the photos themselves, ~1280x720 JPEGs        (NOT in git)
+  places.json       India answers — 36 states/UTs + 2,928 towns        (tracked)
+  spots.json        India photos  — where each was taken, its state    (tracked)
+  world.json        World answers — 210 countries + 34,101 towns       (tracked)
+  world_spots.json  World photos  — where each was taken, its country  (tracked)
+  images/           every photo, both banks, ~1024-1280px JPEGs        (NOT in git)
+  images/.cropped   which photos have had their dashcam overlay cut off
   tools/build.py             places.json, from the GeoNames India dump
   tools/harvest.py           spots.json + images/, from KartaView
   tools/harvest_mapillary.py the same, from Mapillary, for the states KartaView misses
+  tools/build_world.py       world.json, from GeoNames cities15000 + countryInfo
+  tools/harvest_world.py     world_spots.json, from Mapillary's vector tiles
+  tools/crop_overlays.py     cuts the dashcam overlay off every photo - RUN LAST
 ```
 
 `images/` is gitignored for the same reason `moviebank/images/` is: it runs to
@@ -46,15 +54,64 @@ only and copy its client token.
 topped up to `TARGET_PER_STATE`, so re-running fills gaps rather than starting
 over. Run it twice — the first pass always loses some downloads to timeouts.
 
+## The World bank
+
+```sh
+curl -sL -o cities15000.zip https://download.geonames.org/export/dump/cities15000.zip
+curl -sL -o countryInfo.txt https://download.geonames.org/export/dump/countryInfo.txt
+unzip -q cities15000.zip
+python3 geobank/tools/build_world.py cities15000.txt countryInfo.txt
+
+python3 -m venv /tmp/geo-venv && /tmp/geo-venv/bin/pip install mapbox-vector-tile pillow
+/tmp/geo-venv/bin/python geobank/tools/harvest_world.py --start=0 --limit=75 --budget=500
+/tmp/geo-venv/bin/python geobank/tools/harvest_world.py --start=999 --final
+```
+
+`harvest_world.py` reads Mapillary's **vector tiles**, not its `/images`
+search. The search returns HTTP 500 for Brazil, the US, Japan and South Africa
+whatever you ask it - those are among the most photographed places on Earth
+and it times out counting them. The tiles work everywhere, and they carry a
+`foot` flag saying whether a frame was taken walking, which is the
+parked-van filter done properly.
+
+It saves after **every** country and remembers which it has tried, so a run
+cut short loses nothing and the same command simply carries on. `--budget`
+stops it starting new countries after that many seconds. `--final` applies
+the 12-photo floor once every slice has had its turn.
+
+It takes the 75 most populous countries, which is roughly the most
+recognisable. That leaves out some a room in India would want - Nepal, Sri
+Lanka, Bhutan - and add them with `--only=NP,LK,BT --retry`.
+
+## Cutting the overlays off
+
+Almost every photo came off a dashcam, and dashcams print on the picture: the
+time, the speed, the camera model - and some print the **latitude and
+longitude**. One of the first World photos read `N 35.439922 E 139.646057` in
+its corner, which is the answer.
+
+`crop_overlays.py` cuts the same thin strip off the bottom (9%) and top (5%) of
+every photo, where the overlays sit. A detector for the text finds about one
+photo in fifty, but a detector that misses one leaks the answer, so this cuts
+them all; what is lost is dashboard, wiper and sky. It is idempotent - each
+photo is cut once, recorded in `images/.cropped` - so run it after every
+harvest and before every rsync.
+
 ## Deploying it
 
 No `cargo build` is needed for bank content, but the bot reads the bank once at
 boot, so the server needs the files and a restart:
 
 ```sh
-rsync -a geobank/places.json geobank/spots.json geobank/images/ \
-  root@37.27.180.72:/root/vizier/.vizier/geobank/
+rsync -az -e "ssh -i $HOME/.ssh/hetzner_mlci" \
+  geobank/places.json geobank/spots.json geobank/world.json geobank/world_spots.json \
+  geobank/images root@37.27.180.72:/root/vizier/.vizier/geobank/
 ```
+
+The `-e` matters: the server takes the `hetzner_mlci` key, and without it rsync
+falls back to asking for root's password. macOS ships rsync 2.6.9, which
+rejects `--info=`; stick to `-az`. Cropping
+rewrites every photo, so the first rsync after it re-sends the lot.
 
 ## What the photos are
 
