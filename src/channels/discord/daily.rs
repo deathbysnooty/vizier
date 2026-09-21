@@ -250,8 +250,13 @@ const SPORTS_FEEDS: Feeds = &[
     ("BBC Sport", "https://feeds.bbci.co.uk/sport/tennis/rss.xml"),
     ("BBC Sport", "https://feeds.bbci.co.uk/sport/formula1/rss.xml"),
     ("ESPNcricinfo", "https://www.espncricinfo.com/rss/content/story/feeds/0.xml"),
-    ("The Hindu", "https://www.thehindu.com/sport/feeder/default.rss"),
-    ("Indian Express", "https://indianexpress.com/section/sports/feed/"),
+    // The Hindu and Indian Express were here, and both answer a datacenter
+    // with HTTP 403 - a Cloudflare challenge and a hard block - while a home
+    // connection reads them fine. From the server that left sports as BBC and
+    // nothing Indian but cricket. These two let a server read them (checked
+    // from the bot's own host, 2026-09-21).
+    ("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/sports/rssfeed.xml"),
+    ("Times of India", "https://timesofindia.indiatimes.com/rssfeeds/4719148.cms"),
 ];
 
 // --- settings ---------------------------------------------------------------------------
@@ -940,9 +945,10 @@ fn check_prompt(material: &str, title: &str, body: &str) -> String {
          - not naming someone the SOURCE names\n\
          - opinion, tone, framing or storytelling (\"a twist\", \"remarkable\", \"the story goes\")\n\
          - anything the SOURCE does state, however it is worded\n\n\
-         For each real problem, quote the POST's exact words and say what the SOURCE says instead. If you cannot quote words \
-         from the POST that are wrong, it is not a problem.\n\n\
-         Reply with JSON only: {{\"ok\": true}} or {{\"ok\": false, \"problems\": [\"<exact POST words> - <what the SOURCE says>\"]}}\n\n\
+         For each real problem, quote the POST's exact words, then name the fact that differs: \"the POST says X, the SOURCE \
+         says Y\". If the SOURCE says the same thing in other words, it is NOT a problem - do not list it. If you cannot name a \
+         fact that differs, it is not a problem.\n\n\
+         Reply with JSON only: {{\"ok\": true}} or {{\"ok\": false, \"problems\": [\"<exact POST words> - the POST says X, the SOURCE says Y\"]}}\n\n\
          SOURCE:\n{}\n\nPOST:\nTITLE: {}\n\n{}",
         material, title, body
     )
@@ -1068,12 +1074,33 @@ async fn check(deps: &VizierDependencies, agent_id: &str, material: &str, title:
 }
 
 /// "TITLE: ..." then the body; markdown headings turned into bold lines.
+/// Splits a draft into its title and body.
+///
+/// The writer is told to open with `TITLE: ...`, and mostly does. When it does
+/// not - the sports desk wrote `SPORTS SHORTS: Your Weekly Recap!` twice on its
+/// first morning and the whole post was thrown away as unreadable - the first
+/// line IS the title, only unlabelled, so it is taken as one. The marker is
+/// matched whatever its case and however it is dressed in markdown.
 fn split_title(reply: &str) -> Option<(String, String)> {
     let reply = reply.trim().trim_start_matches("```").trim_end_matches("```").trim();
-    let at = reply.find("TITLE:")?;
-    let rest = &reply[at + "TITLE:".len()..];
+    // Searched for in the reply itself, not in an upper-cased copy: a few
+    // characters change length when upper-cased (`ß` becomes `SS`), and an
+    // offset found in the copy can land mid-character in the original.
+    let marker = reply.char_indices().map(|(i, _)| i).find(|&i| reply.get(i..i + 6).is_some_and(|s| s.eq_ignore_ascii_case("TITLE:")));
+    let rest = match marker {
+        // Only a marker near the top is a marker; the word in the middle of a
+        // paragraph is just prose.
+        Some(at) if !reply[..at].contains("\n\n") => &reply[at + "TITLE:".len()..],
+        _ => reply,
+    };
     let (title, body) = rest.split_once('\n')?;
-    let title = title.trim().trim_matches(|c| c == '*' || c == '"').trim().to_string();
+    let title = title
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_matches(|c| c == '*' || c == '"' || c == '_')
+        .trim()
+        .to_string();
     let body: String = body
         .trim()
         .lines()
@@ -1202,6 +1229,44 @@ mod tests {
         assert!(!p.contains("strict"), "\"strict\" is back");
         assert!(!p.contains("every factual claim"), "\"every factual claim\" is back");
         assert!(p.contains("SOURCE:\nSRC") && p.contains("TITLE: T\n\nBODY"), "the material is not passed through");
+    }
+
+    /// A draft's title comes back however the model happened to write it.
+    #[test]
+    fn a_title_is_found_labelled_or_not() {
+        let body = "A body long enough to count as a post, with a second sentence in it.";
+        let want = |reply: String| split_title(&reply).map(|(t, _)| t);
+        assert_eq!(want(format!("TITLE: Big Win\n\n{body}")).as_deref(), Some("Big Win"));
+        assert_eq!(want(format!("**Title:** Big Win\n\n{body}")).as_deref(), Some("Big Win"), "bold and lower case");
+        // What the sports desk actually wrote, twice, and was thrown away for.
+        assert_eq!(want(format!("SPORTS SHORTS: Your Weekly Recap!\n\n{body}")).as_deref(), Some("SPORTS SHORTS: Your Weekly Recap!"));
+        assert_eq!(want(format!("# A Heading Title\n\n{body}")).as_deref(), Some("A Heading Title"));
+        // "title:" in the middle of the prose is not a marker.
+        let prose = format!("Opening Line\n\n{body}\n\nHis book's title: Dune.");
+        assert_eq!(want(prose).as_deref(), Some("Opening Line"));
+        assert!(split_title("TITLE: Only a title\n\ntoo short").is_none(), "a body under 40 characters is not a post");
+        // Characters that grow when upper-cased must not throw the marker off.
+        assert_eq!(want(format!("Straße und Fußball: ein Tag\n\n{body}")).as_deref(), Some("Straße und Fußball: ein Tag"));
+        assert_eq!(want(format!("ßßß TITLE: Weiß\n\n{body}")).as_deref(), Some("Weiß"));
+    }
+
+    /// Both used to be in the list, and both refuse the server outright.
+    #[test]
+    fn sports_reads_no_feed_that_blocks_a_server() {
+        for (_, url) in SPORTS_FEEDS {
+            assert!(!url.contains("thehindu.com") && !url.contains("indianexpress.com"), "{url} answers the server with 403");
+        }
+        assert!(SPORTS_FEEDS.iter().filter(|(_, u)| u.contains("hindustantimes") || u.contains("indiatimes") || u.contains("cricinfo")).count() >= 3,
+            "sports needs Indian sources, not only the BBC");
+    }
+
+    /// The books post was failed for a paraphrase: its quote and the source's
+    /// words said the same thing. A problem must now name what differs.
+    #[test]
+    fn the_checker_must_name_what_differs() {
+        let p = check_prompt("S", "T", "B");
+        assert!(p.contains("the POST says X, the SOURCE says Y"));
+        assert!(p.contains("same thing in other words, it is NOT a problem"));
     }
 
     /// "No names ... from memory" was read as "no names", and the sports post
