@@ -16,13 +16,22 @@
 //!   message deleted soon after it was posted can still be shown with them, and
 //!   they are what costs disk. A copy older than this keeps its text and loses
 //!   its pictures.
-//! * the deleted and edited log — `VIZIER_MSGLOG_LOG_DAYS` (a month): a
-//!   moderation record, not a memory.
+//! * the deleted and edited log — `VIZIER_MSGLOG_LOG_DAYS` (a year, like the
+//!   text): the evidence has to outlast the conversation around it, or a fight
+//!   read back later is missing exactly the messages somebody removed.
+//!
+//! Messages Discord's own AutoMod blocked are kept too, in `blocked`, read from
+//! the alert AutoMod posts in the log channel (see `msglog_gone`): filed under
+//! the channel the member tried to post in, kept as long as text, and never as
+//! the empty alert itself. Deleted and blocked messages come back into the
+//! Messages page and the Kalesh page in their place, marked.
 //!
 //! Never #safe-corner or a thread inside it, never a channel listed in
 //! `VIZIER_MSGLOG_SKIP_CHANNELS`, never DMs, never bots or webhooks, and never a
 //! channel the cache can't place (it could be a thread in #safe-corner).
-//! Discord doesn't tell bots who deleted a message.
+//! Discord doesn't tell bots who deleted a message; the audit log sometimes
+//! does, so a member's deleted message is looked up there a moment later
+//! (`msglog_gone`) and the deleter recorded when there is one.
 //!
 //! Text is searched through an FTS5 index over `recent.content`, kept in step by
 //! triggers. A year is about nine million rows here; a `LIKE` scan over that
@@ -44,6 +53,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serenity::all::{Context, GuildId, Message, MessageId, MessageType, MessageUpdateEvent};
 use tokio::sync::mpsc;
+
+pub use super::msglog_gone::{Alert, AuditDelete, Deleter, Removal};
 
 /// Pictures kept from one message.
 pub const MAX_IMAGES: usize = 4;
@@ -91,8 +102,10 @@ pub fn never_logged() -> Vec<u64> {
     out
 }
 
+/// How long the deleted and edited log is kept: as long as the text by default,
+/// so the evidence never goes before the conversation around it.
 pub fn log_days() -> i64 {
-    super::control::number("VIZIER_MSGLOG_LOG_DAYS", 30).clamp(1, 365) as i64
+    super::control::number("VIZIER_MSGLOG_LOG_DAYS", 365).clamp(1, 3650) as i64
 }
 
 pub fn max_image_bytes() -> u64 {
@@ -158,12 +171,32 @@ pub struct Deletion {
     pub bulk: bool,
 }
 
+/// A message AutoMod stopped: where it was aimed, who, and what it said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blocked {
+    /// The alert's own id, which carries the moment it was tried.
+    pub message_id: u64,
+    /// The channel the member tried to post in.
+    pub place: Place,
+    pub author_id: u64,
+    pub author_name: String,
+    pub avatar: String,
+    pub created_ms: i64,
+    pub alert: Alert,
+    /// Where the alert itself was posted.
+    pub alert_channel: u64,
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
     New(NewMessage),
     /// A bot's or webhook's message: remembered so its deletion isn't logged.
     Other { message_id: u64, ts_ms: i64 },
     Deleted(Deletion),
+    /// A message Discord's AutoMod blocked, from its alert.
+    Blocked(Blocked),
+    /// Who deleted these members' messages, from the audit log (`None`: it couldn't be read).
+    Deleters { removals: Vec<Removal>, entries: Option<Vec<AuditDelete>> },
     Edited { message_id: u64, content: String, ts_ms: i64 },
     /// A picture finished downloading.
     Saved { message_id: u64, file: StoredFile },
@@ -286,7 +319,37 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS edited_ts ON edited (edited_ts);
     CREATE INDEX IF NOT EXISTS edited_author ON edited (author_id);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    -- Messages Discord's AutoMod blocked. `message_id` is the alert's id: its
+    -- moment is when the member tried, and it sorts with the channel's messages.
+    CREATE TABLE IF NOT EXISTS blocked (
+        message_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL, parent_id INTEGER, channel_name TEXT NOT NULL DEFAULT '',
+        author_id INTEGER NOT NULL, author_name TEXT NOT NULL, avatar TEXT NOT NULL DEFAULT '', content TEXT NOT NULL,
+        created_ts INTEGER NOT NULL, rule_name TEXT, keyword TEXT, matched TEXT, outcome TEXT, decision_id TEXT,
+        alert_channel_id INTEGER);
+    CREATE INDEX IF NOT EXISTS blocked_ts ON blocked (created_ts);
+    CREATE INDEX IF NOT EXISTS blocked_author ON blocked (author_id, message_id);
+    CREATE INDEX IF NOT EXISTS blocked_channel ON blocked (channel_id, message_id);
 ";
+
+/// Columns added to `deleted` after it was first made: who deleted it, from the
+/// audit log. `deleter_checked` is 1 once the audit log was read for it, so a
+/// row with no deleter after that means "the author, or unknown".
+const DELETED_COLUMNS: &[(&str, &str)] =
+    &[("deleter_id", "INTEGER"), ("deleter_name", "TEXT"), ("deleter_bot", "INTEGER"), ("deleter_checked", "INTEGER NOT NULL DEFAULT 0")];
+
+fn add_missing_columns(conn: &Connection, table: &str, columns: &[(&str, &str)]) -> rusqlite::Result<()> {
+    let have: Vec<String> = {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (name, kind) in columns {
+        if !have.iter().any(|h| h == name) {
+            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, name, kind))?;
+        }
+    }
+    Ok(())
+}
 
 /// The words of every kept copy, for searching. An external-content table: it
 /// holds no text of its own, only the index, and the triggers keep it in step
@@ -335,6 +398,8 @@ pub struct Store {
     pub full_logged: bool,
     /// When logging first started, ever.
     pub first_started_ms: i64,
+    /// Each audit entry's count when last seen, for telling a bundled repeat apart.
+    pub audit_seen: std::collections::HashMap<u64, u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -344,6 +409,8 @@ pub struct PurgeReport {
     pub others: usize,
     pub deleted: usize,
     pub edited: usize,
+    /// Blocked messages whose text has run out its time.
+    pub blocked: usize,
     pub files: usize,
     pub folders: usize,
     /// Copies that kept their text and lost their pictures.
@@ -380,6 +447,8 @@ impl Store {
         let conn = Connection::open(db)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         conn.execute_batch(SCHEMA)?;
+        add_missing_columns(&conn, "deleted", DELETED_COLUMNS)?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS deleted_channel ON deleted (channel_id, message_id);")?;
         conn.execute_batch(SEARCH_SCHEMA)?;
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('first_started_ms', ?1)", params![now_ms.to_string()])?;
         // The search index arrived after the copies did: fill it in once, from
@@ -393,7 +462,7 @@ impl Store {
             .parse()
             .unwrap_or(now_ms);
         let used = dir_size(&root);
-        Ok(Self { conn, root, used, full_logged: false, first_started_ms })
+        Ok(Self { conn, root, used, full_logged: false, first_started_ms, audit_seen: Default::default() })
     }
 
     pub fn conn(&self) -> &Connection {
@@ -534,6 +603,12 @@ impl Store {
     /// bot's message is forgotten; anything else becomes a row without text,
     /// saying why there is no copy. Returns the rows added to the log.
     pub fn delete(&mut self, d: &Deletion, text_days: i64) -> rusqlite::Result<usize> {
+        self.delete_noting(d, text_days, &mut Vec::new())
+    }
+
+    /// [`Store::delete`], also noting each member's message that went, so who
+    /// deleted it can be looked up.
+    pub fn delete_noting(&mut self, d: &Deletion, text_days: i64, removals: &mut Vec<Removal>) -> rusqlite::Result<usize> {
         let mut added = 0;
         for &id in &d.ids {
             if let Some(k) = self.kept(id)? {
@@ -562,6 +637,7 @@ impl Store {
                     ],
                 )?;
                 self.conn.execute("DELETE FROM recent WHERE message_id = ?1", params![id as i64])?;
+                removals.push(Removal { message_id: id, author_id: k.author_id as u64, channel_id: k.channel_id as u64, ts_ms: d.ts_ms, bulk: d.bulk });
                 continue;
             }
             // A bot's message stays noted until the purge, so a repeated event is ignored too.
@@ -599,6 +675,50 @@ impl Store {
         )?;
         self.conn.execute("UPDATE recent SET content = ?2 WHERE message_id = ?1", params![id as i64, content])?;
         Ok(true)
+    }
+
+    /// Keeps a message AutoMod blocked. A repeat of the same alert changes nothing.
+    pub fn insert_blocked(&mut self, b: &Blocked) -> rusqlite::Result<bool> {
+        let a = &b.alert;
+        let added = self.conn.execute(
+            "INSERT OR IGNORE INTO blocked (message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts,
+                 rule_name, keyword, matched, outcome, decision_id, alert_channel_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                b.message_id as i64,
+                b.place.channel_id as i64,
+                b.place.parent_id.map(|p| p as i64),
+                b.place.channel_name,
+                b.author_id as i64,
+                b.author_name,
+                b.avatar,
+                a.content,
+                b.created_ms,
+                a.rule_name,
+                a.keyword,
+                a.matched,
+                a.outcome,
+                a.decision_id,
+                b.alert_channel as i64,
+            ],
+        )?;
+        Ok(added > 0)
+    }
+
+    /// Records who deleted each message, from the audit log. With no entries
+    /// (the log couldn't be read) nothing changes and they stay unknown; with
+    /// entries, a message none of them accounts for is marked checked with no
+    /// deleter — the author, or unknown.
+    pub fn record_deleters(&mut self, removals: &[Removal], entries: Option<&[AuditDelete]>) -> rusqlite::Result<usize> {
+        let Some(entries) = entries else { return Ok(0) };
+        let mut n = 0;
+        for (id, who) in super::msglog_gone::match_deleters(removals, entries, &mut self.audit_seen) {
+            n += self.conn.execute(
+                "UPDATE deleted SET deleter_id = ?2, deleter_name = ?3, deleter_bot = ?4, deleter_checked = 1 WHERE message_id = ?1",
+                params![id as i64, who.as_ref().map(|w| w.id as i64), who.as_ref().map(|w| w.name.clone()), who.as_ref().map(|w| w.bot)],
+            )?;
+        }
+        Ok(n)
     }
 
     /// A downloaded picture: added to its message's copy, moved along if the
@@ -674,6 +794,8 @@ impl Store {
         }
         report.deleted = self.conn.execute("DELETE FROM deleted WHERE deleted_ts < ?1", params![log_cut])?;
         report.edited = self.conn.execute("DELETE FROM edited WHERE edited_ts < ?1", params![log_cut])?;
+        // A blocked message is what someone said (tried to), so it goes with the text.
+        report.blocked = self.conn.execute("DELETE FROM blocked WHERE created_ts < ?1", params![text_cut])?;
 
         // Day folders: a whole day older than the copies are kept goes (a picture
         // that finished downloading after its message was cleared is in one), and
@@ -716,7 +838,14 @@ impl Store {
                     }
                 }),
                 Event::Other { message_id, ts_ms } => self.note_other(message_id, ts_ms),
-                Event::Deleted(d) => self.delete(&d, text_days()).map(|_| ()),
+                Event::Deleted(d) => {
+                    let mut removals = Vec::new();
+                    let done = self.delete_noting(&d, text_days(), &mut removals).map(|_| ());
+                    super::msglog_gone::request(removals);
+                    done
+                }
+                Event::Blocked(b) => self.insert_blocked(&b).map(|_| ()),
+                Event::Deleters { removals, entries } => self.record_deleters(&removals, entries.as_deref()).map(|_| ()),
                 Event::Edited { message_id, content, ts_ms } => self.edit(message_id, &content, ts_ms).map(|_| ()),
                 Event::Saved { message_id, file } => self.saved(message_id, file),
                 Event::Purge { now_ms } => {
@@ -725,11 +854,12 @@ impl Store {
                     self.purge(now_ms, keep_days(), log_days(), text_days()).map(|r| {
                         if r != PurgeReport::default() {
                             tracing::info!(
-                                "msglog: cleared {} copies, {} deleted and {} edited log entries, {} pictures from {} copies that kept their text, \
-                                 {} folders; {} MB in use",
+                                "msglog: cleared {} copies, {} deleted and {} edited log entries, {} blocked messages, {} pictures from {} copies \
+                                 that kept their text, {} folders; {} MB in use",
                                 r.recent,
                                 r.deleted,
                                 r.edited,
+                                r.blocked,
                                 r.files,
                                 r.stripped,
                                 r.folders,
@@ -835,6 +965,30 @@ pub struct DeletedRow {
     pub files: Vec<StoredFile>,
     pub bulk: bool,
     pub reason: Option<String>,
+    /// Who deleted it, when the audit log said.
+    pub deleter: Option<Deleter>,
+    /// Whether the audit log was read for it: checked with no deleter means
+    /// the author deleted it themselves, or it's unknown.
+    pub deleter_checked: bool,
+}
+
+/// A message Discord's AutoMod blocked, for the Deleted messages page.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BlockedRow {
+    pub message_id: u64,
+    /// Where the member tried to post it.
+    pub channel_id: u64,
+    pub parent_id: Option<u64>,
+    pub channel_name: String,
+    pub author_id: u64,
+    pub author_name: String,
+    pub avatar: String,
+    pub content: String,
+    pub created_ms: i64,
+    pub rule_name: Option<String>,
+    pub keyword: Option<String>,
+    pub matched: Option<String>,
+    pub outcome: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -880,7 +1034,8 @@ fn page<T>(rows: impl Iterator<Item = rusqlite::Result<T>>, keep: impl Fn(&T) ->
 pub fn list_deleted(conn: &Connection, f: &ListFilter) -> rusqlite::Result<Page<DeletedRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts, deleted_ts,
-                reply_to, reply_author, reply_text, attachments_json, stored_files_json, bulk, reason
+                reply_to, reply_author, reply_text, attachments_json, stored_files_json, bulk, reason,
+                deleter_id, deleter_name, deleter_bot, deleter_checked
          FROM deleted WHERE id < ?1 AND deleted_ts >= ?2 AND (?3 IS NULL OR author_id = ?3) AND (?4 IS NULL OR channel_id = ?4 OR parent_id = ?4)
          ORDER BY id DESC",
     )?;
@@ -904,6 +1059,8 @@ pub fn list_deleted(conn: &Connection, f: &ListFilter) -> rusqlite::Result<Page<
             files: files_of(&r.get::<_, String>(15)?),
             bulk: r.get(16)?,
             reason: r.get(17)?,
+            deleter: deleter_of(r.get(18)?, r.get(19)?, r.get(20)?),
+            deleter_checked: r.get::<_, i64>(21)? != 0,
         })
     })?;
     let q = f.q.clone();
@@ -911,6 +1068,44 @@ pub fn list_deleted(conn: &Connection, f: &ListFilter) -> rusqlite::Result<Page<
         rows,
         |row| f.shows(row.channel_id, row.parent_id, &row.channel_name) && q.as_deref().is_none_or(|q| row.content.as_deref().is_some_and(|t| (f.matches)(t, q))),
         |row| row.id,
+        f.limit,
+    )
+}
+
+fn deleter_of(id: Option<i64>, name: Option<String>, bot: Option<bool>) -> Option<Deleter> {
+    id.map(|id| Deleter { id: id as u64, name: name.unwrap_or_else(|| id.to_string()), bot: bot.unwrap_or(false) })
+}
+
+/// Messages AutoMod blocked, newest first. `before` is a message id.
+pub fn list_blocked(conn: &Connection, f: &ListFilter) -> rusqlite::Result<Page<BlockedRow>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts,
+                rule_name, keyword, matched, outcome
+         FROM blocked WHERE message_id < ?1 AND created_ts >= ?2 AND (?3 IS NULL OR author_id = ?3) AND (?4 IS NULL OR channel_id = ?4 OR parent_id = ?4)
+         ORDER BY message_id DESC",
+    )?;
+    let rows = stmt.query_map(params![f.before.unwrap_or(i64::MAX), f.since_ms, f.member.map(|m| m as i64), f.channel.map(|c| c as i64)], |r| {
+        Ok(BlockedRow {
+            message_id: r.get::<_, i64>(0)? as u64,
+            channel_id: r.get::<_, i64>(1)? as u64,
+            parent_id: r.get::<_, Option<i64>>(2)?.map(|p| p as u64),
+            channel_name: r.get(3)?,
+            author_id: r.get::<_, i64>(4)? as u64,
+            author_name: r.get(5)?,
+            avatar: r.get(6)?,
+            content: r.get(7)?,
+            created_ms: r.get(8)?,
+            rule_name: r.get(9)?,
+            keyword: r.get(10)?,
+            matched: r.get(11)?,
+            outcome: r.get(12)?,
+        })
+    })?;
+    let q = f.q.clone();
+    page(
+        rows,
+        |row| f.shows(row.channel_id, row.parent_id, &row.channel_name) && q.as_deref().is_none_or(|q| (f.matches)(&row.content, q)),
+        |row| row.message_id as i64,
         f.limit,
     )
 }
@@ -1000,7 +1195,122 @@ pub struct SaidRow {
     pub attachments: Vec<Attachment>,
     /// Pictures still on disk (they go before the text does).
     pub images: Vec<StoredFile>,
+    /// Not in the channel any more: deleted, or blocked by AutoMod before anyone saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gone: Option<Gone>,
 }
+
+/// What became of a message that is no longer in its channel.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Gone {
+    /// It was posted, seen, and then removed.
+    Deleted {
+        deleted_ms: i64,
+        bulk: bool,
+        /// Whether the audit log was read for it.
+        checked: bool,
+        /// Who removed it, when the audit log said. Checked and none: the author, or unknown.
+        by: Option<Deleter>,
+    },
+    /// It was tried and never reached the channel: nobody there saw it.
+    Blocked { rule: Option<String>, keyword: Option<String>, matched: Option<String>, outcome: Option<String> },
+}
+
+impl SaidRow {
+    pub fn deleted(&self) -> bool {
+        matches!(self.gone, Some(Gone::Deleted { .. }))
+    }
+    pub fn blocked(&self) -> bool {
+        matches!(self.gone, Some(Gone::Blocked { .. }))
+    }
+}
+
+/// Which deleted and blocked messages to read back as [`SaidRow`]s.
+#[derive(Clone, Debug, Default)]
+pub struct GoneFilter {
+    /// Only these authors; empty is anyone.
+    pub authors: Vec<u64>,
+    pub channel: Option<u64>,
+    /// With `channel`, threads inside it too.
+    pub with_threads: bool,
+    /// Message ids, `lo` inclusive, `hi` exclusive.
+    pub lo_id: u64,
+    pub hi_id: u64,
+    /// Rows read from each table (per author) at most, newest first.
+    pub limit: usize,
+}
+
+/// Deleted messages that still have their words, and blocked ones, as
+/// [`SaidRow`]s in their original channel and place in time, marked with what
+/// happened to them. Newest first.
+pub fn gone_between(conn: &Connection, f: &GoneFilter) -> rusqlite::Result<Vec<SaidRow>> {
+    let authors: Vec<Option<i64>> = if f.authors.is_empty() { vec![None] } else { f.authors.iter().map(|a| Some(*a as i64)).collect() };
+    let hi = f.hi_id.min(i64::MAX as u64) as i64;
+    let lo = f.lo_id.min(i64::MAX as u64) as i64;
+    let channel = f.channel.map(|c| c as i64);
+    let mut out = Vec::new();
+    for author in authors {
+        let mut stmt = conn.prepare_cached(
+            "SELECT message_id, channel_id, parent_id, channel_name, author_id, COALESCE(author_name, ''), COALESCE(avatar, ''), content, created_ts,
+                    reply_to, reply_author, reply_text, attachments_json, stored_files_json, deleted_ts, bulk,
+                    deleter_id, deleter_name, deleter_bot, deleter_checked
+             FROM deleted
+             WHERE content IS NOT NULL AND author_id IS NOT NULL AND message_id >= ?1 AND message_id < ?2
+               AND (?3 IS NULL OR author_id = ?3) AND (?4 IS NULL OR channel_id = ?4 OR (?5 AND parent_id = ?4))
+             ORDER BY message_id DESC LIMIT ?6",
+        )?;
+        let rows = stmt.query_map(params![lo, hi, author, channel, f.with_threads, f.limit as i64], |r| {
+            let mut row = said_row(r)?;
+            row.gone = Some(Gone::Deleted {
+                deleted_ms: r.get(14)?,
+                bulk: r.get(15)?,
+                checked: r.get::<_, i64>(19)? != 0,
+                by: deleter_of(r.get(16)?, r.get(17)?, r.get(18)?),
+            });
+            Ok(row)
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+        let mut stmt = conn.prepare_cached(
+            "SELECT message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts,
+                    rule_name, keyword, matched, outcome
+             FROM blocked
+             WHERE message_id >= ?1 AND message_id < ?2
+               AND (?3 IS NULL OR author_id = ?3) AND (?4 IS NULL OR channel_id = ?4 OR (?5 AND parent_id = ?4))
+             ORDER BY message_id DESC LIMIT ?6",
+        )?;
+        let rows = stmt.query_map(params![lo, hi, author, channel, f.with_threads, f.limit as i64], |r| {
+            Ok(SaidRow {
+                message_id: r.get::<_, i64>(0)? as u64,
+                channel_id: r.get::<_, i64>(1)? as u64,
+                parent_id: r.get::<_, Option<i64>>(2)?.map(|p| p as u64),
+                channel_name: r.get(3)?,
+                author_id: r.get::<_, i64>(4)? as u64,
+                author_name: r.get(5)?,
+                avatar: r.get(6)?,
+                content: r.get(7)?,
+                created_ms: r.get(8)?,
+                reply_to: None,
+                reply_author: None,
+                reply_text: None,
+                attachments: Vec::new(),
+                images: Vec::new(),
+                gone: Some(Gone::Blocked { rule: r.get(9)?, keyword: r.get(10)?, matched: r.get(11)?, outcome: r.get(12)? }),
+            })
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    out.sort_by(|x, y| y.message_id.cmp(&x.message_id));
+    out.dedup_by_key(|r| r.message_id);
+    Ok(out)
+}
+
+/// Deleted and blocked rows one page of the Messages page may add, at most.
+pub const GONE_PER_PAGE: usize = 2_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Said {
@@ -1047,6 +1357,7 @@ pub fn said_row(r: &rusqlite::Row) -> rusqlite::Result<SaidRow> {
         reply_text: r.get(11)?,
         attachments: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
         images: files_of(&r.get::<_, String>(13)?),
+        gone: None,
     })
 }
 
@@ -1122,6 +1433,32 @@ pub fn list_said(conn: &Connection, f: &SaidFilter) -> rusqlite::Result<Said> {
             collect(&mut stmt.query(params![before, f.since_id as i64, f.member.map(|m| m as i64), f.channel.map(|c| c as i64)])?, f, &mut out)?;
         }
     }
+    // Deleted and blocked messages go back in their place, over the same span of
+    // ids this page covered: down to where the next page starts, or the period's
+    // start when this is the last page.
+    let lo = if out.complete { f.since_id } else { out.next_before.unwrap_or(f.since_id) };
+    let gone = gone_between(
+        conn,
+        &GoneFilter {
+            authors: f.member.into_iter().collect(),
+            channel: f.channel,
+            with_threads: true,
+            lo_id: lo,
+            hi_id: before as u64,
+            limit: GONE_PER_PAGE,
+        },
+    )?;
+    let extra: Vec<SaidRow> = gone.into_iter().filter(|r| f.shows(r)).collect();
+    if !extra.is_empty() {
+        out.rows.extend(extra);
+        out.rows.sort_by(|x, y| y.message_id.cmp(&x.message_id));
+        // Still one page: what is cut off comes first on the next one.
+        if out.rows.len() > f.limit {
+            out.rows.truncate(f.limit);
+            out.next_before = out.rows.last().map(|r| r.message_id);
+            out.complete = false;
+        }
+    }
     Ok(out)
 }
 
@@ -1157,6 +1494,57 @@ pub fn deleted_file(conn: &Connection, root: &Path, message_id: u64, n: usize) -
         return None;
     }
     Some((std::fs::read(real).ok()?, kind))
+}
+
+/// A saved picture of a kept or deleted message, and where it was posted.
+pub struct Picture {
+    pub bytes: Vec<u8>,
+    pub kind: &'static str,
+    pub place: Place,
+}
+
+/// A saved picture of any message the log holds, still in Discord or deleted:
+/// its bytes, content type and channel (for the caller to check it may be
+/// shown). Nothing for a picture that isn't there or a stored path that would
+/// leave the folder.
+pub fn said_file(conn: &Connection, root: &Path, message_id: u64, n: usize) -> Option<Picture> {
+    let read = |table: &str| -> Option<(String, i64, Option<i64>, String)> {
+        conn.query_row(
+            &format!("SELECT stored_files_json, channel_id, parent_id, channel_name FROM {} WHERE message_id = ?1", table),
+            params![message_id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .ok()?
+    };
+    let (json, channel, parent, name) = read("recent").or_else(|| read("deleted"))?;
+    let file = files_of(&json).into_iter().find(|f| f.n == n)?;
+    if !safe_rel(&file.path) {
+        return None;
+    }
+    let ext = Path::new(&file.path).extension()?.to_str()?.to_ascii_lowercase();
+    let kind = content_type_for(&ext)?;
+    let (base, real) = (root.canonicalize().ok()?, root.join(&file.path).canonicalize().ok()?);
+    if !real.starts_with(&base) {
+        return None;
+    }
+    Some(Picture { bytes: std::fs::read(real).ok()?, kind, place: Place { channel_id: channel as u64, parent_id: parent.map(|p| p as u64), channel_name: name } })
+}
+
+/// Stickers are kept with a message's attachments, typed `sticker/<format>`,
+/// never downloaded: Discord's sticker links don't expire.
+pub fn is_sticker(a: &Attachment) -> bool {
+    a.content_type.as_deref().is_some_and(|t| t.starts_with("sticker/"))
+}
+
+/// Where a sticker's picture is, when it is one a browser can show (not Lottie).
+pub fn sticker_url(a: &Attachment) -> Option<String> {
+    let ext = match a.content_type.as_deref()?.strip_prefix("sticker/")? {
+        "png" | "apng" => "png",
+        "gif" => "gif",
+        _ => return None,
+    };
+    Some(format!("https://cdn.discordapp.com/stickers/{}.{}", a.id, ext))
 }
 
 pub fn content_type_for(ext: &str) -> Option<&'static str> {
@@ -1205,6 +1593,7 @@ pub fn start(workspace: &str) -> anyhow::Result<()> {
     if TX.set(tx.clone()).is_err() {
         return Ok(());
     }
+    super::msglog_gone::start(tx.clone());
     let handle = tokio::runtime::Handle::current();
     let limit = Arc::new(tokio::sync::Semaphore::new(DOWNLOADS_AT_ONCE));
     let saved_tx = tx.clone();
@@ -1325,6 +1714,16 @@ fn new_message(msg: &Message, place: Place, guild: u64) -> NewMessage {
             .attachments
             .iter()
             .map(|a| Attachment { id: a.id.get(), filename: a.filename.clone(), content_type: a.content_type.clone(), size: a.size as u64, url: a.url.clone() })
+            .chain(msg.sticker_items.iter().map(|st| {
+                use serenity::all::StickerFormatType as F;
+                let format = match st.format_type {
+                    F::Png => "png",
+                    F::Apng => "apng",
+                    F::Gif => "gif",
+                    _ => "lottie",
+                };
+                Attachment { id: st.id.get(), filename: st.name.clone(), content_type: Some(format!("sticker/{}", format)), size: 0, url: String::new() }
+            }))
             .collect(),
     }
 }
@@ -1334,6 +1733,14 @@ fn new_message(msg: &Message, place: Place, guild: u64) -> NewMessage {
 pub fn on_message(ctx: &Context, msg: &Message) {
     let (Some(tx), Some(guild)) = (TX.get(), msg.guild_id) else { return };
     if !enabled() {
+        return;
+    }
+    // An AutoMod alert is its own record, filed where the member tried to post;
+    // the empty alert itself is never kept.
+    if msg.kind == MessageType::AutoModAction {
+        if let Some(b) = blocked_of(msg, |channel| place(ctx, guild, serenity::all::ChannelId::new(channel))) {
+            push(tx, Event::Blocked(b));
+        }
         return;
     }
     let place = place(ctx, guild, msg.channel_id);
@@ -1350,9 +1757,30 @@ pub fn on_message(ctx: &Context, msg: &Message) {
     }
 }
 
+/// The record of what an AutoMod alert blocked, filed under the channel the
+/// member tried to post in (the alert's own channel when it doesn't say). None
+/// when it isn't an alert, or the channel is one that is never logged.
+pub fn blocked_of(msg: &Message, place_of: impl Fn(u64) -> Option<Place>) -> Option<Blocked> {
+    let alert = super::msglog_gone::automod_alert(msg.kind, &msg.embeds)?;
+    let target = alert.channel_id.unwrap_or(msg.channel_id.get());
+    let place = place_of(target)?;
+    let author_name = msg.member.as_ref().and_then(|m| m.nick.clone()).or_else(|| msg.author.global_name.clone()).unwrap_or_else(|| msg.author.name.clone());
+    Some(Blocked {
+        message_id: msg.id.get(),
+        place,
+        author_id: msg.author.id.get(),
+        author_name,
+        avatar: msg.author.face(),
+        created_ms: snowflake_ms(msg.id.get()),
+        alert,
+        alert_channel: msg.channel_id.get(),
+    })
+}
+
 /// `message_delete` and `message_delete_bulk`.
 pub fn on_delete(ctx: &Context, channel: serenity::all::ChannelId, ids: &[MessageId], guild: Option<GuildId>, bulk: bool) {
     let (Some(tx), Some(guild)) = (TX.get(), guild) else { return };
+    super::msglog_gone::remember(&ctx.http, guild);
     if !enabled() || ids.is_empty() {
         return;
     }
@@ -1758,6 +2186,172 @@ mod tests {
         // A channel the owner has asked to be left out.
         add(70, 43, "Dev", at(4242, None, "staff-only"), "koto staff chatter");
         store
+    }
+
+    /// An AutoMod alert as the gateway delivers it, turned into its own record.
+    fn alert(channel_field: bool) -> Message {
+        serde_json::from_value(super::super::msglog_gone::tests::alert_json(channel_field, true)).unwrap()
+    }
+
+    #[test]
+    fn an_automod_alert_is_filed_where_the_member_tried_to_post_and_the_envelope_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let target = 1_400_000_000_000_000_023u64;
+        let log_channel = 1_516_779_799_865_987_101u64;
+        let places = |c: u64| match c {
+            c if c == target => Some(Place { channel_id: c, parent_id: None, channel_name: "🥳chatting-hori".into() }),
+            c if c == log_channel => Some(Place { channel_id: c, parent_id: None, channel_name: "📓moderation-logs".into() }),
+            _ => None,
+        };
+        let msg = alert(true);
+        let b = blocked_of(&msg, places).expect("an alert");
+        assert_eq!((b.place.channel_id, b.place.channel_name.as_str()), (target, "🥳chatting-hori"), "not the log channel");
+        assert_eq!((b.author_id, b.author_name.as_str(), b.alert_channel), (42, "gooner", log_channel));
+        assert_eq!(b.created_ms, snowflake_ms(msg.id.get()));
+        store.apply(vec![Event::Blocked(b.clone()), Event::Blocked(b)], &mut |_| {});
+        assert_eq!((count(&store, "blocked"), count(&store, "recent")), (1, 0), "one record, and no empty row in #moderation-logs");
+        let rows = list_blocked(store.conn(), &filter()).unwrap().rows;
+        assert_eq!(
+            (rows[0].content.as_str(), rows[0].rule_name.as_deref(), rows[0].keyword.as_deref(), rows[0].matched.as_deref(), rows[0].outcome.as_deref()),
+            ("tu chutiya hai bc, sab jaante hai", Some("Block slurs"), Some("*chutiya*"), Some("chutiya"), Some("blocked"))
+        );
+        // No channel in the alert: filed under the log channel rather than lost.
+        assert_eq!(blocked_of(&alert(false), places).unwrap().place.channel_id, log_channel);
+        // Aimed at a channel that is never logged (#safe-corner, say): not kept at all.
+        assert!(blocked_of(&msg, |_| None).is_none());
+        // An ordinary message is not an alert.
+        let mut plain = alert(true);
+        plain.kind = MessageType::Regular;
+        assert!(blocked_of(&plain, places).is_none());
+    }
+
+    #[test]
+    fn the_deleted_log_is_kept_as_long_as_the_text_and_blocked_messages_go_with_the_text() {
+        assert_eq!(log_days(), 365, "the default: a year, like the text");
+        assert_eq!(log_days(), text_days());
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let place = Place { channel_id: 21, parent_id: None, channel_name: "general".into() };
+        let b = |id: u64, ms: i64| Blocked {
+            message_id: id,
+            place: place.clone(),
+            author_id: 42,
+            author_name: "Riya".into(),
+            avatar: String::new(),
+            created_ms: ms,
+            alert: Alert { content: "x".into(), ..Default::default() },
+            alert_channel: 9,
+        };
+        store.insert_blocked(&b(id_at(NOW - 400 * DAY_MS, 1), NOW - 400 * DAY_MS)).unwrap();
+        store.insert_blocked(&b(id_at(NOW - 300 * DAY_MS, 2), NOW - 300 * DAY_MS)).unwrap();
+        let old = msg(id_at(NOW - 200 * DAY_MS, 3), NOW - 200 * DAY_MS, "said then removed", vec![]);
+        store.insert_new(&old).unwrap();
+        store.delete(&Deletion { ids: vec![old.message_id], place: place.clone(), ts_ms: NOW - 200 * DAY_MS + 60_000, bulk: false }, 365).unwrap();
+        let r = store.purge(NOW, 7, log_days(), text_days()).unwrap();
+        assert_eq!((r.blocked, r.deleted), (1, 0), "a 200-day-old deletion is still evidence");
+        assert_eq!((count(&store, "blocked"), count(&store, "deleted")), (1, 1));
+    }
+
+    #[test]
+    fn who_deleted_it_is_recorded_from_the_audit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let place = place(21);
+        let mut ids = Vec::new();
+        for seq in 1..=3 {
+            let m = msg(id_at(NOW - 60_000, seq), NOW - 60_000, "x", vec![]);
+            store.insert_new(&m).unwrap();
+            ids.push(m.message_id);
+        }
+        let mut removals = Vec::new();
+        store.delete_noting(&Deletion { ids: ids.clone(), place, ts_ms: NOW, bulk: false }, 365, &mut removals).unwrap();
+        assert_eq!(removals.iter().map(|r| (r.message_id, r.author_id, r.channel_id)).collect::<Vec<_>>(), ids.iter().map(|i| (*i, 42, 21)).collect::<Vec<_>>());
+        // Nothing read yet: unknown, and not "checked".
+        fn row(store: &Store, id: u64) -> DeletedRow {
+            list_deleted(store.conn(), &filter()).unwrap().rows.into_iter().find(|r| r.message_id == id).unwrap()
+        }
+        assert_eq!((row(&store, ids[0]).deleter, row(&store, ids[0]).deleter_checked), (None, false));
+        // The audit log couldn't be read: still unknown.
+        store.record_deleters(&removals, None).unwrap();
+        assert!(!row(&store, ids[0]).deleter_checked);
+        // One entry from a mod for two of the three (a bundled count of 2); the third is theirs.
+        let entry = AuditDelete { id: id_at(NOW + 400, 7), executor: 7001, executor_name: "Meera".into(), executor_bot: false, target: Some(42), channel: Some(21), count: 2, bulk: false };
+        store.record_deleters(&removals, Some(&[entry])).unwrap();
+        let named: Vec<Option<String>> = ids.iter().map(|i| row(&store, *i).deleter.map(|d| d.name)).collect();
+        assert_eq!(named, vec![Some("Meera".into()), Some("Meera".into()), None]);
+        assert!(ids.iter().all(|i| row(&store, *i).deleter_checked));
+    }
+
+    #[test]
+    fn deleted_and_blocked_messages_come_back_into_the_timeline_in_their_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = said_store(&dir);
+        // Riya's "KOTO is never easy" (400 minutes ago) is deleted by a mod 3 minutes later…
+        let koto = id_at(NOW - 400 * 60_000, 42);
+        let mut removals = Vec::new();
+        store.delete_noting(&Deletion { ids: vec![koto], place: Place { channel_id: 22, parent_id: None, channel_name: "memes".into() }, ts_ms: NOW - 397 * 60_000, bulk: false }, 365, &mut removals).unwrap();
+        let entry = AuditDelete { id: id_at(NOW - 397 * 60_000, 9), executor: 7001, executor_name: "Meera".into(), executor_bot: false, target: Some(42), channel: Some(22), count: 1, bulk: false };
+        store.record_deleters(&removals, Some(&[entry])).unwrap();
+        // …and AutoMod stopped one of Dev's 250 minutes ago in #general, and one aimed at #safe-corner.
+        let at = |c: u64, name: &str| Place { channel_id: c, parent_id: None, channel_name: name.into() };
+        for (mins, place, text) in [(250, at(21, "general"), "koto blocked words"), (95, at(SAFE, "safe-corner"), "koto safe blocked")] {
+            let ms = NOW - mins * 60_000;
+            store
+                .insert_blocked(&Blocked {
+                    message_id: id_at(ms, 43),
+                    place,
+                    author_id: 43,
+                    author_name: "Dev".into(),
+                    avatar: String::new(),
+                    created_ms: ms,
+                    alert: Alert { content: text.into(), rule_name: Some("Block slurs".into()), ..Default::default() },
+                    alert_channel: 9,
+                })
+                .unwrap();
+        }
+        let all = list_said(store.conn(), &said()).unwrap();
+        let texts: Vec<&str> = all.rows.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["koto staff chatter", "quiz at nine", "arijit on repeat", "koto blocked words", "today's word is PLANET", "KOTO is never easy", "the zebrafish meme again", "koto was hard today"],
+            "in time order, never #safe-corner"
+        );
+        let deleted = all.rows.iter().find(|r| r.content == "KOTO is never easy").unwrap();
+        match &deleted.gone {
+            Some(Gone::Deleted { deleted_ms, by: Some(d), checked: true, .. }) => {
+                assert_eq!((deleted_ms - deleted.created_ms, d.name.as_str()), (3 * 60_000, "Meera"));
+            }
+            other => panic!("not marked deleted: {other:?}"),
+        }
+        let blocked = all.rows.iter().find(|r| r.content == "koto blocked words").unwrap();
+        assert!(matches!(&blocked.gone, Some(Gone::Blocked { rule: Some(r), .. }) if r == "Block slurs"));
+        // A member's timeline, a channel's, and a search all see them.
+        let mut f = said();
+        f.member = Some(42);
+        assert!(list_said(store.conn(), &f).unwrap().rows.iter().any(|r| r.deleted()));
+        let mut f = said();
+        f.channel = Some(21);
+        assert!(list_said(store.conn(), &f).unwrap().rows.iter().any(|r| r.blocked()));
+        let mut f = said();
+        f.q = Some("koto".into());
+        let found: Vec<String> = list_said(store.conn(), &f).unwrap().rows.into_iter().map(|r| r.content).collect();
+        assert!(found.iter().any(|t| t == "KOTO is never easy") && found.iter().any(|t| t == "koto blocked words") && !found.iter().any(|t| t == "koto safe blocked"), "{found:?}");
+        // Paging never loses or repeats one.
+        let mut f = said();
+        f.limit = 3;
+        let mut seen = Vec::new();
+        loop {
+            let page = list_said(store.conn(), &f).unwrap();
+            assert!(page.rows.len() <= 3);
+            seen.extend(page.rows.iter().map(|r| r.message_id));
+            match page.next_before {
+                Some(b) => f.before = Some(b),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 8);
+        assert!(seen.windows(2).all(|w| w[0] > w[1]));
     }
 
     #[test]

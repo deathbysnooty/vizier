@@ -276,9 +276,14 @@ pub trait PanelData: Send + Sync + 'static {
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
         None
     }
-    /// The Kalesh page: two members' own kept messages between two moments, oldest first.
-    async fn kalesh_authors(&self, _a: u64, _b: u64, _since_ms: i64, _until_ms: i64, _channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+    /// The Kalesh page: the chosen members' own kept messages between two moments,
+    /// deleted and blocked ones included, oldest first.
+    async fn kalesh_authors(&self, _people: Vec<u64>, _since_ms: i64, _until_ms: i64, _channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
         anyhow::bail!("the message log isn't open")
+    }
+    /// The Kalesh page: a saved picture of a message, still in Discord or deleted.
+    async fn kalesh_picture(&self, _message: u64, _n: usize) -> Option<super::super::msglog::Picture> {
+        None
     }
     /// The Kalesh page: everything kept from one channel between two moments, oldest first.
     async fn kalesh_channel(&self, _channel: u64, _since_ms: i64, _until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
@@ -294,6 +299,10 @@ pub trait PanelData: Send + Sync + 'static {
     }
     /// Edited messages from the message log, a page at a time.
     async fn msglog_edited(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::EditedRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// Messages Discord's AutoMod blocked, a page at a time.
+    async fn msglog_blocked(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::BlockedRow>> {
         anyhow::bail!("the message log isn't open")
     }
     /// A saved picture of a deleted message: its bytes and type.
@@ -627,10 +636,10 @@ impl PanelData for LiveData {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
     }
 
-    async fn kalesh_authors(&self, a: u64, b: u64, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+    async fn kalesh_authors(&self, people: Vec<u64>, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
         let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
         let limit = super::super::kalesh::AUTHOR_ROWS;
-        tokio::task::spawn_blocking(move || super::super::kalesh::authors_between(&reader.conn.lock(), a, b, since_ms, until_ms, channel, limit).map_err(anyhow::Error::from))
+        tokio::task::spawn_blocking(move || super::super::kalesh::authors_between(&reader.conn.lock(), &people, since_ms, until_ms, channel, limit).map_err(anyhow::Error::from))
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
     }
@@ -645,6 +654,11 @@ impl PanelData for LiveData {
 
     async fn kalesh_summarise(&self, prompt: String) -> anyhow::Result<super::super::kalesh::Reply> {
         super::super::kalesh::ask_live(prompt).await
+    }
+
+    async fn kalesh_picture(&self, message: u64, n: usize) -> Option<super::super::msglog::Picture> {
+        let reader = super::super::msglog::reader()?;
+        tokio::task::spawn_blocking(move || super::super::msglog::said_file(&reader.conn.lock(), &reader.root, message, n)).await.ok().flatten()
     }
 
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
@@ -662,6 +676,13 @@ impl PanelData for LiveData {
     async fn msglog_edited(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::EditedRow>> {
         let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
         tokio::task::spawn_blocking(move || super::super::msglog::list_edited(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn msglog_blocked(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::BlockedRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        tokio::task::spawn_blocking(move || super::super::msglog::list_blocked(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
     }
@@ -1111,6 +1132,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/messages/search", get(search::search))
         .route("/msglog/deleted", get(msglog::deleted))
         .route("/msglog/edited", get(msglog::edited))
+        .route("/msglog/blocked", get(msglog::blocked))
         .route("/msglog/file/{id}/{n}", get(msglog::file))
         .route("/automod", get(automod::list))
         .route("/invites", get(invites::overview))
@@ -1119,6 +1141,8 @@ pub fn router(panel: Panel) -> Router {
         .route("/kalesh", get(kalesh::overview))
         .route("/kalesh/find", get(kalesh::find))
         .route("/kalesh/exchange", get(kalesh::exchange))
+        .route("/kalesh/period", get(kalesh::whole_period))
+        .route("/kalesh/picture/{id}/{n}", get(kalesh::picture))
         .route("/kalesh/detections/{id}", get(kalesh::detection))
         .route("/kalesh/summarise", post(kalesh::summarise))
         .route("/members", get(members::search))
@@ -1873,7 +1897,7 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(welcomes::audit_entry(&panel, e));
             } else if e.key == "messages:search" || e.key == "messages:look" {
                 obj.extend(messages::audit_entry(e));
-            } else if e.key == "msglog:deleted" || e.key == "msglog:edited" {
+            } else if e.key == "msglog:deleted" || e.key == "msglog:edited" || e.key == "msglog:blocked" {
                 obj.extend(msglog::audit_entry(e));
             } else if e.key == "members:left" {
                 obj.extend(left::audit_entry(e));

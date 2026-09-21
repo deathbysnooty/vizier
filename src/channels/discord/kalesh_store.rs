@@ -42,8 +42,25 @@ pub fn db() -> Option<&'static Mutex<Connection>> {
 }
 
 fn prepare(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    // Added once summaries could be about more than two people, or a whole period.
+    let have: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(summaries)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (name, kind) in [("people_json", "TEXT"), ("scope", "TEXT NOT NULL DEFAULT 'stretch'")] {
+        if !have.iter().any(|h| h == name) {
+            conn.execute_batch(&format!("ALTER TABLE summaries ADD COLUMN {} {}", name, kind))?;
+        }
+    }
+    Ok(())
 }
+
+/// A summary of one stretch in one channel.
+pub const SCOPE_STRETCH: &str = "stretch";
+/// A summary of every stretch of a period, all channels together (`channel_id` 0).
+pub const SCOPE_PERIOD: &str = "period";
 
 /// Opens (or makes) `<workspace>/.runtime/kalesh.db`. Once per process.
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -157,9 +174,15 @@ pub fn detection(conn: &Connection, id: i64) -> rusqlite::Result<Option<Detectio
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewSummary {
     pub stretch_key: String,
+    /// 0 for a whole period.
     pub channel_id: u64,
+    /// The first two of `people`, kept for summaries written before there could be more.
     pub a_id: u64,
     pub b_id: u64,
+    /// Everyone it is about, in the order they were chosen.
+    pub people: Vec<u64>,
+    /// [`SCOPE_STRETCH`] or [`SCOPE_PERIOD`].
+    pub scope: String,
     pub start_ms: i64,
     pub end_ms: i64,
     pub detection_id: Option<i64>,
@@ -186,8 +209,8 @@ pub struct Summary {
 pub fn add_summary(conn: &Connection, s: &NewSummary) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO summaries (stretch_key, channel_id, a_id, b_id, start_ms, end_ms, detection_id, message_ids_json, message_count,
-             sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             s.stretch_key,
             s.channel_id as i64,
@@ -207,23 +230,34 @@ pub fn add_summary(conn: &Connection, s: &NewSummary) -> rusqlite::Result<i64> {
             s.output_tokens as i64,
             s.summary.as_ref().map(|v| v.to_string()),
             s.raw,
+            serde_json::to_string(&s.people.iter().map(|i| i.to_string()).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
+            s.scope,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
 const SUMMARY_COLUMNS: &str = "id, stretch_key, channel_id, a_id, b_id, start_ms, end_ms, detection_id, message_ids_json, \
-                               sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw";
+                               sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope";
 
 fn summary_row(r: &rusqlite::Row) -> rusqlite::Result<Summary> {
     let ids: Vec<String> = serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default();
+    let (a, b) = (r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)? as u64);
+    let people: Vec<u64> = r
+        .get::<_, Option<String>>(18)?
+        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+        .map(|v| v.iter().filter_map(|i| i.parse().ok()).collect::<Vec<u64>>())
+        .filter(|v| v.len() >= 2)
+        .unwrap_or_else(|| vec![a, b]);
     Ok(Summary {
         id: r.get(0)?,
         new: NewSummary {
             stretch_key: r.get(1)?,
             channel_id: r.get::<_, i64>(2)? as u64,
-            a_id: r.get::<_, i64>(3)? as u64,
-            b_id: r.get::<_, i64>(4)? as u64,
+            a_id: a,
+            b_id: b,
+            people,
+            scope: r.get(19)?,
             start_ms: r.get(5)?,
             end_ms: r.get(6)?,
             detection_id: r.get(7)?,
@@ -251,17 +285,38 @@ pub fn summary(conn: &Connection, id: i64) -> rusqlite::Result<Option<Summary>> 
     conn.query_row(&format!("SELECT {} FROM summaries WHERE id = ?1", SUMMARY_COLUMNS), params![id], summary_row).optional()
 }
 
-/// Every summary of this pair in this channel whose stretch overlaps `start..=end`:
-/// the same fight summarised when it was shorter, say. Newest first.
-pub fn summaries_near(conn: &Connection, channel: u64, a: u64, b: u64, start_ms: i64, end_ms: i64) -> rusqlite::Result<Vec<Summary>> {
-    let (lo, hi) = (a.min(b) as i64, a.max(b) as i64);
+fn same_people(x: &[u64], y: &[u64]) -> bool {
+    let (mut x, mut y) = (x.to_vec(), y.to_vec());
+    x.sort_unstable();
+    x.dedup();
+    y.sort_unstable();
+    y.dedup();
+    x == y
+}
+
+/// Every stretch summary about exactly these people in this channel whose
+/// stretch overlaps `start..=end`: the same fight summarised when it was
+/// shorter, say. Newest first.
+pub fn summaries_near(conn: &Connection, channel: u64, people: &[u64], start_ms: i64, end_ms: i64) -> rusqlite::Result<Vec<Summary>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT {} FROM summaries WHERE channel_id = ?1 AND MIN(a_id, b_id) = ?2 AND MAX(a_id, b_id) = ?3
-           AND start_ms <= ?5 AND end_ms >= ?4 ORDER BY id DESC LIMIT 20",
+        "SELECT {} FROM summaries WHERE channel_id = ?1 AND scope = 'stretch' AND start_ms <= ?3 AND end_ms >= ?2 ORDER BY id DESC LIMIT 200",
         SUMMARY_COLUMNS
     ))?;
-    let rows = stmt.query_map(params![channel as i64, lo, hi, start_ms, end_ms], summary_row)?;
-    rows.collect()
+    let rows = stmt.query_map(params![channel as i64, start_ms, end_ms], summary_row)?;
+    let all: Vec<Summary> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(all.into_iter().filter(|s| same_people(&s.new.people, people)).take(20).collect())
+}
+
+/// Every whole-period summary about exactly these people whose period overlaps
+/// `start..=end`. Newest first.
+pub fn period_summaries(conn: &Connection, people: &[u64], start_ms: i64, end_ms: i64) -> rusqlite::Result<Vec<Summary>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {} FROM summaries WHERE scope = 'period' AND start_ms <= ?2 AND end_ms >= ?1 ORDER BY id DESC LIMIT 200",
+        SUMMARY_COLUMNS
+    ))?;
+    let rows = stmt.query_map(params![start_ms, end_ms], summary_row)?;
+    let all: Vec<Summary> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(all.into_iter().filter(|s| same_people(&s.new.people, people)).take(20).collect())
 }
 
 /// The newest summaries, for the page's list.
@@ -321,6 +376,8 @@ mod tests {
             channel_id: 23,
             a_id: 2,
             b_id: 1,
+            people: vec![2, 1],
+            scope: SCOPE_STRETCH.into(),
             start_ms: 0,
             end_ms: 100_000,
             detection_id: Some(id),
@@ -339,8 +396,14 @@ mod tests {
         assert_eq!(summary_for(&conn, "k").unwrap().unwrap().id, sid);
         assert!(summary_for(&conn, "other").unwrap().is_none());
         // Found whichever way round the pair is asked for, if the time overlaps.
-        assert_eq!(summaries_near(&conn, 23, 1, 2, 50_000, 200_000).unwrap().len(), 1);
-        assert!(summaries_near(&conn, 23, 1, 2, 200_000, 300_000).unwrap().is_empty());
+        assert_eq!(summaries_near(&conn, 23, &[1, 2], 50_000, 200_000).unwrap().len(), 1);
+        assert!(summaries_near(&conn, 23, &[1, 2], 200_000, 300_000).unwrap().is_empty());
+        assert!(summaries_near(&conn, 23, &[1, 2, 3], 50_000, 200_000).unwrap().is_empty(), "a different group");
+        assert!(period_summaries(&conn, &[1, 2], 0, 200_000).unwrap().is_empty(), "a stretch summary is not a period one");
+        let p = NewSummary { stretch_key: "period:1-2-3".into(), channel_id: 0, people: vec![3, 1, 2], scope: SCOPE_PERIOD.into(), ..s.clone() };
+        let pid = add_summary(&conn, &p).unwrap();
+        assert_eq!(period_summaries(&conn, &[1, 2, 3], 10, 20).unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), vec![pid]);
+        assert_eq!(summary(&conn, pid).unwrap().unwrap().new.people, vec![3, 1, 2]);
         assert_eq!(summarised_detections(&conn, &[id, id + 1]).unwrap(), vec![id]);
         assert_eq!(summary(&conn, sid).unwrap().unwrap().new, s);
     }

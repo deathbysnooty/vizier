@@ -1586,10 +1586,15 @@ pub fn sections() -> Vec<Section> {
                     and pictures and an edited one's before and after are shown. Three clocks, because the three \
                     things are kept for different reasons: text is the server's memory, so a year; pictures are only \
                     here so a message deleted soon after it was posted can still be shown, and they are what costs \
-                    disk, so a week; the deleted and edited log is a moderation record, so a month. Past the picture \
-                    clock a copy keeps every word and loses its pictures. Never #safe-corner or its threads, never a \
-                    channel on the skip list, never DMs, never bots. Discord doesn't tell bots who deleted a message, \
-                    so the log can't say. Every look at either page is in the activity log.",
+                    disk, so a week; the deleted and edited log is the evidence, so by default it is kept as long as the \
+                    text, a year. Past the picture clock a copy keeps every word and loses its pictures. Messages \
+                    Discord's own AutoMod blocked are kept too, as long as the text, filed under the channel the \
+                    member tried to post in. Deleted and blocked messages are shown back in their place, marked, on \
+                    the Messages and Kalesh pages. Discord doesn't say who deleted a message; the bot reads the \
+                    server's audit log a moment later and records the moderator or bot when there is one (it needs \
+                    View Audit Log). No entry means the author deleted it themselves, or it can't be known. Never \
+                    #safe-corner or its threads, never a channel on the skip list, never DMs, never bots. Every look \
+                    at either page is in the activity log.",
             settings: vec![
                 toggle(
                     "VIZIER_MSGLOG",
@@ -1626,9 +1631,11 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_MSGLOG_LOG_DAYS",
                     "Keep the log for",
-                    "How long deleted and edited messages stay in the log, pictures included, before they're cleared.",
-                    number(1, 365, "days"),
-                    "30",
+                    "How long deleted and edited messages stay in the log, pictures included, before they're cleared. \
+                     The same as the text by default, so the evidence is kept as long as the conversation around it: \
+                     a fight read back later still has the messages somebody removed.",
+                    number(1, 3650, "days"),
+                    "365",
                 ),
                 setting(
                     "VIZIER_MSGLOG_MAX_IMAGE_MB",

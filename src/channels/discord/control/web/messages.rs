@@ -152,7 +152,10 @@ fn result_json(panel: &Panel, row: &SaidRow, channel: Value, house: Value, guild
             "size": a.size,
             "image": msglog::image_ext(a.content_type.as_deref(), &a.filename).is_some(),
         })).collect::<Vec<_>>(),
-        "url": guild.map(|g| search::jump_url(g, channel_id, row.message_id)),
+        // A deleted or blocked message is not in Discord, so there is nothing to open.
+        "url": if row.gone.is_some() { None } else { guild.map(|g| search::jump_url(g, channel_id, row.message_id)) },
+        // Deleted later, or blocked by AutoMod before anyone saw it: back in its place, marked.
+        "gone": row.gone,
         "source": "log",
     })
 }

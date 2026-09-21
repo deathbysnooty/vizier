@@ -49,6 +49,7 @@ mod invites_store;
 mod kalesh;
 mod kalesh_store;
 mod msglog;
+mod msglog_gone;
 mod notes;
 mod notes_build;
 mod notes_facts;

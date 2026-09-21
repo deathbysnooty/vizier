@@ -385,8 +385,12 @@ impl PanelData for FakeData {
         Ok(super::super::super::msglog::list_said(fake_log().store.lock().conn(), &filter)?)
     }
 
-    async fn kalesh_authors(&self, a: u64, b: u64, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
-        super::kalesh::fake::authors(a, b, since_ms, until_ms, channel)
+    async fn kalesh_authors(&self, people: Vec<u64>, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
+        super::kalesh::fake::authors(people, since_ms, until_ms, channel)
+    }
+
+    async fn kalesh_picture(&self, message: u64, n: usize) -> Option<super::super::super::msglog::Picture> {
+        super::kalesh::fake::picture(message, n)
     }
 
     async fn kalesh_channel(&self, channel: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
@@ -407,6 +411,10 @@ impl PanelData for FakeData {
 
     async fn msglog_edited(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::EditedRow>> {
         Ok(super::super::super::msglog::list_edited(fake_log().store.lock().conn(), &filter)?)
+    }
+
+    async fn msglog_blocked(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::BlockedRow>> {
+        Ok(super::super::super::msglog::list_blocked(fake_log().store.lock().conn(), &filter)?)
     }
 
     async fn msglog_file(&self, message: u64, n: usize) -> Option<(Vec<u8>, &'static str)> {
@@ -956,7 +964,7 @@ fn snowflake(ms: i64, seq: u64) -> u64 {
 }
 
 /// A made-up picture: a gradient with a few shapes, as PNG bytes.
-fn fake_png(w: u32, h: u32, hue: f32) -> Vec<u8> {
+pub fn fake_png(w: u32, h: u32, hue: f32) -> Vec<u8> {
     use tiny_skia::{Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point, Rect, SpreadMode, Transform};
     let rgb = |hue: f32, s: f32, l: f32| {
         let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
@@ -1050,6 +1058,25 @@ fn fake_log() -> &'static FakeLog {
         let gone = |store: &mut Store, ids: Vec<u64>, place: Place, when: i64, bulk: bool| {
             store.delete(&Deletion { ids, place, ts_ms: when, bulk }, 7).unwrap();
         };
+        // Who the audit log says deleted them: a mod, a bot, or nobody on record (their own).
+        let deleted_by = |store: &mut Store, ids: &[u64], author: u64, channel: u64, when: i64, bulk: bool, who: Option<(u64, &str, bool)>| {
+            use super::super::super::msglog::{AuditDelete, Removal};
+            let removals: Vec<Removal> = ids.iter().map(|id| Removal { message_id: *id, author_id: author, channel_id: channel, ts_ms: when, bulk }).collect();
+            let entries: Vec<AuditDelete> = who
+                .map(|(id, name, bot)| AuditDelete {
+                    id: snowflake(when + 700, 99),
+                    executor: id,
+                    executor_name: name.into(),
+                    executor_bot: bot,
+                    target: Some(if bulk { channel } else { author }),
+                    channel: (!bulk).then_some(channel),
+                    count: ids.len() as u64,
+                    bulk,
+                })
+                .into_iter()
+                .collect();
+            store.record_deleters(&removals, Some(&entries)).unwrap();
+        };
 
         // Older than the longest period: never listed, but its pictures are asked for.
         let evil = msg(now - 40 * day, 2036, at(24, "music", None), "old", vec![]);
@@ -1076,6 +1103,7 @@ fn fake_log() -> &'static FakeLog {
             keep(&mut store, m, &[]);
         }
         gone(&mut store, spam.iter().map(|m| m.message_id).collect(), at(22, "memes", None), now - 5 * day + 2 * min, true);
+        deleted_by(&mut store, &spam.iter().map(|m| m.message_id).collect::<Vec<_>>(), 2042, 22, now - 5 * day + 2 * min, true, Some((9001, "Wick", true)));
         let dev = msg(now - 2 * day - 5 * hour, 2010, at(21, "general", None), "RCB will win it this year, screenshot this", vec![]);
         keep(&mut store, &dev, &[]);
         store.edit(dev.message_id, "RCB will win it this year (probably), screenshot this", now - 2 * day - 5 * hour + min).unwrap();
@@ -1083,18 +1111,51 @@ fn fake_log() -> &'static FakeLog {
         meme.reply_to = Some(dev.message_id);
         keep(&mut store, &meme, &[fake_png(640, 420, 210.0)]);
         gone(&mut store, vec![meme.message_id], at(22, "memes", None), now - 2 * day + 40 * min, false);
+        deleted_by(&mut store, &[meme.message_id], 2007, 22, now - 2 * day + 40 * min, false, Some((9002, "Dyno", true)));
         let meera = msg(now - 26 * hour - 5 * min, 2003, at(21, "general", None), "quiz at 9 tonight", vec![]);
         keep(&mut store, &meera, &[]);
         store.edit(meera.message_id, "quiz at 9:30 tonight, not 9 - sorry!", now - 26 * hour).unwrap();
         let kavya = msg(now - 20 * hour, 2023, at(78, "koto-spoilers", Some(21)), "koto spoiler: today's word is PLANET", vec![]);
         keep(&mut store, &kavya, &[]);
         gone(&mut store, vec![kavya.message_id], at(78, "koto-spoilers", Some(21)), now - 20 * hour + min, false);
+        deleted_by(&mut store, &[kavya.message_id], 2023, 78, now - 20 * hour + min, false, Some((2003, "Meera", false)));
         let nikhil = msg(now - 7 * hour - 2 * min, 2020, at(23, "desi-banter", None), "that zebra meme was mine", vec![]);
         keep(&mut store, &nikhil, &[]);
         store.edit(nikhil.message_id, "that zebrafish meme was mine", now - 7 * hour).unwrap();
         let nikhil2 = msg(now - 6 * hour, 2020, at(23, "desi-banter", None), "the ZEBRAFISH meme was mine actually, ask Dev", vec![]);
         keep(&mut store, &nikhil2, &[]);
         gone(&mut store, vec![nikhil2.message_id], at(23, "desi-banter", None), now - 6 * hour + 5 * min, false);
+        deleted_by(&mut store, &[nikhil2.message_id], 2020, 23, now - 6 * hour + 5 * min, false, None);
+        // What Discord's AutoMod blocked: filed where they tried to post.
+        {
+            use super::super::super::msglog::{Alert, Blocked};
+            let blocked = |store: &mut Store, at_ms: i64, uid: u64, place: Place, text: &str, rule: &str, keyword: &str, matched: &str| {
+                let id = snowflake(at_ms, 55);
+                store
+                    .insert_blocked(&Blocked {
+                        message_id: id,
+                        place,
+                        author_id: uid,
+                        author_name: name_of(uid),
+                        avatar: String::new(),
+                        created_ms: at_ms,
+                        alert: Alert {
+                            content: text.into(),
+                            rule_name: Some(rule.into()),
+                            channel_id: None,
+                            decision_id: Some("1419000000000000077".into()),
+                            keyword: (!keyword.is_empty()).then(|| keyword.to_string()),
+                            matched: Some(matched.into()),
+                            outcome: Some("blocked".into()),
+                        },
+                        alert_channel: 1_516_779_799_865_987_101,
+                    })
+                    .unwrap();
+            };
+            blocked(&mut store, now - 2 * hour - 7 * min, 2020, at(23, "desi-banter", None), "tu ekdum chutiya hai, college waali", "Block slurs", "*chutiya*", "chutiya");
+            blocked(&mut store, now - 30 * hour, 2014, at(21, "general", None), "free nitro here → discord-gift.example/claim", "Block scam links", "*discord-gift*", "discord-gift");
+            blocked(&mut store, now - 3 * min, 2012, at(SAFE, "safe-corner", None), "SECRET-SAFE blocked words", "Block slurs", "", "x");
+        }
         let zoya = msg(now - 5 * hour - 3 * min, 2007, at(78, "koto-spoilers", Some(21)), "see you in lounge at 10", vec![]);
         keep(&mut store, &zoya, &[]);
         store.edit(zoya.message_id, "see you in lounge at 10:30", now - 5 * hour).unwrap();
@@ -3693,8 +3754,13 @@ async fn searching_inside_a_member_and_across_the_server() {
     assert_eq!(texts(&mine), vec!["ravenclaw needs one more for the houseparty team", "who is counting points for the houseparty though"]);
     // And inside one channel.
     let (_, chan) = said_api(&app, &session, "q=word&channel=21&days=all").await;
-    assert_eq!(chan["count"], 2, "a thread counts as the channel it is in: {chan}");
+    assert_eq!(chan["count"], 3, "a thread counts as the channel it is in: {chan}");
     assert!(chan["results"].as_array().unwrap().iter().all(|r| r["channel"]["name"] == "koto-spoilers" && r["channel"]["thread"] == true));
+    // One of them was deleted by a mod: it is back in its place, marked, with who removed it.
+    let gone: Vec<&Value> = chan["results"].as_array().unwrap().iter().filter(|r| !r["gone"].is_null()).collect();
+    assert_eq!(gone.len(), 1, "{chan}");
+    assert_eq!((gone[0]["text"].as_str(), gone[0]["gone"]["kind"].as_str(), gone[0]["gone"]["by"]["name"].as_str()), (Some("koto spoiler: today's word is PLANET"), Some("deleted"), Some("Meera")));
+    assert!(gone[0]["url"].is_null(), "a deleted message has nothing to jump to");
 
     // Case doesn't matter, and a word nobody said finds nothing rather than erroring.
     let (_, upper) = said_api(&app, &session, "q=HOUSEPARTY&days=all").await;
@@ -3791,7 +3857,7 @@ async fn deleted_messages_list_newest_first_with_pictures_and_never_safe_corner(
     let session = session_for(ADMIN);
     let (status, body) = log_api(&app, &session, "deleted", "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!((body["days"].as_str(), body["keep_days"].as_i64(), body["log_days"].as_i64()), (Some("30"), Some(7), Some(30)));
+    assert_eq!((body["days"].as_str(), body["keep_days"].as_i64(), body["log_days"].as_i64()), (Some("30"), Some(7), Some(365)), "the log is kept as long as the text");
     let texts = log_texts(&body, "text");
     assert!(!body.to_string().contains("SECRET"), "safe corner rows never leave the server: {texts:?}");
     assert_eq!(body["count"], 12, "{texts:?}");
@@ -3872,7 +3938,7 @@ async fn deleted_messages_filter_page_and_check_their_input() {
     assert_eq!(pages, vec![5, 5, 2]);
     assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 12);
 
-    for bad in ["days=90", "days=all", "member=abc", &format!("channel={SAFE}"), "channel=x", "before=0", "before=-3", "limit=lots", &format!("q={}", "x".repeat(101))] {
+    for bad in ["days=14", "days=all", "member=abc", &format!("channel={SAFE}"), "channel=x", "before=0", "before=-3", "limit=lots", &format!("q={}", "x".repeat(101))] {
         for which in ["deleted", "edited"] {
             let (status, body) = log_api(&app, &session, which, bad).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{which} {bad}: {body}");

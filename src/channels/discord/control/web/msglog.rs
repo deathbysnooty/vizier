@@ -18,7 +18,7 @@ use super::{ApiError, ApiResult, Caller, ChannelInfo, Panel, ok, parse_id, searc
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 100;
 pub const MAX_QUERY: usize = 100;
-pub const PERIODS: [(&str, i64); 3] = [("1", 1), ("7", 7), ("30", 30)];
+pub const PERIODS: [(&str, i64); 5] = [("1", 1), ("7", 7), ("30", 30), ("90", 90), ("365", 365)];
 const DAY_MS: i64 = 86_400_000;
 
 #[derive(Deserialize)]
@@ -66,7 +66,7 @@ fn read_query(panel: &Panel, q: &LogQuery) -> Result<Asked, ApiError> {
         None => None,
     };
     let days_key = blank(&q.days).unwrap_or_else(|| "30".to_string());
-    let days = PERIODS.iter().find(|(k, _)| *k == days_key).map(|(_, d)| *d).ok_or_else(|| ApiError::bad("The period is 1, 7 or 30 days."))?;
+    let days = PERIODS.iter().find(|(k, _)| *k == days_key).map(|(_, d)| *d).ok_or_else(|| ApiError::bad("The period is 1, 7, 30, 90 or 365 days."))?;
     let text = blank(&q.q);
     if text.as_ref().is_some_and(|t| t.chars().count() > MAX_QUERY) {
         return Err(ApiError::bad(format!("Keep the search under {} characters.", MAX_QUERY)));
@@ -218,6 +218,9 @@ pub async fn deleted(State(panel): State<Panel>, axum::Extension(Caller(user)): 
                 "text": r.content,
                 "reason": r.reason,
                 "bulk": r.bulk,
+                // Who deleted it: the audit log's executor, or (checked, none) the author or unknown.
+                "deleter": r.deleter,
+                "deleter_checked": r.deleter_checked,
                 "reply_to": r.reply_to.map(|id| json!({ "id": id.to_string(), "author": r.reply_author, "text": r.reply_text })),
                 "images": r.files.iter().map(|f| json!({ "n": f.n, "name": f.name, "url": format!("/api/msglog/file/{}/{}", r.message_id, f.n) })).collect::<Vec<_>>(),
                 "files": r.attachments.iter().filter(|a| !saved.contains(a.filename.as_str())).map(|a| json!({
@@ -264,6 +267,44 @@ pub async fn edited(State(panel): State<Panel>, axum::Extension(Caller(user)): a
     ok(envelope(&asked, names, results, page.next_before))
 }
 
+/// Messages Discord's AutoMod blocked: never seen in the channel they were
+/// aimed at, so the alert is the only record. Filed under that channel.
+pub async fn blocked(State(panel): State<Panel>, axum::Extension(Caller(user)): axum::Extension<Caller>, Query(q): Query<LogQuery>) -> ApiResult {
+    let asked = read_query(&panel, &q)?;
+    let names = log_look(&panel, user, "Blocked", &asked).await;
+    let page = panel.data.msglog_blocked(filter(&panel, &asked)).await.map_err(unavailable)?;
+    let channels = panel.data.channels();
+    let sensitive = never_shown(&panel);
+    let houses = houses_for(&panel, page.rows.iter().map(|r| r.author_id).collect()).await;
+    let guild = panel.data.guild().map(|g| g.id);
+    let results: Vec<Value> = page
+        .rows
+        .iter()
+        .filter_map(|r| {
+            let place = Place { channel_id: r.channel_id, parent_id: r.parent_id, channel_name: r.channel_name.clone() };
+            let shown = channel_json(&place, &channels, &sensitive)?;
+            Some(json!({
+                "id": r.message_id.to_string(),
+                "message_id": r.message_id.to_string(),
+                "member": member_json(&panel, r.author_id, &r.author_name, &r.avatar),
+                "house": house_json(houses.get(&r.author_id)),
+                "channel": shown,
+                "sent_ts": r.created_ms / 1000,
+                "text": r.content,
+                "rule": r.rule_name,
+                "keyword": r.keyword,
+                "matched": r.matched,
+                "outcome": r.outcome,
+                // It never reached the channel: the link opens the channel it was aimed at.
+                "url": guild.as_ref().map(|g| format!("https://discord.com/channels/{}/{}", g, r.channel_id)),
+            }))
+        })
+        .collect();
+    let mut out = envelope(&asked, names, results, page.next_before);
+    out["text_days"] = json!(msglog::text_days());
+    ok(out)
+}
+
 /// A saved picture of a deleted message, for admins only.
 pub async fn file(State(panel): State<Panel>, Path((id, n)): Path<(String, String)>) -> ApiResult {
     let id = parse_id(&id).ok_or_else(|| ApiError::bad("That isn't a message id."))?;
@@ -280,7 +321,11 @@ pub async fn file(State(panel): State<Panel>, Path((id, n)): Path<(String, Strin
 /// How a look at the log reads in the activity log.
 pub fn audit_entry(e: &super::super::AuditEntry) -> serde_json::Map<String, Value> {
     let mut obj = serde_json::Map::new();
-    let label = if e.key == "msglog:edited" { "Looked at edited messages" } else { "Looked at deleted messages" };
+    let label = match e.key.as_str() {
+        "msglog:edited" => "Looked at edited messages",
+        "msglog:blocked" => "Looked at messages AutoMod blocked",
+        _ => "Looked at deleted messages",
+    };
     obj.insert("label".into(), json!(label));
     obj.insert("section".into(), json!({ "id": "msglog", "title": "Deleted messages", "icon": "🗑️" }));
     let change = e.new.clone().unwrap_or_else(|| "Looked".into());

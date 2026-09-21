@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 
 use super::control;
 use super::kalesh_store::{self as store, NewDetection, Participant};
-use super::msglog::{self, SaidRow};
+use super::msglog::{self, Gone, GoneFilter, SaidRow};
 
 /// Both talking in one channel within this long of each other counts as engaging.
 pub const NEAR_MS: i64 = 5 * 60_000;
@@ -38,7 +38,10 @@ pub const AUTHOR_ROWS: usize = 20_000;
 pub const EXCHANGE_ROWS: usize = 3_000;
 /// Longest a single message is in the prompt; longer ones are cut and say so.
 pub const MAX_TEXT_CHARS: usize = 1_200;
-const MODEL_WAIT: Duration = Duration::from_secs(180);
+/// How long one try at a summary may take. A whole period is a long prompt.
+const MODEL_WAIT: Duration = Duration::from_secs(240);
+/// The most members one look may be about.
+pub const MAX_PEOPLE: usize = 6;
 
 /// How many messages the model may be shown for one summary.
 pub fn summary_max() -> usize {
@@ -131,40 +134,48 @@ pub async fn judge_and_record(channel: u64, window: Vec<Seen>, verdict: impl Fut
 
 // --- reading the message log ------------------------------------------------------------------
 
-/// Two members' own messages between two moments (`until` inclusive), oldest
-/// first, optionally in one channel only.
-pub fn authors_between(conn: &Connection, a: u64, b: u64, since_ms: i64, until_ms: i64, channel: Option<u64>, limit: usize) -> rusqlite::Result<Vec<SaidRow>> {
+/// Oldest first by id, one row per message, at most `limit`.
+fn in_order(mut rows: Vec<SaidRow>, limit: usize) -> Vec<SaidRow> {
+    rows.sort_by_key(|r| r.message_id);
+    rows.dedup_by_key(|r| r.message_id);
+    rows.truncate(limit);
+    rows
+}
+
+/// The chosen members' own messages between two moments (`until` inclusive),
+/// oldest first, optionally in one channel only. Their deleted and blocked
+/// messages are in it too, in their place, marked.
+pub fn authors_between(conn: &Connection, people: &[u64], since_ms: i64, until_ms: i64, channel: Option<u64>, limit: usize) -> rusqlite::Result<Vec<SaidRow>> {
+    let (lo, hi) = (msglog::first_id_at(since_ms), msglog::first_id_at(until_ms + 1));
+    let mut out = Vec::new();
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT {} FROM recent WHERE author_id IN (?1, ?2) AND message_id >= ?3 AND message_id < ?4
-           AND (?5 IS NULL OR channel_id = ?5) ORDER BY message_id LIMIT ?6",
+        "SELECT {} FROM recent WHERE author_id = ?1 AND message_id >= ?2 AND message_id < ?3
+           AND (?4 IS NULL OR channel_id = ?4) ORDER BY message_id LIMIT ?5",
         msglog::SAID_COLUMNS
     ))?;
-    let rows = stmt.query_map(
-        params![
-            a as i64,
-            b as i64,
-            msglog::first_id_at(since_ms) as i64,
-            msglog::first_id_at(until_ms + 1) as i64,
-            channel.map(|c| c as i64),
-            limit as i64
-        ],
-        msglog::said_row,
-    )?;
-    rows.collect()
+    for who in people {
+        let rows = stmt.query_map(params![*who as i64, lo as i64, hi as i64, channel.map(|c| c as i64), limit as i64], msglog::said_row)?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+    out.extend(msglog::gone_between(conn, &GoneFilter { authors: people.to_vec(), channel, with_threads: false, lo_id: lo, hi_id: hi, limit })?);
+    Ok(in_order(out, limit))
 }
 
 /// Everything said in one channel (or thread) between two moments (`until`
-/// inclusive), oldest first.
+/// inclusive), oldest first: what is still there, what was deleted, and what
+/// AutoMod blocked, each in its place.
 pub fn channel_between(conn: &Connection, channel: u64, since_ms: i64, until_ms: i64, limit: usize) -> rusqlite::Result<Vec<SaidRow>> {
+    let (lo, hi) = (msglog::first_id_at(since_ms), msglog::first_id_at(until_ms + 1));
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {} FROM recent WHERE channel_id = ?1 AND message_id >= ?2 AND message_id < ?3 ORDER BY message_id LIMIT ?4",
         msglog::SAID_COLUMNS
     ))?;
-    let rows = stmt.query_map(
-        params![channel as i64, msglog::first_id_at(since_ms) as i64, msglog::first_id_at(until_ms + 1) as i64, limit as i64],
-        msglog::said_row,
-    )?;
-    rows.collect()
+    let rows = stmt.query_map(params![channel as i64, lo as i64, hi as i64, limit as i64], msglog::said_row)?;
+    let mut out: Vec<SaidRow> = rows.collect::<rusqlite::Result<_>>()?;
+    out.extend(msglog::gone_between(conn, &GoneFilter { authors: Vec::new(), channel: Some(channel), with_threads: false, lo_id: lo, hi_id: hi, limit })?);
+    Ok(in_order(out, limit))
 }
 
 // --- finding the stretches --------------------------------------------------------------------
@@ -174,7 +185,7 @@ pub fn mentions(text: &str, id: u64) -> bool {
     text.contains(&format!("<@{}>", id)) || text.contains(&format!("<@!{}>", id))
 }
 
-/// How one message of theirs engages the other.
+/// How one message of theirs engages another of the chosen members.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Link {
@@ -183,7 +194,7 @@ pub enum Link {
     Nearby,
 }
 
-/// A stretch of one channel where the two were engaging each other.
+/// A stretch of one channel where the chosen members were engaging each other.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stretch {
     pub channel_id: u64,
@@ -191,25 +202,38 @@ pub struct Stretch {
     pub channel_name: String,
     pub start_ms: i64,
     pub end_ms: i64,
-    pub a_messages: usize,
-    pub b_messages: usize,
-    pub replies_ab: usize,
-    pub replies_ba: usize,
+    /// Each chosen member's own messages in it, in the order they were chosen.
+    pub per_person: Vec<usize>,
+    /// Replies from one chosen member to another: (from, to, how many), by position.
+    pub replies: Vec<(usize, usize, usize)>,
     pub mentions: usize,
     pub nearby: usize,
 }
 
-/// Where `a` and `b` were engaging each other, newest first. `rows` are their
-/// own messages (anyone else's are ignored), in any order.
+impl Stretch {
+    pub fn reply_count(&self) -> usize {
+        self.replies.iter().map(|r| r.2).sum()
+    }
+    /// Replies from `from` to `to` (positions).
+    pub fn replies_from(&self, from: usize, to: usize) -> usize {
+        self.replies.iter().filter(|r| r.0 == from && r.1 == to).map(|r| r.2).sum()
+    }
+}
+
+/// Where the chosen members (two to six) were engaging each other, newest first.
+/// `rows` are their own messages (anyone else's are ignored), in any order.
 ///
-/// A message counts when it replies to the other, mentions them, or was sent
-/// within [`NEAR_MS`] of the other talking in the same channel. A reply also
-/// pulls the message it answers into the stretch. Engaging messages in one
-/// channel no more than [`JOIN_GAP_MS`] apart make one stretch; a stretch is
-/// listed when it has a reply or a mention, or at least two messages from each.
-pub fn find_stretches(rows: &[SaidRow], a: u64, b: u64) -> Vec<Stretch> {
-    let mut own: Vec<&SaidRow> = rows.iter().filter(|r| r.author_id == a || r.author_id == b).collect();
+/// A message counts when it replies to another of them, mentions one, or was
+/// sent within [`NEAR_MS`] of another of them talking in the same channel. A
+/// reply also pulls the message it answers into the stretch. Engaging messages
+/// in one channel no more than [`JOIN_GAP_MS`] apart make one stretch; a stretch
+/// is listed when it has a reply or a mention, or at least two messages from
+/// each of at least two of them.
+pub fn find_stretches(rows: &[SaidRow], people: &[u64]) -> Vec<Stretch> {
+    let pos = |id: u64| people.iter().position(|p| *p == id);
+    let mut own: Vec<&SaidRow> = rows.iter().filter(|r| pos(r.author_id).is_some()).collect();
     own.sort_by_key(|r| r.message_id);
+    own.dedup_by_key(|r| r.message_id);
     let author_of: HashMap<u64, u64> = own.iter().map(|r| (r.message_id, r.author_id)).collect();
     let time_of: HashMap<u64, i64> = own.iter().map(|r| (r.message_id, r.created_ms)).collect();
     let mut names: HashMap<u64, HashSet<String>> = HashMap::new();
@@ -224,30 +248,38 @@ pub fn find_stretches(rows: &[SaidRow], a: u64, b: u64) -> Vec<Stretch> {
         }
     }
 
+    // (time, what it was: a link from one position, or a reply target's time).
+    type Point = (i64, Option<(Link, usize, Option<usize>)>);
     let mut out = Vec::new();
     for (channel, list) in by_channel {
-        // (time, link, from a) for every engaging message; reply targets add their time.
-        let mut points: Vec<(i64, Option<(Link, bool)>)> = Vec::new();
+        let mut points: Vec<Point> = Vec::new();
         for (i, r) in list.iter().enumerate() {
-            let other = if r.author_id == a { b } else { a };
-            let replied = r.reply_to.is_some_and(|to| match author_of.get(&to) {
-                Some(author) => *author == other,
-                None => r.reply_author.as_ref().is_some_and(|n| names.get(&other).is_some_and(|set| set.contains(&n.to_lowercase()))),
+            let me = pos(r.author_id).unwrap_or(0);
+            // A blocked message was never in the channel: it can't be replied to,
+            // but it is aimed at whoever it names, and it sits in time like any other.
+            let replied_to = r.reply_to.and_then(|to| match author_of.get(&to) {
+                Some(author) => pos(*author).filter(|p| *p != me),
+                None => r.reply_author.as_ref().and_then(|n| {
+                    let n = n.to_lowercase();
+                    people.iter().position(|p| *p != r.author_id && names.get(p).is_some_and(|set| set.contains(&n)))
+                }),
             });
+            let mentioned = people.iter().position(|p| *p != r.author_id && mentions(&r.content, *p));
             let near = || {
-                let back = list[..i].iter().rev().take_while(|o| r.created_ms - o.created_ms <= NEAR_MS).any(|o| o.author_id == other);
-                back || list[i + 1..].iter().take_while(|o| o.created_ms - r.created_ms <= NEAR_MS).any(|o| o.author_id == other)
+                let other = |o: &&&SaidRow| o.author_id != r.author_id;
+                let back = list[..i].iter().rev().take_while(|o| r.created_ms - o.created_ms <= NEAR_MS).any(|o| other(&o));
+                back || list[i + 1..].iter().take_while(|o| o.created_ms - r.created_ms <= NEAR_MS).any(|o| other(&o))
             };
-            let link = if replied {
-                Link::Reply
-            } else if mentions(&r.content, other) {
-                Link::Mention
+            let (link, to) = if let Some(to) = replied_to {
+                (Link::Reply, Some(to))
+            } else if let Some(to) = mentioned {
+                (Link::Mention, Some(to))
             } else if near() {
-                Link::Nearby
+                (Link::Nearby, None)
             } else {
                 continue;
             };
-            points.push((r.created_ms, Some((link, r.author_id == a))));
+            points.push((r.created_ms, Some((link, me, to))));
             if link == Link::Reply {
                 if let Some(t) = r.reply_to.and_then(|to| time_of.get(&to)) {
                     if list.iter().any(|o| Some(o.message_id) == r.reply_to) {
@@ -257,7 +289,7 @@ pub fn find_stretches(rows: &[SaidRow], a: u64, b: u64) -> Vec<Stretch> {
             }
         }
         points.sort_by_key(|p| p.0);
-        let mut groups: Vec<Vec<(i64, Option<(Link, bool)>)>> = Vec::new();
+        let mut groups: Vec<Vec<Point>> = Vec::new();
         for p in points {
             match groups.last_mut() {
                 Some(g) if p.0 - g.last().map(|x| x.0).unwrap_or(p.0) <= JOIN_GAP_MS => g.push(p),
@@ -266,22 +298,31 @@ pub fn find_stretches(rows: &[SaidRow], a: u64, b: u64) -> Vec<Stretch> {
         }
         for g in groups {
             let (start_ms, end_ms) = (g[0].0, g[g.len() - 1].0);
-            let inside = |author: u64| list.iter().filter(|r| r.author_id == author && r.created_ms >= start_ms && r.created_ms <= end_ms).count();
-            let count = |want: Link, from_a: Option<bool>| g.iter().filter(|(_, l)| l.is_some_and(|(k, fa)| k == want && from_a.is_none_or(|x| x == fa))).count();
+            let per_person: Vec<usize> =
+                people.iter().map(|p| list.iter().filter(|r| r.author_id == *p && r.created_ms >= start_ms && r.created_ms <= end_ms).count()).collect();
+            let mut replies: Vec<(usize, usize, usize)> = Vec::new();
+            for (_, l) in &g {
+                if let Some((Link::Reply, from, Some(to))) = l {
+                    match replies.iter_mut().find(|r| r.0 == *from && r.1 == *to) {
+                        Some(r) => r.2 += 1,
+                        None => replies.push((*from, *to, 1)),
+                    }
+                }
+            }
+            replies.sort();
+            let count = |want: Link| g.iter().filter(|(_, l)| l.is_some_and(|(k, _, _)| k == want)).count();
             let s = Stretch {
                 channel_id: channel,
                 parent_id: list[0].parent_id,
                 channel_name: list[0].channel_name.clone(),
                 start_ms,
                 end_ms,
-                a_messages: inside(a),
-                b_messages: inside(b),
-                replies_ab: count(Link::Reply, Some(true)),
-                replies_ba: count(Link::Reply, Some(false)),
-                mentions: count(Link::Mention, None),
-                nearby: count(Link::Nearby, None),
+                per_person,
+                replies,
+                mentions: count(Link::Mention),
+                nearby: count(Link::Nearby),
             };
-            if s.replies_ab + s.replies_ba + s.mentions > 0 || (s.a_messages >= 2 && s.b_messages >= 2) {
+            if s.reply_count() + s.mentions > 0 || s.per_person.iter().filter(|n| **n >= 2).count() >= 2 {
                 out.push(s);
             }
         }
@@ -292,13 +333,34 @@ pub fn find_stretches(rows: &[SaidRow], a: u64, b: u64) -> Vec<Stretch> {
 
 // --- laying the exchange out ----------------------------------------------------------------------
 
-/// Whose side of the exchange a message is on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// Whose side of the exchange a message is on: one of the chosen members (by
+/// position, shown as A, B, C…), or a bystander.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
-    A,
-    B,
+    Person(usize),
     Other,
+}
+
+impl Side {
+    pub const A: Side = Side::Person(0);
+    pub const B: Side = Side::Person(1);
+
+    /// "A", "B", … for a chosen member.
+    pub fn letter(self) -> Option<char> {
+        match self {
+            Side::Person(i) => Some((b'A' + (i as u8).min(25)) as char),
+            Side::Other => None,
+        }
+    }
+}
+
+impl Serialize for Side {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.letter() {
+            Some(c) => s.serialize_str(&c.to_ascii_lowercase().to_string()),
+            None => s.serialize_str("other"),
+        }
+    }
 }
 
 /// One message of a stretch, numbered from 1 in order.
@@ -307,19 +369,20 @@ pub struct Line<'a> {
     pub n: usize,
     pub row: &'a SaidRow,
     pub side: Side,
-    /// Which of the two it replies to or mentions (never the author themselves).
+    /// Which chosen member it replies to or mentions (never the author themselves).
     pub towards: Option<Side>,
     /// The number of the message it replies to, when that is in the stretch too.
     pub reply_n: Option<usize>,
 }
 
 /// Every message of a stretch in order, bystanders included, each marked with
-/// whose it is and which of the two it is aimed at.
-pub fn exchange(rows: &[SaidRow], a: u64, b: u64) -> Vec<Line<'_>> {
+/// whose it is and which of the chosen members it is aimed at.
+pub fn exchange<'a>(rows: &'a [SaidRow], people: &[u64]) -> Vec<Line<'a>> {
     let mut sorted: Vec<&SaidRow> = rows.iter().collect();
     sorted.sort_by_key(|r| r.message_id);
+    sorted.dedup_by_key(|r| r.message_id);
     let index: HashMap<u64, (usize, u64)> = sorted.iter().enumerate().map(|(i, r)| (r.message_id, (i + 1, r.author_id))).collect();
-    let side_of = |author: u64| if author == a { Side::A } else if author == b { Side::B } else { Side::Other };
+    let side_of = |author: u64| people.iter().position(|p| *p == author).map(Side::Person).unwrap_or(Side::Other);
     sorted
         .iter()
         .enumerate()
@@ -327,23 +390,36 @@ pub fn exchange(rows: &[SaidRow], a: u64, b: u64) -> Vec<Line<'_>> {
             let side = side_of(r.author_id);
             let target = r.reply_to.and_then(|to| index.get(&to).copied());
             let replied_side = target.map(|(_, author)| side_of(author)).filter(|s| *s != Side::Other && *s != side);
-            let (ma, mb) = (side != Side::A && mentions(&r.content, a), side != Side::B && mentions(&r.content, b));
-            let mentioned = match (ma, mb) {
-                (true, false) => Some(Side::A),
-                (false, true) => Some(Side::B),
-                _ => None,
-            };
+            let named: Vec<Side> = people.iter().enumerate().filter(|(_, p)| **p != r.author_id && mentions(&r.content, **p)).map(|(i, _)| Side::Person(i)).collect();
+            let mentioned = (named.len() == 1).then(|| named[0]);
             Line { n: i + 1, row: *r, side, towards: replied_side.or(mentioned), reply_n: target.map(|(n, _)| n) }
         })
         .collect()
 }
 
-/// What identifies one stretch's summary: the pair, the channel and the exact
-/// messages. A stretch that has grown since is a new stretch.
-pub fn stretch_key(a: u64, b: u64, channel: u64, lines: &[Line]) -> String {
+/// The chosen members, lowest id first: the same group whichever order it was asked in.
+fn group(people: &[u64]) -> String {
+    let mut ids = people.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("-")
+}
+
+fn span_of(lines: &[Line]) -> String {
     let first = lines.first().map(|l| l.row.message_id).unwrap_or(0);
     let last = lines.last().map(|l| l.row.message_id).unwrap_or(0);
-    format!("{}-{}:{}:{}-{}:{}", a.min(b), a.max(b), channel, first, last, lines.len())
+    format!("{}-{}:{}", first, last, lines.len())
+}
+
+/// What identifies one stretch's summary: the group, the channel and the exact
+/// messages. A stretch that has grown since is a new stretch.
+pub fn stretch_key(people: &[u64], channel: u64, lines: &[Line]) -> String {
+    format!("{}:{}:{}", group(people), channel, span_of(lines))
+}
+
+/// What identifies a whole period's summary: the group and the exact messages.
+pub fn period_key(people: &[u64], lines: &[Line]) -> String {
+    format!("period:{}:{}", group(people), span_of(lines))
 }
 
 // --- the prompt ------------------------------------------------------------------------------------
@@ -388,10 +464,17 @@ pub struct Prompt {
     pub trimmed: bool,
 }
 
+/// What a summary covers: one stretch in one channel, or every stretch of a period.
+#[derive(Clone, Copy, Debug)]
+pub enum Scope<'a> {
+    Stretch { channel_name: &'a str },
+    Period { label: &'a str, stretches: usize },
+}
+
 /// The instructions every summary is written under. Kept whole so the tests can
 /// hold it to its promises.
 pub const INSTRUCTIONS: &str = "\
-You are helping the moderators of MLCI, an Indian Discord server, understand an argument between two members. \
+You are helping the moderators of MLCI, an Indian Discord server, understand an argument between members. \
 A moderator asked for this. They will read the actual messages as well and decide for themselves; your job is to \
 make the messages easier to follow, not to judge anyone.
 
@@ -401,20 +484,30 @@ friendly abuse, \"bhai chup kar\", memes and loud banter are normal here and are
 banter as banter, and say so when that is what you see. Do not translate insults literally out of context, and do \
 not treat a swear word as serious unless it is aimed at someone to hurt them.
 
+Some messages carry a marker in square brackets after the name:
+- [DELETED ...] - the message was posted and seen in the channel, and removed later. The marker says how much later \
+and by whom when that is known (a moderator, a bot, or probably the author themselves). Others may have read it and \
+reacted to it.
+- [BLOCKED BY AUTOMOD ...] - the person tried to send this and Discord's AutoMod stopped it. It never appeared in the \
+channel: nobody there saw it, so nobody replied to it or reacted to it. It still shows what the person tried to say.
+Both are part of what happened. Include them in the timeline and in the flags like any other message, say plainly \
+when a message was deleted or blocked if it matters, and never write as if anyone responded to a blocked message.
+
 Rules:
 1. Be neutral. Do not say who was right or who won, do not take sides, do not assign blame, and do not guess at \
 anyone's feelings, motives, character or mental state. Describe; do not diagnose.
 2. Keep what was said separate from interpretation. The trigger, timeline, positions, others and ending report what \
 people said and did, paraphrased fairly in plain English. Anything that is your reading between the lines goes only \
 in \"interpretation\", hedged (\"seems\", \"may\"), and that list may be empty.
-3. Give both people the same care. Paraphrase each person's main points the way they would put them, strongest \
-version first, in similar length.
+3. Give every person named below the same care. Paraphrase each person's main points the way they would put them, \
+strongest version first, in similar length.
 4. Refer to messages by their number, like [#12]. Only use numbers that appear below.
 5. Flag anything a moderator may need to act on, each with the exact message number: slurs (caste, religious, \
 regional, racial, sexual orientation, disability), threats of harm, sharing someone's personal information (real \
 name, phone number, address, photos, school or workplace), sexual content aimed at a person, and harassment that \
-continued after someone asked for it to stop. Ordinary swearing and roasting are not flags. If there is nothing, \
-return an empty list: do not invent flags to seem thorough.
+continued after someone asked for it to stop. A deleted or blocked message is flagged the same way as any other. \
+Ordinary swearing and roasting are not flags. If there is nothing, return an empty list: do not invent flags to \
+seem thorough.
 6. Write in plain English. Quote Hinglish only when the exact words matter, with a short translation in brackets.
 
 Reply with JSON only, in exactly this shape:
@@ -429,7 +522,7 @@ Reply with JSON only, in exactly this shape:
   \"flags\": [{\"kind\": \"slur | threat | personal_info | sexual | harassment_after_stop\", \"who\": \"name\", \"message\": 12, \"what\": \"one line on what was said\"}]
 }
 Keep the timeline to at most 12 points, in order, with the time of the message each point starts at. \
-\"positions\" has one entry for each of the two people, A first.";
+\"positions\" has one entry for each person named below (A, B, …), in that order, even one who said little.";
 
 fn flat(text: &str) -> String {
     let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -449,22 +542,58 @@ fn named(text: &str, names: &HashMap<u64, String>) -> String {
     out
 }
 
-/// The whole prompt for one stretch.
-pub fn build_prompt(a_name: &str, b_name: &str, channel_name: &str, lines: &[Line], max: usize) -> Prompt {
+/// "3 min", "under a minute", "2 hours": how long after it was sent.
+pub fn later(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s < 60 {
+        "under a minute".into()
+    } else if s < 3600 {
+        format!("{} min", (s + 30) / 60)
+    } else if s < 86_400 {
+        let h = (s + 1800) / 3600;
+        format!("{} hour{}", h, if h == 1 { "" } else { "s" })
+    } else {
+        let d = (s + 43_200) / 86_400;
+        format!("{} day{}", d, if d == 1 { "" } else { "s" })
+    }
+}
+
+/// The marker a deleted or blocked message carries in the prompt, or nothing.
+pub fn marker(row: &SaidRow, people: &HashMap<u64, String>) -> Option<String> {
+    match row.gone.as_ref()? {
+        Gone::Deleted { deleted_ms, checked, by, bulk } => {
+            let who = match by {
+                Some(d) if d.id == row.author_id => " by the author".to_string(),
+                Some(d) if d.bot => format!(" by {} (a bot)", d.name),
+                Some(d) => format!(" by {} (a moderator)", people.get(&d.id).cloned().unwrap_or_else(|| d.name.clone())),
+                None if *bulk => ", in a bulk delete by a moderator or bot".to_string(),
+                None if *checked => ", probably by the author themselves".to_string(),
+                None => ", by someone unknown".to_string(),
+            };
+            Some(format!("[DELETED {} later{}]", later(deleted_ms - row.created_ms), who))
+        }
+        Gone::Blocked { rule, .. } => Some(match rule {
+            Some(rule) => format!("[BLOCKED BY AUTOMOD, rule \"{}\" - never shown in the channel]", rule),
+            None => "[BLOCKED BY AUTOMOD - never shown in the channel]".to_string(),
+        }),
+    }
+}
+
+/// The whole prompt for one stretch, or for every stretch of a period.
+pub fn build_prompt(names: &[String], scope: Scope, lines: &[Line], max: usize) -> Prompt {
     let total = lines.len();
     let times: Vec<i64> = lines.iter().map(|l| l.row.created_ms).collect();
     let ranges = pick(&times, max);
     let sent: usize = ranges.iter().map(|r| r.len()).sum();
     let trimmed = sent < total;
 
-    let mut names: HashMap<u64, String> = HashMap::new();
+    let mut known: HashMap<u64, String> = HashMap::new();
     for l in lines {
-        names.entry(l.row.author_id).or_insert_with(|| l.row.author_name.clone());
+        known.entry(l.row.author_id).or_insert_with(|| l.row.author_name.clone());
     }
-    let label = |l: &Line| match l.side {
-        Side::A => format!("{} (A)", l.row.author_name),
-        Side::B => format!("{} (B)", l.row.author_name),
-        Side::Other => l.row.author_name.clone(),
+    let label = |l: &Line| match l.side.letter() {
+        Some(c) => format!("{} ({})", l.row.author_name, c),
+        None => l.row.author_name.clone(),
     };
     let mut others: Vec<String> = Vec::new();
     for l in lines.iter().filter(|l| l.side == Side::Other) {
@@ -472,19 +601,44 @@ pub fn build_prompt(a_name: &str, b_name: &str, channel_name: &str, lines: &[Lin
             others.push(l.row.author_name.clone());
         }
     }
+    let (deleted, blocked) = (lines.iter().filter(|l| l.row.deleted()).count(), lines.iter().filter(|l| l.row.blocked()).count());
 
     let mut text = String::with_capacity(INSTRUCTIONS.len() + sent * 120);
     text.push_str(INSTRUCTIONS);
     text.push_str("\n\n---\n\n");
-    text.push_str(&format!("The two people: A = {}, B = {}.\n", a_name, b_name));
-    text.push_str(&if others.is_empty() { "No one else spoke in this stretch.\n".to_string() } else { format!("Others who spoke: {}.\n", others.join(", ")) });
-    text.push_str(&format!("Channel: #{}. Times are India time (IST).\n", channel_name));
+    let who: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{} = {}", Side::Person(i).letter().unwrap_or('?'), n)).collect();
+    text.push_str(&format!("The {} people: {}.\n", if names.len() == 2 { "two".to_string() } else { names.len().to_string() }, who.join(", ")));
+    text.push_str(&if others.is_empty() { "No one else spoke.\n".to_string() } else { format!("Others who spoke: {}.\n", others.join(", ")) });
+    let multi_channel = lines.iter().any(|l| lines.first().is_some_and(|f| f.row.channel_id != l.row.channel_id));
+    match scope {
+        Scope::Stretch { channel_name } => text.push_str(&format!("Channel: #{}. Times are India time (IST).\n", channel_name)),
+        Scope::Period { label, stretches } => {
+            let mut chans: Vec<String> = Vec::new();
+            for l in lines {
+                let c = format!("#{}", l.row.channel_name);
+                if !chans.contains(&c) {
+                    chans.push(c);
+                }
+            }
+            text.push_str(&format!(
+                "This is everything they said to each other over a period ({}): {} separate stretches, put together in time order. \
+                 Stretches can be hours apart; treat it as one story only where it really continues. Channels: {}. \
+                 Times are India time (IST).\n",
+                label,
+                stretches,
+                chans.join(", ")
+            ));
+        }
+    }
     if let (Some(first), Some(last)) = (lines.first(), lines.last()) {
         text.push_str(&format!("{} messages, {}.\n", total, span(first.row.created_ms, last.row.created_ms)));
     }
+    if deleted + blocked > 0 {
+        text.push_str(&format!("Of these, {} were deleted later and {} were blocked by AutoMod; they are marked.\n", deleted, blocked));
+    }
     if trimmed {
         text.push_str(&format!(
-            "This stretch was too long to show whole: you are shown {} of its {} messages - how it started, the busiest part, \
+            "This was too long to show whole: you are shown {} of its {} messages - how it started, the busiest part, \
              and how it ended. Gaps are marked. Say in the overview that you saw only part of it, and do not guess at \
              what was left out.\n",
             sent, total
@@ -492,12 +646,17 @@ pub fn build_prompt(a_name: &str, b_name: &str, channel_name: &str, lines: &[Lin
     }
     text.push_str("\nMessages, numbered in order (\"↪ #9\" means a reply to message 9):\n");
     let mut last_day = String::new();
+    let mut last_channel = None;
     let mut next = 0usize;
     for r in &ranges {
         if r.start > next {
             text.push_str(&format!("[… {} messages left out …]\n", r.start - next));
         }
         for l in &lines[r.clone()] {
+            if multi_channel && last_channel != Some(l.row.channel_id) {
+                text.push_str(&format!("== in #{} ==\n", l.row.channel_name));
+                last_channel = Some(l.row.channel_id);
+            }
             let d = day(l.row.created_ms);
             if d != last_day {
                 text.push_str(&format!("-- {} --\n", d));
@@ -512,12 +671,20 @@ pub fn build_prompt(a_name: &str, b_name: &str, channel_name: &str, lines: &[Lin
                 }
                 _ => String::new(),
             };
-            let mut body = flat(&named(&l.row.content, &names));
-            if !l.row.attachments.is_empty() {
-                let files: Vec<&str> = l.row.attachments.iter().map(|x| x.filename.as_str()).collect();
-                body = format!("{}{}[attached: {}]", body, if body.is_empty() { "" } else { " " }, files.join(", "));
+            let mark = marker(l.row, &known).map(|m| format!(" {}", m)).unwrap_or_default();
+            let mut body = flat(&named(&l.row.content, &known));
+            // What was attached, by name: the model is told a picture was posted, never shown it.
+            for a in &l.row.attachments {
+                let what = if msglog::is_sticker(a) {
+                    "sticker"
+                } else if msglog::image_ext(a.content_type.as_deref(), &a.filename).is_some() {
+                    "image"
+                } else {
+                    "file"
+                };
+                body = format!("{}{}[{}: {}]", body, if body.is_empty() { "" } else { " " }, what, a.filename);
             }
-            text.push_str(&format!("#{} [{}] {}{}: {}\n", l.n, clock(l.row.created_ms), label(l), reply, body));
+            text.push_str(&format!("#{} [{}] {}{}{}: {}\n", l.n, clock(l.row.created_ms), label(l), mark, reply, body));
         }
         next = r.end;
     }
@@ -671,7 +838,12 @@ pub mod tests {
             reply_text: None,
             attachments: vec![],
             images: vec![],
+            gone: None,
         }
+    }
+
+    fn pair() -> Vec<String> {
+        vec!["gooner".to_string(), "potus".to_string()]
     }
 
     const A: u64 = 711;
@@ -689,18 +861,18 @@ pub mod tests {
         let a3 = row(T0 + 5 * 60 * MIN, 5, A, "gooner", 6, "gm", None);
         let b3 = row(T0 + 7 * 60 * MIN, 6, B, "potus", 6, "gn", None);
         let rows = vec![b2.clone(), a1.clone(), a3, b1, a2, b3];
-        let found = find_stretches(&rows, A, B);
+        let found = find_stretches(&rows, &[A, B]);
         assert_eq!(found.len(), 1, "{found:?}");
         let s = &found[0];
         assert_eq!((s.channel_id, s.start_ms, s.end_ms), (5, T0, T0 + 16 * MIN), "the reply pulls the first message in");
-        assert_eq!((s.replies_ab, s.replies_ba, s.a_messages, s.b_messages), (1, 2, 2, 2));
+        assert_eq!((s.replies_from(0, 1), s.replies_from(1, 0), s.per_person[0], s.per_person[1]), (1, 2, 2, 2));
     }
 
     #[test]
     fn a_mention_counts_and_so_does_talking_within_minutes() {
         // A lone mention is enough to list a stretch.
         let m = row(T0, 1, A, "gooner", 5, "<@935> come to vc and say that", None);
-        let found = find_stretches(&[m], A, B);
+        let found = find_stretches(&[m], &[A, B]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].mentions, 1);
         // Two each within a few minutes in the same channel, without a reply.
@@ -710,14 +882,14 @@ pub mod tests {
             row(T0 + 3 * MIN, 3, A, "gooner", 7, "sach bol raha hu", None),
             row(T0 + 4 * MIN, 4, B, "potus", 7, "clown", None),
         ];
-        let found = find_stretches(&near, A, B);
+        let found = find_stretches(&near, &[A, B]);
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].nearby, found[0].mentions), (4, 0));
         // One each, minutes apart, with no reply or mention: not enough.
-        assert!(find_stretches(&near[..2], A, B).is_empty());
+        assert!(find_stretches(&near[..2], &[A, B]).is_empty());
         // Too far apart in time to be "near".
         let far = vec![row(T0, 1, A, "g", 7, "x", None), row(T0 + 30 * MIN, 2, B, "p", 7, "y", None), row(T0 + 60 * MIN, 3, A, "g", 7, "x", None), row(T0 + 90 * MIN, 4, B, "p", 7, "y", None)];
-        assert!(find_stretches(&far, A, B).is_empty());
+        assert!(find_stretches(&far, &[A, B]).is_empty());
     }
 
     #[test]
@@ -726,7 +898,7 @@ pub mod tests {
             row(T0, 1, A, "g", 5, "<@935> oi", None),
             row(T0 + 3 * 60 * MIN, 2, B, "p", 5, "<@711> hello?", None),
         ];
-        let found = find_stretches(&rows, A, B);
+        let found = find_stretches(&rows, &[A, B]);
         assert_eq!(found.len(), 2);
         assert!(found[0].start_ms > found[1].start_ms);
     }
@@ -740,7 +912,7 @@ pub mod tests {
         let x3 = row(T0 + 4 * MIN, 5, 43, "kavya", 5, "<@711> accept it", None);
         let a2 = row(T0 + 5 * MIN, 6, A, "gooner", 5, "<@935> tu toh chup hi reh", None);
         let rows = vec![x3.clone(), a1, b1, x1, x2, a2];
-        let lines = exchange(&rows, A, B);
+        let lines = exchange(&rows, &[A, B]);
         let summary: Vec<(usize, Side, Option<Side>, Option<usize>)> = lines.iter().map(|l| (l.n, l.side, l.towards, l.reply_n)).collect();
         assert_eq!(
             summary,
@@ -753,15 +925,15 @@ pub mod tests {
                 (6, Side::A, Some(Side::B), None),
             ]
         );
-        let key = stretch_key(B, A, 5, &lines);
-        assert_eq!(key, stretch_key(A, B, 5, &lines), "the pair is the same whichever way round it is asked");
+        let key = stretch_key(&[B, A], 5, &lines);
+        assert_eq!(key, stretch_key(&[A, B], 5, &lines), "the pair is the same whichever way round it is asked");
     }
 
     #[test]
     fn a_stretch_that_fits_is_sent_whole() {
         let rows: Vec<SaidRow> = (0..30).map(|i| row(T0 + i * MIN, i as u64, if i % 2 == 0 { A } else { B }, if i % 2 == 0 { "gooner" } else { "potus" }, 5, "text", None)).collect();
-        let lines = exchange(&rows, A, B);
-        let p = build_prompt("gooner", "potus", "chatting", &lines, 400);
+        let lines = exchange(&rows, &[A, B]);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400);
         assert_eq!((p.sent, p.total, p.trimmed), (30, 30, false));
         assert!(!p.text.contains("left out"));
         assert!(!p.text.contains("too long to show whole"));
@@ -778,8 +950,8 @@ pub mod tests {
                 row(ms, i, if i % 2 == 0 { A } else { B }, if i % 2 == 0 { "gooner" } else { "potus" }, 5, &format!("message {}", i), None)
             })
             .collect();
-        let lines = exchange(&rows, A, B);
-        let p = build_prompt("gooner", "potus", "chatting", &lines, 400);
+        let lines = exchange(&rows, &[A, B]);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400);
         assert_eq!((p.sent, p.total, p.trimmed), (400, 600, true));
         assert!(p.text.contains("you are shown 400 of its 600 messages"), "the prompt says it was trimmed");
         assert!(p.text.contains("messages left out"));
@@ -799,8 +971,8 @@ pub mod tests {
         let a1 = row(T0, 1, A, "gooner", 5, "<@935> bhai tu pagal hai kya", None);
         let b1 = row(T0 + MIN, 2, B, "potus", 5, "tu hoga", Some(a1.message_id));
         let rows = vec![a1, b1];
-        let lines = exchange(&rows, A, B);
-        let p = build_prompt("gooner", "potus", "🥳chatting-hori", &lines, 400);
+        let lines = exchange(&rows, &[A, B]);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "🥳chatting-hori" }, &lines, 400);
         for must in [
             "Be neutral",
             "Do not say who was right",
