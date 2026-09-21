@@ -944,6 +944,57 @@ pub fn sections() -> Vec<Section> {
             )],
         },
         Section {
+            id: "daily",
+            title: "Daily posts",
+            icon: "🗞️",
+            about: "Each topic channel gets a long card at its times (11:00 and 19:00 India time unless changed): a story, news piece, poem \
+                    or quote. Stories and news are written by the AI only from a real source - a Wikipedia article or a \
+                    news article from a feed - which is linked on the card, and a second AI call checks the draft against \
+                    that source; a draft that still claims something the source doesn't say after one correction is \
+                    dropped and the slot tries again later. Poems and quotes come from a hand-picked list with the \
+                    author named. Nothing is repeated until a list runs out. A post missed while the bot was down still \
+                    goes out within the catch-up time. The first time the bot starts with a topic that has never \
+                    posted, that topic posts once straight away. /dailypost previews any topic privately, or posts it now.",
+            settings: {
+                let mut settings = vec![
+                    toggle("VIZIER_DAILY", "Daily posts on", "Off stops every topic's scheduled posts; /dailypost still works."),
+                    setting(
+                        "VIZIER_DAILY_MODEL",
+                        "Model that writes them",
+                        "A model on the bot's own provider for writing and fact-checking the posts. \"agent\" uses the bot's usual model.",
+                        Kind::Text,
+                        super::super::daily::DEFAULT_MODEL,
+                    ),
+                    setting(
+                        "VIZIER_DAILY_CATCH_UP_HOURS",
+                        "Catch-up time",
+                        "How long after its time a missed post may still go out. Past this, that post is skipped.",
+                        number(0, 23, "hours"),
+                        "3",
+                    ),
+                ];
+                for desk in super::super::daily::DESKS {
+                    settings.push(toggle(desk.on_key, desk.title, desk.about));
+                    settings.push(setting(desk.channel_key, desk.channel_label, "Where this topic posts.", Kind::Channel, desk.channel));
+                    settings.push(setting(
+                        desk.times_key,
+                        desk.times_label,
+                        "India times it posts each day, e.g. 09:00,20:00. One time means once a day.",
+                        Kind::Times,
+                        desk.times,
+                    ));
+                }
+                settings
+            },
+            commands: vec![command(
+                "dailypost",
+                ADMINS,
+                "/dailypost desk: post:",
+                "Writes a topic's post now. Without post:true only you see a preview and nothing is marked used; with \
+                 post:true it goes into the topic's channel and counts as the slot that is due.",
+            )],
+        },
+        Section {
             id: "weekly",
             title: "Weekly scan",
             icon: "📝",

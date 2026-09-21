@@ -635,6 +635,10 @@ pub const NEWS: &[News] = &[News {
     id: "letter-duel-correction-2026-09",
     title: "🔠 Letter Duel \u{2014} two corrections",
     body: "The note about Letter Duel had two things wrong in it.\n\n\u{2022} A turn is **four minutes**, not ninety seconds. The very first game showed ninety seconds isn\u{2019}t long            enough to open your rack, read seven tiles and find a word \u{2014} nobody managed a single move.\n\u{2022} It pays **duel points only** for now, not house points. Win, come second or just see the game through            and you score duel points, with no daily limit; `/dueltop` is the board. House points may follow once the            game has been played in properly.\n\nEverything else in that note stands: the lobby, your own tile page, the real rules, and **+50** for using all seven tiles.",
+}, News {
+    id: "daily-posts-2026-09",
+    title: "🗞️ Something to read, twice a day",
+    body: "Nine channels now get a post from the bot at **11:00** and **19:00**:\n\n\u{2022} <#1551291423394111599> a true story from history, mostly Indian\n\u{2022} <#1518241428231426098> behind-the-scenes stories and film/TV news\n\u{2022} <#1539692322726613065> the tech or AI story worth knowing\n\u{2022} <#1523780873496035328> mind-blowing music stories\n\u{2022} <#1520362506596520028> a sher (mostly Urdu), translated and explained\n\u{2022} <#1522910442861887498> a story about a book or writer\n\u{2022} <#1519318756420096070> new games and the stories behind classics\n\u{2022} <#1526595367716655104> a sports roundup, cricket and football first\n\u{2022} <#1525136885112897698> a quote to get you moving\n\nEvery story comes from a real source - a Wikipedia article or a news report - linked on the card, and it is fact-checked against that source before it goes up. Poems and quotes always name who wrote them.",
 }];
 
 /// Puts the live channel mentions into a note: `{sudoku}`, `{chess}`,

@@ -7108,6 +7108,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rig-core",
  "rmcp",
+ "roxmltree",
  "rusqlite",
  "rust-embed",
  "schemars 1.2.1",

@@ -67,6 +67,9 @@ mod chess;
 mod chess_board;
 mod chess_rules;
 mod chess_store;
+mod daily;
+mod daily_bank;
+mod daily_sources;
 mod duel;
 mod duel_board;
 mod duel_rules;
@@ -193,6 +196,9 @@ impl VizierChannel for DiscordChannelReader {
         }
         // The place bank, read once. Missing only means Geo is off.
         geo_bank::open(&self.deps.config.workspace);
+        if let Err(err) = daily::open(&self.deps.config.workspace) {
+            tracing::warn!("daily: store not opened: {}", err);
+        }
         if let Err(err) = weekly::open(&self.deps.config.workspace) {
             tracing::warn!("weekly: store not opened: {}", err);
         }
@@ -1503,6 +1509,8 @@ impl EventHandler for Handler {
         activity::spawn(&ctx);
         // The Sunday evening scan of the discussion channels.
         weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
+        // Daily topic posts: each topic channel's card at its times.
+        daily::spawn(ctx.clone(), self.1.clone(), self.0.clone());
         // Member notes: the first build once switched on, then the weekly refresh.
         notes::spawn(ctx.clone());
 
@@ -1712,6 +1720,7 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(geo::stop_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(daily::command())).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), notes::about_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), notes::forgetme_builder()).await;
@@ -2633,6 +2642,9 @@ impl EventHandler for Handler {
             }
             if command.data.name == "weeklyscan" {
                 weekly::scan_command(&ctx, &self.1, &agent_id, &command).await;
+            }
+            if command.data.name == "dailypost" {
+                daily::post_command(&ctx, &self.1, &agent_id, &command).await;
             }
             if command.data.name == "quiznews" {
                 quiz::news_command(&ctx, &self.1, &agent_id, &command).await;
