@@ -44,6 +44,8 @@ mod frog_sell;
 mod frog_store;
 mod frog_trade;
 mod house;
+mod kalesh;
+mod kalesh_store;
 mod msglog;
 mod notes;
 mod notes_build;
@@ -213,6 +215,10 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
             tracing::warn!("msglog: store not opened: {}", err);
         }
+        // Fights the kalesh detector called, and the panel's summaries of them.
+        if let Err(err) = kalesh_store::open(&self.deps.config.workspace) {
+            tracing::warn!("kalesh: store not opened: {}", err);
+        }
         // Automatic moderation: spam removals and AI flags. Not opening only
         // means the feature stays off, which is also what it defaults to.
         if let Err(err) = automod::start(&self.deps.config.workspace) {
@@ -333,6 +339,10 @@ async fn is_admin_only(storage: &Arc<crate::storage::VizierStorage>, agent_id: &
 #[derive(Clone)]
 struct SeenMessage {
     at: std::time::Instant,
+    /// The message id and when Discord says it was sent, for the record the
+    /// Kalesh page keeps of each fight the model confirms.
+    id: u64,
+    ts_ms: i64,
     author: u64,
     author_name: String,
     text: String,
@@ -386,6 +396,8 @@ fn note_message_and_check(msg: &Message) -> Option<Vec<SeenMessage>> {
 
     entry.messages.push(SeenMessage {
         at: now,
+        id: msg.id.get(),
+        ts_ms: msglog::snowflake_ms(msg.id.get()),
         author: msg.author.id.get(),
         author_name: msg.author.display_name().to_string(),
         text: msg.content.clone(),
@@ -3518,7 +3530,12 @@ impl EventHandler for Handler {
                 let http = ctx.http.clone();
                 let channel_id = msg.channel_id;
                 tokio::spawn(async move {
-                    if let Some(line) = classify_kalesh(&window).await {
+                    // A fight the model confirms is also kept for the panel's Kalesh page.
+                    let seen = window
+                        .iter()
+                        .map(|m| kalesh::Seen { id: m.id, ts_ms: m.ts_ms, author: m.author, author_name: m.author_name.clone() })
+                        .collect();
+                    if let Some(line) = kalesh::judge_and_record(channel_id.get(), seen, classify_kalesh(&window)).await {
                         tracing::info!("kalesh detected in channel {}", channel_id.get());
                         let _ = crate::utils::discord::send_message(
                             http,

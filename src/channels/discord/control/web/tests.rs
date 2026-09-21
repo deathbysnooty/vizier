@@ -385,6 +385,18 @@ impl PanelData for FakeData {
         Ok(super::super::super::msglog::list_said(fake_log().store.lock().conn(), &filter)?)
     }
 
+    async fn kalesh_authors(&self, a: u64, b: u64, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
+        super::kalesh::fake::authors(a, b, since_ms, until_ms, channel)
+    }
+
+    async fn kalesh_channel(&self, channel: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
+        super::kalesh::fake::channel(channel, since_ms, until_ms)
+    }
+
+    async fn kalesh_summarise(&self, prompt: String) -> anyhow::Result<super::super::super::kalesh::Reply> {
+        super::kalesh::fake::summarise(prompt)
+    }
+
     async fn msglog_coverage(&self) -> Option<super::super::super::msglog::Coverage> {
         super::super::super::msglog::coverage(fake_log().store.lock().conn()).ok()
     }
@@ -628,7 +640,7 @@ impl PanelData for FakeData {
     }
 }
 
-const SAFE: u64 = 1543162777642868736;
+pub const SAFE: u64 = 1543162777642868736;
 /// #fight-fight-fight in the fake server: the arena a battle would open in.
 const FIGHT_CHANNEL: u64 = 31;
 
@@ -1344,6 +1356,8 @@ pub fn store() {
         super::super::super::duel_words::open(dir.path().to_str().unwrap());
         // Automatic moderation, with a few flags to draw the Moderation page.
         super::super::super::automod_store::start(dir.path().to_str().unwrap()).expect("automod store");
+        // The Kalesh page's detections and summaries.
+        super::super::super::kalesh_store::open(dir.path().to_str().unwrap()).expect("kalesh store");
         seed_automod();
         dir
     });

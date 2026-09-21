@@ -1031,7 +1031,7 @@ impl SaidFilter {
     }
 }
 
-fn said_row(r: &rusqlite::Row) -> rusqlite::Result<SaidRow> {
+pub fn said_row(r: &rusqlite::Row) -> rusqlite::Result<SaidRow> {
     Ok(SaidRow {
         message_id: r.get::<_, i64>(0)? as u64,
         channel_id: r.get::<_, i64>(1)? as u64,
@@ -1050,7 +1050,7 @@ fn said_row(r: &rusqlite::Row) -> rusqlite::Result<SaidRow> {
     })
 }
 
-const SAID_COLUMNS: &str = "message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts, \
+pub const SAID_COLUMNS: &str = "message_id, channel_id, parent_id, channel_name, author_id, author_name, avatar, content, created_ts, \
                             reply_to, reply_author, reply_text, attachments_json, stored_files_json";
 
 /// The same columns read through the join, so `recent`'s and the search index's

@@ -108,6 +108,7 @@
     door: '<path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><path d="M14.5 12.5h.01"/>',
     userminus: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M17 11h5"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
+    flame: '<path d="M12 3c.6 3.2 4.8 5.4 4.8 10.2A4.8 4.8 0 0 1 12 18a4.8 4.8 0 0 1-4.8-4.8c0-2.2 1.1-3.7 2.3-4.8.2 1.6.9 2.7 2 3.2-.6-2.9-.1-5.8.5-8.6z"/><path d="M8 21h8"/>',
   };
 
   function icon(name, cls) {
@@ -562,6 +563,7 @@
       navItem('#/members', icon('users'), 'Members', S.status && S.status.notes_to_review ? h('span', { class: 'nav-badge', 'aria-label': S.status.notes_to_review + ' notes to review', 'data-tip': 'Notes to review' }, S.status.notes_to_review) : null),
       navItem('#/messages', icon('message'), 'Messages'),
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
+      navItem('#/kalesh', icon('flame'), 'Kalesh'),
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/insights', icon('spark'), 'Insights'),
@@ -610,6 +612,7 @@
       ['Messages', '#/messages', 'message', 'What a member has said, across every channel, newest first'],
       ['Search messages', '#/messages?q=', 'search', 'Find who said something and when, in every channel or in the long archive'],
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
+      ['Kalesh', '#/kalesh', 'flame', 'Look back at a fight between two members: the messages, and a neutral summary on request'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Moderation', '#/automod', 'shield', 'Spam the bot removed, and messages it has asked a moderator to look at'],
@@ -753,6 +756,7 @@
       case 'activity': renderActivity(page, r.q); break;
       case 'messages': case 'search': renderMessages(page, r.q); break;
       case 'deleted': renderDeleted(page, r.q); break;
+      case 'kalesh': renderKalesh(page, r); break;
       case 'left': renderLeft(page, r.q); break;
       case 'automod': renderAutomod(page, r.q); break;
       case 'settings': renderSettings(page); break;
@@ -1733,6 +1737,427 @@
       h('div', { class: 'msg-hit-actions' }, r.url
         ? h('a', { class: 'btn sm', href: r.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open ' + name + '’s message in Discord' }, 'Open in Discord', icon('external'))
         : h('span', { class: 'hint', title: 'The bot didn’t keep this message’s id, so there’s no link.' }, 'No link')));
+  }
+
+  // --- kalesh: looking back at a fight ----------------------------------------------
+
+  const KALESH_PERIODS = [['24', '24 hours'], ['72', '3 days'], ['168', '7 days'], ['custom', 'Custom']];
+  const KALESH_FLAGS = { slur: 'Slur', threat: 'Threat', personal_info: 'Personal information', sexual: 'Sexual content', harassment_after_stop: 'Kept going after “stop”', other: 'Other' };
+  const KALESH_ENDINGS = { resolved: ['Resolved', 'ok'], fizzled: ['Fizzled out', 'muted'], ongoing: ['Still going', 'warn'], unclear: ['Unclear', 'muted'] };
+
+  /** "20 Sep, 23:02–23:31", India time; both days when it crosses midnight. */
+  function kaleshSpan(startTs, endTs) {
+    const t12 = kaleshClock;
+    const sameDay = dayMonth(startTs) === dayMonth(endTs);
+    return dayMonth(startTs) + ', ' + t12(startTs) + (sameDay ? ' – ' + t12(endTs) : ' – ' + dayMonth(endTs) + ', ' + t12(endTs));
+  }
+
+  const kaleshClockFmt = new Intl.DateTimeFormat('en-US', { timeZone: IST, hour: 'numeric', minute: '2-digit', hour12: true });
+  /** "2:04 pm", India time. */
+  function kaleshClock(ts) { return kaleshClockFmt.format(new Date(ts * 1000)).toLowerCase().replace(' ', '\u00a0'); }
+
+  function kaleshViewHref(x, a, b, detection) {
+    const p = new URLSearchParams({ a: a.id || a, b: b.id || b, channel: x.channel.id, start: x.start_ms, end: x.end_ms });
+    if (detection) p.set('d', detection);
+    return '#/kalesh/view?' + p.toString();
+  }
+
+  function kaleshChannel(ch) {
+    ch = ch || {};
+    return h('span', { class: 'msg-hit-chan', title: ch.thread && ch.parent ? 'A thread in #' + ch.parent.name : null }, h('span', { class: 'glyph' }, '#'), ch.name || 'unknown', ch.thread ? h('small', null, '› thread') : null);
+  }
+
+  function renderKalesh(page, r) {
+    if (r.parts[1] === 'view') { renderKaleshView(page, r.q); return; }
+    if (r.parts[1] === 'detection') { openKaleshDetection(page, r.parts[2]); return; }
+    document.title = 'Kalesh · Loduchand';
+    page.appendChild(pageHead('Kalesh', 'Look back at a fight. Pick two members to find where they went at each other, or open one the detector caught. A summary is written only when you ask for one.',
+      sectionById('kalesh') ? h('a', { class: 'btn', href: '#/s/kalesh', 'aria-label': 'Kalesh detector settings' }, icon('sliders'), h('span', { class: 'hide-sm' }, 'Settings')) : null));
+
+    const rq = r.q;
+    const idOk = (v) => /^\d{1,20}$/.test(v || '') ? v : '';
+    const hours = rq.get('hours');
+    const st = {
+      a: idOk(rq.get('a')), b: idOk(rq.get('b')),
+      period: rq.get('from') && rq.get('to') ? 'custom' : (KALESH_PERIODS.some((x) => x[0] === hours && x[0] !== 'custom') ? hours : '24'),
+      from: /^\d{1,12}$/.test(rq.get('from') || '') ? +rq.get('from') : 0,
+      to: /^\d{1,12}$/.test(rq.get('to') || '') ? +rq.get('to') : 0,
+    };
+    const hashFor = (s) => {
+      const p = new URLSearchParams();
+      if (s.a) p.set('a', s.a);
+      if (s.b) p.set('b', s.b);
+      if (s.period === 'custom' && s.from && s.to) { p.set('from', String(s.from)); p.set('to', String(s.to)); }
+      else if (s.period !== '24' && s.period !== 'custom') p.set('hours', s.period);
+      const qs = p.toString();
+      return '#/kalesh' + (qs ? '?' + qs : '');
+    };
+
+    // --- the finder -------------------------------------------------------------------
+    const draft = Object.assign({}, st);
+    const pickBtn = (which) => {
+      const btn = h('button', { class: 'picker-btn wide', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': which === 'a' ? 'First member' : 'Second member' });
+      const draw = (m) => {
+        clear(btn);
+        const id = draft[which];
+        append(btn, [id && m ? avatar(m.avatar, m.name, 'xs') : icon('user'),
+          h('span', { class: 'value' + (id ? '' : ' placeholder') }, id ? (m ? m.name : 'Member ' + id) : (which === 'a' ? 'First member' : 'Second member')), icon('chevron')]);
+      };
+      draw(S.members.get(draft[which]) || null);
+      if (draft[which]) memberById(draft[which]).then((m) => { if (btn.isConnected) draw(m); });
+      btn.addEventListener('click', () => openPicker(btn, { title: which === 'a' ? 'First member' : 'Second member', placeholder: 'Search members by name', debounce: 180,
+        load: (q) => memberItems(q), onPick: (it) => { draft[which] = it.id; S.members.set(it.id, it.member); draw(it.member); } }));
+      return btn;
+    };
+    const aBtn = pickBtn('a'), bBtn = pickBtn('b');
+    const nowS = Math.floor(Date.now() / 1000);
+    const iso = (ts) => new Date(ts * 1000).toISOString();
+    const fromIn = h('input', { class: 'input', type: 'datetime-local', 'aria-label': 'From (India time)', value: toIstInput(iso(st.from || nowS - 86400)) });
+    const toIn = h('input', { class: 'input', type: 'datetime-local', 'aria-label': 'To (India time)', value: toIstInput(iso(st.to || nowS)) });
+    const custom = h('div', { class: 'kalesh-custom', hidden: draft.period !== 'custom' },
+      h('label', null, h('span', null, 'From'), fromIn), h('label', null, h('span', null, 'To'), toIn), h('span', { class: 'hint' }, 'India time · up to 7 days'));
+    const period = segmented(KALESH_PERIODS, draft.period, 'Period', (v) => { draft.period = v; custom.hidden = v !== 'custom'; });
+    period.classList.add('msg-periods');
+    const problem = h('p', { class: 'hint kalesh-problem', role: 'status', hidden: true });
+    const go = () => {
+      const say = (t) => { problem.textContent = t; problem.hidden = false; };
+      if (!draft.a || !draft.b) return say('Pick both members.');
+      if (draft.a === draft.b) return say('Pick two different members.');
+      if (draft.period === 'custom') {
+        const f = Math.floor(Date.parse(fromIstInput(fromIn.value)) / 1000), t = Math.floor(Date.parse(fromIstInput(toIn.value)) / 1000);
+        if (!f || !t || isNaN(f) || isNaN(t)) return say('Pick a start and an end.');
+        if (f >= t) return say('The start has to be before the end.');
+        if (t - f > 7 * 86400) return say('Pick at most 7 days at a time.');
+        draft.from = f; draft.to = t;
+      }
+      problem.hidden = true;
+      navigate(hashFor(draft));
+    };
+    page.appendChild(h('form', { class: 'card msg-search kalesh-finder', onsubmit: (e) => { e.preventDefault(); go(); } },
+      h('div', { class: 'kalesh-pair' }, aBtn, h('span', { class: 'kalesh-vs', 'aria-hidden': 'true' }, 'vs'), bBtn),
+      h('div', { class: 'msg-search-filters' }, period, h('span', { class: 'grow' }), h('button', { class: 'btn primary', type: 'submit' }, icon('search'), 'Find')),
+      custom, problem));
+
+    // --- what was found ---------------------------------------------------------------
+    const found = h('div', { class: 'kalesh-found', 'aria-live': 'polite' });
+    page.appendChild(found);
+    if (st.a && st.b && st.a !== st.b) {
+      found.appendChild(h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Looking through their messages…')));
+      const p = new URLSearchParams({ a: st.a, b: st.b });
+      if (st.period === 'custom' && st.from && st.to) { p.set('from', String(st.from)); p.set('to', String(st.to)); } else p.set('hours', st.period);
+      api('GET', '/kalesh/find?' + p.toString()).then((data) => {
+        if (!found.isConnected) return;
+        clear(found);
+        found.appendChild(kaleshFound(data));
+        refreshAudit();
+      }).catch((e) => {
+        if (!found.isConnected) return;
+        clear(found);
+        found.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t look'), h('p', null, e.message))));
+      });
+    }
+
+    // --- detections and past summaries ------------------------------------------------
+    const lists = h('div', { class: 'kalesh-lists' });
+    page.appendChild(lists);
+    lists.appendChild(h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')));
+    api('GET', '/kalesh').then((data) => {
+      if (!lists.isConnected) return;
+      clear(lists);
+      lists.appendChild(kaleshDetections(data));
+      lists.appendChild(kaleshPast(data.summaries));
+    }).catch((e) => {
+      if (!lists.isConnected) return;
+      clear(lists);
+      lists.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the kalesh log'), h('p', null, e.message))));
+    });
+  }
+
+  function kaleshFound(data) {
+    const list = data.stretches || [];
+    const a = data.a, b = data.b;
+    const title = h('span', null, plural(list.length, 'stretch', 'stretches'), ' between ', h('b', null, a.name), ' and ', h('b', null, b.name));
+    const body = h('div', { class: 'kalesh-rows' });
+    if (!list.length) {
+      body.appendChild(h('div', { class: 'empty' }, icon('search'), h('h3', null, 'Nothing between them'),
+        h('p', null, 'No replies, mentions or back-and-forth between ' + a.name + ' and ' + b.name + ' in the ' + data.label + '.'),
+        h('p', { class: 'hint' }, data.log_on === false ? 'The message log is switched off, so nothing new is being kept.' : 'Only messages in the message log are searched: every channel except #safe-corner and the skip list.')));
+    }
+    list.forEach((s) => {
+      const talk = s.replies_ab + s.replies_ba;
+      const facts = [
+        h('span', { class: 'kalesh-count' }, h('b', null, numberFmt.format(s.messages)), ' messages'),
+        h('span', { class: 'kalesh-sides' }, h('i', { class: 'side-dot a', 'aria-hidden': 'true' }), a.name + ' ' + s.a_messages, h('i', { class: 'side-dot b', 'aria-hidden': 'true' }), b.name + ' ' + s.b_messages),
+      ];
+      if (s.others) facts.push(h('span', { title: s.bystanders.map((p) => p.name + ' (' + p.messages + ')').join(', ') }, '+' + plural(s.bystanders.length, 'other') + ' (' + s.others + ')'));
+      const how = [];
+      if (talk) how.push(plural(talk, 'reply', 'replies') + ' between them');
+      if (s.mentions) how.push(plural(s.mentions, 'mention'));
+      if (!talk && !s.mentions) how.push('talking within minutes of each other');
+      body.appendChild(h('a', { class: 'kalesh-row', href: kaleshViewHref(s, a, b) },
+        h('div', { class: 'kalesh-row-main' },
+          h('div', { class: 'kalesh-row-head' }, kaleshChannel(s.channel), h('span', { class: 'msg-hit-time' }, kaleshSpan(s.start_ts, s.end_ts)),
+            s.summarised ? h('span', { class: 'badge good' }, icon('check'), 'Summarised') : null),
+          h('div', { class: 'kalesh-row-facts' }, facts),
+          h('div', { class: 'kalesh-row-how' }, how.join(' · '))),
+        icon('right', 'kalesh-row-go')));
+    });
+    return h('section', { class: 'card kalesh-results', 'aria-label': 'What was found' },
+      h('div', { class: 'card-head' }, h('div', { class: 'grow' }, h('h2', null, title), h('div', { class: 'sub' }, 'The ' + data.label + ', newest first. Open one to read it message by message.' + (data.more ? ' Only the newest 60 are listed.' : '')))),
+      h('div', { class: 'card-body' }, body));
+  }
+
+  function kaleshDetections(data) {
+    const set = data.settings || {};
+    const list = data.detections || [];
+    const body = h('div', { class: 'kalesh-rows' });
+    if (!list.length) {
+      let why = 'Nothing yet. Each fight the detector calls from now on is kept here.';
+      if (!set.detector_on) why = 'The kalesh detector is switched off, so nothing is being caught.';
+      else if (!set.watched_channels) why = 'The detector isn’t watching any channels yet.';
+      else if (!set.role_set) why = 'The detector only asks the AI — and so only records a fight — once a kalesh role is set to ping.';
+      body.appendChild(h('div', { class: 'empty' }, icon('shield'), h('h3', null, 'No fights caught'), h('p', null, why),
+        h('p', { class: 'hint' }, h('a', { href: '#/s/kalesh' }, 'Kalesh detector settings'))));
+    }
+    list.forEach((d) => {
+      const people = d.participants || [];
+      const [p1, p2] = people;
+      const extra = people.length - 2;
+      const names = p2 ? [h('b', null, p1.name), ' vs ', h('b', null, p2.name), extra > 0 ? ' (+' + plural(extra, 'other') + ')' : ''] : [h('b', null, p1 ? p1.name : 'someone')];
+      body.appendChild(h('a', { class: 'kalesh-row', href: '#/kalesh/detection/' + d.id },
+        h('div', { class: 'kalesh-row-main' },
+          h('div', { class: 'kalesh-row-head' }, kaleshChannel(d.channel),
+            h('time', { class: 'msg-hit-time', datetime: iso(d.start_ts), title: fmtFull.format(new Date(d.start_ts * 1000)) + ' IST' }, msgWhen(d.start_ts), h('small', null, ' · ' + ago(d.start_ts))),
+            d.summarised ? h('span', { class: 'badge good' }, icon('check'), 'Summarised') : null),
+          h('div', { class: 'kalesh-row-facts' }, h('span', null, names), h('span', null, plural(d.message_count, 'message') + ' in the burst')),
+          d.line ? h('div', { class: 'kalesh-row-how' }, '“' + d.line + '”') : null),
+        icon('right', 'kalesh-row-go')));
+    });
+    return card('kalesh-detections', 'Caught by the detector', 'Fights the kalesh detector called and pinged for, newest first. Open one to see the whole stretch.', body, { cls: 'kalesh-card' });
+  }
+
+  function iso(ts) { return new Date(ts * 1000).toISOString(); }
+
+  function kaleshTokens(s) { return numberFmt.format((s.input_tokens || 0) + (s.output_tokens || 0)) + ' tokens'; }
+
+  function kaleshPast(list) {
+    list = list || [];
+    const body = h('div', { class: 'kalesh-rows' });
+    if (!list.length) body.appendChild(h('p', { class: 'empty-small kalesh-none' }, 'No summaries yet. They appear here once a moderator asks for one.'));
+    list.forEach((s) => {
+      body.appendChild(h('a', { class: 'kalesh-row', href: kaleshViewHref(s, s.a, s.b, s.detection_id) },
+        h('div', { class: 'kalesh-row-main' },
+          h('div', { class: 'kalesh-row-head' }, h('b', null, s.a.name + ' vs ' + s.b.name), kaleshChannel(s.channel), h('span', { class: 'msg-hit-time' }, kaleshSpan(s.start_ts, s.end_ts))),
+          h('div', { class: 'kalesh-row-how' }, 'Summarised by ' + s.run_by.name + ' ' + ago(s.run_ts) + ' · ' + s.model + ' · ' + kaleshTokens(s) + (s.trimmed ? ' · trimmed' : ''))),
+        icon('right', 'kalesh-row-go')));
+    });
+    return card('kalesh-past', 'Past summaries', 'Every summary is kept, with who asked for it and what it cost.', body, { cls: 'kalesh-card' });
+  }
+
+  async function openKaleshDetection(page, id) {
+    document.title = 'Kalesh · Loduchand';
+    page.appendChild(h('a', { class: 'back-link', href: '#/kalesh' }, icon('left'), 'Kalesh'));
+    page.appendChild(h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Opening the fight…')));
+    try {
+      const d = await api('GET', '/kalesh/detections/' + encodeURIComponent(id || ''));
+      if (!page.isConnected) return;
+      location.replace(kaleshViewHref(d, d.a, d.b, d.id));
+    } catch (e) {
+      if (!page.isConnected) return;
+      clear(page);
+      page.appendChild(h('a', { class: 'back-link', href: '#/kalesh' }, icon('left'), 'Kalesh'));
+      page.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t open that fight'), h('p', null, e.message))));
+    }
+  }
+
+  function renderKaleshView(page, rq) {
+    document.title = 'Kalesh · Loduchand';
+    page.appendChild(h('a', { class: 'back-link', href: '#/kalesh' }, icon('left'), 'Kalesh'));
+    const p = new URLSearchParams();
+    ['a', 'b', 'channel', 'start', 'end'].forEach((k) => p.set(k, rq.get(k) || ''));
+    if (rq.get('d')) p.set('detection', rq.get('d'));
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the messages…')));
+    page.appendChild(holder);
+    api('GET', '/kalesh/exchange?' + p.toString()).then((ex) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      drawKaleshView(holder, ex);
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      holder.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t read that stretch'), h('p', null, e.message))));
+    });
+  }
+
+  function drawKaleshView(holder, ex) {
+    const a = ex.a, b = ex.b;
+    document.title = a.name + ' vs ' + b.name + ' · Kalesh · Loduchand';
+    const who = [h('span', { class: 'kalesh-name a' }, a.name), h('span', { class: 'kalesh-vs' }, 'vs'), h('span', { class: 'kalesh-name b' }, b.name)];
+    const lead = [kaleshChannel(ex.channel), ' · ' + kaleshSpan(ex.start_ts, ex.end_ts) + ' · ' + plural(ex.count, 'message')];
+    if (ex.bystanders.length) lead.push(' · ' + ex.bystanders.map((x) => x.name).join(', ') + ' joined in');
+    holder.appendChild(h('div', { class: 'page-head kalesh-head' }, h('div', { class: 'grow' }, h('h1', null, who), h('p', { class: 'lead' }, lead))));
+    holder.appendChild(h('div', { class: 'banner inline kalesh-warning', role: 'note' }, icon('alert'),
+      h('p', null, h('b', null, 'Read the messages before acting. '),
+        h('span', null, 'A summary is the model’s reading and can be wrong or miss things. The messages below are what was actually said — never act on the summary alone.'))));
+
+    // Message number n → the message, for the summary's links.
+    const names = new Map([[a.id, a.name], [b.id, b.name]]);
+    ex.messages.forEach((m) => { if (m.member && !names.has(m.member.id)) names.set(m.member.id, m.member.name); });
+    const named = (t) => String(t || '').replace(/<@!?(\d{1,20})>/g, (_, id) => '@' + (names.get(id) || (S.members.get(id) || {}).name || 'someone'));
+    ex.messages.forEach((m) => { m.text = named(m.text); if (m.reply_to) m.reply_to.text = named(m.reply_to.text); });
+    const byN = new Map(ex.messages.map((m) => [m.n, m]));
+    const byId = new Map(ex.messages.map((m) => [m.id, m]));
+    const jump = (m) => {
+      const el = document.getElementById('kmsg-' + m.id);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    };
+
+    const summaryBox = h('div', { class: 'kalesh-summary-box' });
+    holder.appendChild(summaryBox);
+    const drawSummary = (list, note) => {
+      clear(summaryBox);
+      const current = list.find((s) => s.current);
+      const older = list.filter((s) => !s.current);
+      if (current) summaryBox.appendChild(kaleshSummaryCard(current, ex, byId, jump, note));
+      else summaryBox.appendChild(kaleshAskCard(ex, (got) => { list.unshift(got.summary); drawSummary(list, got.reused ? 'Already summarised — this is the stored one, nothing new was spent.' : null); refreshAudit(); }));
+      older.forEach((s) => summaryBox.appendChild(kaleshSummaryCard(s, ex, byId, jump, null)));
+    };
+    drawSummary(ex.summaries || [], null);
+
+    // --- the raw exchange -----------------------------------------------------------------------
+    const rows = h('div', { class: 'kalesh-exchange' });
+    ex.messages.forEach((m) => rows.appendChild(kaleshMessage(m, a, b, byN, jump)));
+    if (!ex.messages.length) rows.appendChild(h('div', { class: 'empty' }, icon('message'), h('h3', null, 'No messages kept'), h('p', null, 'The message log has nothing from this stretch.')));
+    const legend = h('div', { class: 'kalesh-legend' },
+      h('span', null, h('i', { class: 'side-dot a' }), a.name), h('span', null, h('i', { class: 'side-dot b' }), b.name),
+      h('span', null, h('i', { class: 'side-dot other' }), 'Others'),
+      ex.detection_id ? h('span', null, h('i', { class: 'side-dot burst' }), 'In the burst the detector saw') : null);
+    holder.appendChild(card('kalesh-exchange', 'The exchange', 'Every message in order, bystanders included. The numbers match the summary’s.' + (ex.truncated ? ' Only the first 3,000 are shown.' : ''),
+      [legend, rows], { cls: 'kalesh-exchange-card' }));
+  }
+
+  function kaleshAskCard(ex, done) {
+    const tokens = Math.round(Math.min(ex.count, ex.max_messages) * 30 + 1100);
+    const btn = h('button', { class: 'btn primary lg', type: 'button' }, icon('spark'), 'Summarise');
+    const status = h('p', { class: 'hint', role: 'status' },
+      ex.will_trim
+        ? 'This stretch has ' + numberFmt.format(ex.count) + ' messages; the model will see ' + numberFmt.format(ex.max_messages) + ' of them — how it started, the busiest part and how it ended — and the summary will say so.'
+        : 'The model reads all ' + plural(ex.count, 'message') + ', in order, with names and replies. Roughly ' + numberFmt.format(tokens) + ' tokens.');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      clear(btn);
+      append(btn, [h('span', { class: 'spinner' }), 'Writing the summary…']);
+      status.textContent = 'This can take up to a minute. It is kept once written, so nobody pays for it twice.';
+      try {
+        const got = await api('POST', '/kalesh/summarise', { a: ex.a.id, b: ex.b.id, channel: ex.channel.id, start: ex.start_ms, end: ex.end_ms, detection: ex.detection_id ? String(ex.detection_id) : undefined });
+        done(got);
+      } catch (e) {
+        btn.disabled = false;
+        clear(btn);
+        append(btn, [icon('spark'), 'Summarise']);
+        status.textContent = e.message;
+        toast(e.message, 'error');
+      }
+    });
+    return h('section', { class: 'card kalesh-ask', 'aria-label': 'Summary' },
+      h('div', { class: 'kalesh-ask-body' },
+        h('div', { class: 'grow' }, h('h2', null, 'No summary yet'),
+          h('p', null, 'A neutral account of what happened: what set it off, how it escalated, each side’s points, who else joined, how it ended — and anything a moderator may need to act on, linked to the message.'),
+          status),
+        btn));
+  }
+
+  /** Text with [#n] turned into links to message n. */
+  function kaleshRefs(text, byN, jump) {
+    const out = [];
+    const re = /\[#(\d+)\]/g;
+    let last = 0, m;
+    while ((m = re.exec(text || ''))) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      const msg = byN(+m[1]);
+      out.push(msg ? h('button', { class: 'kalesh-ref', type: 'button', title: 'Show message ' + m[1], onclick: () => jump(msg) }, '#' + m[1]) : '#' + m[1]);
+      last = re.lastIndex;
+    }
+    if (last < (text || '').length) out.push(text.slice(last));
+    return out;
+  }
+
+  function kaleshSummaryCard(s, ex, byId, jump, note) {
+    // The summary's numbers are the stretch as it was when it was written.
+    const byN = (n) => byId.get(s.message_ids[n - 1]);
+    const refs = (list) => (list || []).map((n) => byN(n)).filter(Boolean).map((m, i) => h('button', { class: 'kalesh-ref', type: 'button', onclick: () => jump(m) }, '#' + list[i]));
+    const sum = s.summary;
+    const meta = h('p', { class: 'kalesh-meta' }, 'Summarised by ', h('b', null, s.run_by.name), ' · ' + msgWhen(s.run_ts) + ' · ' + s.model + ' · ' + numberFmt.format(s.input_tokens) + ' in + ' + numberFmt.format(s.output_tokens) + ' out tokens');
+    const notes = [];
+    if (note) notes.push(h('p', { class: 'kalesh-note' }, icon('info'), note));
+    if (s.trimmed) notes.push(h('p', { class: 'kalesh-note warn' }, icon('alert'), 'Trimmed: the model saw ' + numberFmt.format(s.sent_count) + ' of ' + numberFmt.format(s.message_count) + ' messages — how it started, the busiest part and how it ended. What was left out is not in this summary.'));
+    if (!s.current) notes.push(h('p', { class: 'kalesh-note' }, icon('clock'), 'Written for an earlier version of this stretch (' + plural(s.message_count, 'message') + '). Numbers link to the messages it saw.'));
+    const parts = [meta, notes];
+    if (!sum) {
+      parts.push(h('p', { class: 'kalesh-sec-title' }, 'The model’s answer (it didn’t come back in the usual shape)'));
+      parts.push(h('pre', { class: 'kalesh-raw' }, s.raw || ''));
+    } else {
+      const sec = (title, body, cls) => h('div', { class: 'kalesh-sec' + (cls ? ' ' + cls : '') }, h('h3', { class: 'kalesh-sec-title' }, title), body);
+      const flags = sum.flags || [];
+      parts.push(sec('For a moderator', flags.length
+        ? h('ul', { class: 'kalesh-flags' }, flags.map((f) => {
+          const m = f.message ? byN(f.message) : null;
+          return h('li', null, h('span', { class: 'badge kalesh-flag' }, icon('alert'), KALESH_FLAGS[f.kind] || f.kind),
+            h('div', { class: 'grow' }, f.who ? h('b', null, f.who + ': ') : null, kaleshRefs(f.what, byN, jump)),
+            m ? h('span', { class: 'kalesh-flag-links' }, h('button', { class: 'kalesh-ref', type: 'button', onclick: () => jump(m) }, '#' + f.message),
+              m.url ? h('a', { class: 'btn sm', href: m.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open message ' + f.message + ' in Discord' }, 'Discord', icon('external')) : null) : null);
+        }))
+        : h('p', { class: 'kalesh-clear' }, icon('check'), 'Nothing flagged: no slurs, threats, personal information, sexual content aimed at someone, or harassment after being asked to stop.'), flags.length ? 'flagged' : 'clear'));
+      if (sum.overview) parts.push(h('p', { class: 'kalesh-overview' }, kaleshRefs(sum.overview, byN, jump)));
+      if (sum.trigger) parts.push(sec('What set it off', h('p', null, kaleshRefs(sum.trigger, byN, jump))));
+      if ((sum.timeline || []).length) parts.push(sec('How it went', h('ol', { class: 'kalesh-timeline' }, sum.timeline.map((t) => {
+        const first = t.refs && t.refs.length ? byN(t.refs[0]) : null;
+        const time = first ? kaleshClock(first.ts) : (t.time || '');
+        return h('li', null, h('span', { class: 'kalesh-time' }, time), h('div', null, kaleshRefs(t.what, byN, jump), ' ', refs(t.refs)));
+      }))));
+      if ((sum.positions || []).length) parts.push(sec('Each side, in their own terms', h('div', { class: 'kalesh-positions' }, sum.positions.map((p, i) =>
+        h('div', { class: 'kalesh-position ' + (p.who === ex.b.name ? 'b' : p.who === ex.a.name ? 'a' : i ? 'b' : 'a') }, h('b', null, p.who),
+          h('ul', null, (p.points || []).map((x) => h('li', null, kaleshRefs(x, byN, jump)))))))));
+      if (sum.others) parts.push(sec('Others', h('p', null, kaleshRefs(sum.others, byN, jump))));
+      if (sum.ending) {
+        const [label, tone] = KALESH_ENDINGS[sum.ending.state] || KALESH_ENDINGS.unclear;
+        parts.push(sec('How it ended', h('p', null, h('span', { class: 'badge kalesh-end ' + tone }, label), ' ', kaleshRefs(sum.ending.what, byN, jump))));
+      }
+      if ((sum.interpretation || []).length) parts.push(sec('The model’s interpretation', [h('p', { class: 'hint', style: 'margin:0 0 6px' }, 'Reading between the lines — not what was said.'),
+        h('ul', { class: 'kalesh-interp' }, sum.interpretation.map((x) => h('li', null, kaleshRefs(x, byN, jump))))], 'interp'));
+    }
+    return card('kalesh-summary-' + s.id, s.current ? 'Summary' : 'Earlier summary', null, parts, { pad: true, cls: 'kalesh-summary' + (s.current ? '' : ' older') });
+  }
+
+  function kaleshMessage(m, a, b, byN, jump) {
+    const member = m.member || {};
+    const name = member.name || 'Member ' + member.id;
+    const sideName = { a: a.name, b: b.name };
+    const tag = m.side === 'other'
+      ? h('span', { class: 'kalesh-tag other' }, m.towards ? 'to ' + sideName[m.towards] : 'bystander')
+      : h('span', { class: 'kalesh-tag ' + m.side }, m.side.toUpperCase());
+    const d = new Date(m.ts * 1000);
+    let reply = null;
+    if (m.reply_to) {
+      const target = m.reply_to.n ? byN.get(m.reply_to.n) : null;
+      reply = h('p', { class: 'msg-hit-reply' }, icon('reply'), h('span', null,
+        target ? h('button', { class: 'kalesh-ref', type: 'button', onclick: () => jump(target) }, '#' + m.reply_to.n) : 'replying to',
+        ' ', h('b', null, target ? target.member.name : '@' + (m.reply_to.author || 'someone')), (target ? target.text : m.reply_to.text) ? ': “' + (target ? target.text : m.reply_to.text) + '”' : ''));
+    }
+    return h('article', { class: 'kalesh-msg side-' + m.side + (m.in_detection ? ' in-burst' : ''), id: 'kmsg-' + m.id },
+      h('span', { class: 'kalesh-n', 'aria-label': 'Message ' + m.n }, '#' + m.n),
+      h('div', { class: 'kalesh-msg-main' },
+        h('div', { class: 'msg-hit-head' },
+          avatar(member.avatar, name, 'xs'),
+          h('a', { class: 'msg-hit-name', href: '#/members/' + member.id }, name), tag,
+          h('time', { class: 'msg-hit-time', datetime: d.toISOString(), title: fmtFull.format(d) + ' IST' }, kaleshClock(m.ts))),
+        reply,
+        h('p', { class: 'msg-hit-text' }, m.text || ''),
+        (m.files || []).length ? h('p', { class: 'msg-hit-files' }, icon(m.files.every((f) => f.image) ? 'image' : 'tag'), m.files.map((f) => f.name).join(', ')) : null),
+      m.url ? h('a', { class: 'btn sm ghost kalesh-open', href: m.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open message ' + m.n + ' in Discord', title: 'Open in Discord' }, icon('external'), h('span', { class: 'hide-sm' }, 'Discord')) : null);
   }
 
   // --- deleted & edited messages ------------------------------------------------------

@@ -1290,7 +1290,8 @@ pub fn sections() -> Vec<Section> {
                     burst from only a few people, full of replies - and only when that trips, the AI is asked \
                     whether it is a genuine fight or just loud banter. If it says fight, the bot pings the kalesh \
                     role with a playful line, then waits out the cooldown before it can ping again in that channel. \
-                    It works even while the bot is in admin-only mode.",
+                    It works even while the bot is in admin-only mode. Every fight it calls is listed on the panel's \
+                    Kalesh page, where a mod can also look up two members and ask for a neutral summary.",
             settings: vec![
                 toggle("VIZIER_KALESH", "Kalesh detector", "Watch for fights and ping the role. Off stops it entirely."),
                 setting("VIZIER_KALESH_CHANNELS", "Watched channels", "Channels watched for fights. Empty means none.", Kind::Channels, ""),
@@ -1306,6 +1307,20 @@ pub fn sections() -> Vec<Section> {
                     "The OpenRouter model that judges fight or banter. Empty means google/gemini-2.5-flash-lite.",
                     Kind::Text,
                     "google/gemini-2.5-flash-lite",
+                ),
+                setting(
+                    "VIZIER_KALESH_SUMMARY_MODEL",
+                    "Summary model",
+                    "The model that writes a fight's summary on the Kalesh page, on the bot's own provider. Empty means the bot's main model: a mod may act on it, so quality matters more than cost.",
+                    Kind::Text,
+                    "",
+                ),
+                setting(
+                    "VIZIER_KALESH_SUMMARY_MAX_MESSAGES",
+                    "Messages per summary",
+                    "Most messages the summary model is shown. A longer stretch is trimmed to how it started, its busiest part and how it ended, and the summary says so.",
+                    number(20, 5000, "messages"),
+                    "400",
                 ),
             ],
             commands: vec![],

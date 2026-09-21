@@ -2306,3 +2306,128 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .about-bullets { margin: 0 0 10px; padding-left: 20px; display: grid; gap: 6px; }
 .about-lookups { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
 .card-head .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Kalesh: looking back at a fight between two members. */
+:root { --side-a: #5aa9ff; --side-b: #f07a9c; --side-other: var(--faint); }
+[data-theme="light"] { --side-a: #1f6fc0; --side-b: #c43a62; }
+.side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--side-other); flex: none; }
+.side-dot.a { background: var(--side-a); }
+.side-dot.b { background: var(--side-b); }
+.side-dot.burst { background: transparent; box-shadow: inset 0 0 0 2px var(--warn); }
+
+.kalesh-finder { gap: 12px; }
+.kalesh-pair { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.kalesh-pair .picker-btn.wide { flex: 1 1 220px; min-width: 0; height: 46px; border-radius: 12px; }
+.kalesh-vs { color: var(--faint); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.kalesh-finder .msg-search-filters .grow { flex: 1; }
+.kalesh-finder .msg-search-filters .btn { height: 36px; }
+.kalesh-custom { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.kalesh-custom label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.kalesh-custom .input { width: 220px; max-width: 100%; }
+.kalesh-custom .hint { margin: 0 0 8px; }
+.kalesh-problem { margin: 0; color: var(--danger); }
+.kalesh-found, .kalesh-lists { display: grid; gap: var(--gap); margin-bottom: var(--gap); }
+.kalesh-results .card-head h2 b { font-weight: 700; }
+
+.kalesh-row { display: flex; align-items: center; gap: 12px; padding: 12px var(--pad-card); border-top: 1px solid var(--line); color: inherit; }
+.kalesh-row:first-child { border-top: 0; }
+.kalesh-row:hover { background: color-mix(in srgb, var(--hover) 60%, transparent); text-decoration: none; }
+.kalesh-row-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.kalesh-row-head { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; font-size: 13.5px; }
+.kalesh-row-head .msg-hit-chan { font-weight: 600; color: var(--text); }
+.kalesh-row-head .badge { margin-left: auto; }
+.kalesh-row-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-2); font-size: 13px; }
+.kalesh-row-facts b { color: var(--text); }
+.kalesh-sides { display: inline-flex; align-items: center; gap: 6px; }
+.kalesh-sides .side-dot.b { margin-left: 6px; }
+.kalesh-row-how { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.kalesh-row-go { width: 16px; height: 16px; color: var(--faint); flex: none; }
+.kalesh-none { padding: 14px var(--pad-card); margin: 0; }
+
+.kalesh-head h1 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.kalesh-name.a { color: var(--side-a); }
+.kalesh-name.b { color: var(--side-b); }
+.kalesh-head .lead { max-width: none; }
+.kalesh-head .lead .msg-hit-chan { white-space: nowrap; }
+.kalesh-warning { margin-bottom: var(--gap); }
+.kalesh-summary-box { display: grid; gap: var(--gap); margin-bottom: var(--gap); }
+
+.kalesh-ask-body { display: flex; align-items: center; gap: 18px; padding: var(--pad-card); }
+.kalesh-ask-body h2 { font-size: 16px; margin-bottom: 4px; }
+.kalesh-ask-body p { color: var(--text-2); max-width: 640px; }
+.kalesh-ask-body .hint { margin-top: 8px; }
+.kalesh-ask-body .btn { flex: none; }
+
+.kalesh-summary .card-body.pad { display: grid; gap: 14px; }
+.kalesh-summary.older { opacity: .92; }
+.kalesh-meta { color: var(--muted); font-size: 12.5px; margin: 0; }
+.kalesh-meta b { color: var(--text-2); }
+.kalesh-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; padding: 8px 10px; border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--line); color: var(--text-2); font-size: 13px; }
+.kalesh-note .icon { width: 15px; height: 15px; flex: none; margin-top: 2px; color: var(--accent-text); }
+.kalesh-note.warn { border-color: color-mix(in srgb, var(--warn) 40%, transparent); background: color-mix(in srgb, var(--warn) 8%, var(--surface)); }
+.kalesh-note.warn .icon { color: var(--warn); }
+.kalesh-overview { font-size: 15px; line-height: 1.6; margin: 0; }
+.kalesh-sec { display: grid; gap: 6px; }
+.kalesh-sec-title { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.kalesh-sec p { margin: 0; line-height: 1.6; }
+.kalesh-sec.flagged, .kalesh-sec.clear { padding: 12px 14px; border-radius: var(--r); border: 1px solid var(--line); }
+.kalesh-sec.flagged { border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.kalesh-sec.flagged .kalesh-sec-title { color: var(--danger); }
+.kalesh-sec.clear { border-color: color-mix(in srgb, var(--ok) 35%, transparent); background: color-mix(in srgb, var(--ok) 6%, var(--surface)); }
+.kalesh-clear { display: flex; gap: 8px; align-items: flex-start; color: var(--text-2); }
+.kalesh-clear .icon { width: 16px; height: 16px; flex: none; color: var(--ok); margin-top: 3px; }
+.kalesh-flags { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.kalesh-flags li { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.kalesh-flags .grow { flex: 1 1 240px; min-width: 0; line-height: 1.55; }
+.kalesh-flag { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.kalesh-flag-links { display: inline-flex; gap: 6px; align-items: center; }
+.kalesh-flag-links .btn .icon { width: 12px; height: 12px; }
+.kalesh-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.kalesh-timeline li { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; line-height: 1.55; }
+.kalesh-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; padding-top: 2px; }
+.kalesh-positions { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.kalesh-position { padding: 10px 12px; border-radius: var(--r); border: 1px solid var(--line); border-left: 3px solid var(--side-a); background: var(--surface-2); }
+.kalesh-position.b { border-left-color: var(--side-b); }
+.kalesh-position ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; color: var(--text-2); }
+.kalesh-interp { margin: 0; padding-left: 18px; color: var(--text-2); font-style: italic; display: grid; gap: 4px; }
+.kalesh-end.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.kalesh-end.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.kalesh-raw { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; margin: 0; }
+.kalesh-ref { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; margin: 0 1px; border: 1px solid var(--accent-line); border-radius: 6px; background: var(--accent-soft); color: var(--accent-text); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; vertical-align: 1px; }
+.kalesh-ref:hover { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+
+.kalesh-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px var(--pad-card); border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+.kalesh-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.kalesh-msg { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 10px; padding: 10px var(--pad-card) 10px calc(var(--pad-card) - 3px); border-top: 1px solid var(--line); border-left: 3px solid transparent; align-items: start; scroll-margin: 90px; }
+.kalesh-msg:first-child { border-top: 0; }
+.kalesh-msg.side-a { border-left-color: var(--side-a); }
+.kalesh-msg.side-b { border-left-color: var(--side-b); background: color-mix(in srgb, var(--side-b) 4%, transparent); }
+.kalesh-msg.side-a { background: color-mix(in srgb, var(--side-a) 4%, transparent); }
+.kalesh-msg.in-burst .kalesh-n { box-shadow: inset 0 0 0 2px var(--warn); }
+.kalesh-msg.flash { animation: kalesh-flash 1.6s ease-out; }
+@keyframes kalesh-flash { 0%, 30% { background: var(--accent-soft); } 100% { background: transparent; } }
+.kalesh-n { display: inline-grid; place-items: center; min-width: 34px; height: 22px; padding: 0 4px; border-radius: 6px; background: var(--surface-3); color: var(--muted); font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
+.kalesh-msg-main { min-width: 0; }
+.kalesh-msg .msg-hit-head .avatar { width: 20px; height: 20px; }
+.kalesh-msg .msg-hit-text { margin-top: 3px; }
+.kalesh-tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 5px; font-size: 11px; font-weight: 700; letter-spacing: .03em; border: 1px solid var(--line-2); color: var(--muted); }
+.kalesh-tag.a { color: var(--side-a); border-color: color-mix(in srgb, var(--side-a) 50%, transparent); }
+.kalesh-tag.b { color: var(--side-b); border-color: color-mix(in srgb, var(--side-b) 50%, transparent); }
+.kalesh-tag.other { font-weight: 600; letter-spacing: 0; }
+.kalesh-open .icon { width: 13px; height: 13px; }
+
+@media (max-width: 640px) {
+  .kalesh-pair { gap: 6px; }
+  .kalesh-pair .picker-btn.wide { flex-basis: 100%; }
+  .kalesh-pair .kalesh-vs { width: 100%; text-align: center; }
+  .kalesh-finder .msg-search-filters .btn { width: 100%; justify-content: center; }
+  .kalesh-custom .input { width: 100%; }
+  .kalesh-custom label { flex: 1 1 100%; }
+  .kalesh-row { padding: 12px; }
+  .kalesh-row-head .badge { margin-left: 0; }
+  .kalesh-ask-body { flex-direction: column; align-items: stretch; padding: 14px; }
+  .kalesh-msg { grid-template-columns: 30px minmax(0, 1fr) auto; padding: 10px 8px 10px 7px; gap: 8px; }
+  .kalesh-n { min-width: 30px; padding: 0 2px; font-size: 11px; }
+  .kalesh-head h1 { font-size: 21px; }
+  .kalesh-timeline li { grid-template-columns: 58px minmax(0, 1fr); gap: 6px; }
+}

@@ -276,6 +276,18 @@ pub trait PanelData: Send + Sync + 'static {
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
         None
     }
+    /// The Kalesh page: two members' own kept messages between two moments, oldest first.
+    async fn kalesh_authors(&self, _a: u64, _b: u64, _since_ms: i64, _until_ms: i64, _channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// The Kalesh page: everything kept from one channel between two moments, oldest first.
+    async fn kalesh_channel(&self, _channel: u64, _since_ms: i64, _until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
+    /// The Kalesh page: one summary from the model.
+    async fn kalesh_summarise(&self, _prompt: String) -> anyhow::Result<super::super::kalesh::Reply> {
+        anyhow::bail!("no model here")
+    }
     /// Deleted messages from the message log, a page at a time.
     async fn msglog_deleted(&self, _filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
         anyhow::bail!("the message log isn't open")
@@ -321,6 +333,7 @@ mod frogs;
 pub mod housecup;
 mod houses;
 mod insights;
+mod kalesh;
 mod left;
 mod media;
 mod members;
@@ -611,6 +624,26 @@ impl PanelData for LiveData {
         tokio::task::spawn_blocking(move || super::super::msglog::list_said(&reader.conn.lock(), &filter).map_err(anyhow::Error::from))
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn kalesh_authors(&self, a: u64, b: u64, since_ms: i64, until_ms: i64, channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        let limit = super::super::kalesh::AUTHOR_ROWS;
+        tokio::task::spawn_blocking(move || super::super::kalesh::authors_between(&reader.conn.lock(), a, b, since_ms, until_ms, channel, limit).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn kalesh_channel(&self, channel: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        let limit = super::super::kalesh::EXCHANGE_ROWS;
+        tokio::task::spawn_blocking(move || super::super::kalesh::channel_between(&reader.conn.lock(), channel, since_ms, until_ms, limit).map_err(anyhow::Error::from))
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
+    async fn kalesh_summarise(&self, prompt: String) -> anyhow::Result<super::super::kalesh::Reply> {
+        super::super::kalesh::ask_live(prompt).await
     }
 
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
@@ -1079,6 +1112,11 @@ pub fn router(panel: Panel) -> Router {
         .route("/msglog/edited", get(msglog::edited))
         .route("/msglog/file/{id}/{n}", get(msglog::file))
         .route("/automod", get(automod::list))
+        .route("/kalesh", get(kalesh::overview))
+        .route("/kalesh/find", get(kalesh::find))
+        .route("/kalesh/exchange", get(kalesh::exchange))
+        .route("/kalesh/detections/{id}", get(kalesh::detection))
+        .route("/kalesh/summarise", post(kalesh::summarise))
         .route("/members", get(members::search))
         .route("/members/left", get(left::list))
         .route("/members/notes", get(members::noted))
@@ -1835,6 +1873,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(msglog::audit_entry(e));
             } else if e.key == "members:left" {
                 obj.extend(left::audit_entry(e));
+            } else if e.key.starts_with("kalesh:") {
+                obj.extend(kalesh::audit_entry(e));
             } else if e.key == "automod:flags" {
                 obj.extend(automod::audit_entry(e));
             } else if e.key.starts_with("notes:") {
