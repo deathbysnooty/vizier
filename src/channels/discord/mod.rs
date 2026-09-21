@@ -1847,7 +1847,7 @@ impl EventHandler for Handler {
                 duel::on_component(&ctx, component).await;
                 return;
             }
-            if id.starts_with("movieready:") {
+            if movie::owns_component(&id) {
                 movie::on_component(&ctx, component).await;
                 return;
             }

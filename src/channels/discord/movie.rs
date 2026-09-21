@@ -1276,6 +1276,15 @@ pub fn vote_line(tally: &[(Pool, usize)]) -> String {
     format!("🗳️ **The vote so far:** {} · most wins, a tie is settled at random", said.join(" · "))
 }
 
+/// Whether a button press belongs to this game.
+///
+/// The router asks rather than listing prefixes of its own: it knew about
+/// `movieready:` and not `moviepool:`, so every press of a category went
+/// nowhere and Discord told the room the app was not responding.
+pub fn owns_component(id: &str) -> bool {
+    id.starts_with(READY_ID) || id.starts_with(POOL_ID)
+}
+
 /// The old I'm-ready button. Cards posted before the categories replaced it are
 /// still in the channel, so the press still works - it just says what to do now.
 ///
@@ -2077,6 +2086,53 @@ mod tests {
             language: "Hindi".into(),
             open_secs: 130,
         }
+    }
+
+    #[test]
+    fn every_button_the_card_puts_up_is_one_the_router_delivers() {
+        // The bug this is here for: the card grew a second kind of button and
+        // the router still only knew the first, so pressing a category did
+        // nothing at all and the app looked dead.
+        let m = store::Match {
+            id: 5,
+            status: store::MatchStatus::Break,
+            films: 10,
+            played: 0,
+            opened_ts: 0,
+            ready_from: 0,
+            started_ts: None,
+            ended_ts: None,
+            channel: 1,
+            pool: Pool::Mix,
+        };
+        let mut rows = vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("{}{}", READY_ID, m.id)).label("🎬 I'm ready"),
+        ])];
+        rows.extend(pool_buttons(m.id, &[]));
+        let json = serde_json::to_value(&rows).expect("components");
+        let mut found = 0;
+        let mut walk = |value: &serde_json::Value| {
+            let mut ids = Vec::new();
+            let mut stack = vec![value.clone()];
+            while let Some(node) = stack.pop() {
+                match node {
+                    serde_json::Value::Object(map) => {
+                        if let Some(serde_json::Value::String(id)) = map.get("custom_id") {
+                            ids.push(id.clone());
+                        }
+                        stack.extend(map.into_values());
+                    }
+                    serde_json::Value::Array(items) => stack.extend(items),
+                    _ => {}
+                }
+            }
+            ids
+        };
+        for id in walk(&json) {
+            assert!(owns_component(&id), "nothing delivers {}", id);
+            found += 1;
+        }
+        assert!(found >= 2, "only {} buttons carried an id", found);
     }
 
     #[test]
