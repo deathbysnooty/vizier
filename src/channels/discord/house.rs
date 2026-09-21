@@ -1305,6 +1305,20 @@ pub(super) fn award_person(
     award_person_at(user, source, points, reason, by, dedupe, scope, Utc::now().timestamp())
 }
 
+/// Points of one kind a person already holds for the India day of `at`: the
+/// ledger's rows for a member, the pool's for a mod. Only earnings count -
+/// a deduction or a mod's give doesn't make a day owe more.
+pub(super) fn earned_on(user: u64, source: super::points::Source, at: i64) -> i64 {
+    let Some(db) = DB.get() else {
+        return 0;
+    };
+    let conn = db.lock();
+    let day = super::points::ist_day(at);
+    let sum = |sql: &str| conn.query_row(sql, params![user as i64, source.key(), day], |r| r.get::<_, i64>(0)).unwrap_or(0);
+    sum("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE user_id = ?1 AND source = ?2 AND day = ?3 AND points > 0")
+        + sum("SELECT COALESCE(SUM(points), 0) FROM pool WHERE user_id = ?1 AND source = ?2 AND day = ?3 AND points > 0")
+}
+
 /// `award_person`, dated to when the points were EARNED rather than now.
 ///
 /// The ledger counts caps by the day a row is dated. A chat or voice day that is

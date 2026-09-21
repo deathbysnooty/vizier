@@ -12,6 +12,14 @@
 //! Every award goes through `house::award_person_at` with a key naming the person
 //! and the day, so the timer can rerun as often as it likes - after a restart,
 //! on the day before, twice in a minute - and each day still pays once.
+//!
+//! Voice asks for a running total rather than a price per hour: hour N says
+//! "the day's voice should now come to the ladder's sum through N", and only
+//! what the ledger doesn't already hold for that day is paid. So a change to
+//! the ladder or to the length of an hour in the middle of a day tops people
+//! up to the new rule instead of colliding with keys the old one used - which
+//! is what happened on 2026-09-21, when half-hour points already sat on the
+//! keys the new hours wanted and five hours paid five points.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,6 +99,12 @@ pub fn voice_hour_worth(ladder: &[i64], hour: usize) -> i64 {
     ladder.get(hour.saturating_sub(1)).copied().unwrap_or(last)
 }
 
+/// The first India day paid by the hour ladder, 2026-09-21. Days before it
+/// were settled under the flat rule and are left as they are.
+fn ladder_since() -> i64 {
+    NaiveDate::from_ymd_opt(2026, 9, 21).and_then(day_bounds).map(|(start, _)| start).unwrap_or(0)
+}
+
 fn voice_day_secs() -> i64 {
     super::control::number("VIZIER_VOICE_DAY_MINUTES", (VOICE_DAY_SECS / 60) as u64).max(1) as i64 * 60
 }
@@ -123,9 +137,12 @@ struct VoiceEvent {
 struct Award {
     user: u64,
     source: Source,
-    /// What to ask the ledger for. One, except for voice, where the hours
-    /// climb: the first is worth less than the fourth.
+    /// What to ask the ledger for. One for chat. For voice, the day's running
+    /// total through this hour: what is paid is that less what the day already
+    /// holds (see `running`).
     points: i64,
+    /// `points` is a running total for the day, not an amount.
+    running: bool,
     reason: String,
     dedupe: String,
     /// The last second of the day it was earned. The ledger dates each point by
@@ -249,7 +266,19 @@ async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
     let paid = tokio::task::spawn_blocking(move || {
         let mut settled = Vec::new();
         for a in todo {
-            let asked = a.points;
+            // Voice before the ladder shipped was paid in full under the rule
+            // of its day; a running total would top it up at today's rates.
+            if a.source == Source::Voice && a.at < ladder_since() {
+                settled.push(a.dedupe);
+                continue;
+            }
+            let asked = if a.running { a.points - super::house::earned_on(a.user, a.source, a.at) } else { a.points };
+            if asked <= 0 {
+                // Already holds this much for the day: nothing to write, and
+                // nothing to ask again until the next hour raises the total.
+                settled.push(a.dedupe);
+                continue;
+            }
             match super::house::award_person_at(a.user, a.source, asked, &a.reason, None, Some(a.dedupe.clone()), None, a.at.min(chrono::Utc::now().timestamp())) {
                 Some((house, outcome)) => {
                     tracing::info!("activity: {} -> {} ({}): {:?}", a.dedupe, a.user, house.name, outcome);
@@ -808,6 +837,7 @@ fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> 
                 reason: format!("{}+ messages on {}", bar, day),
                 dedupe: key("chat", user, i + 1),
                 at,
+                running: false,
             });
         }
     }
@@ -820,15 +850,18 @@ fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> 
         // hours on a marathon day are asked for and refused as capped.
         let hours = (secs / bar).min(24) as usize;
         let ladder = voice_hour_points();
+        let mut total = 0;
         for hour in 1..=hours {
             let worth = voice_hour_worth(&ladder, hour);
             if worth <= 0 {
                 continue;
             }
+            total += worth;
             out.push(Award {
                 user,
                 source: Source::Voice,
-                points: worth,
+                points: total,
+                running: true,
                 reason: format!(
                     "{} {} in voice{} on {} (hour {})",
                     hour * (bar / 60) as usize,
@@ -837,7 +870,9 @@ fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> 
                     day,
                     hour
                 ),
-                dedupe: key("voice", user, hour),
+                // "h" keeps these clear of the keys the half-hour rule used
+                // (`voice:<day>:<user>:<n>`), which the same day may still hold.
+                dedupe: format!("voice:{}:{}:h{}", day, user, hour),
                 at,
             });
         }
@@ -1030,16 +1065,68 @@ mod tests {
             .map(|a| (a.dedupe.clone(), a.points))
             .collect();
         assert_eq!(hours.len(), 3, "three full hours: {:?}", hours);
-        assert_eq!(hours[0].1, 1);
-        assert_eq!(hours[1].1, 2);
-        assert_eq!(hours[2].1, 3);
+        // Each asks for the day's running total: 1, then 1+2, then 1+2+3.
+        assert_eq!(hours.iter().map(|h| h.1).collect::<Vec<_>>(), vec![1, 3, 6]);
+        assert!(awards.iter().filter(|a| a.source == Source::Voice).all(|a| a.running));
         // Each hour keeps its own key, so a rerun pays none of them twice.
-        assert_eq!(hours[0].0, format!("voice:{}:{}", day(), ME));
-        assert!(hours[2].0.ends_with(":3"), "{}", hours[2].0);
+        assert_eq!(hours[0].0, format!("voice:{}:{}:h1", day(), ME));
+        assert!(hours[2].0.ends_with(":h3"), "{}", hours[2].0);
         // And the reason says which hour it was, because "60 minutes" on a
         // three-point row reads like a mistake otherwise.
-        let third = awards.iter().find(|a| a.points == 3).expect("the third hour");
+        let third = awards.iter().filter(|a| a.source == Source::Voice).nth(2).expect("the third hour");
         assert!(third.reason.contains("hour 3"), "{}", third.reason);
+    }
+
+    /// 2026-09-21: five half-hours were paid a point each under the old rule,
+    /// on keys `voice:<day>:<user>:1..5`. The ladder's hours used the same keys,
+    /// so five hours came to five points. Asking for the running total less what
+    /// the day holds tops it up to the ladder's fourteen, and no further.
+    #[test]
+    fn a_rule_change_mid_day_tops_up_to_the_ladder_and_never_pays_twice() {
+        let ledger = Connection::open_in_memory().unwrap();
+        ledger.execute_batch(points::SCHEMA).unwrap();
+        let (start, _) = bounds();
+        let at = start + 20 * H;
+        let write = |points: i64, dedupe: String| {
+            let entry = Entry {
+                user: Some(ME),
+                house: &HOUSES[0],
+                source: Source::Voice,
+                scope: None,
+                points,
+                reason: "voice",
+                by: None,
+                dedupe: Some(dedupe),
+            };
+            points::write(&ledger, &entry, at).unwrap()
+        };
+        for half in 1..=5 {
+            let key = if half == 1 { format!("voice:{}:{}", day(), ME) } else { format!("voice:{}:{}:{}", day(), ME, half) };
+            write(1, key);
+        }
+        let held = || -> i64 {
+            ledger
+                .query_row(
+                    "SELECT COALESCE(SUM(points), 0) FROM ledger WHERE user_id = ?1 AND source = 'voice' AND day = ?2 AND points > 0",
+                    params![ME as i64, points::ist_day(at)],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(held(), 5);
+        let voice: HashMap<u64, i64> = [(ME, 305 * 60)].into_iter().collect();
+        let pay = || {
+            for a in plan(day(), &HashMap::new(), &voice).into_iter().filter(|a| a.source == Source::Voice) {
+                let asked = a.points - held();
+                if asked > 0 {
+                    write(asked, a.dedupe);
+                }
+            }
+        };
+        pay();
+        assert_eq!(held(), 14, "1+2+3+4+4 for five hours");
+        pay();
+        assert_eq!(held(), 14, "a rerun pays nothing more");
     }
 
     #[test]
@@ -1102,7 +1189,7 @@ mod tests {
         assert_eq!(shared.get(&44), None, "a bot is not company");
         assert_eq!(shared.get(&BOT), None);
         let hours: Vec<String> = plan(day(), &HashMap::new(), &shared).into_iter().map(|a| a.dedupe).collect();
-        assert_eq!(hours, vec!["voice:2026-09-14:11", "voice:2026-09-14:11:2", "voice:2026-09-14:22", "voice:2026-09-14:33"]);
+        assert_eq!(hours, vec!["voice:2026-09-14:11:h1", "voice:2026-09-14:11:h2", "voice:2026-09-14:22:h1", "voice:2026-09-14:33:h1"]);
     }
 
     fn sit(user: u64, room: u64, start: i64, end: i64) -> Sitting {
@@ -1281,7 +1368,7 @@ mod tests {
         let now = s + 23 * H;
         let first = load_day(&conn, day(), now, &HashSet::new(), None, true, &HashSet::new()).unwrap();
         let keys: Vec<&str> = first.iter().map(|a| a.dedupe.as_str()).collect();
-        assert_eq!(keys, vec!["chat:2026-09-14:11", "voice:2026-09-14:22", "voice:2026-09-14:44"]);
+        assert_eq!(keys, vec!["chat:2026-09-14:11", "voice:2026-09-14:22:h1", "voice:2026-09-14:44:h1"]);
         // Voice log still importing: no voice days yet.
         let early = load_day(&conn, day(), now, &HashSet::new(), None, false, &HashSet::new()).unwrap();
         assert!(early.iter().all(|a| a.source == Source::Chat));
