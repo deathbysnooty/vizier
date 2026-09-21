@@ -103,11 +103,14 @@ No `cargo build` is needed for bank content, but the bot reads the bank once at
 boot, so the server needs the files and a restart:
 
 ```sh
-rsync -az geobank/places.json geobank/spots.json geobank/world.json geobank/world_spots.json \
+rsync -az -e "ssh -i $HOME/.ssh/hetzner_mlci" \
+  geobank/places.json geobank/spots.json geobank/world.json geobank/world_spots.json \
   geobank/images root@37.27.180.72:/root/vizier/.vizier/geobank/
 ```
 
-macOS ships rsync 2.6.9, which rejects `--info=`; stick to `-az`. Cropping
+The `-e` matters: the server takes the `hetzner_mlci` key, and without it rsync
+falls back to asking for root's password. macOS ships rsync 2.6.9, which
+rejects `--info=`; stick to `-az`. Cropping
 rewrites every photo, so the first rsync after it re-sends the lot.
 
 ## What the photos are
