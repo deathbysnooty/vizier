@@ -1395,6 +1395,31 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "invites",
+            title: "Invite tracking",
+            icon: "✉️",
+            about: "Works out which invite each new member joined through, and who made it. Discord never tells a bot \
+                    this, so the bot keeps a copy of every invite's use count and, when someone joins, looks for the one \
+                    that went up. One going up is sure; a single-use invite that vanished is likely; the server's vanity \
+                    link is its own answer; two going up at once is unsure; nothing changing is unknown. The panel's \
+                    Invites page lists every invite and the people each inviter brought in, and each member's profile \
+                    says how they joined. Joins before tracking began are not known.",
+            settings: vec![
+                toggle("VIZIER_INVITES", "Invite tracking", "Read the invites when someone joins and record which one they used. Off records nothing, and joins while it is off stay unknown."),
+                setting(
+                    "VIZIER_INVITES_RESYNC_MINUTES",
+                    "Re-read every",
+                    "How often the whole invite list is read again, in case the bot missed an invite being made or deleted.",
+                    number(1, 1440, "minutes"),
+                    "15",
+                ),
+            ],
+            commands: vec![
+                command("invitedby", ADMINS, "/invitedby member:", "Which invite a member joined through and who made it, answered privately."),
+                command("invites", ADMINS, "/invites member:", "How many people a member's invites brought in and how many are still here, answered privately."),
+            ],
+        },
+        Section {
             id: "quotes",
             title: "Quotes & awards",
             icon: "💬",

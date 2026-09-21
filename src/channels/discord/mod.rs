@@ -44,6 +44,8 @@ mod frog_sell;
 mod frog_store;
 mod frog_trade;
 mod house;
+mod invites;
+mod invites_store;
 mod kalesh;
 mod kalesh_store;
 mod msglog;
@@ -218,6 +220,10 @@ impl VizierChannel for DiscordChannelReader {
         // Fights the kalesh detector called, and the panel's summaries of them.
         if let Err(err) = kalesh_store::open(&self.deps.config.workspace) {
             tracing::warn!("kalesh: store not opened: {}", err);
+        }
+        // Invite tracking: the invite snapshot and which invite each join used.
+        if let Err(err) = invites_store::open(&self.deps.config.workspace) {
+            tracing::warn!("invites: store not opened: {}", err);
         }
         // Automatic moderation: spam removals and AI flags. Not opening only
         // means the feature stays off, which is also what it defaults to.
@@ -1303,6 +1309,9 @@ impl EventHandler for Handler {
         }
         let uid = member.user.id.get();
         let name = member.user.name.clone();
+        // Which invite they came through, in its own task: it reads the invite
+        // list from Discord, and the welcome must not wait on that.
+        invites::on_join(&ctx, &member);
         let log = joinlog_bump(&self.1.storage, uid, &name, true).await;
 
         let welcome = welcome_channel();
@@ -1350,6 +1359,16 @@ impl EventHandler for Handler {
         }
         // Recorded quietly - announcing departures invites drama.
         joinlog_bump(&self.1.storage, user.id.get(), &user.name, false).await;
+    }
+
+    async fn invite_create(&self, ctx: Context, data: serenity::all::InviteCreateEvent) {
+        // Into the invite snapshot at once, so its first use can be told apart.
+        invites::on_create(&ctx, &data);
+    }
+
+    async fn invite_delete(&self, _ctx: Context, data: serenity::all::InviteDeleteEvent) {
+        // Out of the snapshot but kept: a used-up single-use invite goes this way.
+        invites::on_delete(&data);
     }
 
 
@@ -1408,6 +1427,9 @@ impl EventHandler for Handler {
         // line the deafened stretches up with who is deafened after a restart
         // or a fresh session. Safe to run again on every later cache_ready.
         stats::reconcile_from_cache(&ctx);
+        // The invite snapshot, read again on every cache_ready in case a
+        // reconnect missed an invite event; the periodic re-read starts once.
+        invites::on_ready(&ctx, _guilds.first().copied());
     }
 
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -1706,6 +1728,8 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(puzzle::skip_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(invites::invitedby_builder())).await;
+        let _ = Command::create_global_command(ctx.http.clone(), admin_command(invites::invites_builder())).await;
         let _ = Command::create_global_command(ctx.http.clone(), duel::command()).await;
         let _ = Command::create_global_command(ctx.http.clone(), duel::help_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), duel::top_builder()).await;
@@ -2399,6 +2423,15 @@ impl EventHandler for Handler {
             }
 
             // The four houses.
+            // Invite tracking, mods only, answered privately.
+            if command.data.name == "invitedby" {
+                invites::invitedby_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "invites" {
+                invites::invites_command(&ctx, &command, &self.1.storage).await;
+                return;
+            }
             if command.data.name == "snitchdrop" {
                 snitch::drop_command(&ctx, &command).await;
             }

@@ -107,6 +107,8 @@
     send: '<path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/>',
     door: '<path d="M3 21h18"/><path d="M6 21V4.5A1.5 1.5 0 0 1 7.5 3h9A1.5 1.5 0 0 1 18 4.5V21"/><path d="M14.5 12.5h.01"/>',
     userminus: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M17 11h5"/>',
+    userplus: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19.5 8.5v5M17 11h5"/>',
+    link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>',
     flame: '<path d="M12 3c.6 3.2 4.8 5.4 4.8 10.2A4.8 4.8 0 0 1 12 18a4.8 4.8 0 0 1-4.8-4.8c0-2.2 1.1-3.7 2.3-4.8.2 1.6.9 2.7 2 3.2-.6-2.9-.1-5.8.5-8.6z"/><path d="M8 21h8"/>',
   };
@@ -566,6 +568,7 @@
       navItem('#/kalesh', icon('flame'), 'Kalesh'),
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
+      navItem('#/invites', icon('userplus'), 'Invites'),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -615,6 +618,7 @@
       ['Kalesh', '#/kalesh', 'flame', 'Look back at a fight between two members: the messages, and a neutral summary on request'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
+      ['Invites', '#/invites', 'userplus', 'Which invite each new member joined through, who made it, and who each inviter brought in'],
       ['Moderation', '#/automod', 'shield', 'Spam the bot removed, and messages it has asked a moderator to look at'],
       ['Possibly AI flags', '#/automod?kind=ai', 'bot', 'Messages that might have been written by an AI — flagged only, never deleted'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
@@ -758,6 +762,7 @@
       case 'deleted': renderDeleted(page, r.q); break;
       case 'kalesh': renderKalesh(page, r); break;
       case 'left': renderLeft(page, r.q); break;
+      case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
       case 'automod': renderAutomod(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
@@ -2592,6 +2597,227 @@
     if (day === istDay(Date.now())) return 'today';
     if (day === istDay(Date.now() - 86400000)) return 'yesterday';
     return 'on ' + dayMonth(ts);
+  }
+
+  // --- invites --------------------------------------------------------------------------
+
+  const INVITE_HOW = {
+    sure: { word: null, tip: 'Exactly one invite’s count went up when they joined.' },
+    likely: { word: 'likely', tip: 'No count went up, but a single-use invite vanished just then: most likely that one.' },
+    vanity: { word: 'vanity link', tip: 'The server’s vanity link’s count went up.' },
+    unsure: { word: 'unsure', tip: 'More than one count went up: someone else joined at the same moment.' },
+    unknown: { word: 'unknown', tip: 'Nothing the bot can see changed: a bot’s sign-in link, Server Discovery, or a link it never saw.' },
+  };
+
+  function inviteHowBadge(how) {
+    const k = INVITE_HOW[how];
+    if (!k || !k.word) return null;
+    return h('span', { class: 'badge inv-how ' + how, title: k.tip }, k.word);
+  }
+
+  function inviteCode(code, url) {
+    return h('code', { class: 'inv-code', title: 'https://' + (url || 'discord.gg/' + code) }, url || 'discord.gg/' + code);
+  }
+
+  function invitePerson(who, cls) {
+    if (!who) return h('span', { class: 'inv-nobody' }, 'nobody Discord names');
+    return h('a', { class: 'inv-person' + (cls ? ' ' + cls : ''), href: '#/invites/' + who.id, title: 'Who ' + who.name + '’s invites brought in' }, '@' + who.name);
+  }
+
+  /** One join, in words, with the inviter linked: the profile's line and the page's. */
+  function inviteLine(j, opts) {
+    opts = opts || {};
+    const day = dayMonth(j.joined_ts);
+    const out = [];
+    if (j.how === 'sure' || j.how === 'likely') {
+      out.push('Joined ' + day + ' via ', inviteCode(j.code, j.url), ' — invite created by ', invitePerson(j.inviter));
+    } else if (j.how === 'vanity') {
+      out.push('Joined ' + day + ' via the server’s vanity link');
+    } else if (j.how === 'unsure') {
+      out.push('Joined ' + day + ' via ');
+      (j.candidates || []).forEach((c, i) => {
+        if (i) out.push(' or ');
+        out.push(c.vanity ? 'the vanity link' : inviteCode(c.code, c.url));
+      });
+      const people = [];
+      (j.candidates || []).filter((c) => c.inviter).forEach((c) => { if (!people.some((p) => p.id === c.inviter.id)) people.push(c.inviter); });
+      if (people.length) { out.push(' — invite created by '); people.forEach((p, i) => { if (i) out.push(' or '); out.push(invitePerson(p)); }); }
+    } else {
+      out.push('Joined ' + day + ' — invite unknown');
+    }
+    const badge = opts.noBadge ? null : inviteHowBadge(j.how === 'vanity' ? null : j.how);
+    if (badge) out.push(' ', badge);
+    return out;
+  }
+
+  /** The line on a member's profile: filled in once it has loaded. */
+  function profileInvite(id) {
+    const el = h('p', { class: 'profile-invite', 'aria-live': 'polite' }, icon('userplus'), h('span', { class: 'inv-loading' }, 'Looking up how they joined…'));
+    api('GET', '/invites/members/' + encodeURIComponent(id)).then((d) => {
+      clear(el).appendChild(icon('userplus'));
+      if (d.join) {
+        el.appendChild(h('span', null, inviteLine(d.join)));
+      } else {
+        el.appendChild(h('span', { class: d.before_tracking ? 'inv-quiet' : null }, d.line));
+      }
+    }).catch((e) => {
+      clear(el).appendChild(icon('userplus'));
+      el.appendChild(h('span', { class: 'inv-quiet' }, e.status === 503 ? 'Invite tracking isn’t running.' : 'Couldn’t look up how they joined.'));
+    });
+    return el;
+  }
+
+  function inviteExpiry(inv) {
+    if (inv.gone_ts) return h('span', { class: 'inv-quiet', title: fmtFull.format(new Date(inv.gone_ts * 1000)) + ' IST' }, 'gone ' + ago(inv.gone_ts));
+    if (!inv.expires_ts) return h('span', { class: 'inv-quiet' }, 'never');
+    const left = inv.expires_ts - Date.now() / 1000;
+    return h('span', { title: fmtFull.format(new Date(inv.expires_ts * 1000)) + ' IST' }, left <= 0 ? 'expired' : 'in ' + duration(left));
+  }
+
+  function inviteUses(inv) {
+    return inv.max_uses ? numberFmt.format(inv.uses) + ' / ' + numberFmt.format(inv.max_uses) : numberFmt.format(inv.uses);
+  }
+
+  function invitesTable(list) {
+    const rows = list.map((i) => h('tr', { class: i.gone_ts ? 'inv-gone' : null },
+      h('td', { 'data-label': 'Invite' }, inviteCode(i.code, i.url), i.temporary ? h('span', { class: 'badge paused', title: 'Members who join through it are removed when they go offline, unless given a role' }, 'temporary') : null),
+      h('td', { 'data-label': 'Made by' }, invitePerson(i.inviter)),
+      h('td', { 'data-label': 'Channel' }, h('span', { class: 'msg-hit-chan' }, h('span', { class: 'glyph' }, '#'), i.channel.name || 'unknown')),
+      h('td', { class: 'num', 'data-label': 'Uses' }, inviteUses(i)),
+      h('td', { class: 'num', 'data-label': 'Brought in', title: 'Joins the bot has put down to this invite since tracking began' }, numberFmt.format(i.brought)),
+      h('td', { 'data-label': i.gone_ts ? 'Gone' : 'Expires' }, inviteExpiry(i))));
+    return h('div', { class: 'table-wrap inv-table-wrap' }, h('table', { class: 'mini-table inv-table' },
+      h('thead', null, h('tr', null, h('th', null, 'Invite'), h('th', null, 'Made by'), h('th', null, 'Channel'), h('th', { class: 'num' }, 'Uses'), h('th', { class: 'num' }, 'Brought in'), h('th', null, 'Expires'))),
+      h('tbody', null, rows)));
+  }
+
+  function renderInvites(page) {
+    document.title = 'Invites · Loduchand';
+    page.appendChild(pageHead('Invites', 'Which invite each new member joined through, who made it, and who each inviter has brought in.',
+      sectionById('invites') ? h('a', { class: 'btn', href: '#/s/invites', 'aria-label': 'Invite tracking settings' }, icon('sliders'), h('span', { class: 'hide-sm' }, 'Settings')) : null));
+    const holder = h('div', { class: 'inv-page' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the invites…'));
+    page.appendChild(holder);
+    api('GET', '/invites').then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      const started = d.started_ts ? fmtDate(d.started_ts * 1000) : 'the day it was switched on';
+      if (!d.enabled) holder.appendChild(h('div', { class: 'banner inline', role: 'status' }, icon('pause'),
+        h('p', null, h('b', null, 'Invite tracking is switched off. '), h('span', null, 'Joins while it is off are not recorded. '), h('a', { href: '#/s/invites' }, 'Switch it on'))));
+      holder.appendChild(h('div', { class: 'banner info inline inv-note', role: 'note' }, icon('info'),
+        h('p', null, h('b', null, 'Tracking started on ' + started + '. '),
+          h('span', null, 'Anyone who joined before that is not known here. For them, Discord’s own '),
+          h('b', null, 'Server Settings → Members'), h('span', null, ' shows the invite each member joined with.'))));
+
+      const t = d.totals;
+      holder.appendChild(h('div', { class: 'stat-row five inv-stats' },
+        stat('Joins tracked', numberFmt.format(t.joins), 'since ' + (d.started_ts ? dayMonth(d.started_ts) : 'the start')),
+        stat('Sure', numberFmt.format(t.sure), 'one invite’s count went up'),
+        stat('Likely', numberFmt.format(t.likely), 'a single-use invite vanished'),
+        stat('Vanity link', numberFmt.format(t.vanity), d.vanity ? d.vanity.url + ' · ' + numberFmt.format(d.vanity.uses) + ' uses' : 'the server has none'),
+        stat('Unsure or unknown', numberFmt.format(t.unsure + t.unknown), t.unsure + ' unsure, ' + t.unknown + ' unknown')));
+
+      // Who brought whom.
+      const inviters = d.inviters || [];
+      const people = h('div', { class: 'inv-rows' });
+      if (!inviters.length) people.appendChild(h('div', { class: 'empty' }, icon('userplus'), h('h3', null, 'Nobody yet'),
+        h('p', null, 'No join since ' + started + ' has been put down to anyone’s invite yet.')));
+      const top = Math.max(1, ...inviters.map((r) => r.brought));
+      inviters.forEach((r, n) => {
+        const gone = r.brought - r.still_here;
+        people.appendChild(h('a', { class: 'inv-row', href: '#/invites/' + r.id },
+          h('span', { class: 'inv-rank', 'aria-hidden': 'true' }, String(n + 1)),
+          avatar(r.avatar, r.name, 'lg'),
+          h('div', { class: 'inv-row-main' },
+            h('div', { class: 'inv-row-head' }, h('b', null, r.name), r.live_invites ? h('small', null, plural(r.live_invites, 'live invite')) : null),
+            h('div', { class: 'inv-bar', role: 'img', 'aria-label': r.still_here + ' of ' + r.brought + ' still here' },
+              h('i', { class: 'here', style: 'width:' + (r.still_here / top) * 100 + '%' }), h('i', { class: 'gone', style: 'width:' + (gone / top) * 100 + '%' })),
+            h('div', { class: 'inv-row-facts' },
+              h('span', null, h('b', null, numberFmt.format(r.still_here)), ' still here'),
+              h('span', null, h('b', null, numberFmt.format(r.brought)), ' brought in'),
+              h('span', null, h('b', null, numberFmt.format(r.sorted)), ' in a house'),
+              h('span', null, h('b', null, numberFmt.format(r.active)), ' active'))),
+          icon('right', 'kalesh-row-go')));
+      });
+      holder.appendChild(card('inv-inviters', 'People each inviter brought in',
+        'Most still here first. Active means they chatted or sat in voice in the last ' + d.active_days + ' days. Only sure and likely joins count towards anyone.', people, { cls: 'inv-card' }));
+
+      // Every invite.
+      const live = (d.invites || []).filter((i) => !i.gone_ts), gone = (d.invites || []).filter((i) => i.gone_ts);
+      const box = h('div', null);
+      const drawInvites = (showGone) => {
+        clear(box);
+        if (!live.length) box.appendChild(h('p', { class: 'empty-small inv-pad' }, 'The server has no live invites the bot knows of.'));
+        else box.appendChild(invitesTable(live));
+        if (gone.length) {
+          if (showGone) box.appendChild(h('div', { class: 'inv-gone-head' }, 'Expired or deleted'));
+          if (showGone) box.appendChild(invitesTable(gone));
+          box.appendChild(h('div', { class: 'inv-foot' }, h('button', { class: 'btn sm ghost', type: 'button', 'aria-expanded': showGone ? 'true' : 'false', onclick: () => drawInvites(!showGone) },
+            icon(showGone ? 'up' : 'down'), showGone ? 'Hide the ones that are gone' : 'Show ' + plural(gone.length, 'expired or deleted invite'))));
+        }
+      };
+      drawInvites(false);
+      holder.appendChild(card('inv-list', 'Invites', plural(live.length, 'live invite') + (d.vanity ? ' · vanity link ' + d.vanity.url : ''), box, { cls: 'inv-card' }));
+
+      // The latest arrivals.
+      const recent = h('ul', { class: 'inv-joins' });
+      (d.recent || []).forEach((j) => recent.appendChild(h('li', null,
+        h('a', { class: 'inv-join-who', href: '#/members/' + j.member.id, tabindex: '-1', 'aria-hidden': 'true' }, avatar(j.member.avatar, j.member.name)),
+        h('div', { class: 'inv-join-main' },
+          h('a', { class: 'inv-join-name', href: '#/members/' + j.member.id }, j.member.name),
+          h('div', { class: 'inv-join-line' }, inviteLine(j))),
+        h('time', { class: 'msg-hit-time', datetime: iso(j.joined_ts), title: fmtFull.format(new Date(j.joined_ts * 1000)) + ' IST' }, ago(j.joined_ts)))));
+      if (!(d.recent || []).length) recent.appendChild(h('li', { class: 'empty-small' }, 'Nobody has joined since tracking began.'));
+      holder.appendChild(card('inv-recent', 'Latest joins', 'Newest first, with how sure the bot is of each.', recent, { cls: 'inv-card' }));
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the invites'), h('p', null, e.message))));
+    });
+  }
+
+  function renderInviter(page, id) {
+    document.title = 'Invites · Loduchand';
+    page.appendChild(h('a', { class: 'back-link', href: '#/invites' }, icon('left'), 'Invites'));
+    const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…'));
+    page.appendChild(holder);
+    api('GET', '/invites/inviters/' + encodeURIComponent(id)).then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      const who = d.inviter;
+      document.title = who.name + ' · Invites · Loduchand';
+      holder.appendChild(h('div', { class: 'page-head inv-head' }, avatar(who.avatar, who.name, 'xl'),
+        h('div', { class: 'grow' }, h('div', { class: 'title-row' }, h('h1', null, 'Who ' + who.name + ' brought in')),
+          h('p', { class: 'lead' }, 'Members who joined through ' + who.name + '’s invites since tracking began on ' + fmtDate(d.started_ts * 1000) + '. ',
+            h('a', { class: 'open-link', href: '#/members/' + who.id }, icon('user'), 'Their profile')))));
+      holder.appendChild(h('div', { class: 'stat-row four inv-stats' },
+        stat('Brought in', numberFmt.format(d.brought), 'sure and likely joins'),
+        stat('Still here', numberFmt.format(d.still_here), d.brought ? Math.round((d.still_here / d.brought) * 100) + '% stayed' : '—'),
+        stat('In a house', numberFmt.format(d.sorted), 'sorted by the hat'),
+        stat('Active', numberFmt.format(d.active), 'in the last ' + d.active_days + ' days')));
+
+      const list = h('div', { class: 'inv-rows' });
+      if (!d.members.length) list.appendChild(h('div', { class: 'empty' }, icon('userplus'), h('h3', null, 'Nobody yet'), h('p', null, 'No join has been put down to ' + who.name + '’s invites.')));
+      d.members.forEach((m) => {
+        const href = '#/members/' + m.id;
+        list.appendChild(h('article', { class: 'inv-member' + (m.still_here ? '' : ' left') },
+          h('a', { href, tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.avatar, m.name, 'lg')),
+          h('div', { class: 'inv-row-main' },
+            h('div', { class: 'inv-row-head' }, h('a', { class: 'inv-join-name', href }, m.name),
+              m.house ? h('span', { class: 'house-chip', style: '--house:' + m.house.colour }, m.house.crest + ' ' + m.house.name) : null,
+              m.still_here ? h('span', { class: 'badge good' }, 'Still here') : h('span', { class: 'badge paused' }, 'Left'),
+              m.active ? h('span', { class: 'badge on', title: 'Chatted or sat in voice in the last ' + d.active_days + ' days' }, 'Active') : null),
+            h('div', { class: 'inv-join-line' },
+              h('time', { datetime: iso(m.joined_ts), title: fmtFull.format(new Date(m.joined_ts * 1000)) + ' IST' }, 'Joined ' + dayMonth(m.joined_ts)),
+              ' via ', inviteCode(m.code, m.url), ' ', inviteHowBadge(m.how))),
+          h('a', { class: 'btn sm', href, 'aria-label': 'Open ' + m.name + '’s profile' }, h('span', { class: 'hide-sm' }, 'Profile'), icon('right'))));
+      });
+      holder.appendChild(card('inv-brought', 'Members they brought in', 'Newest first. Someone who came back through the same person’s invite is listed once.', list, { cls: 'inv-card' }));
+      if (d.invites.length) holder.appendChild(card('inv-theirs', 'Their invites', null, invitesTable(d.invites), { cls: 'inv-card' }));
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card empty' }, icon('user'), h('h3', null, e.status === 404 ? 'Nothing for this member' : 'Couldn’t load this inviter'), h('p', null, e.message)));
+    });
   }
 
   // --- moderation ---------------------------------------------------------------------
@@ -5889,6 +6115,7 @@
           p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null,
           h('a', { class: 'open-link', href: '#/messages?member=' + encodeURIComponent(p.id) }, icon('message'), 'Read their messages'),
           h('a', { class: 'open-link', href: '#/deleted?member=' + encodeURIComponent(p.id) }, icon('trash'), 'Deleted messages')),
+        profileInvite(p.id),
         p.roles.length ? h('div', { class: 'chips role-chips' }, p.roles.map((r) => h('span', { class: 'chip role-chip' }, h('span', { class: 'role-dot', style: r.color ? 'background:' + r.color : '' }), h('span', { class: 'chip-text' }, r.name)))) : null)));
 
     const grid = h('div', { class: 'profile-grid' });

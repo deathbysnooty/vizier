@@ -333,6 +333,7 @@ mod frogs;
 pub mod housecup;
 mod houses;
 mod insights;
+mod invites;
 mod kalesh;
 mod left;
 mod media;
@@ -1112,6 +1113,9 @@ pub fn router(panel: Panel) -> Router {
         .route("/msglog/edited", get(msglog::edited))
         .route("/msglog/file/{id}/{n}", get(msglog::file))
         .route("/automod", get(automod::list))
+        .route("/invites", get(invites::overview))
+        .route("/invites/inviters/{id}", get(invites::inviter))
+        .route("/invites/members/{id}", get(invites::member))
         .route("/kalesh", get(kalesh::overview))
         .route("/kalesh/find", get(kalesh::find))
         .route("/kalesh/exchange", get(kalesh::exchange))
@@ -1875,6 +1879,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(left::audit_entry(e));
             } else if e.key.starts_with("kalesh:") {
                 obj.extend(kalesh::audit_entry(e));
+            } else if e.key.starts_with("invites:") {
+                obj.extend(invites::audit_entry(e));
             } else if e.key == "automod:flags" {
                 obj.extend(automod::audit_entry(e));
             } else if e.key.starts_with("notes:") {

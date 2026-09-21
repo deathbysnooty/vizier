@@ -1358,6 +1358,11 @@ pub fn store() {
         super::super::super::automod_store::start(dir.path().to_str().unwrap()).expect("automod store");
         // The Kalesh page's detections and summaries.
         super::super::super::kalesh_store::open(dir.path().to_str().unwrap()).expect("kalesh store");
+        // Invite tracking, with three weeks of joins to draw the Invites page.
+        super::super::super::invites_store::open(dir.path().to_str().unwrap()).expect("invites store");
+        if let Some(db) = super::super::super::invites_store::db() {
+            super::invites::seed(&db.lock(), chrono::Utc::now().timestamp());
+        }
         seed_automod();
         dir
     });
