@@ -555,6 +555,17 @@ pub struct News {
 }
 
 pub const NEWS: &[News] = &[News {
+    id: "geo-world-2026-09",
+    title: "\u{1F30D} Geo goes worldwide \u{2014} vote India, World or Mix",
+    body: "Geo in {geo} isn't only India any more.\n\n\
+           \u{2022} Before each match you **vote**: \u{1F1EE}\u{1F1F3} **India**, \u{1F30D} **World** or \u{1F3B2} **Mix**. Pressing a button is your vote AND your seat \u{2014} no more Ready button.\n\
+           \u{2022} **World** rounds ask for the **country**, and that's the whole answer: **2 points**. `USA`, `UK`, `UAE`, `Holland` all work, and naming a town counts as its country \u{2014} `Tokyo` says Japan.\n\
+           \u{2022} **India** rounds are unchanged: the state for 2, a town near the photo for up to 5.\n\
+           \u{2022} **Mix** draws each round from either, half and half.\n\
+           \u{2022} Most votes wins; a tie is settled at random, and a break nobody votes in plays a Mix.\n\n\
+           Around 70 countries so far, from Japan and Brazil to Kenya and Kazakhstan \u{2014} every one comes up as often as every other.\n\n\
+           `/geohelp` explains the lot.",
+}, News {
     id: "geo-2026-09",
     title: "\u{1F5FA}\u{FE0F} Geo is here \u{2014} GeoGuessr, but only India",
     body: "A photo of a street somewhere in India goes up in {geo}, and you say where it is.\n\n           \u{2022} Real dashcam photos \u{2014} no landmark picked out for you. A road, the shops on it, the signboards. Read them.\n           \u{2022} Type a place. The **state** is worth **2**, a town **within 60 km** is **4**, a town **within 15 km** is **5**.\n           \u{2022} You never have to know the town: the state alone always scores, and a town hands you its state free. `Kerala` is safe, `Kochi` is greedy.\n           \u{2022} The state is a **gate** \u{2014} a town in the WRONG state scores nothing, however near it looks.\n           \u{2022} Old names and bad spelling both work: `Bombay`, `Benares`, `Gurgaon`.\n           \u{2022} **Matches of 5 places.** Most points wins: **5 house points**, **2** for second, up to **15 a day**. One photo alone pays none. Press **I'm ready** to play.\n           \u{2022} **`!hint`** gives the state's first letter for a point off; **`!skip`** works after a hint.\n\n           It covers **22 states** so far \u{2014} wherever people have driven with a camera. Every state in it comes up as often as every other, so guessing Tamil Nadu every time will not work.\n\n           `/geohelp` explains the lot, `/geotop` is the board.",

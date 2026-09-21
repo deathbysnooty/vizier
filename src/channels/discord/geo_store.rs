@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::geo_bank::{Pool, Scope};
+
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
 pub const SCHEMA: &str = "
@@ -50,10 +52,28 @@ pub const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS prizes (
         match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, place INTEGER NOT NULL,
         score INTEGER NOT NULL, points INTEGER NOT NULL, granted INTEGER NOT NULL, ts INTEGER NOT NULL,
+        PRIMARY KEY (match_id, user_id));
+    CREATE TABLE IF NOT EXISTS votes (
+        match_id INTEGER NOT NULL, user_id INTEGER NOT NULL, pool TEXT NOT NULL, ts INTEGER NOT NULL,
         PRIMARY KEY (match_id, user_id));";
 
+/// Columns that arrived with the World: what a match plays, and which kind of
+/// round each round was. A database written before them grows the columns;
+/// SQLite has no `ADD COLUMN IF NOT EXISTS`, and the error for one already
+/// there is the normal case on every start after the first, so it is swallowed.
+///
+/// A round's `state` column holds its REGION - a state for an India round, a
+/// country code for a World one. Renaming a column in SQLite is a table
+/// rebuild; the name is only history.
+fn migrate(conn: &Connection) {
+    let _ = conn.execute("ALTER TABLE matches ADD COLUMN pool TEXT NOT NULL DEFAULT 'india'", []);
+    let _ = conn.execute("ALTER TABLE rounds ADD COLUMN scope TEXT NOT NULL DEFAULT 'india'", []);
+}
+
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn);
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -118,8 +138,10 @@ pub struct Row {
     pub id: i64,
     /// Which photo, so the same street is not posted twice in a fortnight.
     pub spot_id: String,
-    /// The answer, copied out of the bank so an old round can still be read
-    /// after the bank is rebuilt.
+    /// India or World: what kind of answer the round was asking for.
+    pub scope: Scope,
+    /// The answer's region - a state, or a country code - copied out of the
+    /// bank so an old round can still be read after the bank is rebuilt.
     pub state: String,
     pub lat: f64,
     pub lon: f64,
@@ -150,7 +172,7 @@ impl Row {
 }
 
 const COLUMNS: &str = "id, spot_id, state, lat, lon, posted_ts, message_id, channel_id, status, match_id, \
-                       winner, winning_guess, verdict, km, won, solved_ts, seconds, hint_by, hint_ts, ended_by, ended_ts";
+                       winner, winning_guess, verdict, km, won, solved_ts, seconds, hint_by, hint_ts, ended_by, ended_ts, scope";
 
 fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
     let status: String = row.get(8)?;
@@ -176,13 +198,15 @@ fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Row> {
         hint_ts: row.get(18)?,
         ended_by: row.get::<_, Option<i64>>(19)?.map(|v| v as u64),
         ended_ts: row.get(20)?,
+        scope: Scope::from_key(&row.get::<_, String>(21).unwrap_or_default()),
     })
 }
 
-pub fn add_round(conn: &Connection, spot_id: &str, state: &str, lat: f64, lon: f64, channel: u64, now: i64) -> rusqlite::Result<Row> {
+#[allow(clippy::too_many_arguments)]
+pub fn add_round(conn: &Connection, spot_id: &str, scope: Scope, region: &str, lat: f64, lon: f64, channel: u64, now: i64) -> rusqlite::Result<Row> {
     conn.execute(
-        "INSERT INTO rounds (spot_id, state, lat, lon, posted_ts, channel_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![spot_id, state, lat, lon, now, channel as i64],
+        "INSERT INTO rounds (spot_id, scope, state, lat, lon, posted_ts, channel_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![spot_id, scope.key(), region, lat, lon, now, channel as i64],
     )?;
     get(conn, conn.last_insert_rowid()).ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
@@ -379,9 +403,11 @@ pub struct Match {
     pub started_ts: Option<i64>,
     pub ended_ts: Option<i64>,
     pub channel: u64,
+    /// What the room voted for at the break: India, the World, or a Mix.
+    pub pool: Pool,
 }
 
-const MATCH_COLUMNS: &str = "id, status, rounds, played, opened_ts, ready_from, started_ts, ended_ts, channel_id";
+const MATCH_COLUMNS: &str = "id, status, rounds, played, opened_ts, ready_from, started_ts, ended_ts, channel_id, pool";
 
 fn read_match(row: &rusqlite::Row) -> rusqlite::Result<Match> {
     let status: String = row.get(1)?;
@@ -395,6 +421,7 @@ fn read_match(row: &rusqlite::Row) -> rusqlite::Result<Match> {
         started_ts: row.get(6)?,
         ended_ts: row.get(7)?,
         channel: row.get::<_, i64>(8)? as u64,
+        pool: Pool::from_key(&row.get::<_, String>(9).unwrap_or_default()),
     })
 }
 
@@ -446,6 +473,39 @@ pub fn ready_list(conn: &Connection, match_id: i64) -> Vec<u64> {
     let Ok(mut stmt) = conn.prepare("SELECT user_id FROM ready WHERE match_id = ?1 ORDER BY ts") else { return Vec::new() };
     let Ok(rows) = stmt.query_map(params![match_id], |r| r.get::<_, i64>(0)) else { return Vec::new() };
     rows.filter_map(Result::ok).map(|v| v as u64).collect()
+}
+
+/// Casts, moves or takes back a vote. `true` means the person now holds a
+/// vote; `false` means they pressed the pool they already had, which takes it
+/// back - one button to vote and the same button again to change your mind.
+pub fn cast_vote(conn: &Connection, match_id: i64, user: u64, pool: Pool, now: i64) -> rusqlite::Result<bool> {
+    let held: Option<String> = conn
+        .query_row("SELECT pool FROM votes WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64], |r| r.get(0))
+        .optional()?;
+    if held.as_deref() == Some(pool.key()) {
+        conn.execute("DELETE FROM votes WHERE match_id = ?1 AND user_id = ?2", params![match_id, user as i64])?;
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO votes (match_id, user_id, pool, ts) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (match_id, user_id) DO UPDATE SET pool = excluded.pool, ts = excluded.ts",
+        params![match_id, user as i64, pool.key(), now],
+    )?;
+    Ok(true)
+}
+
+/// Every vote for this match, as (pool, how many), most first.
+pub fn vote_tally(conn: &Connection, match_id: i64) -> Vec<(Pool, usize)> {
+    let sql = "SELECT pool, COUNT(*) FROM votes WHERE match_id = ?1 GROUP BY pool ORDER BY COUNT(*) DESC, pool";
+    let Ok(mut stmt) = conn.prepare(sql) else { return Vec::new() };
+    let Ok(rows) = stmt.query_map(params![match_id], |r| Ok((Pool::from_key(&r.get::<_, String>(0)?), r.get::<_, i64>(1)? as usize))) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+pub fn set_pool(conn: &Connection, id: i64, pool: Pool) -> rusqlite::Result<usize> {
+    conn.execute("UPDATE matches SET pool = ?2 WHERE id = ?1", params![id, pool.key()])
 }
 
 /// Break to playing. Only a break can start, so two ticks cannot start it twice.
@@ -507,7 +567,7 @@ pub mod tests {
     }
 
     fn put(conn: &Connection, spot: &str, state: &str, now: i64) -> Row {
-        add_round(conn, spot, state, 17.4, 78.5, 1, now).expect("a round")
+        add_round(conn, spot, Scope::India, state, 17.4, 78.5, 1, now).expect("a round")
     }
 
     #[test]
@@ -567,6 +627,54 @@ pub mod tests {
         assert!(add_prize(&conn, m.id, 7, 1, 12, 5, 5, 200).expect("first"));
         assert!(!add_prize(&conn, m.id, 7, 1, 12, 5, 5, 200).expect("again"));
         assert!(prizes_paid(&conn, m.id));
+    }
+
+    /// A vote is one press to cast, the same press to take back, and a
+    /// different one to move - never two votes from one person.
+    #[test]
+    fn one_person_one_vote() {
+        let conn = memory();
+        let m = open_match(&conn, 5, 1, 100, 100).expect("a match");
+        assert!(cast_vote(&conn, m.id, 7, Pool::World, 100).expect("cast"));
+        assert!(cast_vote(&conn, m.id, 7, Pool::India, 101).expect("moved"));
+        assert_eq!(vote_tally(&conn, m.id), vec![(Pool::India, 1)]);
+        assert!(!cast_vote(&conn, m.id, 7, Pool::India, 102).expect("taken back"));
+        assert!(vote_tally(&conn, m.id).is_empty());
+    }
+
+    #[test]
+    fn a_match_remembers_what_it_plays() {
+        let conn = memory();
+        let m = open_match(&conn, 5, 1, 100, 100).expect("a match");
+        set_pool(&conn, m.id, Pool::World).expect("set");
+        assert_eq!(get_match(&conn, m.id).expect("the match").pool, Pool::World);
+    }
+
+    #[test]
+    fn a_round_remembers_what_it_asked_for() {
+        let conn = memory();
+        let row = add_round(&conn, "mly1", Scope::World, "JP", 35.4, 139.6, 1, 100).expect("a round");
+        let back = get(&conn, row.id).expect("the round");
+        assert_eq!(back.scope, Scope::World);
+        assert_eq!(back.state, "JP");
+    }
+
+    /// A database from before the World must open, and read as India.
+    #[test]
+    fn an_old_database_grows_the_new_columns() {
+        let conn = Connection::open_in_memory().expect("a database");
+        conn.execute_batch(
+            "CREATE TABLE rounds (id INTEGER PRIMARY KEY AUTOINCREMENT, spot_id TEXT NOT NULL, state TEXT NOT NULL, \
+             lat REAL NOT NULL, lon REAL NOT NULL, posted_ts INTEGER NOT NULL, message_id INTEGER, channel_id INTEGER NOT NULL, \
+             status TEXT NOT NULL DEFAULT 'open', match_id INTEGER, winner INTEGER, winning_guess TEXT, verdict TEXT, km REAL, \
+             won INTEGER NOT NULL DEFAULT 0, solved_ts INTEGER, seconds INTEGER, hint_by INTEGER, hint_ts INTEGER, \
+             ended_by INTEGER, ended_ts INTEGER);
+             INSERT INTO rounds (spot_id, state, lat, lon, posted_ts, channel_id) VALUES ('kv1', 'Telangana', 17.4, 78.5, 100, 1);",
+        )
+        .expect("an old table");
+        init(&conn).expect("migrated");
+        let back = get(&conn, 1).expect("the old round");
+        assert_eq!(back.scope, Scope::India);
     }
 
     #[test]
