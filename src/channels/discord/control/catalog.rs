@@ -1938,12 +1938,21 @@ mod tests {
         let mut files = Vec::new();
         sources(&root, &mut files);
         let read = regex::Regex::new(r#"control::(?:var|id|ids|number|float|on)\(\s*"(VIZIER_[A-Z0-9_]+)""#).unwrap();
+        // A game with one setting per topic keeps the keys in a table and reads
+        // them through a field: `on_key: "VIZIER_DAILY_BOOKS"` declared, then
+        // `control::on(desk.on_key, ..)`. A key declared that way counts as read
+        // only when that very field is passed to a reader in the same file, so
+        // a key that is declared and never read still fails.
+        let field_read = regex::Regex::new(r#"control::(?:var|id|ids|number|float|on)\(\s*[a-z_]+\.([a-z_]+_key)\b"#).unwrap();
+        let field_decl = regex::Regex::new(r#"\b([a-z_]+_key):\s*"(VIZIER_[A-Z0-9_]+)""#).unwrap();
         let mut used = std::collections::BTreeSet::new();
         for (path, text) in &files {
             if path.ends_with("catalog.rs") {
                 continue;
             }
             used.extend(read.captures_iter(text).map(|c| c[1].to_string()));
+            let fields: std::collections::HashSet<String> = field_read.captures_iter(text).map(|c| c[1].to_string()).collect();
+            used.extend(field_decl.captures_iter(text).filter(|c| fields.contains(&c[1])).map(|c| c[2].to_string()));
         }
         assert!(used.len() > 50, "the scan found only {} settings - has the reading style changed?", used.len());
         let described: std::collections::BTreeSet<String> = keys().into_iter().map(String::from).collect();
