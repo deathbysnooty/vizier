@@ -926,14 +926,43 @@ fn parse_pick(reply: &str, count: usize) -> Vec<usize> {
     out
 }
 
+/// The checker's instructions, apart from the call so they can be tested.
+fn check_prompt(material: &str, title: &str, body: &str) -> String {
+    format!(
+        "You check a short social-media POST against its SOURCE for FACTUAL ERRORS.\n\n\
+         A problem is ONLY a statement the POST makes that is FALSE according to the SOURCE, or a specific fact the POST asserts \
+         - a name, date, number, quote, event or cause - that the SOURCE never mentions.\n\n\
+         These are NOT problems. Do not list them:\n\
+         - leaving facts out: the POST is a short retelling, not a copy\n\
+         - summarising, simplifying or paraphrasing, as long as the meaning holds\n\
+         - rounding, or giving fewer figures than the SOURCE (one estimate where it gives a range)\n\
+         - vaguer time words (\"last week\", \"recently\") where the SOURCE gives a date\n\
+         - not naming someone the SOURCE names\n\
+         - opinion, tone, framing or storytelling (\"a twist\", \"remarkable\", \"the story goes\")\n\
+         - anything the SOURCE does state, however it is worded\n\n\
+         For each real problem, quote the POST's exact words and say what the SOURCE says instead. If you cannot quote words \
+         from the POST that are wrong, it is not a problem.\n\n\
+         Reply with JSON only: {{\"ok\": true}} or {{\"ok\": false, \"problems\": [\"<exact POST words> - <what the SOURCE says>\"]}}\n\n\
+         SOURCE:\n{}\n\nPOST:\nTITLE: {}\n\n{}",
+        material, title, body
+    )
+}
+
 fn first_json(text: &str) -> Option<serde_json::Value> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
+/// The writer's rules.
+///
+/// The first one used to read "No names, dates, numbers, quotes or claims from
+/// memory", meant as "nothing from memory". The model read it as "no names",
+/// wrote "a player scored 100*" where the source named Shafali, and the checker
+/// then failed the post for leaving her out - the two prompts working against
+/// each other. It now says outright that what the SOURCE states is welcome.
 const WRITER_RULES: &str = "RULES:
-- Use ONLY facts stated in the SOURCE. No names, dates, numbers, quotes or claims from memory - if the source doesn't say it, leave it out.
+- Use ONLY facts the SOURCE states. Names, dates, numbers and quotes are welcome WHEN THE SOURCE GIVES THEM - use them, don't blur them into \"a player\" or \"recently\". Never add any the SOURCE doesn't give, and nothing from memory.
 - Keep the source's hedges (\"reportedly\", \"according to\", \"is expected to\"). Never present a rumour as fact.
 - Engaging, vivid storytelling in plain English for young Indian readers; short paragraphs.
 - Discord markdown only: **bold** for a few key names or moments, *italics* sparingly. No # headings, no tables, no hashtags.
@@ -958,8 +987,9 @@ async fn write(deps: &VizierDependencies, agent_id: &str, desk: Desk, brief: Bri
         if !problems.is_empty() {
             tracing::info!("daily: {} draft had {} unsupported claim(s), rewriting", info(desk).key, problems.len());
             let retry = format!(
-                "{}\n\nYOUR PREVIOUS DRAFT:\nTITLE: {}\n\n{}\n\nA fact-checker found claims the SOURCE does not support:\n- {}\n\nWrite the \
-                 post again in the same shape, removing or correcting those claims using only the SOURCE.",
+                "{}\n\nYOUR PREVIOUS DRAFT:\nTITLE: {}\n\n{}\n\nA fact-checker found these statements wrong against the SOURCE:\n- {}\n\nWrite the \
+                 post again in the same shape, correcting or removing ONLY those statements. Keep everything else, including \
+                 names and numbers the SOURCE gives.",
                 base,
                 title,
                 body,
@@ -1003,14 +1033,23 @@ async fn draft(deps: &VizierDependencies, agent_id: &str, prompt: &str) -> anyho
 }
 
 /// Claims in the draft the source doesn't support; empty when it checks out.
+/// Asks whether a draft states anything its SOURCE does not.
+///
+/// The first version called itself "a strict fact-checker" and asked for
+/// "every factual claim" the source did not support, and one item on that list
+/// sank the post. On its first morning it sank six of nine: for leaving out a
+/// lower estimate, for "last week" being vaguer than a date, for a summary
+/// being "slightly less precise", for "a twist" being opinion - and once for a
+/// fact the source stated, quoted back in the same sentence. None of those is a
+/// false statement. A post is a short retelling; leaving things out is what a
+/// retelling does.
+///
+/// So a problem is now only something the POST ASSERTS that the SOURCE
+/// contradicts or never mentions, the omissions and tone that are fine are
+/// named outright, and each problem has to quote the POST's own words - which
+/// makes the checker point at a sentence rather than at what is missing.
 async fn check(deps: &VizierDependencies, agent_id: &str, material: &str, title: &str, body: &str) -> anyhow::Result<Vec<String>> {
-    let prompt = format!(
-        "You are a strict fact-checker. Compare the POST with the SOURCE. List every factual claim in the POST - names, dates, \
-         numbers, events, quotes, causes, superlatives - that the SOURCE does not support or that contradicts it. Storytelling \
-         flourishes and opinions that add no facts are fine.\nReply with JSON only: {{\"ok\": true}} or {{\"ok\": false, \
-         \"problems\": [\"...\"]}}\n\nSOURCE:\n{}\n\nPOST:\nTITLE: {}\n\n{}",
-        material, title, body
-    );
+    let prompt = check_prompt(material, title, body);
     for attempt in 1..=2 {
         match ask(deps, agent_id, prompt.clone()).await {
             Ok(reply) => match first_json(&reply) {
@@ -1148,6 +1187,31 @@ pub async fn post_command(ctx: &Context, deps: &VizierDependencies, agent_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checker sank six of nine posts on its first morning for things that
+    /// are not errors. Each of these was a real rejection reason that day.
+    #[test]
+    fn the_checker_is_told_what_is_not_an_error() {
+        let p = check_prompt("SRC", "T", "BODY");
+        for fine in ["leaving facts out", "rounding", "vaguer time words", "not naming someone", "opinion, tone", "summarising"] {
+            assert!(p.contains(fine), "the checker is not told that {fine:?} is fine");
+        }
+        assert!(p.contains("quote the POST's exact words"), "a problem must point at the post's own words");
+        assert!(p.contains("FALSE according to the SOURCE"));
+        // The words that made it hunt for anything at all.
+        assert!(!p.contains("strict"), "\"strict\" is back");
+        assert!(!p.contains("every factual claim"), "\"every factual claim\" is back");
+        assert!(p.contains("SOURCE:\nSRC") && p.contains("TITLE: T\n\nBODY"), "the material is not passed through");
+    }
+
+    /// "No names ... from memory" was read as "no names", and the sports post
+    /// wrote "a player" where the source named Shafali.
+    #[test]
+    fn the_writer_is_told_sourced_names_are_welcome() {
+        assert!(WRITER_RULES.contains("welcome WHEN THE SOURCE GIVES THEM"));
+        assert!(WRITER_RULES.contains("nothing from memory"));
+        assert!(!WRITER_RULES.contains("No names, dates"), "the ambiguous rule is back");
+    }
 
     #[test]
     fn times_are_read_sorted_and_bad_ones_dropped() {
