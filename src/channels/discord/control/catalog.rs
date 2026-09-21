@@ -120,14 +120,24 @@ pub fn sections() -> Vec<Section> {
                     everything else in those channels is read quietly and remembered. DMs are answered for bot \
                     admins only. The games, points and letters below work in every channel whatever this list \
                     says. Who counts as a bot admin is set in the server's environment file, not here.",
-            settings: vec![setting(
-                "VIZIER_DISCORD_CHANNELS",
-                "Chat channels",
-                "Channels the bot chats in and counts messages from for /awards and chat points. Empty means every \
-                 channel it can see. A newly added channel's older history is only counted after a restart.",
-                Kind::Channels,
-                "",
-            )],
+            settings: vec![
+                setting(
+                    "VIZIER_DISCORD_CHANNELS",
+                    "Chat channels",
+                    "Channels the bot chats in and counts messages from for /awards and chat points. Empty means every \
+                     channel it can see. A newly added channel's older history is only counted after a restart.",
+                    Kind::Channels,
+                    "",
+                ),
+                setting(
+                    "VIZIER_RESTART_NOTICES",
+                    "Announce restarts",
+                    "Post \"the bot is being updated\" in every running game's channel when the bot restarts, and \
+                     \"back up\" when it returns. Off: restarts go by without a word.",
+                    Kind::Toggle,
+                    "off",
+                ),
+            ],
             commands: vec![
                 command("help", EVERYONE, "/help topic:", "Every command you can use, by area; pick a topic for the details. Only the asker sees it."),
             ],

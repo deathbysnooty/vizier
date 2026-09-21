@@ -66,6 +66,13 @@ fn was_planned() -> bool {
     path.exists() && std::fs::remove_file(path).is_ok()
 }
 
+/// Whether restarts are announced at all, `VIZIER_RESTART_NOTICES`. Off unless
+/// switched on: the owner would rather a restart went by quietly than put two
+/// messages into every game room each time.
+fn announcing() -> bool {
+    super::control::on("VIZIER_RESTART_NOTICES", false)
+}
+
 /// Every channel with a game live in it right now. A game that is switched off,
 /// or has no channel set, is not in the list - there is nobody in there to tell.
 pub fn game_channels() -> Vec<u64> {
@@ -102,6 +109,9 @@ async fn say(http: &Arc<Http>, channel: u64, text: &str) {
 /// the whole thing gives up rather than hold the process open.
 pub async fn going_down() {
     mark();
+    if !announcing() {
+        return;
+    }
     let Some(http) = HTTP.get() else { return };
     let channels = game_channels();
     if channels.is_empty() {
@@ -124,7 +134,9 @@ pub fn mark_planned() {
 /// were never told anything, and a bot that quietly reappears is better than
 /// one announcing itself every time it falls over.
 pub async fn back_up() {
-    if !was_planned() {
+    // The note is taken away either way, so switching the notices back on later
+    // doesn't announce a restart that happened while they were off.
+    if !was_planned() || !announcing() {
         return;
     }
     let Some(http) = HTTP.get() else { return };
