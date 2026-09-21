@@ -465,6 +465,13 @@ pub struct Movie {
 }
 
 impl Movie {
+    /// Whether a person wrote a clue for this one: tags, a line from it, or a
+    /// sentence about the story. A cast list is not writing - the picture
+    /// round shows it already.
+    pub fn is_written(&self) -> bool {
+        !self.tags.is_empty() || !self.hints.is_empty() || !self.dialogues.is_empty()
+    }
+
     /// The language the card names: the entry's own when it has one, and the
     /// industry's otherwise.
     pub fn language(&self) -> &str {
@@ -635,6 +642,13 @@ impl Bank {
         }
         let inside: Vec<usize> = (0..self.movies.len()).filter(|i| pool.holds(&self.movies[*i])).collect();
         let inside = if inside.is_empty() { (0..self.movies.len()).collect() } else { inside };
+        // Somebody wrote about these: tags, a line of dialogue, or a sentence
+        // of story. The rest are a title and two pictures, which for an
+        // obscure one is a round nobody can win - so they wait until the
+        // well-written ones have all been up lately.
+        let written: Vec<usize> = inside.iter().copied().filter(|i| self.movies[*i].is_written()).collect();
+        let fresh_written = written.iter().any(|i| !used.contains(&self.movies[*i].key()));
+        let inside = if fresh_written { written } else { inside };
         let want_hindi = rng.below(100) < hindi.min(100) as usize;
         let want_modern = rng.below(100) < modern.min(100) as usize;
         let industry = if want_hindi { Industry::Bollywood } else { Industry::Hollywood };
@@ -1073,6 +1087,35 @@ pub mod tests {
         let empty = tempfile::tempdir().expect("a folder");
         open(&empty.path().display().to_string());
         assert!(bank().is_none());
+    }
+
+    #[test]
+    fn a_title_somebody_wrote_about_comes_up_before_one_nobody_did() {
+        let json = r#"{"format": "MOVIEBANK1", "movies": [
+            {"id": "w1", "title": "Sholay", "year": 1975, "industry": "bollywood", "era": "iconic",
+             "answers": ["sholay"], "tags": ["a water tank", "two friends", "a village", "a bandit"]},
+            {"id": "w2", "title": "Queen", "year": 2013, "industry": "bollywood", "era": "modern",
+             "answers": ["queen"], "hints": ["A bride goes on her honeymoon alone after the wedding is called off."],
+             "shots": [{"path": "/a.jpg", "note": "one"}, {"path": "/b.jpg", "note": "two"}]},
+            {"id": "b1", "title": "Waarrior Savitri", "year": 2016, "industry": "bollywood", "era": "modern",
+             "answers": ["waarrior savitri"],
+             "shots": [{"path": "/c.jpg", "note": "one"}, {"path": "/d.jpg", "note": "two"}]},
+            {"id": "b2", "title": "Project Marathwada", "year": 2016, "industry": "bollywood", "era": "modern",
+             "answers": ["project marathwada"],
+             "shots": [{"path": "/e.jpg", "note": "one"}, {"path": "/f.jpg", "note": "two"}]}
+        ]}"#;
+        let bank = Bank::from_json(json).expect("a bank");
+        let mut rng = Rng::seeded(5);
+        // Nothing used yet: only the two with writing come up, however often
+        // it is asked. A title and two stills is not a clue.
+        for _ in 0..50 {
+            let which = bank.pick_in(Pool::Mix, &HashSet::new(), 100, 65, &mut rng).expect("a film");
+            assert!(bank.movie(which).expect("a film").is_written(), "{} came up", bank.movies[which].title);
+        }
+        // Once both have been up lately, the rest are better than no round.
+        let used: HashSet<String> = ["sholay", "queen"].iter().map(|t| key(t)).collect();
+        let which = bank.pick_in(Pool::Mix, &used, 100, 65, &mut rng).expect("a film");
+        assert!(!bank.movie(which).expect("a film").is_written(), "the window never widens");
     }
 
     #[test]
