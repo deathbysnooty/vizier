@@ -198,7 +198,8 @@ async fn tick(ctx: &Context, r: Reminder, now: i64) {
     if FAILED.lock().get(&r.id).is_some_and(|at| at.elapsed() < RETRY_AFTER) {
         return;
     }
-    let Some(channel) = r.channel_id.trim().parse::<u64>().ok().filter(|id| *id != 0).map(ChannelId::new) else {
+    let targets = r.targets();
+    let Some(channel) = targets.first().copied().map(ChannelId::new) else {
         return;
     };
     let user = r.user_id.trim().parse::<u64>().ok().filter(|id| *id != 0);
@@ -230,26 +231,43 @@ async fn tick(ctx: &Context, r: Reminder, now: i64) {
         FAILED.lock().insert(r.id, Instant::now());
         return;
     };
-    match deliver(ctx, channel, &prepared, user).await {
-        Ok(message) => {
-            FAILED.lock().remove(&r.id);
-            // Logged either way: a silent success is indistinguishable from a
-            // thread that died, which cost an evening of guessing once already.
-            tracing::info!("reminders: posted '{}' ({} so far)", r.name, r.sent_count + 1);
-            if let Some(old) = posts::previous_to_delete(&r, message) {
-                match tokio::time::timeout(HTTP_WAIT, channel.delete_message(&ctx.http, MessageId::new(old))).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => tracing::info!("reminders: '{}' previous post not deleted: {}", r.name, err),
-                    Err(_) => tracing::info!("reminders: '{}' previous post not deleted in time", r.name),
-                }
+    // One post, every room it names. A channel that refuses does not stop the
+    // others: four rooms out of five is better than none, and the one that
+    // failed is named in the log.
+    let mut sent: Vec<(u64, u64)> = Vec::new();
+    let mut failed: Vec<u64> = Vec::new();
+    for target in &targets {
+        match deliver(ctx, ChannelId::new(*target), &prepared, user).await {
+            Ok(message) => sent.push((*target, message)),
+            Err(err) => {
+                failed.push(*target);
+                tracing::warn!("reminders: '{}' not posted in {}: {}", r.name, target, err);
             }
-            update(r.id, |fresh| posts::record_post(fresh, now, message, prepared.ai_text.as_deref()));
-        }
-        Err(err) => {
-            FAILED.lock().insert(r.id, Instant::now());
-            tracing::warn!("reminders: '{}' not posted: {}", r.name, err);
         }
     }
+    if sent.is_empty() {
+        FAILED.lock().insert(r.id, Instant::now());
+        return;
+    }
+    FAILED.lock().remove(&r.id);
+    // Logged either way: a silent success is indistinguishable from a
+    // thread that died, which cost an evening of guessing once already.
+    tracing::info!(
+        "reminders: posted '{}' in {} of {} channels ({} so far)",
+        r.name,
+        sent.len(),
+        targets.len(),
+        r.sent_count + 1
+    );
+    for (channel, old) in posts::previous_in_each(&r, &sent) {
+        let gone = ChannelId::new(channel).delete_message(&ctx.http, MessageId::new(old));
+        match tokio::time::timeout(HTTP_WAIT, gone).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::info!("reminders: '{}' previous post not deleted: {}", r.name, err),
+            Err(_) => tracing::info!("reminders: '{}' previous post not deleted in time", r.name),
+        }
+    }
+    update(r.id, |fresh| posts::record_posts(fresh, now, &sent, prepared.ai_text.as_deref()));
 }
 
 // --- richer posts ------------------------------------------------------------------------
@@ -354,12 +372,27 @@ async fn deliver(ctx: &Context, channel: ChannelId, p: &Prepared, user: Option<u
 /// Posts a reminder once, now, as it would go out, without touching its count,
 /// its last post or what the AI remembers: the panel's "Send a test now".
 pub async fn send_test(ctx: &Context, r: &Reminder) -> Result<(), String> {
-    let channel = r.channel_id.trim().parse::<u64>().ok().filter(|id| *id != 0).map(ChannelId::new).ok_or("Pick a channel first.")?;
+    let targets = r.targets();
+    if targets.is_empty() {
+        return Err("Pick a channel first.".into());
+    }
     let user = r.user_id.trim().parse::<u64>().ok().filter(|id| *id != 0);
     let name = display_name(ctx, r, user);
     let now = Utc::now().timestamp();
     let prepared = prepare(r, &name, user, now).await.ok_or("There's nothing to send yet: add a line, a picture or an AI prompt.")?;
-    deliver(ctx, channel, &prepared, user).await.map(|_| ())
+    let mut refused: Vec<String> = Vec::new();
+    for target in &targets {
+        if let Err(err) = deliver(ctx, ChannelId::new(*target), &prepared, user).await {
+            refused.push(format!("<#{}> ({})", target, err));
+        }
+    }
+    match refused.len() {
+        0 => Ok(()),
+        // Some of it landed, and saying so beats a bare error on a post that
+        // is already in four rooms.
+        n if n < targets.len() => Err(format!("Posted in {} of {}. These wouldn't take it: {}", targets.len() - n, targets.len(), refused.join(", "))),
+        _ => Err(refused.join(", ")),
+    }
 }
 
 /// Changes only what the scheduler owns, on the stored copy read afresh, so an

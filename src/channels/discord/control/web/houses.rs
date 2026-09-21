@@ -333,3 +333,19 @@ mod tests {
         assert_eq!(all.houses.iter().find(|h| h.key == "hufflepuff").unwrap().total, 5);
     }
 }
+
+/// The four house common rooms, for anything in the panel that wants to post
+/// in all of them at once. Found by name in the guild, so a room that has been
+/// renamed is simply missing rather than wrong.
+pub async fn rooms(State(panel): State<Panel>) -> ApiResult {
+    let ids = panel.data.house_rooms();
+    let known = panel.data.channels();
+    let channels: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            let name = known.iter().find(|c| c.id == id.to_string()).map(|c| c.name.clone());
+            json!({ "id": id.to_string(), "name": name })
+        })
+        .collect();
+    ok(json!({ "channels": channels }))
+}

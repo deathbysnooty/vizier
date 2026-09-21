@@ -110,6 +110,11 @@ pub trait PanelData: Send + Sync + 'static {
     fn roles(&self) -> Vec<RoleInfo>;
     async fn search_members(&self, query: &str, limit: usize) -> Vec<MemberInfo>;
     async fn member(&self, id: u64) -> Option<MemberInfo>;
+    /// The four house common rooms as they stand in the guild now. They are
+    /// found by name rather than stored, so the panel has to ask.
+    fn house_rooms(&self) -> Vec<u64> {
+        Vec::new()
+    }
     /// Who may use the panel.
     fn admins(&self) -> Vec<u64>;
     /// Ends the process shortly after the response has gone; systemd starts it again.
@@ -362,6 +367,10 @@ impl PanelData for LiveData {
             icon: g.icon_url(),
             members: g.member_count,
         })
+    }
+
+    fn house_rooms(&self) -> Vec<u64> {
+        CTX.get().map(super::super::house::common_room_ids).unwrap_or_default()
     }
 
     fn channels(&self) -> Vec<ChannelInfo> {
@@ -1051,6 +1060,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/autoreplies/{id}/toggle", post(rules::toggle))
         .route("/houses", get(houses::get))
         .route("/agent", get(agent::get).put(agent::put))
+        .route("/houses/rooms", get(houses::rooms))
         .route("/houses/scorers", get(scorers::get))
         .route("/insights", get(insights::overview))
         .route("/insights/pair", get(insights::pair))
@@ -1591,6 +1601,25 @@ async fn check_reminder(panel: &Panel, mut r: Reminder) -> Result<Reminder, ApiE
     r.channel_id = check_channel(panel, &r.channel_id, false).map_err(|e| {
         ApiError::bad(if r.channel_id.trim().is_empty() { "Pick a channel to post in.".to_string() } else { e })
     })?;
+    // The other rooms the same post goes to. The first one stays in
+    // `channel_id`, so a post saved before this reads exactly as it did.
+    let mut also: Vec<String> = Vec::new();
+    for id in std::mem::take(&mut r.channels) {
+        if id.trim().is_empty() {
+            continue;
+        }
+        let checked = check_channel(panel, &id, false).map_err(ApiError::bad)?;
+        if !also.contains(&checked) {
+            also.push(checked);
+        }
+    }
+    if !also.is_empty() && !also.contains(&r.channel_id) {
+        also.insert(0, r.channel_id.clone());
+    }
+    if also.len() > 10 {
+        return Err(ApiError::bad("That's more than ten channels for one post."));
+    }
+    r.channels = also;
     r.lines = r.lines.iter().map(|l| l.trim_end().to_string()).filter(|l| !l.trim().is_empty()).collect();
     posts::check_extras(&mut r)?;
     if r.lines.is_empty() && r.ai_prompt.is_empty() && r.images.is_empty() {

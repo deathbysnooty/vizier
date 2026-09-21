@@ -65,6 +65,10 @@ pub struct Reminder {
     pub enabled: bool,
     /// Discord ids travel as strings: they are too big for JavaScript numbers.
     pub channel_id: String,
+    /// Where else the same post goes. Empty means `channel_id` alone, which is
+    /// every post written before one could go to more than one place.
+    #[serde(default)]
+    pub channels: Vec<String>,
     /// The messages. Placeholders: `{name}`, `{mention}` (the member in
     /// `user_id`), `{hours}` and `{days}` (since `since`).
     pub lines: Vec<String>,
@@ -131,6 +135,22 @@ pub struct Reminder {
     /// Kept by the scheduler: the latest AI-written posts, so it doesn't repeat itself.
     #[serde(default)]
     pub ai_recent: Vec<String>,
+}
+
+impl Reminder {
+    /// Every channel this post goes to, in order, with duplicates and rubbish
+    /// dropped. One post to the four common rooms and the game-updates channel
+    /// is one reminder, not five.
+    pub fn targets(&self) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        let listed = if self.channels.is_empty() { std::slice::from_ref(&self.channel_id) } else { &self.channels[..] };
+        for id in listed.iter().filter_map(|c| c.trim().parse::<u64>().ok()).filter(|id| *id != 0) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        out
+    }
 }
 
 const SCHEMA: &str = "

@@ -3159,8 +3159,41 @@
         h('span', { class: 'value' + (c ? '' : ' placeholder') }, c ? c.name : 'Choose a channel'), c && c.category ? h('small', { style: 'color:var(--faint)' }, c.category) : null, icon('chevron'));
       chBtn.addEventListener('click', () => openPicker(chBtn, { title: 'Channel', placeholder: 'Search channels', load: channelItems('text', [d.channel_id]), onPick: (it) => { d.channel_id = it.id; draw(); } }));
       const enabled = switchEl(d.enabled, 'Reminder running', (on, btn) => { d.enabled = on; btn.set(on); drawPreview(); });
+      // The other rooms the same post goes to. One announcement belongs in all
+      // four common rooms and game-updates, and that was five copies to keep
+      // in step before this.
+      const extras = (d.channels || []).filter((id) => id && id !== d.channel_id);
+      const chip = (id) => {
+        const ch = chan(id);
+        const x = h('button', { class: 'chip-x', type: 'button', title: 'Remove', 'aria-label': 'Remove ' + (ch ? ch.name : id) }, '×');
+        x.addEventListener('click', () => { d.channels = (d.channels || []).filter((c) => c !== id); draw(); });
+        return h('span', { class: 'chip' }, '#' + (ch ? ch.name : id), x);
+      };
+      const addBtn = h('button', { class: 'btn small', type: 'button' }, icon('plus'), 'Add a channel');
+      addBtn.addEventListener('click', () => openPicker(addBtn, {
+        title: 'Also post in', placeholder: 'Search channels',
+        load: channelItems('text', [d.channel_id, ...extras]),
+        onPick: (it) => {
+          const all = [d.channel_id, ...extras, it.id].filter((v, i, a) => v && a.indexOf(v) === i);
+          d.channels = all;
+          draw();
+        },
+      }));
+      const houseBtn = h('button', { class: 'btn small', type: 'button', title: 'The four house common rooms' }, '🏠 House rooms');
+      houseBtn.addEventListener('click', async () => {
+        try {
+          const rooms = await api('GET', '/houses/rooms');
+          const ids = (rooms.channels || []).map((c) => String(c.id)).filter(Boolean);
+          if (!ids.length) { toast('The four common rooms are not set up yet.', 'error'); return; }
+          if (!d.channel_id) d.channel_id = ids[0];
+          d.channels = [d.channel_id, ...extras, ...ids].filter((v, i, a) => v && a.indexOf(v) === i);
+          draw();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+      const alsoRow = h('div', { class: 'chips' }, ...extras.map(chip), addBtn, houseBtn);
       body.appendChild(h('section', { class: 'form-card' }, h('h3', null, icon('bell'), 'Basics', h('span', { class: 'right' }, enabled)),
-        h('div', { class: 'form-grid' }, field('Name', name, 'Only admins see this.'), field('Posts in', chBtn))));
+        h('div', { class: 'form-grid' }, field('Name', name, 'Only admins see this.'), field('Posts in', chBtn)),
+        field('Also posts in', alsoRow, extras.length ? 'The same post goes to every one of these.' : 'Optional — the same post can go to several rooms at once.')));
 
       // lines
       const lines = h('div', { class: 'lines' });

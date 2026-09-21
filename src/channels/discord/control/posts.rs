@@ -249,6 +249,42 @@ pub fn previous_to_delete(r: &Reminder, new_message: u64) -> Option<u64> {
     r.last_message_id.trim().parse::<u64>().ok().filter(|id| *id != 0 && *id != new_message)
 }
 
+/// The same, for a post that went to several channels: the last one in each,
+/// with whatever has just been posted left alone.
+///
+/// A post that goes to five rooms leaves five messages behind, and deleting
+/// only the first would leave the other four standing forever.
+pub fn previous_in_each(r: &Reminder, sent: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    if !r.delete_previous {
+        return Vec::new();
+    }
+    // Only the message just posted is spared. Matching on the channel as well
+    // would spare every one of them, because the old post is in the same room
+    // as the new one - which is the whole point of deleting it.
+    read_sent(&r.last_message_id).into_iter().filter(|(_, message)| !sent.iter().any(|(_, m)| m == message)).collect()
+}
+
+/// "channel:message,channel:message" as pairs. A bare number is the one
+/// message a post written before several channels left behind, and its channel
+/// is unknown - so it is dropped rather than deleted from the wrong room.
+pub fn read_sent(raw: &str) -> Vec<(u64, u64)> {
+    raw.split(',')
+        .filter_map(|pair| pair.trim().split_once(':'))
+        .filter_map(|(c, m)| Some((c.trim().parse().ok()?, m.trim().parse().ok()?)))
+        .filter(|(c, m): &(u64, u64)| *c != 0 && *m != 0)
+        .collect()
+}
+
+pub fn write_sent(sent: &[(u64, u64)]) -> String {
+    sent.iter().map(|(c, m)| format!("{}:{}", c, m)).collect::<Vec<_>>().join(",")
+}
+
+/// What the scheduler writes back after a post went out to every channel.
+pub fn record_posts(r: &mut Reminder, now: i64, sent: &[(u64, u64)], ai_text: Option<&str>) {
+    record_post(r, now, sent.first().map(|(_, m)| *m).unwrap_or(0), ai_text);
+    r.last_message_id = write_sent(sent);
+}
+
 /// What the scheduler writes back after a post went out.
 pub fn record_post(r: &mut Reminder, now: i64, message_id: u64, ai_text: Option<&str>) {
     r.last_sent = now;
@@ -489,6 +525,42 @@ mod tests {
         let totals: HashMap<&'static str, i64> =
             [("gryffindor", 397), ("slytherin", 249), ("ravenclaw", 413), ("hufflepuff", 249)].into_iter().collect();
         standings_from(&totals)
+    }
+
+    #[test]
+    fn one_post_to_several_rooms_remembers_one_message_in_each() {
+        let mut r = Reminder { channel_id: "11".into(), delete_previous: true, ..Default::default() };
+        // Nothing listed: the one channel it has always had.
+        assert_eq!(r.targets(), vec![11]);
+        r.channels = vec!["11".into(), "22".into(), " 33 ".into(), "22".into(), "".into(), "nonsense".into()];
+        assert_eq!(r.targets(), vec![11, 22, 33], "duplicates and rubbish are dropped");
+
+        // Posted in all three, one message id each.
+        let first = [(11u64, 101u64), (22, 202), (33, 303)];
+        record_posts(&mut r, NOW, &first, None);
+        assert_eq!(r.last_message_id, "11:101,22:202,33:303");
+        assert_eq!(r.sent_count, 1);
+
+        // Next time round, the previous post in every room is the one to
+        // delete - not just the first, which would leave two standing.
+        let second = [(11u64, 111u64), (22, 222), (33, 333)];
+        assert_eq!(previous_in_each(&r, &second), vec![(11, 101), (22, 202), (33, 303)]);
+        record_posts(&mut r, NOW + 60, &second, None);
+        assert_eq!(previous_in_each(&r, &second), Vec::new(), "what was just posted is never deleted");
+
+        // Switched off, nothing is deleted at all.
+        r.delete_previous = false;
+        assert_eq!(previous_in_each(&r, &[(11, 999)]), Vec::new());
+    }
+
+    #[test]
+    fn a_post_written_before_several_channels_reads_as_it_did() {
+        // One bare message id: which room it is in is unknown, so it is left
+        // alone rather than a delete being aimed at a guess.
+        let r = Reminder { channel_id: "11".into(), delete_previous: true, last_message_id: "909".into(), ..Default::default() };
+        assert_eq!(r.targets(), vec![11]);
+        assert_eq!(previous_in_each(&r, &[(11, 910)]), Vec::new());
+        assert_eq!(previous_to_delete(&r, 910), Some(909), "the single-channel path still deletes it");
     }
 
     fn rolls(values: &[f64]) -> impl FnMut() -> f64 + '_ {
