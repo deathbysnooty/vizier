@@ -159,7 +159,7 @@ impl Source {
         let day = |limit: u64| if limit >= NO_LIMIT { Cap::None } else { Cap::PerDay(limit as i64) };
         match self {
             Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 3)),
-            Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 4)),
+            Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 20)),
             Source::Quiz => day(super::control::number("VIZIER_CAP_QUIZ", 6)),
             Source::Anagram => day(super::control::number("VIZIER_CAP_ANAGRAM", 10)),
             Source::Snitch => day(super::control::number("VIZIER_CAP_SNITCH", 6)),

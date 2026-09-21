@@ -34,6 +34,8 @@ pub struct Rules {
     pub chat_cap: Option<i64>,
     pub voice_minutes: i64,
     pub voice_cap: Option<i64>,
+    /// What each hour of voice pays, in order; the last value repeats.
+    pub voice_hours: Vec<i64>,
     pub voice_company: bool,
     /// Deafened time is left out of voice.
     pub voice_ignore_deaf: bool,
@@ -300,6 +302,7 @@ impl Rules {
             chat_cap: limit(Source::Chat.cap()),
             voice_minutes: (super::activity::voice_bar_secs() / 60).max(1),
             voice_cap: limit(Source::Voice.cap()),
+            voice_hours: super::activity::voice_hour_points(),
             voice_company: super::activity::voice_company_rule(),
             voice_ignore_deaf: super::activity::voice_deafened_rule(),
 
@@ -718,7 +721,27 @@ fn voice_line(r: &Rules) -> Option<String> {
         return None;
     }
     let company = if r.voice_company { " **with at least one other person**" } else { "" };
-    Some(format!("🎙️ **Voice** — every full {} in VC{} → **1 point** {}", voice_block(r.voice_minutes), company, max_words(r.voice_cap)))
+    Some(format!(
+        "🎙️ **Voice** — every full {} in VC{} → **{}** {}",
+        voice_block(r.voice_minutes),
+        company,
+        ladder_words(&r.voice_hours),
+        max_words(r.voice_cap)
+    ))
+}
+
+/// What the hours pay, written out: "1 point", or "1 · 2 · 3 · 4 points as the
+/// hours add up" when they climb.
+fn ladder_words(hours: &[i64]) -> String {
+    let flat = hours.iter().all(|h| Some(h) == hours.first());
+    match (flat, hours.first().copied().unwrap_or(1)) {
+        (true, 1) => "1 point".to_string(),
+        (true, n) => format!("{} points", n),
+        _ => format!(
+            "{} points as the hours add up",
+            hours.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(" · ")
+        ),
+    }
 }
 
 /// The small print under the voice line: what doesn't count.
@@ -911,7 +934,13 @@ pub fn earn_text(r: &Rules) -> String {
             let company = if r.voice_company { " with others" } else { "" };
             let per = if r.voice_minutes == 60 { "hour".to_string() } else { format!("{} min", r.voice_minutes) };
             let deaf = if r.voice_ignore_deaf { " · deafened time doesn't count" } else { "" };
-            lines.push(format!("🎙️ VC{} → 1/{} {}{}", company, per, max_words(r.voice_cap), deaf));
+            let flat = r.voice_hours.iter().all(|h| Some(h) == r.voice_hours.first());
+            let each = if flat {
+                r.voice_hours.first().copied().unwrap_or(1).to_string()
+            } else {
+                r.voice_hours.iter().map(|h| h.to_string()).collect::<Vec<_>>().join("·")
+            };
+            lines.push(format!("🎙️ VC{} → {}/{} {}{}", company, each, per, max_words(r.voice_cap), deaf));
         }
     }
     let mut games = Vec::new();
@@ -1672,6 +1701,7 @@ pub(crate) mod tests {
             chat_tiers: vec![20, 60, 150],
             chat_cap: Some(3),
             voice_minutes: 60,
+            voice_hours: vec![1, 2, 3, 4],
             voice_cap: Some(4),
             voice_company: true,
             voice_ignore_deaf: true,
@@ -1998,7 +2028,7 @@ pub(crate) mod tests {
         assert!(panels[..panels.len() - 1].iter().all(|p| p.footer.is_none()));
         let hang = &panels[1].body;
         assert!(hang.contains("💬 **Chat** — 20, 60 and 150 messages in a day → **1 point each** (max 3)"), "{}", hang);
-        assert!(hang.contains("🎙️ **Voice** — every full hour in VC **with at least one other person** → **1 point** (max 4)"), "{}", hang);
+        assert!(hang.contains("🎙️ **Voice** — every full hour in VC **with at least one other person** → **1 · 2 · 3 · 4 points as the hours add up** (max 4)"), "{}", hang);
         assert!(hang.contains("-# Alone in VC or only with a music bot doesn't count, and neither does deafened time."), "{}", hang);
         let games = &panels[2].body;
         assert!(games.contains("🧠 **Quiz** in <#1547862192932528138> — vote a genre, answer first; top 3 of each round get **2 · 1 · 1** (max 6)"), "{}", games);
@@ -2218,7 +2248,10 @@ pub(crate) mod tests {
 
         let lonely = Rules { voice_company: false, voice_minutes: 30, voice_cap: None, ..defaults() };
         let hang = &guide(&lonely, true)[1].body;
-        assert!(hang.contains("every full 30 minutes in VC → **1 point** (no limit)"), "{}", hang);
+        assert!(hang.contains("every full 30 minutes in VC → **1 · 2 · 3 · 4 points as the hours add up** (no limit)"), "{}", hang);
+        // A flat ladder still reads as one point, which is what it was before.
+        let flat = Rules { voice_hours: vec![1], ..lonely.clone() };
+        assert!(guide(&flat, true)[1].body.contains("every full 30 minutes in VC → **1 point** (no limit)"));
         assert!(!hang.contains("music bot"));
         assert!(hang.contains("-# Deafened time doesn't count."), "{}", hang);
         let hearing = Rules { voice_ignore_deaf: false, ..defaults() };
@@ -2232,7 +2265,7 @@ pub(crate) mod tests {
     fn how_to_earn_is_short_and_live() {
         let text = earn_text(&defaults());
         assert!(text.contains("💬 Chat 20·60·150 msgs → 1 each (max 3)"), "{}", text);
-        assert!(text.contains("🎙️ VC with others → 1/hour (max 4) · deafened time doesn't count"), "{}", text);
+        assert!(text.contains("🎙️ VC with others → 1·2·3·4/hour (max 4) · deafened time doesn't count"), "{}", text);
         assert!(!earn_text(&Rules { voice_ignore_deaf: false, ..defaults() }).contains("deafened"));
         assert!(text.contains("🧠 Quiz podium 2·1·1 · 🔤 Koto 3 · 🔡 Anagram 3 · 🐱 Cats 1–3"), "{}", text);
         assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–10 (no limit)"), "{}", text);

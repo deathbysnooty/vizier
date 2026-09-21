@@ -71,6 +71,26 @@ fn voice_ignores_deafened() -> bool {
 /// as company - also for the panel and /today, which have no cache to hand.
 static BOTS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// What each hour of voice pays, in order: the first hour, the second, and so
+/// on. `VIZIER_VOICE_HOUR_POINTS`, a comma-separated list.
+///
+/// An hour past the end of the list pays what the last one paid, so "1,2,3,4"
+/// is a ladder that levels off at four and the daily limit decides where it
+/// stops for good.
+pub const VOICE_HOUR_POINTS: &str = "1,2,3,4";
+
+pub fn voice_hour_points() -> Vec<i64> {
+    let raw = super::control::var("VIZIER_VOICE_HOUR_POINTS").unwrap_or_else(|| VOICE_HOUR_POINTS.to_string());
+    let ladder: Vec<i64> = raw.split(',').filter_map(|v| v.trim().parse::<i64>().ok()).map(|v| v.clamp(0, 100)).collect();
+    if ladder.is_empty() { vec![1] } else { ladder }
+}
+
+/// What the `hour`th full hour of the day is worth (1 is the first).
+pub fn voice_hour_worth(ladder: &[i64], hour: usize) -> i64 {
+    let last = ladder.last().copied().unwrap_or(1);
+    ladder.get(hour.saturating_sub(1)).copied().unwrap_or(last)
+}
+
 fn voice_day_secs() -> i64 {
     super::control::number("VIZIER_VOICE_DAY_MINUTES", (VOICE_DAY_SECS / 60) as u64).max(1) as i64 * 60
 }
@@ -103,6 +123,9 @@ struct VoiceEvent {
 struct Award {
     user: u64,
     source: Source,
+    /// What to ask the ledger for. One, except for voice, where the hours
+    /// climb: the first is worth less than the fourth.
+    points: i64,
     reason: String,
     dedupe: String,
     /// The last second of the day it was earned. The ledger dates each point by
@@ -226,7 +249,8 @@ async fn pass(ctx: &Context, db: &Arc<Mutex<Connection>>) {
     let paid = tokio::task::spawn_blocking(move || {
         let mut settled = Vec::new();
         for a in todo {
-            match super::house::award_person_at(a.user, a.source, 1, &a.reason, None, Some(a.dedupe.clone()), None, a.at.min(chrono::Utc::now().timestamp())) {
+            let asked = a.points;
+            match super::house::award_person_at(a.user, a.source, asked, &a.reason, None, Some(a.dedupe.clone()), None, a.at.min(chrono::Utc::now().timestamp())) {
                 Some((house, outcome)) => {
                     tracing::info!("activity: {} -> {} ({}): {:?}", a.dedupe, a.user, house.name, outcome);
                     settled.push(a.dedupe);
@@ -780,6 +804,7 @@ fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> 
             out.push(Award {
                 user,
                 source: Source::Chat,
+                points: 1,
                 reason: format!("{}+ messages on {}", bar, day),
                 dedupe: key("chat", user, i + 1),
                 at,
@@ -794,16 +819,23 @@ fn plan(day: NaiveDate, chat: &HashMap<u64, i64>, voice: &HashMap<u64, i64>) -> 
         // The ledger's daily limit decides how many are kept; a few spare
         // hours on a marathon day are asked for and refused as capped.
         let hours = (secs / bar).min(24) as usize;
+        let ladder = voice_hour_points();
         for hour in 1..=hours {
+            let worth = voice_hour_worth(&ladder, hour);
+            if worth <= 0 {
+                continue;
+            }
             out.push(Award {
                 user,
                 source: Source::Voice,
+                points: worth,
                 reason: format!(
-                    "{} {} in voice{} on {}",
+                    "{} {} in voice{} on {} (hour {})",
                     hour * (bar / 60) as usize,
                     "minutes",
                     if company { " with others" } else { "" },
-                    day
+                    day,
+                    hour
                 ),
                 dedupe: key("voice", user, hour),
                 at,
@@ -964,6 +996,50 @@ mod tests {
         );
         assert_eq!(list.len(), 1);
         assert_eq!((list[0].together, list[0].alone), (2 * H, 2 * H));
+    }
+
+    #[test]
+    fn the_hours_in_voice_climb_and_then_level_off() {
+        let ladder = vec![1, 2, 3, 4];
+        assert_eq!(voice_hour_worth(&ladder, 1), 1);
+        assert_eq!(voice_hour_worth(&ladder, 2), 2);
+        assert_eq!(voice_hour_worth(&ladder, 3), 3);
+        assert_eq!(voice_hour_worth(&ladder, 4), 4);
+        // Past the end it keeps paying what the last hour paid; the daily
+        // limit is what stops a marathon, not the ladder.
+        assert_eq!(voice_hour_worth(&ladder, 5), 4);
+        assert_eq!(voice_hour_worth(&ladder, 12), 4);
+        // Four hours is ten points, six is eighteen - so a cap of twenty is
+        // reached somewhere in the seventh.
+        let day: i64 = (1..=4).map(|h| voice_hour_worth(&ladder, h)).sum();
+        assert_eq!(day, 10);
+        assert_eq!((1..=6).map(|h| voice_hour_worth(&ladder, h)).sum::<i64>(), 18);
+        // A flat ladder is the old rule, unchanged.
+        assert_eq!(voice_hour_worth(&[1], 9), 1);
+        // Hour nought is not a thing, and asking for it must not panic.
+        assert_eq!(voice_hour_worth(&ladder, 0), 1);
+    }
+
+    #[test]
+    fn a_voice_day_asks_for_each_hour_at_its_own_worth() {
+        let voice: HashMap<u64, i64> = [(ME, 3 * H + 600)].into_iter().collect();
+        let awards = plan(day(), &HashMap::new(), &voice);
+        let hours: Vec<(String, i64)> = awards
+            .iter()
+            .filter(|a| a.source == Source::Voice)
+            .map(|a| (a.dedupe.clone(), a.points))
+            .collect();
+        assert_eq!(hours.len(), 3, "three full hours: {:?}", hours);
+        assert_eq!(hours[0].1, 1);
+        assert_eq!(hours[1].1, 2);
+        assert_eq!(hours[2].1, 3);
+        // Each hour keeps its own key, so a rerun pays none of them twice.
+        assert_eq!(hours[0].0, format!("voice:{}:{}", day(), ME));
+        assert!(hours[2].0.ends_with(":3"), "{}", hours[2].0);
+        // And the reason says which hour it was, because "60 minutes" on a
+        // three-point row reads like a mistake otherwise.
+        let third = awards.iter().find(|a| a.points == 3).expect("the third hour");
+        assert!(third.reason.contains("hour 3"), "{}", third.reason);
     }
 
     #[test]

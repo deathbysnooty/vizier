@@ -499,8 +499,21 @@ fn today_lines(head: &str, who: Option<&str>, sources: &HashMap<String, i64>, me
     lines.push(if voice_cap > 0 && pts(Source::Voice) >= voice_cap {
         format!("{} ✅ maxed {}/{} ({} min{})", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company)
     } else {
+        // The hours climb, so "next point at 120" was only half the story: what
+        // matters is that the second hour pays two and the fourth pays four.
         let next = (voice_min / per_point + 1) * per_point;
-        format!("{} {}/{} · {} min{}, next point at {}", Source::Voice.label(), pts(Source::Voice), voice_cap, voice_min, company, next)
+        let ladder = super::activity::voice_hour_points();
+        let worth = super::activity::voice_hour_worth(&ladder, (voice_min / per_point + 1) as usize);
+        format!(
+            "{} {}/{} · {} min{}, {} more at {} min",
+            Source::Voice.label(),
+            pts(Source::Voice),
+            voice_cap,
+            voice_min,
+            company,
+            if worth == 1 { "1 point".to_string() } else { format!("{} points", worth) },
+            next
+        )
     });
     let mut left = 0;
     // What is NOT here pays the Cup nothing, and a line reading "0/8" for a game
@@ -812,7 +825,8 @@ mod tests {
         assert!(today_text(h, Some("Riya"), &sources, 34, 0).contains("today **Riya** has earned"));
         assert!(text.contains("today you've earned **15** points"), "{}", text);
         assert!(text.contains("💬 Chat 1/3 · 34 msgs, next point at 60"), "{}", text);
-        assert!(text.contains("🎙️ Voice 0/4 · 25 min"), "{}", text);
+        // The hours climb, so the line says what the next one is worth.
+        assert!(text.contains("🎙️ Voice 0/20 · 25 min with others, 1 point more at 60 min"), "{}", text);
         assert!(text.contains("🧠 Quiz ✅ maxed 6/6"), "{}", text);
         assert!(text.contains("🔤 Koto 2/4"), "{}", text);
         assert!(text.contains("🥇 Golden Snitch +6"), "{}", text);

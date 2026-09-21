@@ -307,7 +307,7 @@ pub fn sections() -> Vec<Section> {
                     section.",
             settings: vec![
                 setting("VIZIER_CAP_CHAT", "Chat points a day", "Most chat points one person can earn in a day (one per message tier reached).", number(0, 3, "points"), "3"),
-                setting("VIZIER_CAP_VOICE", "Voice points a day", "Most voice points one person can earn in a day (one per full hour, or whatever the voice block is set to).", number(0, 24, "points"), "4"),
+                setting("VIZIER_CAP_VOICE", "Voice points a day", "Most voice points one person can earn in a day. The hours climb (see Voice hour ladder), so this is what stops a marathon.", number(0, 100, "points"), "20"),
                 setting("VIZIER_CAP_QUIZ", "Quiz points a day", "Most points one person can earn from quiz rounds in a day. 100 means no limit.", number(0, 100, "points"), "6"),
                 setting("VIZIER_CAP_KOTO", "Koto points a day", "Most points one person can earn from Koto in a day. 100 means no limit.", number(0, 100, "points"), "4"),
                 setting("VIZIER_CAP_GUESS", "Guess the Word points a day", "Most points one person can earn from Guess the Word in a day. 100 means no limit.", number(0, 100, "points"), "10"),
@@ -1025,6 +1025,15 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CHAT_TIER2_MESSAGES", "2nd chat point at", "Messages in the day for the second chat point. Set it at or below the first to switch this tier off.", number(1, 5000, "messages"), "60"),
                 setting("VIZIER_CHAT_TIER3_MESSAGES", "3rd chat point at", "Messages in the day for the third chat point. Set it at or below the second to switch this tier off.", number(1, 5000, "messages"), "150"),
                 setting("VIZIER_VOICE_DAY_MINUTES", "Minutes per voice point", "Each full block of this many minutes in voice in a day earns a voice point, up to the daily limit.", number(10, 1440, "minutes"), "60"),
+                setting(
+                    "VIZIER_VOICE_HOUR_POINTS",
+                    "Voice hour ladder",
+                    "What each hour in voice pays, in order, separated by commas. \"1,2,3,4\" means the first hour \
+                     pays 1, the second 2, the third 3 and the fourth 4. An hour past the end of the list pays what \
+                     the last one paid, and the daily limit decides where it stops.",
+                    Kind::Text,
+                    "1,2,3,4",
+                ),
                 toggle(
                     "VIZIER_VOICE_NEEDS_COMPANY",
                     "Voice needs company",
