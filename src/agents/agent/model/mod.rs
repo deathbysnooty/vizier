@@ -492,7 +492,20 @@ impl VizierModelTrait for VizierModel {
         history: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> Result<(Option<String>, OneOrMany<AssistantContent>, Usage)> {
-        self.0.completion(message, history, tools).await
+        // The provider sometimes resets a pooled keep-alive connection, and the
+        // request fails before it is sent. Nothing reached the model, so it is
+        // safe to try again on a fresh connection.
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match self.0.completion(message.clone(), history.clone(), tools.clone()).await {
+                Err(e) if tries < 3 && never_sent(&e.to_string()) => {
+                    tracing::warn!("completion: request not sent (try {tries}), retrying: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(700 * tries)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     fn context_window(&self) -> Option<u64> {
@@ -615,3 +628,21 @@ impl<T: rig_core::client::CompletionClient> VizierModelTrait for VizierModelImpl
     }
 }
 
+
+/// A request that failed before the provider answered: a reset or closed
+/// connection, or one that could not be made. Retrying it cannot duplicate work.
+fn never_sent(error: &str) -> bool {
+    error.contains("error sending request")
+}
+
+#[cfg(test)]
+mod never_sent_tests {
+    use super::never_sent;
+
+    #[test]
+    fn only_requests_that_never_reached_the_provider_are_retried() {
+        assert!(never_sent("HttpError: Http client error: error sending request for url (https://openrouter.ai/api/v1/chat/completions)"));
+        assert!(!never_sent("ProviderError: rate limited"));
+        assert!(!never_sent("HttpError: Invalid status code 400"));
+    }
+}
