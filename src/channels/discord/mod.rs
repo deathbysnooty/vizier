@@ -58,6 +58,8 @@ mod roast;
 mod roast_build;
 mod roast_card;
 mod roast_store;
+mod ship_score;
+mod ship_sheet;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -222,6 +224,12 @@ impl VizierChannel for DiscordChannelReader {
         // the card can't say which way the number has moved.
         if let Err(err) = roast_store::open(&self.deps.config.workspace) {
             tracing::warn!("roast: store not opened: {}", err);
+        }
+        // The nightly sheets /ship works its shares out from. Not opening only
+        // means every pair reads as their own number and nothing else: the
+        // store is a cache of counts, and the next night builds it back.
+        if let Err(err) = ship_sheet::open(&self.deps.config.workspace) {
+            tracing::warn!("ship: the nightly sheet store was not opened: {}", err);
         }
         // Deleted and edited messages for the panel. Not opening only means no log.
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
@@ -1557,6 +1565,9 @@ impl EventHandler for Handler {
         daily::spawn(ctx.clone(), self.1.clone(), self.0.clone());
         // Member notes: the first build once switched on, then the weekly refresh.
         notes::spawn(ctx.clone());
+        // /ship's nightly sheets: one row of counts per active member, rebuilt
+        // in the small hours so a ship never has to read the whole log itself.
+        ship_sheet::spawn(ctx.clone());
 
         let thinking = CreateCommand::new("thinking").description("toggle showing thinking output");
 

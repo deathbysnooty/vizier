@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 use super::super::super::house;
 use super::super::super::points;
+use super::super::super::ship_sheet;
 use super::super::members::{self as notes, MemberNote, Tone};
 use super::{ApiError, ApiResult, Caller, MemberInfo, Panel, ok, parse_id};
 
@@ -534,10 +535,38 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
             "snitch_month": stats.snitch_month,
         },
         "joins": stats.joins,
+        "ship_sheet": ship_sheet_of(id),
         "note": note,
         "tones": tones(),
         "max_note_chars": notes::MAX_NOTE_CHARS,
     }))
+}
+
+/// When this member's nightly `/ship` sheet was last built, and the plain
+/// counts on it. Numbers only: a sheet holds nothing anybody said, and no model
+/// ever sees one. Null when the store isn't open at all.
+fn ship_sheet_of(id: u64) -> Value {
+    let Some(db) = ship_sheet::db() else { return Value::Null };
+    let sheet = ship_sheet::get(&db.lock(), id);
+    let mut out = json!({
+        "window_days": ship_sheet::WINDOW_DAYS,
+        "min_messages": ship_sheet::MIN_MESSAGES,
+        "rebuild_hour": ship_sheet::build_hour(),
+        "on": ship_sheet::sheets_on(),
+        "built_ts": Value::Null,
+    });
+    if let (Some(s), Some(obj)) = (sheet, out.as_object_mut()) {
+        obj.insert("built_ts".into(), json!(s.built_ts));
+        obj.insert("messages".into(), json!(s.messages));
+        obj.insert("replies_sent".into(), json!(s.replies_sent));
+        obj.insert("vc_minutes".into(), json!(s.vc_minutes));
+        obj.insert("reply_partners".into(), json!(s.reply_partners.len()));
+        obj.insert("vc_partners".into(), json!(s.vc_partners.len()));
+        obj.insert("channels".into(), json!(s.channels.len()));
+        obj.insert("avg_len".into(), json!(s.avg_len));
+        obj.insert("burst".into(), json!(s.burst));
+    }
+    out
 }
 
 pub async fn seen(State(panel): State<Panel>, Path(id): Path<String>) -> ApiResult {

@@ -1298,20 +1298,39 @@ pub fn sections() -> Vec<Section> {
             icon: "💘",
             about: "One joke command. /ship @a @b gives a \
                     pair a percentage, a mashed-up name and a short verdict on how they really behave around each \
-                    other, from their replies, shared channels and any fights the kalesh detector has called. The \
-                    percentage is not a random roll. Each pair has a number of their own, worked out from their two \
-                    member ids, that never changes and nobody can reroll. What the two of them actually do then nudges \
-                    it, in a few chunky steps and never by more than 25 either way: replying to each other, sitting in \
-                    voice together and playing the same games push it up; fights the kalesh detector called, and one \
-                    of them going quiet on the other, pull it down. It comes out the same whichever way round the pair \
+                    other, from their replies, shared channels and any fights the kalesh detector has called. \
+                    The percentage is not a random roll and it is not a count of anything. Each pair has a number of \
+                    their own, worked out from their two member ids, that never changes and nobody can reroll; about a \
+                    sixth of the answer stays that number and the rest is what the two of them actually do - \
+                    relationship about half of it, and how alike they are about a third. \
+                    What counts is SHARES, not totals: how much of everything you say goes to that one person, and how \
+                    much of everything they say comes back, with the SMALLER of the two deciding it. Two people with \
+                    200 replies out of thousands each are less of a pair than two who barely reply to anyone else. \
+                    It goes up when they give each other a real share of their replies, spend a real share of their \
+                    voice time together, keep going back and forth, are around at the same hours, live in the same \
+                    channels and play the same games. It goes down when they ignore each other while talking to \
+                    everyone else, when the kalesh detector has called fights between them, and when one of them does \
+                    nearly all the replying - a one-sided crush is capped and can never read high. A small sample is \
+                    pulled back towards the pair's own number, so two replies each way proves nothing, and anything \
+                    the bot has no evidence for simply leaves that number showing. It moves only in steps of 3, so it \
+                    drifts when something real changed rather than jittering. \
+                    Nothing else is read into it: the bot never guesses at personalities, interests or what anyone \
+                    meant, and nothing anybody said is stored to work it out. \
+                    It comes out the same whichever way round the pair \
                     is named, and never lands on a suspiciously round 0% or 100%. Each pair's last score is \
                     remembered, so when it has moved the card says which way and since when. The /ship result is a \
                     drawn card - both avatars, the ship name, the score, a bar coloured by it, the movement, and one \
                     counted fact about the pair (\"412 replies in 60 days\") that the bot works out itself, never the \
-                    AI. If the card can't be drawn the message goes out as text instead. It \
+                    AI. That line only ever says something anyone in the server could have noticed - a count of \
+                    replies, time in voice together, a shared channel or game, or the plain absence of any of it. \
+                    If the card can't be drawn the message goes out as text instead. It \
                     posts only in the roast channel: run anywhere else, the result still lands there and the channel it \
                     was run in gets a line linking to it. A ship pings \
                     only the two being shipped, and names whoever asked in the footer. \
+                    The shares come off a nightly sheet of plain counts per member (when they are about, which \
+                    channels, how much they reply and to whom, voice minutes) rebuilt once a night for members active \
+                    in the last 60 days. It holds no words and no AI ever sees it; a member's page says when theirs \
+                    was last built. Deleting the store costs one night: the next run counts it all again. \
                     #safe-corner never reaches the AI, and every answer is checked before it is posted - no slurs and \
                     nothing about family, death, looks or body, mental health, gender or sexuality, religion or caste, \
                     even when the member jokes about those themselves. A answer that fails is asked for once more and \
@@ -1353,13 +1372,43 @@ pub fn sections() -> Vec<Section> {
                     number(0, 180, "minutes"),
                     "10",
                 ),
+                toggle(
+                    "VIZIER_SHIP_SHEETS",
+                    "Nightly sheets",
+                    "Rebuild each active member's sheet of plain counts once a night - when they are about, which \
+                     channels, how much of their replying goes to whom, voice minutes. /ship works its shares out \
+                     from these. Off stops the rebuild; sheets already built keep being used, they just go stale, and \
+                     a pair with no sheets simply scores their own number.",
+                ),
+                setting(
+                    "VIZIER_SHIP_SHEET_HOUR",
+                    "Rebuild at",
+                    "The India hour the nightly rebuild runs at. Pick a quiet one: it reads the message log for every \
+                     active member, a few at a time with a pause between them.",
+                    number(0, 23, "hour"),
+                    "4",
+                ),
+                setting(
+                    "VIZIER_SHIP_SHEET_BATCH",
+                    "Members per night",
+                    "How many members one night's rebuild covers, stalest first. Everyone else comes round the next \
+                     night. 0 stops it.",
+                    number(0, 5_000, "members"),
+                    "120",
+                ),
             ],
             commands: vec![
                 command(
                     "ship",
                     EVERYONE,
                     "/ship @a @b",
-                    "Ships two members with a score, a name, a card and a verdict. Leave the second empty and it is you. The                      score is the pair's own number, from their two ids, nudged a few points by how much they reply to each                      other, time in voice together, games they both play, and kalesh between them - so it moves only when                      something real changed, never at random.",
+                    "Ships two members with a score, a name, a card and a verdict. Leave the second empty and it is \
+                     you. The score is the pair's own number from their two ids, moved by the SHARE of each one's \
+                     replies and voice time that goes to the other (the smaller share counts, not the totals), by \
+                     whether they are around at the same hours, in the same channels and playing the same games, and \
+                     by their back-and-forths against their kalesh. One-sided replying is docked and capped, a tiny \
+                     sample barely moves it, and it only moves in steps of 3 - so it changes when something real \
+                     changed, never at random. Nothing else is read into it.",
                 ),
                 command("noroast", EVERYONE, "/noroast", "Keeps you out of /ship. Run it again to come back in. Not the same as /forgetme."),
             ],

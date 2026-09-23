@@ -6435,6 +6435,26 @@
       stat('👑 Crowns', numberFmt.format(g.crowns), 'royales won'),
       stat('🪽 Snitches', numberFmt.format(g.snitch_month), 'this month')))));
 
+    const sheet = p.ship_sheet;
+    if (sheet) {
+      const built = sheet.built_ts
+        ? h('span', null, ago(sheet.built_ts), h('small', null, ' · ' + when(sheet.built_ts) + ' IST'))
+        : h('span', { class: 'muted' }, sheet.on ? 'Not built yet' : 'Nightly rebuild is off');
+      const body = sheet.built_ts
+        ? h('div', { class: 'stat-row four' },
+            stat('Messages', numberFmt.format(sheet.messages), 'last ' + sheet.window_days + ' days'),
+            stat('Replies sent', numberFmt.format(sheet.replies_sent), sheet.reply_partners + ' people'),
+            stat('🎙️ Voice', duration(sheet.vc_minutes * 60), sheet.vc_partners + ' people'),
+            stat('Typical message', sheet.avg_len + ' chars', sheet.burst + '% in bursts'))
+        : h('p', { class: 'empty-small' }, 'No sheet yet — members need at least ' + sheet.min_messages
+            + ' messages in the last ' + sheet.window_days + ' days. Ships for them fall back to the pair’s own number.');
+      panel.appendChild(card('pf-shipsheet', 'Ship sheet', 'Plain counts /ship works its shares out from — rebuilt nightly at '
+        + String(sheet.rebuild_hour).padStart(2, '0') + ':00 IST. No words are kept and no AI ever sees it.',
+        h('div', { class: 'card-body pad' },
+          h('dl', { class: 'kv' }, h('dt', null, 'Last built'), h('dd', null, built)),
+          body)));
+    }
+
     if (p.joins) {
       const j = p.joins;
       const d = (s) => (s ? fmtDate(Date.parse(s)) : '—');

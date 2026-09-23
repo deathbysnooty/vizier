@@ -11,9 +11,17 @@
 //!
 //! `/ship` posts a drawn card (`roast_card.rs`): both avatars, the ship name,
 //! the score, a bar coloured by it, one counted fact about the pair, and which
-//! way the score has moved since they were last shipped. The score itself is
-//! each pair's own number nudged by what they have done - see
-//! `roast_build::WHAT_MOVES_IT`.
+//! way the score has moved since they were last shipped. That one fact is
+//! always something anyone in the channel could have noticed - a count of
+//! replies, time in voice, a shared channel, or the plain absence of any of it.
+//!
+//! The score itself is worked out in `ship_score.rs`, from shares rather than
+//! totals: how much of each other's replying and voice time the two of them
+//! actually get, how alike their hours, channels and games are, and their
+//! back-and-forths against their kalesh - all of it against each person's own
+//! nightly sheet of counts (`ship_sheet.rs`). What is left is the pair's own
+//! number from their two ids, and a pair the bot knows nothing about is nothing
+//! but that number. `ship_score::WHAT_MOVES_IT` says the whole of it in English.
 //!
 //! The rules and the check every model answer has to pass live in
 //! `roast_build.rs`, with the tests. `/noroast` is the opt-out, and it is a
@@ -483,8 +491,9 @@ async fn give_up(ctx: &Context, command: &CommandInteraction, text: &str) {
 pub fn ship_builder() -> CreateCommand {
     CreateCommand::new("ship")
         // Discord allows 100 characters here, and this is the only help most
-        // people will read: say plainly that the number is not a random roll.
-        .description("ship two members - each pair's own number, nudged by replies, vc, games and kalesh")
+        // people will read: say plainly that it is shares, not a count and not
+        // a roll. The whole of it is in /help and on the panel.
+        .description("ship two members - the share of each other's replies and time, not who talks most")
         .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "pehla banda").required(true))
         .add_option(CreateCommandOption::new(CommandOptionType::User, "with", "doosra banda - khaali chhoda to tum ho").required(false))
 }
@@ -525,21 +534,27 @@ pub async fn ship_command(ctx: &Context, storage: &std::sync::Arc<crate::storage
     let channels = super::notes::cache_names(ctx).0;
     let mut t = pair_together(a, b, channels).await;
     t.shared_games = da.games.iter().map(|(g, _)| g.clone()).filter(|g| db.games.iter().any(|(o, _)| o == g)).collect();
-    let signals = t.signals();
-    let percent = build::ship_percent(a, b, &signals);
+    // The shares come off the two nightly sheets, so both halves of every share
+    // were counted the same way on the same pass. A member with no sheet reads
+    // as nothing known, and their pair's own number simply shows through.
+    let (side_a, side_b, _, _) = super::ship_sheet::sides(a, b);
+    let scored = build::ship_score(a, b, &side_a, &side_b, &t.between());
+    let percent = scored.percent;
     let ship = build::ship_name(&name_a, &name_b);
-    let prompt = build::ship_prompt(&da, &db, &t, percent, &ship);
+    let prompt = build::ship_prompt(&da, &db, &t, &scored, &ship);
     // What they scored last time, so the card can say which way it has moved.
     // Remembered now: the score is already decided, whatever the model does.
     let moved = remember_score(a, b, percent);
     tracing::info!(
-        "roast: {} shipped {} and {} ({}% = base {} {:+}, {}), about {} tokens",
+        "roast: {} shipped {} and {} ({}% = base {} {:+}{}; {:?}), {}, about {} tokens",
         caller,
         a,
         b,
         percent,
-        build::ship_base(a, b),
-        build::drift(&signals),
+        scored.base,
+        scored.moved(),
+        if scored.capped { ", capped as one-sided" } else { "" },
+        scored.told(),
         moved.as_deref().unwrap_or("no change"),
         build::prompt_tokens(&prompt)
     );
