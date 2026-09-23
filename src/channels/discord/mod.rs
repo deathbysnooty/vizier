@@ -56,6 +56,8 @@ mod notes_facts;
 mod notes_store;
 mod roast;
 mod roast_build;
+mod roast_card;
+mod roast_store;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -215,6 +217,11 @@ impl VizierChannel for DiscordChannelReader {
         // Member notes. Not opening only means /about and the builds are unavailable.
         if let Err(err) = notes_store::open(&self.deps.config.workspace) {
             tracing::warn!("notes: store not opened: {}", err);
+        }
+        // /ship's memory of what each pair scored last. Not opening only means
+        // the card can't say which way the number has moved.
+        if let Err(err) = roast_store::open(&self.deps.config.workspace) {
+            tracing::warn!("roast: store not opened: {}", err);
         }
         // Deleted and edited messages for the panel. Not opening only means no log.
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
@@ -1771,6 +1778,7 @@ impl EventHandler for Handler {
         commands.push(notes::about_builder());
         commands.push(notes::forgetme_builder());
         commands.push(roast::roast_builder());
+        commands.push(roast::ship_builder());
         commands.push(roast::noroast_builder());
         commands.push(standings::today_builder());
         commands.push(control::remind::remind_builder());
@@ -2636,6 +2644,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "roast" {
                 roast::roast_command(&ctx, &self.1.storage, &command).await;
+                return;
+            }
+            if command.data.name == "ship" {
+                roast::ship_command(&ctx, &self.1.storage, &command).await;
                 return;
             }
             if command.data.name == "noroast" {
