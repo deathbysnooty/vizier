@@ -1260,6 +1260,29 @@ pub mod tests {
         assert!(text_only.starts_with("**arjun** × **riya**"));
     }
 
+    /// What one call actually costs, so a change that quietly doubles it is
+    /// noticed here rather than on the bill. Run with `--nocapture` to print it.
+    #[test]
+    fn one_call_stays_inside_its_budget() {
+        // A roast of someone with a full history: the whole message sample.
+        let full = Dossier { messages: sample(&(0..4_000).map(|i| Said { ts: i, text: format!("bhai ye {} wala match dekha kya, ekdum scene tha", i) }).collect::<Vec<_>>(), READ_BUDGET), ..arjun() };
+        let roast = estimate_tokens(&roast_prompt(&full));
+        let thin = estimate_tokens(&roast_prompt(&nobody()));
+        let ship = estimate_tokens(&ship_prompt(&arjun(), &riya(), &together(), 87, "Arjya"));
+        println!("one /roast: {} tokens in (thin member: {}); one /ship: {} tokens in", roast, thin, ship);
+        // The prompt's own words, without anyone's messages.
+        let bare = estimate_tokens(&roast_prompt(&Dossier { messages: vec![], ..arjun() }));
+        println!("the roast prompt's own words: {} tokens", bare);
+        // Roughly: the instructions and the record are under a thousand tokens,
+        // the member's own messages are the rest, and a ship - which sends both
+        // records and what they said at each other, but neither member's whole
+        // message sample - is far cheaper than a roast.
+        assert!(bare < 1_000, "the instructions and the record alone cost {bare} tokens");
+        assert!(thin < 1_000, "a member with nothing to go on costs {thin} tokens");
+        assert!(roast < READ_BUDGET + 1_200, "a full roast costs {roast} tokens");
+        assert!(ship < 3_000, "a ship costs {ship} tokens");
+    }
+
     #[test]
     fn a_dossier_only_says_what_it_knows() {
         let facts = nobody().facts();
