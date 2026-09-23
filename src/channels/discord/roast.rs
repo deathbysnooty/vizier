@@ -561,7 +561,10 @@ pub async fn roast_command(ctx: &Context, storage: &std::sync::Arc<crate::storag
     let d = dossier(ctx, storage, target, &name).await;
     let prompt = build::roast_prompt(&d);
     tracing::info!("roast: {} asked for a roast of {} ({} messages, about {} tokens)", caller, target, d.messages.len(), build::prompt_tokens(&prompt));
-    match build::make(prompt, build::check_roast, ask).await {
+    // Their own words, so a quote of a catchphrase isn't mistaken for the bot
+    // being cruel about a banned area.
+    let said = d.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n") + "\n" + &d.phrases.join("\n");
+    match build::make(prompt, |raw| build::check_roast_quoting(raw, &said), ask).await {
         Made::Ok { text, tries } => {
             tracing::info!("roast: roast of {} written in {} tr{}", target, tries, if tries == 1 { "y" } else { "ies" });
             // /roast stays text only: nothing to draw for one person.

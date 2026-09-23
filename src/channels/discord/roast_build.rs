@@ -448,10 +448,42 @@ static REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Why a piece of writing may not be posted, or `None` when it may.
 pub fn rejection(text: &str) -> Option<&'static str> {
+    rejection_quoting(text, "")
+}
+
+/// The same, for a roast of someone whose own messages are `said`. A banned
+/// word inside a quotation of their own words is the member's, not the bot's,
+/// and the bot quoting a catchphrase back at them is the whole point of the
+/// feature - so quoted runs that they really did write are not held against it.
+/// Anything the model writes in its own voice still is.
+pub fn rejection_quoting(text: &str, said: &str) -> Option<&'static str> {
     if text.contains("@everyone") || text.contains("@here") {
         return Some("a mass ping");
     }
-    BANNED_RES.iter().find(|(_, re)| re.is_match(text)).map(|(area, _)| *area)
+    let own = without_their_words(text, said);
+    BANNED_RES.iter().find(|(_, re)| re.is_match(&own)).map(|(area, matched)| {
+        tracing::info!("roast: thrown away for {} ({:?})", area, matched.find(&own).map(|m| m.as_str().to_string()));
+        *area
+    })
+}
+
+/// Quoted runs, each holding a word that is only a quote when they wrote it.
+static QUOTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]{1,120})"|'([^']{2,120})'|“([^”]{1,120})”"#).expect("regex"));
+
+/// The writing with every quotation of their own words taken out.
+fn without_their_words(text: &str, said: &str) -> String {
+    if said.is_empty() {
+        return text.to_string();
+    }
+    let said = said.to_lowercase();
+    let mut out = text.to_string();
+    for caps in QUOTES.captures_iter(text) {
+        let Some(inner) = (1..=3).find_map(|i| caps.get(i)) else { continue };
+        if said.contains(&inner.as_str().to_lowercase()) {
+            out = out.replace(inner.as_str(), " ");
+        }
+    }
+    out
 }
 
 fn tidy(raw: &str) -> String {
@@ -478,6 +510,12 @@ fn field(raw: &str, key: &str) -> Option<String> {
 /// Reads a reply and holds it to the rules. `Ok` is what may be posted; `Err`
 /// says why not, in words the log can carry.
 pub fn check(raw: &str, key: &str, max_chars: usize) -> Result<String, &'static str> {
+    check_quoting(raw, key, max_chars, "")
+}
+
+/// The same, knowing what the member themselves has said, so the bot may quote
+/// them back at them even when their own words touch a banned area.
+pub fn check_quoting(raw: &str, key: &str, max_chars: usize, said: &str) -> Result<String, &'static str> {
     let Some(text) = field(raw, key) else { return Err("the reply couldn't be read") };
     if REFUSAL.is_match(&text) {
         return Err("the model refused");
@@ -488,7 +526,7 @@ pub fn check(raw: &str, key: &str, max_chars: usize) -> Result<String, &'static 
     if text.chars().count() > max_chars {
         return Err("it was too long to post");
     }
-    match rejection(&text) {
+    match rejection_quoting(&text, said) {
         Some(why) => Err(why),
         None => Ok(text),
     }
@@ -496,6 +534,11 @@ pub fn check(raw: &str, key: &str, max_chars: usize) -> Result<String, &'static 
 
 pub fn check_roast(raw: &str) -> Result<String, &'static str> {
     check(raw, "roast", ROAST_CHARS)
+}
+
+/// The roast check for a member whose own messages are `said`.
+pub fn check_roast_quoting(raw: &str, said: &str) -> Result<String, &'static str> {
+    check_quoting(raw, "roast", ROAST_CHARS, said)
 }
 
 pub fn check_ship(raw: &str) -> Result<String, &'static str> {
@@ -795,6 +838,21 @@ pub mod tests {
     const ARJUN: u64 = 771;
     const RIYA: u64 = 982;
     const SAFE: u64 = 1_516_000_000_000_000_001;
+
+    /// A member whose own catchphrase is "maa kasam" can still be roasted: the
+    /// bot quoting them back is not the bot talking about their family. What
+    /// the model writes in its own voice is still held to the rules.
+    #[test]
+    fn quoting_their_own_words_back_at_them_is_not_a_banned_area() {
+        let said = "maa kasam bhai i was afk\nek minute\nmy mother tongue is hindi";
+        let quoting = r#"{"roast": "\"maa kasam\" every single round and you still lost 49 of 61 games bhai"}"#;
+        assert!(check_roast_quoting(quoting, said).is_ok(), "their own words, quoted");
+        assert_eq!(check_roast(quoting), Err("family"), "with nothing to check against, it still goes");
+
+        // The model's own voice, and a quotation they never wrote.
+        assert_eq!(check_roast_quoting(r#"{"roast": "even your mother mutes you in vc, 12 wins in 61 games bhai"}"#, said), Err("family"));
+        assert_eq!(check_roast_quoting(r#"{"roast": "you type \"my mother pays for your nitro\" and lose anyway, 12 of 61"}"#, said), Err("family"));
+    }
     const T0: i64 = 1_780_000_000_000;
 
     /// A member with a real history: the test data the samples in the report come from.
