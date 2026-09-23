@@ -1,8 +1,7 @@
-//! `/roast` and `/ship`, the part that is plain logic: what the bot knows about
-//! a member gathered into a dossier, the prompts built from it, the check every
-//! model reply must pass before anything is posted, the ship name and the ship
-//! percentage, and where the result goes when the command was run somewhere
-//! else.
+//! `/roast`, the part that is plain logic: what the bot knows about a member
+//! gathered into a dossier, the prompt built from it, the check every model
+//! reply must pass before anything is posted, and where the result goes when
+//! the command was run somewhere else.
 //!
 //! Nothing here touches Discord or a model - `roast.rs` does that - so the
 //! tests can hand it a fake model and a made-up dossier.
@@ -23,7 +22,7 @@ use regex::Regex;
 use serde_json::Value;
 
 pub use super::notes_build::Said;
-use super::notes_build::{cut, estimate_tokens, sample, usable};
+use super::notes_build::{estimate_tokens, sample, usable};
 
 /// The messages one prompt may carry, in tokens, after the count cap. The same
 /// idea as the notes budget: a sample spread over their whole time, not the
@@ -32,8 +31,6 @@ pub const READ_BUDGET: usize = 3500;
 /// The longest a roast may be once tidied. Discord allows 4096 in an embed
 /// description; this leaves room and keeps the model honest.
 pub const ROAST_CHARS: usize = 1400;
-/// The longest a ship verdict may be.
-pub const SHIP_CHARS: usize = 500;
 /// A member with fewer messages on record than this has nothing to go on.
 pub const THIN_MESSAGES: i64 = 40;
 /// Tries at one model answer: one, then one more if the first is refused.
@@ -146,77 +143,6 @@ pub fn hours(mins: i64) -> String {
     }
 }
 
-/// How two members behave around each other, for `/ship`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Together {
-    /// Channels they both turn up in, by name.
-    pub shared_channels: Vec<String>,
-    /// Replies from the first to the second, and back.
-    pub replies_ab: usize,
-    pub replies_ba: usize,
-    /// Times one pinged the other.
-    pub mentions: usize,
-    /// Stretches of back-and-forth found in the period looked at.
-    pub stretches: usize,
-    /// Fights the kalesh detector called with both of them in it.
-    pub fights: usize,
-    /// Minutes in the same voice room at the same time, over the period.
-    pub vc_minutes: i64,
-    /// Games they both play.
-    pub shared_games: Vec<String>,
-    /// A few of the things they said at each other: (who, what).
-    pub sample: Vec<(String, String)>,
-}
-
-impl Together {
-    pub fn nothing(&self) -> bool {
-        self.replies_ab + self.replies_ba + self.mentions + self.stretches == 0 && self.sample.is_empty()
-    }
-
-    pub fn facts(&self, a: &str, b: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        if self.shared_channels.is_empty() {
-            out.push("They don't really share a channel.".to_string());
-        } else {
-            out.push(format!("Both turn up in: {}.", self.shared_channels.iter().map(|c| format!("#{}", c)).collect::<Vec<_>>().join(", ")));
-        }
-        out.push(format!("{} replied to {} {} times; {} replied to {} {} times.", a, b, self.replies_ab, b, a, self.replies_ba));
-        out.push(format!("{} times one of them pinged the other.", self.mentions));
-        out.push(format!("{} separate back-and-forths in the period looked at.", self.stretches));
-        out.push(match self.fights {
-            0 => "The kalesh detector has never called a fight with both of them in it.".to_string(),
-            1 => "The kalesh detector has called one fight with both of them in it.".to_string(),
-            n => format!("The kalesh detector has called {} fights with both of them in them.", n),
-        });
-        out.push(match self.vc_minutes {
-            0 => "They have not once been in a voice room together.".to_string(),
-            m => format!("{} in voice together.", hours(m)),
-        });
-        if !self.shared_games.is_empty() {
-            out.push(format!("Both play: {}.", self.shared_games.join(", ")));
-        }
-        out
-    }
-
-    /// One of them doing nearly all the replying: the quiet one has, in effect,
-    /// stopped answering. Only once there is enough traffic to mean anything.
-    pub fn one_sided(&self) -> bool {
-        let (lo, hi) = (self.replies_ab.min(self.replies_ba), self.replies_ab.max(self.replies_ba));
-        hi >= 20 && lo * 5 < hi
-    }
-
-    /// What this pair's number is nudged by.
-    pub fn signals(&self) -> Signals {
-        Signals {
-            replies: self.replies_ab + self.replies_ba,
-            vc_minutes: self.vc_minutes,
-            shared_games: self.shared_games.len(),
-            fights: self.fights,
-            one_sided: self.one_sided(),
-        }
-    }
-}
-
 // --- what may be read -------------------------------------------------------------------------
 
 /// One message as it comes out of the log, before anything is decided about it.
@@ -316,82 +242,6 @@ THINGS {name} HAS ACTUALLY SAID (a sample of their own messages, oldest first):
         limits = LIMITS,
         facts = facts,
         said = said,
-    )
-}
-
-pub fn ship_prompt(a: &Dossier, b: &Dossier, t: &Together, percent: u8, ship_name: &str) -> String {
-    let each = |d: &Dossier| {
-        let facts = d.facts();
-        let facts = if facts.is_empty() { "- (nothing on record)".to_string() } else { facts.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n") };
-        format!("{}:\n{}", d.name, facts)
-    };
-    let between = t.facts(&a.name, &b.name).iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n");
-    let sample = if t.sample.is_empty() {
-        "(nothing on record between them)".to_string()
-    } else {
-        t.sample.iter().map(|(who, what)| format!("- {}: {}", who, what)).collect::<Vec<_>>().join("\n")
-    };
-    let nothing = if t.nothing() {
-        "\nThey have basically never interacted. Say so, and make the verdict about two strangers being shoved together \
-by a bot - do not invent a history for them.\n"
-    } else {
-        ""
-    };
-    format!(
-        "{voice}
-
-Two members of the server have been shipped, as a joke, by a bot. The pairing is nonsense and everyone knows it: it is \
-a bit, not a claim about anybody's real life. The score is already fixed at {percent}% and the ship name is already \
-\"{ship}\" - do not argue with either, do not repeat the number, just write the verdict that goes under them.
-
-The number is their own, worked out from their member ids, moved {drift} by what they have actually done:
-{moved}
-Your verdict has to agree with that. If the number is low because they fight, the verdict knows it; if it is high \
-because they never stop replying, the verdict knows that instead.
-
-Write the verdict: two or three short lines about how these two actually behave around each other, drawn only from the \
-record below - who replies to whom, the channels they share, the games they both play, the fights they have had, the \
-way each of them talks. Funny and sharp, the way the server talks to itself. It is a joke about their chat history and \
-nothing more: no romance, no claims about anyone's real relationships, no advice.
-{nothing}
-{limits}
-
-Length: under 60 words in all.
-
-Reply with only a JSON object and nothing else: {{\"verdict\": \"...\"}}
-
-THE TWO OF THEM
-{a}
-
-{b}
-
-HOW THEY ARE AROUND EACH OTHER
-{between}
-
-SOME OF WHAT THEY HAVE SAID AT EACH OTHER:
-{sample}",
-        voice = VOICE,
-        percent = percent,
-        drift = match drift(&t.signals()) {
-            0 => "not at all".to_string(),
-            d if d > 0 => format!("up {} points", d),
-            d => format!("down {} points", -d),
-        },
-        moved = {
-            let steps = steps(&t.signals());
-            if steps.is_empty() {
-                "- nothing has happened between them to move it either way".to_string()
-            } else {
-                steps.iter().map(|(what, by)| format!("- {} ({}{})", what, if *by > 0 { "+" } else { "" }, by)).collect::<Vec<_>>().join("\n")
-            }
-        },
-        ship = ship_name,
-        nothing = nothing,
-        limits = LIMITS,
-        a = each(a),
-        b = each(b),
-        between = between,
-        sample = sample,
     )
 }
 
@@ -541,10 +391,6 @@ pub fn check_roast_quoting(raw: &str, said: &str) -> Result<String, &'static str
     check_quoting(raw, "roast", ROAST_CHARS, said)
 }
 
-pub fn check_ship(raw: &str) -> Result<String, &'static str> {
-    check(raw, "verdict", SHIP_CHARS)
-}
-
 // --- asking, and asking once more -----------------------------------------------------------------
 
 /// What came of asking the model.
@@ -620,177 +466,10 @@ pub fn blocked(optouts: &[u64], people: &[u64]) -> Option<u64> {
 /// business beyond the fact that they are out.
 pub fn opted_out_message(who: u64, caller: u64, name: &str) -> String {
     if who == caller {
-        "You've opted out of roasts and ships, so I'm not going to do one. Run `/noroast` again to come back in."
-            .to_string()
+        "You've opted out of roasts, so I'm not going to do one. Run `/noroast` again to come back in.".to_string()
     } else {
-        format!("**{}** has opted out of roasts and ships, so that one's off the table. Nothing was posted.", name)
+        format!("**{}** has opted out of roasts, so that one's off the table. Nothing was posted.", name)
     }
-}
-
-// --- the ship ---------------------------------------------------------------------------------------
-
-/// What a pair's number is nudged by. Every one of these is symmetric, so the
-/// score comes out the same whichever way round the pair was named.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Signals {
-    /// Replies between them, both ways, over the period looked at.
-    pub replies: usize,
-    /// Minutes in the same voice room at the same time.
-    pub vc_minutes: i64,
-    /// Games they both play.
-    pub shared_games: usize,
-    /// Fights the kalesh detector called with both of them in it.
-    pub fights: usize,
-    /// One of them doing nearly all the replying.
-    pub one_sided: bool,
-}
-
-/// The furthest the things that happened may carry a pair from their own base,
-/// either way. Past this the pair's own number would stop showing through.
-pub const MAX_DRIFT: i32 = 25;
-/// Never a suspiciously round nothing or everything.
-pub const MIN_PERCENT: u8 = 1;
-pub const MAX_PERCENT: u8 = 99;
-
-/// In plain English, for the help text and the report: what moves a pair's
-/// number, so nobody thinks it is a random roll.
-pub const WHAT_MOVES_IT: &str = "Each pair has a number of their own that never changes, worked out from their two member ids - nobody can reroll it. What the two of them actually do then nudges it, in a few chunky steps and never by more than 25 either way: replying to each other, sitting in voice together, playing the same games and being on the same side push it up; fights the kalesh detector called, and one of them doing nearly all the replying, pull it down. It only moves when one of those crosses a step, so it drifts slowly and only when something real changed.";
-
-/// Which rung of a ladder a count has reached. Saturating, so an absurd count
-/// lands on the top rung rather than wrapping round to nothing.
-fn step(value: usize, ladder: &[(i64, i32)]) -> i32 {
-    let value = i64::try_from(value).unwrap_or(i64::MAX);
-    ladder.iter().rev().find(|(at, _)| value >= *at).map(|(_, by)| *by).unwrap_or(0)
-}
-
-/// Every step this pair has earned, with what it is called. Coarse on purpose:
-/// a handful of steps of a few points, not a sliding score, so the number holds
-/// still until something real changes.
-pub fn steps(s: &Signals) -> Vec<(&'static str, i32)> {
-    let mut out: Vec<(&'static str, i32)> = Vec::new();
-    let replies = step(s.replies, &[(1, 2), (25, 5), (100, 9), (400, 13)]);
-    if replies != 0 {
-        out.push(("they reply to each other", replies));
-    }
-    let vc = step(s.vc_minutes.max(0) as usize, &[(1, 2), (60, 5), (300, 8)]);
-    if vc != 0 {
-        out.push(("time in voice together", vc));
-    }
-    let games = step(s.shared_games, &[(1, 2), (2, 4)]);
-    if games != 0 {
-        out.push(("games they both play", games));
-    }
-    let fights = step(s.fights, &[(1, -4), (2, -7), (4, -10)]);
-    if fights != 0 {
-        out.push(("kalesh between them", fights));
-    }
-    if s.one_sided {
-        out.push(("one of them has gone quiet on the other", -6));
-    }
-    out
-}
-
-/// How far the things that happened carry them from their base, capped.
-pub fn drift(s: &Signals) -> i32 {
-    steps(s).iter().map(|(_, by)| by).sum::<i32>().clamp(-MAX_DRIFT, MAX_DRIFT)
-}
-
-/// The pair's own number, from their two ids and nothing else: the same every
-/// time, whichever way round they are named, and nobody can reroll it.
-pub fn ship_base(a: u64, b: u64) -> i32 {
-    let (lo, hi) = (a.min(b), a.max(b));
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in lo.to_le_bytes().iter().chain(hi.to_le_bytes().iter()) {
-        h ^= *byte as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (h % 101) as i32
-}
-
-/// Their base, nudged by what the two of them have actually done. Stable in
-/// both orders, because every signal is.
-pub fn ship_percent(a: u64, b: u64, s: &Signals) -> u8 {
-    (ship_base(a, b) + drift(s)).clamp(MIN_PERCENT as i32, MAX_PERCENT as i32) as u8
-}
-
-/// "up 6 since 5 days ago", or nothing at all when it hasn't moved. Silence is
-/// the point: a line that appears every time would stop meaning anything.
-pub fn movement(now: u8, last: Option<(u8, i64)>, now_ts: i64) -> Option<String> {
-    let (was, at) = last?;
-    let by = now as i32 - was as i32;
-    if by == 0 {
-        return None;
-    }
-    let ago = super::kalesh::later((now_ts - at).max(0) * 1000);
-    Some(format!("{} {} since {} ago", if by > 0 { "up" } else { "down" }, by.abs(), ago))
-}
-
-fn letters(name: &str) -> String {
-    name.chars().filter(|c| c.is_alphanumeric()).collect()
-}
-
-/// The front of one name on the back of the other: "gooner" + "potus" = "Gootus".
-/// Falls back to whatever there is when a name is all emoji.
-pub fn ship_name(a: &str, b: &str) -> String {
-    let (a, b) = (letters(a), letters(b));
-    if a.is_empty() || b.is_empty() {
-        let joined = format!("{}{}", a, b);
-        return if joined.is_empty() { "Ship".to_string() } else { capitalise(&joined) };
-    }
-    let head: String = a.chars().take(a.chars().count().div_ceil(2).max(2)).collect();
-    let keep = b.chars().count().div_ceil(2).max(2).min(b.chars().count());
-    let tail: String = b.chars().skip(b.chars().count() - keep).collect();
-    capitalise(&cut(&format!("{}{}", head, tail), 28))
-}
-
-fn capitalise(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
-        None => String::new(),
-    }
-}
-
-/// The longest the card's one-line fact may be.
-pub const HEADLINE_CHARS: usize = 58;
-
-/// One real number about the pair, for the line under the bar on the card. It
-/// comes from what the bot counted, never from the model, so it cannot be
-/// wrong and cannot be unsafe. The most interesting thing available wins: a
-/// fight beats a reply count, a reply count beats a ping count, and a pair who
-/// have never said a word to each other get a line that says exactly that.
-pub fn headline(t: &Together, days: i64) -> String {
-    let replies = t.replies_ab + t.replies_ba;
-    let line = if t.fights > 0 {
-        format!("{} fight{} called · 0 apologies logged", t.fights, if t.fights == 1 { "" } else { "s" })
-    } else if replies > 0 {
-        format!("{} repl{} in {} days", replies, if replies == 1 { "y" } else { "ies" }, days)
-    } else if t.mentions > 0 {
-        format!("{} ping{} at each other, 0 replies", t.mentions, if t.mentions == 1 { "" } else { "s" })
-    } else if t.stretches > 0 {
-        format!("{} run-in{} in {} days, not one reply", t.stretches, if t.stretches == 1 { "" } else { "s" }, days)
-    } else if let Some(channel) = t.shared_channels.first() {
-        format!("Both live in #{} and have never once replied", cut(channel, 24))
-    } else {
-        format!("Not one word between them in {} days", days)
-    };
-    cut(&line, HEADLINE_CHARS)
-}
-
-/// The score as text, for the message when the card couldn't be drawn. With a
-/// card there is no need: the picture says it better.
-pub fn score_line(a: &str, b: &str, percent: u8, with_card: bool) -> String {
-    if with_card {
-        format!("**{}** × **{}**", a, b)
-    } else {
-        format!("**{}** × **{}**\n\n`{}` **{}%**", a, b, bar(percent), percent)
-    }
-}
-
-/// The percentage drawn as a bar, ten steps wide.
-pub fn bar(percent: u8) -> String {
-    let filled = (percent as usize * 10).div_ceil(100).min(10);
-    format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
 }
 
 // --- where it is posted ------------------------------------------------------------------------------
@@ -887,50 +566,6 @@ pub mod tests {
         }
     }
 
-    pub fn riya() -> Dossier {
-        Dossier {
-            id: RIYA,
-            name: "riya".into(),
-            days_here: Some(300),
-            messages_all: 9_100,
-            messages_month: 2_400,
-            top_channels: vec!["chatting-hori".into(), "chess".into()],
-            games: vec![("Chess".into(), "58 games, 41 won, 3 drawn".into())],
-            house: Some("Rankhoj".into()),
-            points_month: 890,
-            house_place: Some((1, 11)),
-            frog_cards: 4,
-            voice_month_mins: 120,
-            automod_blocked: 0,
-            deleted: 3,
-            emoji: Some("😭".into()),
-            phrases: vec!["nahi bhai".into(), "cope".into()],
-            partners: vec!["arjun".into()],
-            messages: vec![
-                Said { ts: T0 / 1000 + 10, text: "cope harder, the knight was always going there".into() },
-                Said { ts: T0 / 1000 + 200, text: "nahi bhai vc me nahi aungi, padhna hai".into() },
-            ],
-        }
-    }
-
-    pub fn together() -> Together {
-        Together {
-            shared_channels: vec!["chatting-hori".into(), "chess".into()],
-            replies_ab: 214,
-            replies_ba: 198,
-            mentions: 61,
-            stretches: 22,
-            fights: 3,
-            vc_minutes: 640,
-            shared_games: vec!["Chess".into()],
-            sample: vec![
-                ("arjun".into(), "ek minute rematch dedo".into()),
-                ("riya".into(), "cope harder".into()),
-                ("arjun".into(), "bhai sun ye galat tha".into()),
-            ],
-        }
-    }
-
     fn nobody() -> Dossier {
         Dossier { id: 55, name: "ghost".into(), days_here: Some(390), messages_all: 11, messages_month: 0, ..Default::default() }
     }
@@ -972,11 +607,11 @@ pub mod tests {
     // --- opting out -----------------------------------------------------------
 
     #[test]
-    fn someone_who_opted_out_is_never_roasted_or_shipped() {
+    fn someone_who_opted_out_is_never_roasted() {
         let optouts = vec![RIYA];
         assert_eq!(blocked(&optouts, &[ARJUN]), None);
         assert_eq!(blocked(&optouts, &[RIYA]), Some(RIYA));
-        assert_eq!(blocked(&optouts, &[ARJUN, RIYA]), Some(RIYA), "either half of a ship stops it");
+        assert_eq!(blocked(&optouts, &[ARJUN, RIYA]), Some(RIYA), "the one who asked being out stops it too");
         assert!(blocked(&[], &[ARJUN, RIYA]).is_none());
         let theirs = opted_out_message(RIYA, ARJUN, "riya");
         assert!(theirs.contains("riya") && theirs.contains("opted out") && theirs.contains("Nothing was posted"), "{theirs}");
@@ -1013,9 +648,6 @@ pub mod tests {
         // A fenced answer, and a wrong-shaped one.
         assert!(check_roast("```json\n{\"roast\": \"61 chess games, 12 wins. ek minute, ek minute, and still no rematch won bhai.\"}\n```").is_ok());
         assert_eq!(check_roast(r#"{"something_else": "..."}"#), Err("the reply couldn't be read"));
-        // The ship verdict is held to the same lines, on a shorter leash.
-        assert!(check_ship(r#"{"verdict": "412 replies between them and riya has won 41 of 58 chess games. This is not a ship, it is a hostage situation with extra steps."}"#).is_ok());
-        assert_eq!(check_ship(r#"{"verdict": "they fight like brother and sister honestly, 412 replies between them bhai"}"#), Err("family"));
     }
 
     #[tokio::test]
@@ -1135,189 +767,6 @@ pub mod tests {
         assert!(check_roast(answer).is_ok());
     }
 
-    // --- the ship ---------------------------------------------------------------
-
-    #[test]
-    fn a_pair_always_scores_the_same_whichever_way_round_it_is_asked() {
-        let s = together().signals();
-        for (a, b) in [(ARJUN, RIYA), (1, 2), (999_999_999_999_999_999, 4), (7, 7)] {
-            assert_eq!(ship_percent(a, b, &s), ship_percent(b, a, &s), "{a} and {b}");
-            assert_eq!(ship_base(a, b), ship_base(b, a));
-        }
-        // The same every time it is asked, not a fresh roll.
-        let first = ship_percent(ARJUN, RIYA, &s);
-        for _ in 0..50 {
-            assert_eq!(ship_percent(RIYA, ARJUN, &s), first);
-        }
-        // Never a suspiciously round nothing or everything, whatever happens.
-        for base_pair in [(1u64, 2u64), (ARJUN, RIYA), (5, 900), (12, 13)] {
-            for signals in [
-                Signals::default(),
-                Signals { replies: 100_000, vc_minutes: 100_000, shared_games: 9, ..Default::default() },
-                Signals { fights: 500, one_sided: true, ..Default::default() },
-            ] {
-                let p = ship_percent(base_pair.0, base_pair.1, &signals);
-                assert!((MIN_PERCENT..=MAX_PERCENT).contains(&p), "{p}% from {base_pair:?}");
-            }
-        }
-        // Different pairs don't all land on the same number.
-        let spread: HashSet<u8> = (1..40u64).map(|i| ship_percent(i, i * 7 + 3, &s)).collect();
-        assert!(spread.len() > 15, "only {} distinct scores in 39 pairs", spread.len());
-        assert_eq!(bar(0), "░░░░░░░░░░");
-        assert_eq!(bar(100), "██████████");
-        assert_eq!(bar(41).chars().filter(|c| *c == '█').count(), 5);
-    }
-
-    #[test]
-    fn what_they_do_moves_the_number_in_chunky_steps_and_only_so_far() {
-        // Nothing has happened: the pair's own number, untouched.
-        let (a, b) = (ARJUN, RIYA);
-        let base = ship_base(a, b);
-        let nothing = Signals::default();
-        assert_eq!(drift(&nothing), 0);
-        assert!(steps(&nothing).is_empty());
-        assert_eq!(ship_percent(a, b, &nothing) as i32, base.clamp(1, 99));
-        // Replies push it up; a fight pulls it down.
-        let chatty = Signals { replies: 412, ..Default::default() };
-        let fighty = Signals { fights: 3, ..Default::default() };
-        assert!(drift(&chatty) > 0, "lots of replies raise it: {:?}", steps(&chatty));
-        assert!(drift(&fighty) < 0, "a fight lowers it: {:?}", steps(&fighty));
-        assert!(ship_percent(a, b, &chatty) > ship_percent(a, b, &nothing));
-        assert!(ship_percent(a, b, &fighty) < ship_percent(a, b, &nothing));
-        // Coarse on purpose: within a step nothing moves at all.
-        assert_eq!(drift(&Signals { replies: 100, ..Default::default() }), drift(&Signals { replies: 399, ..Default::default() }));
-        assert!(drift(&Signals { replies: 400, ..Default::default() }) > drift(&Signals { replies: 399, ..Default::default() }));
-        assert_eq!(drift(&Signals { vc_minutes: 60, ..Default::default() }), drift(&Signals { vc_minutes: 299, ..Default::default() }));
-        // Every step is a few points, never a landslide.
-        for (_, by) in steps(&together().signals()) {
-            assert!((1..=13).contains(&by.abs()), "a step of {by} is not a nudge");
-        }
-        // The movement is capped, however much has happened either way.
-        let everything = Signals { replies: usize::MAX, vc_minutes: i64::MAX, shared_games: 50, ..Default::default() };
-        let worst = Signals { fights: 10_000, one_sided: true, ..Default::default() };
-        assert_eq!(drift(&everything), MAX_DRIFT.min(13 + 8 + 4));
-        assert!(drift(&everything) <= MAX_DRIFT && drift(&worst) >= -MAX_DRIFT);
-        for s in [everything, worst] {
-            assert!((ship_percent(a, b, &s) as i32 - base).abs() <= MAX_DRIFT, "the pair's own number still shows through");
-        }
-        // One of them going quiet counts, and only once there is enough to go on.
-        assert!(Together { replies_ab: 200, replies_ba: 3, ..Default::default() }.one_sided());
-        assert!(!Together { replies_ab: 200, replies_ba: 60, ..Default::default() }.one_sided(), "both talking is not ghosting");
-        assert!(!Together { replies_ab: 4, replies_ba: 0, ..Default::default() }.one_sided(), "four replies proves nothing");
-        assert!(steps(&Signals { one_sided: true, ..Default::default() }).iter().any(|(what, by)| what.contains("gone quiet") && *by < 0));
-        // And it is the same signal read from either side.
-        let t = together();
-        let other_way = Together { replies_ab: t.replies_ba, replies_ba: t.replies_ab, ..t.clone() };
-        assert_eq!(t.signals(), other_way.signals());
-        // The plain-English line names what moves it.
-        for must in ["never changes", "member ids", "replying to each other", "voice", "games", "kalesh", "25"] {
-            assert!(WHAT_MOVES_IT.contains(must), "the explanation lacks {must:?}");
-        }
-    }
-
-    #[test]
-    fn the_card_says_which_way_the_number_moved_only_when_it_moved() {
-        let now = 1_800_000_000;
-        assert_eq!(movement(61, None, now), None, "the first time, there is nothing to compare with");
-        assert_eq!(movement(61, Some((61, now - 86_400)), now), None, "it hasn't moved: say nothing");
-        assert_eq!(movement(67, Some((61, now - 7 * 86_400)), now).as_deref(), Some("up 6 since 7 days ago"));
-        assert_eq!(movement(52, Some((61, now - 2 * 3600)), now).as_deref(), Some("down 9 since 2 hours ago"));
-        assert_eq!(movement(62, Some((61, now - 30)), now).as_deref(), Some("up 1 since under a minute ago"));
-        // A clock that has gone backwards doesn't produce nonsense.
-        assert!(movement(70, Some((61, now + 500)), now).is_some_and(|m| m.starts_with("up 9")));
-    }
-
-    #[test]
-    fn the_ship_name_is_the_front_of_one_and_the_back_of_the_other() {
-        assert_eq!(ship_name("gooner", "potus"), "Gootus");
-        assert_eq!(ship_name("arjun", "riya"), "Arjya");
-        assert_eq!(ship_name("dev", "kavya"), "Devya");
-        assert_eq!(ship_name("a", "b"), "Ab");
-        assert_eq!(ship_name("🐸🐸", "riya"), "Riya", "a name that is all emoji still makes something");
-        assert_eq!(ship_name("🐸", "🐸"), "Ship");
-        assert!(ship_name(&"x".repeat(80), &"y".repeat(80)).chars().count() <= 29);
-    }
-
-    #[test]
-    fn the_ship_prompt_says_it_is_a_joke_and_carries_how_they_behave() {
-        let (a, b) = (arjun(), riya());
-        let t = together();
-        let pct = ship_percent(a.id, b.id, &t.signals());
-        let name = ship_name(&a.name, &b.name);
-        let p = ship_prompt(&a, &b, &t, pct, &name);
-        for must in [
-            "it is a bit, not a claim about anybody's real life",
-            "no romance, no claims about anyone's real relationships",
-            "No slur of any kind",
-            "arjun replied to riya 214 times; riya replied to arjun 198 times",
-            "The kalesh detector has called 3 fights with both of them in them",
-            "Both turn up in: #chatting-hori, #chess",
-            "Both play: Chess",
-            "Chess: 58 games, 41 won, 3 drawn",
-            "arjun: ek minute rematch dedo",
-        ] {
-            assert!(p.contains(must), "the ship prompt lacks {must:?}");
-        }
-        assert!(p.contains(&format!("{}%", pct)) && p.contains(&name));
-        assert!(!p.contains("basically never interacted"));
-        // Two strangers: the prompt says so instead of letting the model invent one.
-        let strangers = Together { shared_channels: vec![], ..Default::default() };
-        assert!(strangers.nothing());
-        let p = ship_prompt(&a, &b, &strangers, 4, "Arjiya");
-        assert!(p.contains("basically never interacted") && p.contains("do not invent a history for them"), "{p}");
-        assert!(p.contains("They don't really share a channel."));
-    }
-
-    #[test]
-    fn the_card_line_is_the_most_interesting_thing_the_bot_counted() {
-        let t = together();
-        assert_eq!(headline(&t, 60), "3 fights called · 0 apologies logged");
-        // A fight beats a reply count; without one, the replies speak.
-        let calm = Together { fights: 0, ..t.clone() };
-        assert_eq!(headline(&calm, 60), "412 replies in 60 days");
-        assert_eq!(headline(&Together { fights: 1, ..t.clone() }, 60), "1 fight called · 0 apologies logged");
-        assert_eq!(headline(&Together { replies_ab: 1, replies_ba: 0, ..calm.clone() }, 60), "1 reply in 60 days");
-        // Then pings, then run-ins, then a shared channel, then nothing at all.
-        let quiet = Together { replies_ab: 0, replies_ba: 0, ..calm.clone() };
-        assert_eq!(headline(&quiet, 60), "61 pings at each other, 0 replies");
-        let silent = Together { mentions: 0, ..quiet.clone() };
-        assert_eq!(headline(&silent, 60), "22 run-ins in 60 days, not one reply");
-        let strangers = Together { stretches: 0, ..silent.clone() };
-        assert_eq!(headline(&strangers, 60), "Both live in #chatting-hori and have never once replied");
-        let nothing = Together { shared_channels: vec![], ..strangers };
-        assert_eq!(headline(&nothing, 60), "Not one word between them in 60 days");
-        // Nothing the bot can count makes a line too long for the card.
-        let huge = Together {
-            fights: 999_999_999,
-            replies_ab: usize::MAX / 4,
-            replies_ba: usize::MAX / 4,
-            mentions: usize::MAX / 2,
-            stretches: usize::MAX / 2,
-            shared_channels: vec!["a-channel-name-that-someone-really-did-name-this-🥳".repeat(4)],
-            ..Default::default()
-        };
-        for t in [
-            huge.clone(),
-            Together { fights: 0, ..huge.clone() },
-            Together { fights: 0, replies_ab: 0, replies_ba: 0, ..huge.clone() },
-            Together { fights: 0, replies_ab: 0, replies_ba: 0, mentions: 0, ..huge.clone() },
-            Together { fights: 0, replies_ab: 0, replies_ba: 0, mentions: 0, stretches: 0, ..huge },
-        ] {
-            let line = headline(&t, 9_999_999);
-            assert!(line.chars().count() <= HEADLINE_CHARS, "{} chars: {:?}", line.chars().count(), line);
-        }
-    }
-
-    #[test]
-    fn the_score_is_written_out_only_when_there_is_no_card() {
-        let with_card = score_line("arjun", "riya", 87, true);
-        assert_eq!(with_card, "**arjun** × **riya**");
-        assert!(!with_card.contains('%'), "the picture carries the number");
-        let text_only = score_line("arjun", "riya", 87, false);
-        assert!(text_only.contains("**87%**") && text_only.contains("█"), "{text_only}");
-        assert!(text_only.starts_with("**arjun** × **riya**"));
-    }
-
     /// What one call actually costs, so a change that quietly doubles it is
     /// noticed here rather than on the bill. Run with `--nocapture` to print it.
     #[test]
@@ -1326,19 +775,15 @@ pub mod tests {
         let full = Dossier { messages: sample(&(0..4_000).map(|i| Said { ts: i, text: format!("bhai ye {} wala match dekha kya, ekdum scene tha", i) }).collect::<Vec<_>>(), READ_BUDGET), ..arjun() };
         let roast = estimate_tokens(&roast_prompt(&full));
         let thin = estimate_tokens(&roast_prompt(&nobody()));
-        let ship = estimate_tokens(&ship_prompt(&arjun(), &riya(), &together(), 87, "Arjya"));
-        println!("one /roast: {} tokens in (thin member: {}); one /ship: {} tokens in", roast, thin, ship);
+        println!("one /roast: {} tokens in (thin member: {})", roast, thin);
         // The prompt's own words, without anyone's messages.
         let bare = estimate_tokens(&roast_prompt(&Dossier { messages: vec![], ..arjun() }));
         println!("the roast prompt's own words: {} tokens", bare);
         // Roughly: the instructions and the record are under a thousand tokens,
-        // the member's own messages are the rest, and a ship - which sends both
-        // records and what they said at each other, but neither member's whole
-        // message sample - is far cheaper than a roast.
+        // and the member's own messages are the rest.
         assert!(bare < 1_000, "the instructions and the record alone cost {bare} tokens");
         assert!(thin < 1_000, "a member with nothing to go on costs {thin} tokens");
         assert!(roast < READ_BUDGET + 1_200, "a full roast costs {roast} tokens");
-        assert!(ship < 3_000, "a ship costs {ship} tokens");
     }
 
     #[test]

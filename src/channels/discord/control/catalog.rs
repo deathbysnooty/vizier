@@ -1294,37 +1294,23 @@ pub fn sections() -> Vec<Section> {
         },
         Section {
             id: "roast",
-            title: "Roast & ship",
+            title: "Roast",
             icon: "🔥",
-            about: "Two joke commands. /roast @member has the AI write a sharp, personal roast from what the bot has \
+            about: "A joke command. /roast @member has the AI write a sharp, personal roast from what the bot has \
                     actually seen them do - the way they type, their catchphrases, the games they keep losing, their \
-                    hours in voice, how often AutoMod eats them, who they never stop replying to. /ship @a @b gives a \
-                    pair a percentage, a mashed-up name and a short verdict on how they really behave around each \
-                    other, from their replies, shared channels and any fights the kalesh detector has called. The \
-                    percentage is not a random roll. Each pair has a number of their own, worked out from their two \
-                    member ids, that never changes and nobody can reroll. What the two of them actually do then nudges \
-                    it, in a few chunky steps and never by more than 25 either way: replying to each other, sitting in \
-                    voice together and playing the same games push it up; fights the kalesh detector called, and one \
-                    of them going quiet on the other, pull it down. It comes out the same whichever way round the pair \
-                    is named, and never lands on a suspiciously round 0% or 100%. Each pair's last score is \
-                    remembered, so when it has moved the card says which way and since when. The /ship result is a \
-                    drawn card - both avatars, the ship name, the score, a bar coloured by it, the movement, and one \
-                    counted fact about the pair (\"412 replies in 60 days\") that the bot works out itself, never the \
-                    AI. If the card can't be drawn the message goes out as text instead. /roast is text only. Both \
-                    post only in the roast channel: run anywhere else, the result still lands there and the channel it \
-                    was run in gets a line linking to it. A roast pings the member and whoever asked; a ship pings \
-                    only the two being shipped, and names whoever asked in the footer. \
+                    hours in voice, how often AutoMod eats them, who they never stop replying to. It is text only, \
+                    and it posts only in the roast channel: run anywhere else, the roast still lands there and the \
+                    channel it was run in gets a line linking to it. It pings the member and whoever asked. \
                     #safe-corner never reaches the AI, and every answer is checked before it is posted - no slurs and \
                     nothing about family, death, looks or body, mental health, gender or sexuality, religion or caste, \
                     even when the member jokes about those themselves. A answer that fails is asked for once more and \
                     then given up on, and the person is told plainly. There is no cooldown.",
             settings: vec![
-                toggle("VIZIER_ROAST", "/roast on", "Off: /roast says it is switched off and nothing is sent to the AI. /ship is unaffected."),
-                toggle("VIZIER_SHIP", "/ship on", "Off: /ship says it is switched off and nothing is sent to the AI. /roast is unaffected."),
+                toggle("VIZIER_ROAST", "/roast on", "Off: /roast says it is switched off and nothing is sent to the AI."),
                 setting(
                     "VIZIER_ROAST_CHANNEL",
                     "Roast channel",
-                    "The one channel both commands post in. Run anywhere else, the card still lands here and the other \
+                    "The one channel /roast posts in. Run anywhere else, the roast still lands here and the other \
                      channel gets a link to it.",
                     Kind::Channel,
                     "1516534303968858312",
@@ -1332,7 +1318,7 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_ROAST_OPTOUTS",
                     "Opted out of roasts",
-                    "Members who can't be roasted or shipped, and whose messages are never sent to the AI for either. \
+                    "Members who can't be roasted, and whose messages are never sent to the AI for it. \
                      Members add and remove themselves with /noroast; you can edit the list here. This is a different \
                      list from the member-notes opt-out (/forgetme) - changing one never changes the other.",
                     Kind::Users,
@@ -1341,7 +1327,7 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_ROAST_MODEL",
                     "AI model",
-                    "A model on the bot's own provider for writing roasts and ship verdicts. Empty means the bot's \
+                    "A model on the bot's own provider for writing roasts. Empty means the bot's \
                      main model: these are read by the whole channel, so the writing matters.",
                     Kind::Text,
                     "",
@@ -1349,7 +1335,7 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_ROAST_CACHE_MINS",
                     "Reuse what was read for",
-                    "After reading a member's record (or a pair's history) for one of these commands, how long to reuse \
+                    "After reading a member's record for a roast, how long to reuse \
                      it instead of reading it again. Repeated roasts in a burst then cost nothing but the AI call - the \
                      AI is still asked every single time, so the wording is always new. It is only held in memory and \
                      goes when the bot restarts. 0 reads everything fresh every time.",
@@ -1367,13 +1353,7 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("roast", EVERYONE, "/roast @member", "The AI roasts that member, in the roast channel, from what the bot has seen them do."),
-                command(
-                    "ship",
-                    EVERYONE,
-                    "/ship @a @b",
-                    "Ships two members with a score, a name, a card and a verdict. Leave the second empty and it is you. The                      score is the pair's own number, from their two ids, nudged a few points by how much they reply to each                      other, time in voice together, games they both play, and kalesh between them - so it moves only when                      something real changed, never at random.",
-                ),
-                command("noroast", EVERYONE, "/noroast", "Keeps you out of /roast and /ship. Run it again to come back in. Not the same as /forgetme."),
+                command("noroast", EVERYONE, "/noroast", "Keeps you out of /roast. Run it again to come back in. Not the same as /forgetme."),
             ],
         },
         Section {
