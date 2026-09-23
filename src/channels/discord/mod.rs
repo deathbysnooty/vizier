@@ -1564,18 +1564,25 @@ impl EventHandler for Handler {
 
         let stop = CreateCommand::new("stop")
             .description("admin only: silence the bot everywhere until /resume");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(stop)).await;
+        // Every slash command in one list, registered with a single call below.
+// Discord counts each command *create* against a daily limit for the whole
+// app, and the bot restarts often enough to burn through it - which silently
+// lost the newest commands at the end of the list. One overwrite costs one
+// call, however many commands it carries.
+        let mut commands: Vec<CreateCommand> = Vec::new();
+
+        commands.push(admin_command(stop));
 
         let resume =
             CreateCommand::new("resume").description("admin only: bring the bot back after /stop");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(resume)).await;
+        commands.push(admin_command(resume));
 
         let admin_only = CreateCommand::new("adminonly")
             .description("admin only: toggle whether the bot answers admins and nobody else");
 
         // Upstream handles /help but never registers it, so it never appears.
         let help = control::help::builder();
-        let _ = Command::create_global_command(ctx.http.clone(), help).await;
+        commands.push(help);
 
         let letter = CreateCommand::new("letter")
             .description("send someone an anonymous letter")
@@ -1595,11 +1602,11 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), letter).await;
+        commands.push(letter);
 
         let inbox = CreateCommand::new("letterbox")
             .description("check your unopened anonymous letters (only you see this)");
-        let _ = Command::create_global_command(ctx.http.clone(), inbox).await;
+        commands.push(inbox);
 
         let samebanda = CreateCommand::new("samebanda")
             .description("same person, new account - merge their join history (admins only)")
@@ -1619,24 +1626,24 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(samebanda)).await;
+        commands.push(admin_command(samebanda));
 
         // Right-click a message -> Apps -> Quote.
         let quote_cmd = CreateCommand::new("Quote").kind(serenity::all::CommandType::Message);
-        let _ = Command::create_global_command(ctx.http.clone(), quote_cmd).await;
+        commands.push(quote_cmd);
 
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
 
         let rejoinstats = CreateCommand::new("rejoinstats")
             .description("who keeps leaving and coming back");
-        let _ = Command::create_global_command(ctx.http.clone(), rejoinstats).await;
+        commands.push(rejoinstats);
 
         let quiz_cmd = CreateCommand::new("quiz").description("start the never-ending quiz (quiz channel only)");
-        let _ = Command::create_global_command(ctx.http.clone(), quiz_cmd).await;
+        commands.push(quiz_cmd);
 
         let quiz_board = CreateCommand::new("quizleaderboard").description("top quiz scorers - all time or this week");
-        let _ = Command::create_global_command(ctx.http.clone(), quiz_board).await;
+        commands.push(quiz_board);
 
         let text_option = |name: &str, about: &str, max: u16| {
             CreateCommandOption::new(serenity::all::CommandOptionType::String, name, about).max_length(max)
@@ -1649,14 +1656,14 @@ impl EventHandler for Handler {
             .add_option(text_option("wrong1", "multiple choice: a wrong option (give all three)", 80))
             .add_option(text_option("wrong2", "multiple choice: a second wrong option", 80))
             .add_option(text_option("wrong3", "multiple choice: a third wrong option", 80));
-        let _ = Command::create_global_command(ctx.http.clone(), quiz_add).await;
+        commands.push(quiz_add);
 
         let quiz_news = CreateCommand::new("quiznews")
             .description("admin only: make this week's Bollywood news questions now");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(quiz_news)).await;
+        commands.push(admin_command(quiz_news));
 
         let quiz_stop = CreateCommand::new("quizstop").description("admin only: stop the quiz until someone runs /quiz again");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(quiz_stop)).await;
+        commands.push(admin_command(quiz_stop));
 
         let fight_cmd = CreateCommand::new("fight")
             .description("challenge someone to a 1v1 - the fight happens in the fight channel")
@@ -1665,7 +1672,7 @@ impl EventHandler for Handler {
                     .required(true),
             )
             .add_option(battle::theme_command_option());
-        let _ = Command::create_global_command(ctx.http.clone(), fight_cmd).await;
+        commands.push(fight_cmd);
 
         let battle_cmd = CreateCommand::new("battle")
             .description("admin only: open a battle royale lobby and ping the warriors")
@@ -1683,16 +1690,16 @@ impl EventHandler for Handler {
                 .max_int_value(battle::max_lobby_minutes() as u64),
             )
             .add_option(battle::theme_command_option());
-        let _ = Command::create_global_command(ctx.http.clone(), battle_cmd).await;
+        commands.push(battle_cmd);
 
         let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
 
         let fight_board = CreateCommand::new("fightboard").description("who has won the most fights and battles");
-        let _ = Command::create_global_command(ctx.http.clone(), fight_board).await;
+        commands.push(fight_board);
 
         let battle_stop =
             CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(battle_stop)).await;
+        commands.push(admin_command(battle_stop));
 
         // The four houses. There is no self-serve sorting command: the bot
         // assigns everyone, so the only way in is the draft or a mod's hand.
@@ -1714,98 +1721,98 @@ impl EventHandler for Handler {
                 "reason",
                 "what they are for",
             ));
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_points)).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::reload_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::pool_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house::give_builder())).await;
+        commands.push(admin_command(house_points));
+        commands.push(admin_command(movie::reload_builder()));
+        commands.push(admin_command(house::pool_builder()));
+        commands.push(admin_command(house::give_builder()));
 
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(snitch::command())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog::command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog::card_command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(frog::drop_command_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog_trade::command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog_sell::command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(npat::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(sudoku::new_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), sudoku::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), sudoku::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), sudoku::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), chess::command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), chess::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), puzzle::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), puzzle::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), puzzle::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(puzzle::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), chess::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(chess::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(invites::invitedby_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(invites::invites_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), duel::command()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), duel::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), duel::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(duel::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), anagram::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), anagram::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), anagram::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(anagram::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), guess::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), guess::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), guess::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(guess::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), movie::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), movie::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), movie::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(movie::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), geo::mine_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), geo::top_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), geo::help_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(geo::skip_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(geo::stop_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), frog_trade::trades_command_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(weekly::command())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(daily::command())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), notes::about_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), notes::forgetme_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), roast::roast_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), roast::ship_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), roast::noroast_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), standings::housetop_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), standings::housecup_builder()).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(standings::draw_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(scoreboard::refresh_builder())).await;
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(announce::builder())).await;
+        commands.push(admin_command(snitch::command()));
+        commands.push(frog::command());
+        commands.push(frog::card_command());
+        commands.push(admin_command(frog::drop_command_builder()));
+        commands.push(frog_trade::command());
+        commands.push(frog_sell::command());
+        commands.push(admin_command(npat::stop_builder()));
+        commands.push(admin_command(sudoku::new_builder()));
+        commands.push(sudoku::mine_builder());
+        commands.push(sudoku::top_builder());
+        commands.push(sudoku::help_builder());
+        commands.push(chess::command());
+        commands.push(chess::top_builder());
+        commands.push(puzzle::mine_builder());
+        commands.push(puzzle::top_builder());
+        commands.push(puzzle::help_builder());
+        commands.push(admin_command(puzzle::skip_builder()));
+        commands.push(chess::help_builder());
+        commands.push(admin_command(chess::stop_builder()));
+        commands.push(admin_command(invites::invitedby_builder()));
+        commands.push(admin_command(invites::invites_builder()));
+        commands.push(duel::command());
+        commands.push(duel::help_builder());
+        commands.push(duel::top_builder());
+        commands.push(admin_command(duel::stop_builder()));
+        commands.push(anagram::mine_builder());
+        commands.push(anagram::top_builder());
+        commands.push(anagram::help_builder());
+        commands.push(admin_command(anagram::skip_builder()));
+        commands.push(admin_command(anagram::stop_builder()));
+        commands.push(guess::mine_builder());
+        commands.push(guess::top_builder());
+        commands.push(guess::help_builder());
+        commands.push(admin_command(guess::skip_builder()));
+        commands.push(admin_command(guess::stop_builder()));
+        commands.push(movie::mine_builder());
+        commands.push(movie::top_builder());
+        commands.push(movie::help_builder());
+        commands.push(admin_command(movie::skip_builder()));
+        commands.push(admin_command(movie::stop_builder()));
+        commands.push(geo::mine_builder());
+        commands.push(geo::top_builder());
+        commands.push(geo::help_builder());
+        commands.push(admin_command(geo::skip_builder()));
+        commands.push(admin_command(geo::stop_builder()));
+        commands.push(frog_trade::trades_command_builder());
+        commands.push(admin_command(weekly::command()));
+        commands.push(admin_command(daily::command()));
+        commands.push(standings::mypoints_builder());
+        commands.push(notes::about_builder());
+        commands.push(notes::forgetme_builder());
+        commands.push(roast::roast_builder());
+        commands.push(roast::ship_builder());
+        commands.push(roast::noroast_builder());
+        commands.push(standings::today_builder());
+        commands.push(control::remind::remind_builder());
+        commands.push(control::remind::reminders_builder());
+        commands.push(standings::housetop_builder());
+        commands.push(standings::housecup_builder());
+        commands.push(admin_command(standings::draw_builder()));
+        commands.push(admin_command(scoreboard::refresh_builder()));
+        commands.push(admin_command(announce::builder()));
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
-        let _ = Command::create_global_command(ctx.http.clone(), house_opt).await;
+        commands.push(house_opt);
 
         let house_channels = CreateCommand::new("housechannels")
             .description("admin only: make a private common room for each house");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_channels)).await;
+        commands.push(admin_command(house_channels));
 
         let house_draft = CreateCommand::new("housedraft")
             .description("admin only: work out who goes in which house, and show the plan before anything happens");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_draft)).await;
+        commands.push(admin_command(house_draft));
 
         let house_roles = CreateCommand::new("houseroles")
             .description("admin only: make the four house roles and put the crests on them");
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(house_roles)).await;
+        commands.push(admin_command(house_roles));
 
         let house_list = CreateCommand::new("houselist")
             .description("who is in a house - shown only to you, a page at a time")
             .add_option(house::house_option("house", "which house").required(true));
-        let _ = Command::create_global_command(ctx.http.clone(), house_list).await;
+        commands.push(house_list);
 
         // Not an admin_command: anyone in a house may look at their own house's
         // cards. Naming another house is the mods' part, and refused inside.
-        let _ = Command::create_global_command(ctx.http.clone(), frog_house::command()).await;
+        commands.push(frog_house::command());
 
         // Not an admin_command: the captains are members, and a command they
         // can't see is a command they can't use.
@@ -1820,10 +1827,10 @@ impl EventHandler for Handler {
                 .required(true),
             )
             .add_option(house::house_option("house", "which house (mods only - a captain always rallies their own)"));
-        let _ = Command::create_global_command(ctx.http.clone(), house_ping).await;
+        commands.push(house_ping);
 
         let houses = CreateCommand::new("houses").description("the four houses, their points, sizes and captains");
-        let _ = Command::create_global_command(ctx.http.clone(), houses).await;
+        commands.push(houses);
 
         let captain = CreateCommand::new("housecaptain")
             .description("admin only: make someone captain of their house")
@@ -1831,7 +1838,7 @@ impl EventHandler for Handler {
                 CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "who becomes captain")
                     .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(captain)).await;
+        commands.push(admin_command(captain));
 
         let sort = CreateCommand::new("sort")
             .description("admin only: put someone in a house by hand")
@@ -1840,11 +1847,11 @@ impl EventHandler for Handler {
                     .required(true),
             )
             .add_option(house::house_option("house", "which house").required(true));
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(sort)).await;
+        commands.push(admin_command(sort));
 
         let toggle = CreateCommand::new("nochitthi")
             .description("stop or resume anonymous letters coming to you");
-        let _ = Command::create_global_command(ctx.http.clone(), toggle).await;
+        commands.push(toggle);
 
         let trace = CreateCommand::new("letter_trace")
             .description("admin only: who sent a letter")
@@ -1856,7 +1863,11 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
-        let _ = Command::create_global_command(ctx.http.clone(), admin_command(trace)).await;
+        commands.push(admin_command(trace));
+        
+if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
+    tracing::error!("discord: could not register the slash commands: {e}");
+}
 
         // Commands the owner retired: registering fewer doesn't remove them from Discord.
         if let Ok(existing) = Command::get_global_commands(&ctx.http).await {
