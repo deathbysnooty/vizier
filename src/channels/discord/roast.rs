@@ -1,20 +1,19 @@
-//! `/roast` and `/ship`: the bot makes fun of a member, or reads two of them
-//! together, from what it can actually see - their messages, their game
-//! records, their time in voice, how often AutoMod eats them, who they are
-//! always replying to.
+//! `/ship`: the bot reads two members together, from what it can actually see -
+//! their game records, their time in voice, how often AutoMod eats them, who
+//! they are always replying to, and what the two of them have said at each
+//! other.
 //!
-//! Both only ever post in the roast channel (`VIZIER_ROAST_CHANNEL`). Run
+//! It only ever posts in the roast channel (`VIZIER_ROAST_CHANNEL`). Run
 //! anywhere else, the result still lands there and the place it was run in gets
-//! a line with a link to it. Whoever the post is about is pinged there, so
-//! nobody finds out second-hand: a roast pings the member and the one who asked
-//! for it, a ship pings only the two being shipped - whoever asked is named in
-//! the footer and doesn't need telling about their own command.
+//! a line with a link to it. The two being shipped are pinged there, so nobody
+//! finds out second-hand - whoever asked is named in the footer and doesn't
+//! need telling about their own command.
 //!
 //! `/ship` posts a drawn card (`roast_card.rs`): both avatars, the ship name,
 //! the score, a bar coloured by it, one counted fact about the pair, and which
 //! way the score has moved since they were last shipped. The score itself is
 //! each pair's own number nudged by what they have done - see
-//! `roast_build::WHAT_MOVES_IT`. `/roast` is text only.
+//! `roast_build::WHAT_MOVES_IT`.
 //!
 //! The rules and the check every model answer has to pass live in
 //! `roast_build.rs`, with the tests. `/noroast` is the opt-out, and it is a
@@ -38,11 +37,10 @@ use super::control;
 use super::kalesh;
 use super::kalesh_store;
 use super::notes_facts::Facts;
-use super::notes_build::Said;
 use super::roast_card::{self, Face};
-use super::roast_build::{self as build, Dossier, Logged, Made, Together};
+use super::roast_build::{self as build, Dossier, Made, Together};
 
-/// Where both commands post unless the panel says otherwise.
+/// Where `/ship` posts unless the panel says otherwise.
 pub const DEFAULT_CHANNEL: u64 = 1_516_534_303_968_858_312;
 /// How long one model call may take.
 const MODEL_WAIT: Duration = Duration::from_secs(120);
@@ -67,25 +65,19 @@ const AVATAR_TTL: Duration = Duration::from_secs(6 * 3600);
 const AVATAR_MISS_TTL: Duration = Duration::from_secs(600);
 const AVATAR_CACHE_MAX: usize = 256;
 
-const ROAST_COLOUR: u32 = 0xE0_4F_2A;
-
 // --- settings ----------------------------------------------------------------------------------
-
-pub fn roast_on() -> bool {
-    control::on("VIZIER_ROAST", true)
-}
 
 pub fn ship_on() -> bool {
     control::on("VIZIER_SHIP", true)
 }
 
-/// The one channel both commands post in.
+/// The one channel `/ship` posts in.
 pub fn channel() -> u64 {
     control::id("VIZIER_ROAST_CHANNEL").unwrap_or(DEFAULT_CHANNEL)
 }
 
-/// Members who have put themselves out of reach of both commands. Kept apart
-/// from the member-notes opt-out on purpose: `/forgetme` is about notes.
+/// Members who have put themselves out of reach of `/ship`. Kept apart from the
+/// member-notes opt-out on purpose: `/forgetme` is about notes.
 pub fn optouts() -> Vec<u64> {
     control::ids("VIZIER_ROAST_OPTOUTS")
 }
@@ -93,12 +85,6 @@ pub fn optouts() -> Vec<u64> {
 /// A model on the bot's own provider; empty means the bot's usual one.
 pub fn model_name() -> Option<String> {
     control::var("VIZIER_ROAST_MODEL")
-}
-
-/// Their own messages one roast reads at most, before the token budget trims
-/// it further.
-pub fn max_messages() -> usize {
-    control::number("VIZIER_ROAST_MAX_MESSAGES", 250).clamp(20, 3_000) as usize
 }
 
 /// How long a gathered dossier, and a pair's interaction summary, are reused
@@ -154,7 +140,7 @@ fn remember_score(a: u64, b: u64, percent: u8) -> Option<String> {
 
 // --- the model ------------------------------------------------------------------------------------
 
-/// One call to the roast model. The retry that matters for a dropped
+/// One call to the ship model. The retry that matters for a dropped
 /// connection is inside the model itself (`never_sent`); this one waits, and
 /// `build::make` asks a second time if what comes back is no good.
 async fn ask(prompt: String) -> anyhow::Result<String> {
@@ -166,31 +152,6 @@ async fn ask(prompt: String) -> anyhow::Result<String> {
 
 // --- reading the record ------------------------------------------------------------------------------
 
-/// A member's own messages from the log, newest first, never #safe-corner.
-/// Blocking.
-fn load_logged(user: u64, cap: usize) -> Vec<Said> {
-    let sensitive = control::insights::sensitive_channels();
-    let mut rows: Vec<Logged> = Vec::new();
-    if let Some(reader) = super::msglog::reader() {
-        let conn = reader.conn.lock();
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT content, created_ts, channel_id, parent_id FROM recent WHERE author_id = ?1 ORDER BY message_id DESC LIMIT ?2")
-        {
-            if let Ok(found) = stmt.query_map(params![user as i64, (cap * 4) as i64], |r| {
-                Ok(Logged {
-                    text: r.get::<_, String>(0)?,
-                    ts_ms: r.get::<_, i64>(1)?,
-                    channel: r.get::<_, i64>(2)? as u64,
-                    parent: r.get::<_, Option<i64>>(3)?.map(|p| p as u64),
-                })
-            }) {
-                rows.extend(found.flatten());
-            }
-        }
-    }
-    build::keep_messages(&rows, &sensitive, cap)
-}
-
 /// How many of their messages AutoMod blocked, and how many were deleted.
 fn gone_counts(user: u64) -> (i64, i64) {
     let Some(reader) = super::msglog::reader() else { return (0, 0) };
@@ -199,7 +160,7 @@ fn gone_counts(user: u64) -> (i64, i64) {
     (count("SELECT COUNT(*) FROM blocked WHERE author_id = ?1"), count("SELECT COUNT(*) FROM deleted WHERE author_id = ?1"))
 }
 
-fn dossier_from(id: u64, name: &str, f: &Facts, now: i64, channels: &HashMap<u64, String>, members: &HashMap<u64, String>, messages: Vec<Said>) -> Dossier {
+fn dossier_from(id: u64, name: &str, f: &Facts, now: i64, channels: &HashMap<u64, String>, members: &HashMap<u64, String>) -> Dossier {
     let (blocked, deleted) = gone_counts(id);
     Dossier {
         id,
@@ -219,12 +180,11 @@ fn dossier_from(id: u64, name: &str, f: &Facts, now: i64, channels: &HashMap<u64
         emoji: f.emoji.clone(),
         phrases: f.phrases.clone(),
         partners: f.partners.iter().filter_map(|p| members.get(p).cloned()).collect(),
-        messages: build::read_sample(&messages),
     }
 }
 
 /// Everything the bot knows about one member, ready for a prompt. Reused for
-/// `cache_window()` so a burst of roasts doesn't read every database again;
+/// `cache_window()` so a burst of ships doesn't read every database again;
 /// the name is always taken fresh, since that is the cheap part.
 async fn dossier(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierStorage>, user: u64, name: &str) -> Dossier {
     let (window, at) = (cache_window(), Instant::now());
@@ -239,9 +199,7 @@ async fn dossier(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierS
     let now = Utc::now().timestamp();
     let (channels, members, words) = super::notes::cache_names(ctx);
     let facts = super::notes::facts_for(ctx, storage, user, words).await;
-    let cap = max_messages();
-    let messages = tokio::task::spawn_blocking(move || load_logged(user, cap)).await.unwrap_or_default();
-    let d = dossier_from(user, name, &facts, now, &channels, &members, messages);
+    let d = dossier_from(user, name, &facts, now, &channels, &members);
     if !window.is_zero() {
         let mut cache = dossier_cache().lock();
         sweep(&mut cache, at, window);
@@ -426,15 +384,7 @@ async fn avatar_of(urls: Vec<String>) -> Option<Vec<u8>> {
     None
 }
 
-// --- the cards -----------------------------------------------------------------------------------
-
-fn roast_embed(name: &str, text: &str, by: &str) -> CreateEmbed {
-    CreateEmbed::new()
-        .title(format!("🔥 {} ko roast kiya gaya", name))
-        .description(text)
-        .colour(ROAST_COLOUR)
-        .footer(CreateEmbedFooter::new(format!("asked for by {} · it's a joke, chill · /noroast to stay out of these", by)))
-}
+// --- the card ------------------------------------------------------------------------------------
 
 /// The ship card's message. With a picture the number lives in the picture;
 /// without one - when drawing failed - it is written out instead, exactly as
@@ -526,55 +476,6 @@ async fn open(ctx: &Context, command: &CommandInteraction) -> bool {
 
 async fn give_up(ctx: &Context, command: &CommandInteraction, text: &str) {
     let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
-}
-
-// --- /roast -----------------------------------------------------------------------------------------
-
-pub fn roast_builder() -> CreateCommand {
-    CreateCommand::new("roast").description("the bot roasts a member, from what it has actually seen them do").add_option(
-        CreateCommandOption::new(CommandOptionType::User, "member", "kiska roast karna hai").required(true),
-    )
-}
-
-pub async fn roast_command(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierStorage>, command: &CommandInteraction) {
-    if !roast_on() {
-        let _ = command.create_response(&ctx.http, whisper("`/roast` is switched off right now.")).await;
-        return;
-    }
-    let caller = command.user.id.get();
-    let Some(target) = picked(command, "member") else {
-        let _ = command.create_response(&ctx.http, whisper("Name someone: `/roast @member`.")).await;
-        return;
-    };
-    if is_bot(command, target) {
-        let _ = command.create_response(&ctx.http, whisper("Bots don't get roasted. Pick a human.")).await;
-        return;
-    }
-    if let Some(out) = build::blocked(&optouts(), &[caller, target]) {
-        let _ = command.create_response(&ctx.http, whisper(build::opted_out_message(out, caller, &name_of(ctx, command, out)))).await;
-        return;
-    }
-    let name = name_of(ctx, command, target);
-    if !open(ctx, command).await {
-        return;
-    }
-    let d = dossier(ctx, storage, target, &name).await;
-    let prompt = build::roast_prompt(&d);
-    tracing::info!("roast: {} asked for a roast of {} ({} messages, about {} tokens)", caller, target, d.messages.len(), build::prompt_tokens(&prompt));
-    // Their own words, so a quote of a catchphrase isn't mistaken for the bot
-    // being cruel about a banned area.
-    let said = d.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n") + "\n" + &d.phrases.join("\n");
-    match build::make(prompt, |raw| build::check_roast_quoting(raw, &said), ask).await {
-        Made::Ok { text, tries } => {
-            tracing::info!("roast: roast of {} written in {} tr{}", target, tries, if tries == 1 { "y" } else { "ies" });
-            // /roast stays text only: nothing to draw for one person.
-            // A roast pings the person it is about and the one who asked for it.
-            if let Err(err) = post(ctx, command, roast_embed(&name, &text, &command.user.display_name().to_string()), &[caller, target], None).await {
-                give_up(ctx, command, &err).await;
-            }
-        }
-        other => give_up(ctx, command, build::failure_message(&other)).await,
-    }
 }
 
 // --- /ship ------------------------------------------------------------------------------------------
@@ -688,13 +589,13 @@ pub async fn ship_command(ctx: &Context, storage: &std::sync::Arc<crate::storage
 // --- /noroast ---------------------------------------------------------------------------------------
 
 pub fn noroast_builder() -> CreateCommand {
-    CreateCommand::new("noroast").description("keep yourself out of /roast and /ship - run it again to come back in")
+    CreateCommand::new("noroast").description("keep yourself out of /ship - run it again to come back in")
 }
 
-const OUT: &str = "Done - nobody can `/roast` or `/ship` you while you're out, and nothing of yours goes to the AI for \
-    either. Run `/noroast` again to come back in.\n\
+const OUT: &str = "Done - nobody can `/ship` you while you're out, and nothing of yours goes to the AI for it. \
+    Run `/noroast` again to come back in.\n\
     -# This is separate from `/forgetme`: that one is about member notes, and it hasn't changed.";
-const IN: &str = "You're back in - `/roast` and `/ship` can name you again. Brace yourself.\n\
+const IN: &str = "You're back in - `/ship` can name you again. Brace yourself.\n\
     -# `/forgetme` is untouched: it's a different opt-out, about member notes.";
 
 /// Flips a member's opt-out on the panel's list; true when they are now out.
@@ -745,17 +646,18 @@ mod tests {
         let name_of = |c: &CreateCommand| serde_json::to_value(c).unwrap()["name"].as_str().unwrap_or_default().to_string();
         assert_eq!(name_of(&noroast_builder()), "noroast");
         assert_eq!(name_of(&super::super::notes::forgetme_builder()), "forgetme");
-        // And the two commands the owner asked for exist, with the options they need.
-        let roast = serde_json::to_value(roast_builder()).unwrap();
-        assert_eq!(roast["name"], "roast");
-        assert_eq!(roast["options"][0]["name"], "member");
-        assert_eq!(roast["options"][0]["required"], true);
+        // And the command the owner asked for exists, with the options it needs.
         let ship = serde_json::to_value(ship_builder()).unwrap();
         assert_eq!(ship["name"], "ship");
+        assert_eq!(ship["options"][0]["name"], "member");
+        assert_eq!(ship["options"][0]["required"], true);
         assert_eq!(ship["options"][1]["name"], "with");
         assert_eq!(ship["options"][1]["required"], false, "the second member is optional: it's the caller when left out");
+        // /noroast now keeps you out of /ship, and says so.
+        assert!(OUT.contains("`/ship`") && !OUT.contains("`/roast`"), "{OUT}");
+        assert!(IN.contains("`/ship`") && !IN.contains("`/roast`"), "{IN}");
         assert!(OUT.contains("separate from `/forgetme`") && IN.contains("different opt-out"));
-        // The roast list lives in the panel's settings; the notes list in notes.db.
+        // The opt-out list lives in the panel's settings; the notes list in notes.db.
         assert!(optouts().is_empty(), "nothing saved, nobody out");
     }
 
@@ -786,13 +688,8 @@ mod tests {
     }
 
     #[test]
-    fn the_cards_say_what_they_are_and_how_to_get_out() {
+    fn the_card_says_what_it_is_and_how_to_get_out() {
         let d = build::tests::arjun();
-        let embed = roast_embed(&d.name, "61 games, 12 wins. bhai.", "riya");
-        let json = serde_json::to_value(&embed).unwrap();
-        assert_eq!(json["title"], "🔥 arjun ko roast kiya gaya");
-        let footer = json["footer"]["text"].as_str().unwrap();
-        assert!(footer.contains("asked for by riya") && footer.contains("it's a joke") && footer.contains("/noroast"), "{footer}");
         // With a card, the number lives in the picture and the message just
         // carries the verdict.
         let verdict = "they argue in #chess and call it a hobby";

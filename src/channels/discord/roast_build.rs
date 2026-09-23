@@ -1,5 +1,5 @@
-//! `/roast` and `/ship`, the part that is plain logic: what the bot knows about
-//! a member gathered into a dossier, the prompts built from it, the check every
+//! `/ship`, the part that is plain logic: what the bot knows about a member
+//! gathered into a dossier, the prompt built from two of them, the check every
 //! model reply must pass before anything is posted, the ship name and the ship
 //! percentage, and where the result goes when the command was run somewhere
 //! else.
@@ -7,42 +7,32 @@
 //! Nothing here touches Discord or a model - `roast.rs` does that - so the
 //! tests can hand it a fake model and a made-up dossier.
 //!
-//! The rules are narrower than member notes'. A roast is meant to be mean: the
-//! "unkind" filter notes use is deliberately not here, and neither is the ban on
-//! talking about someone's routine or the games they lose. What stays banned is
-//! the cruelty the owner ruled out - slurs, family, death, looks and body,
-//! mental health, gender and sexuality, religion and caste - and those stay out
-//! even when the member jokes about them themselves. #safe-corner never reaches
-//! the model at all: its messages are dropped before the prompt is built.
+//! The rules are narrower than member notes'. A ship verdict is allowed to be
+//! sharp: the "unkind" filter notes use is deliberately not here, and neither is
+//! the ban on talking about someone's routine or the games they lose. What stays
+//! banned is the cruelty the owner ruled out - slurs, family, death, looks and
+//! body, mental health, gender and sexuality, religion and caste - and those
+//! stay out even when the member jokes about them themselves. #safe-corner
+//! never reaches the model: nothing said there is in the message log to begin
+//! with.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::Value;
 
-pub use super::notes_build::Said;
-use super::notes_build::{cut, estimate_tokens, sample, usable};
+use super::notes_build::{cut, estimate_tokens};
 
-/// The messages one prompt may carry, in tokens, after the count cap. The same
-/// idea as the notes budget: a sample spread over their whole time, not the
-/// last hour.
-pub const READ_BUDGET: usize = 3500;
-/// The longest a roast may be once tidied. Discord allows 4096 in an embed
-/// description; this leaves room and keeps the model honest.
-pub const ROAST_CHARS: usize = 1400;
 /// The longest a ship verdict may be.
 pub const SHIP_CHARS: usize = 500;
-/// A member with fewer messages on record than this has nothing to go on.
-pub const THIN_MESSAGES: i64 = 40;
 /// Tries at one model answer: one, then one more if the first is refused.
 pub const TRIES: usize = 2;
 
 // --- the dossier ------------------------------------------------------------------------------
 
 /// Everything the bot can honestly say about one member. Only what is in here
-/// may end up in a roast: the prompt says so, and nothing else is sent.
+/// may end up in a verdict: the prompt says so, and nothing else is sent.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dossier {
     pub id: u64,
@@ -70,16 +60,9 @@ pub struct Dossier {
     pub phrases: Vec<String>,
     /// Who they talk with most, by name.
     pub partners: Vec<String>,
-    /// A sample of their own messages, oldest first. Never #safe-corner.
-    pub messages: Vec<Said>,
 }
 
 impl Dossier {
-    /// Barely anything on record: the roast has to be about that.
-    pub fn thin(&self) -> bool {
-        self.messages.len() < 12 && self.messages_all < THIN_MESSAGES && self.games.is_empty() && self.voice_month_mins < 30
-    }
-
     /// The record as the model reads it, one fact a line. Anything the bot
     /// doesn't know is simply missing rather than written as zero.
     pub fn facts(&self) -> Vec<String> {
@@ -217,46 +200,9 @@ impl Together {
     }
 }
 
-// --- what may be read -------------------------------------------------------------------------
+// --- the prompt -------------------------------------------------------------------------------
 
-/// One message as it comes out of the log, before anything is decided about it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Logged {
-    pub channel: u64,
-    pub parent: Option<u64>,
-    pub ts_ms: i64,
-    pub text: String,
-}
-
-/// The messages that may be shown to the model: never #safe-corner or a thread
-/// inside it (or any other channel the owner has hidden), never a bot command
-/// or a one-word reply, each once, newest first, at most `cap` of them.
-///
-/// This is the only door: a message that doesn't come through here never
-/// reaches a prompt.
-pub fn keep_messages(rows: &[Logged], sensitive: &[u64], cap: usize) -> Vec<Said> {
-    let hidden: HashSet<u64> = sensitive.iter().copied().collect();
-    let said: Vec<Said> = rows
-        .iter()
-        .filter(|r| !hidden.contains(&r.channel) && !r.parent.is_some_and(|p| hidden.contains(&p)))
-        .filter_map(|r| usable(&r.text).map(|text| Said { ts: r.ts_ms / 1000, text }))
-        .collect();
-    let mut out = said;
-    out.sort_by(|a, b| b.ts.cmp(&a.ts));
-    let mut seen = HashSet::new();
-    out.retain(|m| seen.insert(m.text.to_lowercase()));
-    out.truncate(cap);
-    out
-}
-
-/// The sample that goes in the prompt, inside the token budget, oldest first.
-pub fn read_sample(messages: &[Said]) -> Vec<Said> {
-    sample(messages, READ_BUDGET)
-}
-
-// --- the prompts ------------------------------------------------------------------------------
-
-/// The server's voice, said once and shared by both prompts.
+/// The server's voice.
 const VOICE: &str = "You are Loduchand, the house bot of MLCI, an Indian Discord server of friends who roast each other \
 all day (bakchodi). Everyone there writes Hinglish - Hindi typed in Roman letters, mixed freely with English, full of \
 Indian slang and short forms (\"bhai\", \"yaar\", \"scene kya hai\", \"op\", \"sahi hai\", \"bakchodi\", \"lmao\"). Read \
@@ -264,7 +210,7 @@ their messages the way a fluent member of that server would: it is not broken En
 way they talk - mostly English sentences with the Hinglish thrown in where it lands - so it sounds like a friend in \
 the channel, not a stand-up set and not a greeting card.";
 
-/// The lines both prompts are held to.
+/// The lines the prompt is held to.
 const LIMITS: &str = "HARD LIMITS - break one and this is thrown away:
 - No slur of any kind: caste, religion, region, race, sexual orientation, disability. Not as a joke, not quoting anyone.
 - Nothing about their family, anyone's death, their looks or their body, their mental health, their gender or \
@@ -273,51 +219,6 @@ sexuality, their religion or their caste. These stay out even if they joke about
 no guessing at what they are like off the server.
 - Punch at what they do, never at what they are.
 - No emoji spam: one at most, and none is better. No @everyone or @here.";
-
-pub fn roast_prompt(d: &Dossier) -> String {
-    let thin = if d.thin() {
-        "\nThere is barely anything on record for them: almost no messages, nothing in the games, no time in voice. Do \
-not invent a personality to fill the gap. Make the roast about exactly that - how little there is to work with, how \
-forgettable their presence is - using the few scraps below and admitting straight out that they gave you nothing.\n"
-    } else {
-        ""
-    };
-    let facts = d.facts();
-    let facts = if facts.is_empty() { "(nothing on record)".to_string() } else { facts.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n") };
-    let said = if d.messages.is_empty() {
-        "(they have not said anything worth reading)".to_string()
-    } else {
-        d.messages.iter().map(|m| format!("- {}", m.text)).collect::<Vec<_>>().join("\n")
-    };
-    format!(
-        "{voice}
-
-Write ONE roast of {name}.
-
-Be MEAN and be SPECIFIC. Every line must land on something in the record below: the way they type, their catchphrases, \
-the games they keep losing, the hours they sit in voice, how often AutoMod eats their messages, their chess or sudoku \
-record, the channel they never leave, who they are always replying to. A roast that would work on any other member is \
-a failure - cut it and find something only true of them.
-{thin}
-{limits}
-
-Length: five to eight short lines, under 120 words in all.
-
-Reply with only a JSON object and nothing else: {{\"roast\": \"...\"}} - newlines inside the string are fine.
-
-WHAT THE BOT CAN SEE ABOUT {name}
-{facts}
-
-THINGS {name} HAS ACTUALLY SAID (a sample of their own messages, oldest first):
-{said}",
-        voice = VOICE,
-        name = d.name,
-        thin = thin,
-        limits = LIMITS,
-        facts = facts,
-        said = said,
-    )
-}
 
 pub fn ship_prompt(a: &Dossier, b: &Dossier, t: &Together, percent: u8, ship_name: &str) -> String {
     let each = |d: &Dossier| {
@@ -404,7 +305,7 @@ pub const SLURS: &str = r"n[i1]gg(?:er|ers|a|as)|negro|chink|chinki|paki|raghead
 
 /// Each area the owner ruled out, and the words that give it away. Deliberately
 /// narrow: a false rejection only costs one retry, but a word that is ordinary
-/// Hinglish ("bhai", "yaar") must never be in here or every roast would fail.
+/// Hinglish ("bhai", "yaar") must never be in here or every verdict would fail.
 pub const BANNED: &[(&str, &str)] = &[
     ("a slur", SLURS),
     (
@@ -440,7 +341,7 @@ static BANNED_RES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+").expect("regex"));
 static BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").expect("regex"));
 static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^\s*```(?:json)?\s*(.*?)\s*```\s*$").expect("regex"));
-/// The model declining rather than writing anything. Never posted as a roast.
+/// The model declining rather than writing anything. Never posted as a verdict.
 static REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:i'?m sorry|i am sorry|sorry[,.]? (?:but )?i\b|i can'?t\b|i cannot\b|i won'?t\b|i'?m not able|i am not able|as an ai|unfortunately,? i\b)")
         .expect("regex")
@@ -448,42 +349,13 @@ static REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Why a piece of writing may not be posted, or `None` when it may.
 pub fn rejection(text: &str) -> Option<&'static str> {
-    rejection_quoting(text, "")
-}
-
-/// The same, for a roast of someone whose own messages are `said`. A banned
-/// word inside a quotation of their own words is the member's, not the bot's,
-/// and the bot quoting a catchphrase back at them is the whole point of the
-/// feature - so quoted runs that they really did write are not held against it.
-/// Anything the model writes in its own voice still is.
-pub fn rejection_quoting(text: &str, said: &str) -> Option<&'static str> {
     if text.contains("@everyone") || text.contains("@here") {
         return Some("a mass ping");
     }
-    let own = without_their_words(text, said);
-    BANNED_RES.iter().find(|(_, re)| re.is_match(&own)).map(|(area, matched)| {
-        tracing::info!("roast: thrown away for {} ({:?})", area, matched.find(&own).map(|m| m.as_str().to_string()));
+    BANNED_RES.iter().find(|(_, re)| re.is_match(text)).map(|(area, matched)| {
+        tracing::info!("roast: thrown away for {} ({:?})", area, matched.find(text).map(|m| m.as_str().to_string()));
         *area
     })
-}
-
-/// Quoted runs, each holding a word that is only a quote when they wrote it.
-static QUOTES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""([^"]{1,120})"|'([^']{2,120})'|“([^”]{1,120})”"#).expect("regex"));
-
-/// The writing with every quotation of their own words taken out.
-fn without_their_words(text: &str, said: &str) -> String {
-    if said.is_empty() {
-        return text.to_string();
-    }
-    let said = said.to_lowercase();
-    let mut out = text.to_string();
-    for caps in QUOTES.captures_iter(text) {
-        let Some(inner) = (1..=3).find_map(|i| caps.get(i)) else { continue };
-        if said.contains(&inner.as_str().to_lowercase()) {
-            out = out.replace(inner.as_str(), " ");
-        }
-    }
-    out
 }
 
 fn tidy(raw: &str) -> String {
@@ -501,7 +373,7 @@ fn field(raw: &str, key: &str) -> Option<String> {
             let v: Value = serde_json::from_str(&text[a..=b]).ok()?;
             v.get(key).and_then(Value::as_str).map(|s| tidy(s))
         }
-        // No JSON at all: the model wrote the roast straight out. Take it.
+        // No JSON at all: the model wrote the verdict straight out. Take it.
         (None, None) => Some(text),
         _ => None,
     }
@@ -510,12 +382,6 @@ fn field(raw: &str, key: &str) -> Option<String> {
 /// Reads a reply and holds it to the rules. `Ok` is what may be posted; `Err`
 /// says why not, in words the log can carry.
 pub fn check(raw: &str, key: &str, max_chars: usize) -> Result<String, &'static str> {
-    check_quoting(raw, key, max_chars, "")
-}
-
-/// The same, knowing what the member themselves has said, so the bot may quote
-/// them back at them even when their own words touch a banned area.
-pub fn check_quoting(raw: &str, key: &str, max_chars: usize, said: &str) -> Result<String, &'static str> {
     let Some(text) = field(raw, key) else { return Err("the reply couldn't be read") };
     if REFUSAL.is_match(&text) {
         return Err("the model refused");
@@ -526,19 +392,10 @@ pub fn check_quoting(raw: &str, key: &str, max_chars: usize, said: &str) -> Resu
     if text.chars().count() > max_chars {
         return Err("it was too long to post");
     }
-    match rejection_quoting(&text, said) {
+    match rejection(&text) {
         Some(why) => Err(why),
         None => Ok(text),
     }
-}
-
-pub fn check_roast(raw: &str) -> Result<String, &'static str> {
-    check(raw, "roast", ROAST_CHARS)
-}
-
-/// The roast check for a member whose own messages are `said`.
-pub fn check_roast_quoting(raw: &str, said: &str) -> Result<String, &'static str> {
-    check_quoting(raw, "roast", ROAST_CHARS, said)
 }
 
 pub fn check_ship(raw: &str) -> Result<String, &'static str> {
@@ -599,7 +456,7 @@ where
 
 /// What the person is told when nothing usable came back. Never a raw error.
 pub const COULDNT: &str = "Couldn't come up with anything clean for that one. Try again in a bit.";
-pub const MODEL_DOWN: &str = "The AI isn't answering right now, so no roast. Try again in a few minutes.";
+pub const MODEL_DOWN: &str = "The AI isn't answering right now, so no ship. Try again in a few minutes.";
 
 pub fn failure_message(made: &Made) -> &'static str {
     match made {
@@ -610,8 +467,8 @@ pub fn failure_message(made: &Made) -> &'static str {
 
 // --- opting out ----------------------------------------------------------------------------------
 
-/// Who, if anyone, has put themselves out of reach - the target first, because
-/// that is the one that stops the whole thing.
+/// Who, if anyone, has put themselves out of reach - the first one named wins,
+/// because any one of them stops the whole thing.
 pub fn blocked(optouts: &[u64], people: &[u64]) -> Option<u64> {
     people.iter().copied().find(|p| optouts.contains(p))
 }
@@ -620,10 +477,9 @@ pub fn blocked(optouts: &[u64], people: &[u64]) -> Option<u64> {
 /// business beyond the fact that they are out.
 pub fn opted_out_message(who: u64, caller: u64, name: &str) -> String {
     if who == caller {
-        "You've opted out of roasts and ships, so I'm not going to do one. Run `/noroast` again to come back in."
-            .to_string()
+        "You've opted out of ships, so I'm not going to do one. Run `/noroast` again to come back in.".to_string()
     } else {
-        format!("**{}** has opted out of roasts and ships, so that one's off the table. Nothing was posted.", name)
+        format!("**{}** has opted out of ships, so that one's off the table. Nothing was posted.", name)
     }
 }
 
@@ -795,8 +651,8 @@ pub fn bar(percent: u8) -> String {
 
 // --- where it is posted ------------------------------------------------------------------------------
 
-/// Both commands only ever post in the roast channel. When one was run
-/// somewhere else, this is what that other place is told.
+/// `/ship` only ever posts in the roast channel. When it was run somewhere
+/// else, this is what that other place is told.
 pub fn posted_elsewhere(roast_channel: u64, link: &str) -> String {
     format!("Posted in <#{}> → {}", roast_channel, link)
 }
@@ -832,28 +688,13 @@ pub fn prompt_tokens(prompt: &str) -> usize {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const ARJUN: u64 = 771;
     const RIYA: u64 = 982;
-    const SAFE: u64 = 1_516_000_000_000_000_001;
 
-    /// A member whose own catchphrase is "maa kasam" can still be roasted: the
-    /// bot quoting them back is not the bot talking about their family. What
-    /// the model writes in its own voice is still held to the rules.
-    #[test]
-    fn quoting_their_own_words_back_at_them_is_not_a_banned_area() {
-        let said = "maa kasam bhai i was afk\nek minute\nmy mother tongue is hindi";
-        let quoting = r#"{"roast": "\"maa kasam\" every single round and you still lost 49 of 61 games bhai"}"#;
-        assert!(check_roast_quoting(quoting, said).is_ok(), "their own words, quoted");
-        assert_eq!(check_roast(quoting), Err("family"), "with nothing to check against, it still goes");
-
-        // The model's own voice, and a quotation they never wrote.
-        assert_eq!(check_roast_quoting(r#"{"roast": "even your mother mutes you in vc, 12 wins in 61 games bhai"}"#, said), Err("family"));
-        assert_eq!(check_roast_quoting(r#"{"roast": "you type \"my mother pays for your nitro\" and lose anyway, 12 of 61"}"#, said), Err("family"));
-    }
-    const T0: i64 = 1_780_000_000_000;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A member with a real history: the test data the samples in the report come from.
     pub fn arjun() -> Dossier {
@@ -879,11 +720,6 @@ pub mod tests {
             emoji: Some("💀".into()),
             phrases: vec!["ek minute".into(), "bhai sun".into(), "gg wp".into()],
             partners: vec!["riya".into(), "dev".into()],
-            messages: vec![
-                Said { ts: T0 / 1000, text: "ek minute bhai rematch dedo abhi".into() },
-                Said { ts: T0 / 1000 + 90, text: "gg wp but you got lucky with that knight".into() },
-                Said { ts: T0 / 1000 + 400, text: "vc me aa jao sab, akela baitha hu".into() },
-            ],
         }
     }
 
@@ -906,10 +742,6 @@ pub mod tests {
             emoji: Some("😭".into()),
             phrases: vec!["nahi bhai".into(), "cope".into()],
             partners: vec!["arjun".into()],
-            messages: vec![
-                Said { ts: T0 / 1000 + 10, text: "cope harder, the knight was always going there".into() },
-                Said { ts: T0 / 1000 + 200, text: "nahi bhai vc me nahi aungi, padhna hai".into() },
-            ],
         }
     }
 
@@ -972,7 +804,7 @@ pub mod tests {
     // --- opting out -----------------------------------------------------------
 
     #[test]
-    fn someone_who_opted_out_is_never_roasted_or_shipped() {
+    fn someone_who_opted_out_is_never_shipped() {
         let optouts = vec![RIYA];
         assert_eq!(blocked(&optouts, &[ARJUN]), None);
         assert_eq!(blocked(&optouts, &[RIYA]), Some(RIYA));
@@ -987,49 +819,46 @@ pub mod tests {
     // --- the check ------------------------------------------------------------
 
     #[test]
-    fn the_check_lets_a_mean_roast_through_and_stops_a_cruel_one() {
-        let fine = r#"{"roast": "61 chess games and 12 wins, bhai that's not a record that's a cry for help. 53 hours in vc this month and still nobody remembers what your voice sounds like. AutoMod has eaten 37 of your messages, which is 37 more thoughts than you've had. You say ek minute like it's a personality. Riya has beaten you so many times the chess bot should just auto-resign for you."}"#;
-        let out = check_roast(fine).expect("a mean, specific roast is fine");
+    fn the_check_lets_a_sharp_verdict_through_and_stops_a_cruel_one() {
+        let fine = r#"{"verdict": "412 replies between them and riya has won 41 of 58 chess games. This is not a ship, it is a hostage situation with extra steps. They say ek minute at each other for sixty days and call it chemistry."}"#;
+        let out = check_ship(fine).expect("a sharp, specific verdict is fine");
         assert!(out.contains("ek minute"));
         for (why, bad) in [
-            ("a slur", r#"{"roast": "you absolute retard, 12 wins in 61 games"}"#),
-            ("family", r#"{"roast": "even your mother mutes you in vc, 12 wins in 61 games bhai"}"#),
-            ("death", r#"{"roast": "your chess rating died a slow death, honestly go dig a grave for it bhai"}"#),
-            ("looks or body", r#"{"roast": "your face is the reason the vc has cameras off, 12 wins in 61 games"}"#),
-            ("mental health", r#"{"roast": "212 frog cards is not a hobby it is a disorder, get therapy bhai"}"#),
-            ("gender or sexuality", r#"{"roast": "61 chess games and you still play like a virgin, sorry bhai"}"#),
-            ("religion or caste", r#"{"roast": "you pray to the chess bot every night and it still says no, 12 wins bhai"}"#),
-            ("a mass ping", r#"{"roast": "@everyone come look at this man's 12 wins in 61 chess games, genuinely tragic"}"#),
+            ("a slur", r#"{"verdict": "you absolute retard, 412 replies and 3 fights between them"}"#),
+            ("family", r#"{"verdict": "they fight like brother and sister honestly, 412 replies between them bhai"}"#),
+            ("death", r#"{"verdict": "this pairing died a slow death, honestly go dig a grave for those 412 replies"}"#),
+            ("looks or body", r#"{"verdict": "two ugly people replying 412 times at each other does not make a ship"}"#),
+            ("mental health", r#"{"verdict": "412 replies is not a friendship it is a disorder, get therapy both of you"}"#),
+            ("gender or sexuality", r#"{"verdict": "58 chess games together and he still plays like a virgin, sorry bhai"}"#),
+            ("religion or caste", r#"{"verdict": "they pray to the chess bot every night and it still says no, 3 fights bhai"}"#),
+            ("a mass ping", r#"{"verdict": "@everyone come look at these two and their 412 replies, genuinely tragic"}"#),
         ] {
-            assert_eq!(check_roast(bad), Err(why), "{bad}");
+            assert_eq!(check_ship(bad), Err(why), "{bad}");
         }
         // Too long for the embed, and too short to be anything.
-        let long = format!(r#"{{"roast": "{}"}}"#, "bhai ye bohot lamba hai ".repeat(100));
-        assert_eq!(check_roast(&long), Err("it was too long to post"));
-        assert_eq!(check_roast(r#"{"roast": "lol"}"#), Err("it came back empty"));
+        let long = format!(r#"{{"verdict": "{}"}}"#, "bhai ye bohot lamba hai ".repeat(100));
+        assert_eq!(check_ship(&long), Err("it was too long to post"));
+        assert_eq!(check_ship(r#"{"verdict": "lol"}"#), Err("it came back empty"));
         // The model declining is never posted as if it were the joke.
-        assert_eq!(check_roast("I'm sorry, I can't help with that."), Err("the model refused"));
-        assert_eq!(check_roast(r#"{"roast": "I cannot write a roast about this member without more information to go on."}"#), Err("the model refused"));
+        assert_eq!(check_ship("I'm sorry, I can't help with that."), Err("the model refused"));
+        assert_eq!(check_ship(r#"{"verdict": "I cannot write a verdict about these members without more information to go on."}"#), Err("the model refused"));
         // A fenced answer, and a wrong-shaped one.
-        assert!(check_roast("```json\n{\"roast\": \"61 chess games, 12 wins. ek minute, ek minute, and still no rematch won bhai.\"}\n```").is_ok());
-        assert_eq!(check_roast(r#"{"something_else": "..."}"#), Err("the reply couldn't be read"));
-        // The ship verdict is held to the same lines, on a shorter leash.
-        assert!(check_ship(r#"{"verdict": "412 replies between them and riya has won 41 of 58 chess games. This is not a ship, it is a hostage situation with extra steps."}"#).is_ok());
-        assert_eq!(check_ship(r#"{"verdict": "they fight like brother and sister honestly, 412 replies between them bhai"}"#), Err("family"));
+        assert!(check_ship("```json\n{\"verdict\": \"412 replies in 60 days and 3 fights. ek minute, ek minute, and still no rematch won bhai.\"}\n```").is_ok());
+        assert_eq!(check_ship(r#"{"something_else": "..."}"#), Err("the reply couldn't be read"));
     }
 
     #[tokio::test]
     async fn a_refused_answer_is_asked_again_once_and_then_given_up_on() {
-        let bad = r#"{"roast": "your mother has 12 wins in 61 chess games and she doesn't even play, bhai"}"#;
-        let good = r#"{"roast": "12 wins in 61 chess games. You say ek minute like it is a magic spell and it has never once worked. 53 hours of vc to say gg wp and nothing else."}"#;
+        let bad = r#"{"verdict": "her mother has 41 wins in 58 chess games and she doesn't even play, bhai"}"#;
+        let good = r#"{"verdict": "412 replies in 60 days. They say ek minute at each other like it is a magic spell and it has never once worked."}"#;
         // Refused, then fine: two calls, and the good one is what comes out.
         let calls = Arc::new(AtomicUsize::new(0));
-        let made = make("p".into(), check_roast, fake(vec![Ok(bad), Ok(good)], calls.clone())).await;
+        let made = make("p".into(), check_ship, fake(vec![Ok(bad), Ok(good)], calls.clone())).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(matches!(&made, Made::Ok { tries: 2, text } if text.contains("ek minute")), "{made:?}");
         // Refused twice: given up on, and the person is told plainly.
         let calls = Arc::new(AtomicUsize::new(0));
-        let made = make("p".into(), check_roast, fake(vec![Ok(bad), Ok(bad)], calls.clone())).await;
+        let made = make("p".into(), check_ship, fake(vec![Ok(bad), Ok(bad)], calls.clone())).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(made, Made::Refused { why: "family" });
         assert_eq!(failure_message(&made), COULDNT);
@@ -1042,7 +871,7 @@ pub mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let made = make(
             "p".into(),
-            check_roast,
+            check_ship,
             fake(vec![Err(anyhow::anyhow!("error sending request for url (https://api.example/v1/chat): connection closed")), Err(anyhow::anyhow!("timed out"))], calls.clone()),
         )
         .await;
@@ -1053,86 +882,9 @@ pub mod tests {
         assert!(!shown.contains("http") && !shown.contains("connection closed"), "the raw error is never shown: {shown}");
         // It fails, then works: one retry is enough.
         let calls = Arc::new(AtomicUsize::new(0));
-        let good = r#"{"roast": "12 wins in 61 chess games, and you still ask for a rematch like it will help bhai."}"#;
-        let made = make("p".into(), check_roast, fake(vec![Err(anyhow::anyhow!("dropped")), Ok(good)], calls.clone())).await;
+        let good = r#"{"verdict": "412 replies in 60 days, and they still ask for a rematch like it will help bhai."}"#;
+        let made = make("p".into(), check_ship, fake(vec![Err(anyhow::anyhow!("dropped")), Ok(good)], calls.clone())).await;
         assert!(matches!(made, Made::Ok { tries: 2, .. }), "{made:?}");
-    }
-
-    // --- what reaches the model -----------------------------------------------
-
-    #[test]
-    fn safe_corner_never_reaches_the_model() {
-        let rows = vec![
-            Logged { channel: 21, parent: None, ts_ms: T0, text: "bhai ye chess game to gaya".into() },
-            Logged { channel: SAFE, parent: None, ts_ms: T0 + 1, text: "mujhe kuch batana hai sabko, bohot mushkil hai".into() },
-            Logged { channel: 77, parent: Some(SAFE), ts_ms: T0 + 2, text: "thread me bhi wahi baat likhi thi maine".into() },
-            Logged { channel: 21, parent: None, ts_ms: T0 + 3, text: "ek minute rematch dedo abhi".into() },
-            Logged { channel: 21, parent: None, ts_ms: T0 + 4, text: "!play despacito".into() },
-            Logged { channel: 21, parent: None, ts_ms: T0 + 5, text: "lol".into() },
-        ];
-        let kept = keep_messages(&rows, &[SAFE], 100);
-        let texts: Vec<&str> = kept.iter().map(|m| m.text.as_str()).collect();
-        assert_eq!(texts.len(), 2, "{texts:?}");
-        assert!(texts.contains(&"ek minute rematch dedo abhi") && texts.contains(&"bhai ye chess game to gaya"));
-        assert!(!texts.iter().any(|t| t.contains("batana")), "the #safe-corner message is gone");
-        assert!(!texts.iter().any(|t| t.contains("thread me")), "a thread inside #safe-corner is gone too");
-        // And nothing from there can get into a prompt.
-        let d = Dossier { messages: kept.clone(), ..arjun() };
-        let p = roast_prompt(&d);
-        assert!(!p.contains("batana") && !p.contains("thread me"), "{p}");
-        // The cap is a hard cap.
-        let many: Vec<Logged> = (0..500).map(|i| Logged { channel: 21, parent: None, ts_ms: T0 + i, text: format!("message number {} about the chess game", i) }).collect();
-        assert_eq!(keep_messages(&many, &[], 120).len(), 120);
-        // And the sample that goes in the prompt stays inside the token budget.
-        let picked = read_sample(&keep_messages(&many, &[], 5_000));
-        let spent: usize = picked.iter().map(|m| estimate_tokens(&m.text) + 2).sum();
-        assert!(spent <= READ_BUDGET, "over budget: {spent}");
-        assert!(picked.windows(2).all(|w| w[0].ts <= w[1].ts), "oldest first");
-    }
-
-    #[test]
-    fn the_roast_prompt_carries_the_record_and_the_limits() {
-        let p = roast_prompt(&arjun());
-        for must in [
-            "Hinglish",
-            "Be MEAN and be SPECIFIC",
-            "No slur of any kind",
-            "their family",
-            "anyone's death",
-            "their looks or their body",
-            "their mental health",
-            "their gender or sexuality",
-            "their religion or their caste",
-            "even if they joke about them themselves",
-            "Invent nothing",
-            "No emoji spam",
-            "Chess: 61 games, 12 won, 4 drawn",
-            "AutoMod has eaten 37 of their messages",
-            "53 hours in voice chat",
-            "ek minute",
-            "9th of 11 scorers",
-            "ek minute bhai rematch dedo abhi",
-        ] {
-            assert!(p.contains(must), "the prompt lacks {must:?}");
-        }
-        assert!(!p.contains("barely anything on record"), "arjun is not a thin case");
-    }
-
-    #[test]
-    fn a_member_with_almost_no_history_still_gets_a_roast_about_being_boring() {
-        let ghost = nobody();
-        assert!(ghost.thin());
-        assert!(!arjun().thin());
-        let p = roast_prompt(&ghost);
-        assert!(p.contains("barely anything on record"), "{p}");
-        assert!(p.contains("Do not invent a personality to fill the gap"));
-        assert!(p.contains("admitting straight out that they gave you nothing"));
-        assert!(p.contains("(they have not said anything worth reading)"));
-        // 11 messages in 390 days is still a fact the roast may use.
-        assert!(p.contains("11 messages on record all time"));
-        // And a clean answer about exactly that passes the check.
-        let answer = r#"{"roast": "11 messages in 390 days. Not a joke, not a bit, just eleven. You have been here longer than most of the chess games and the bot still had to check twice that you exist. There is nothing to roast here, which is somehow the roast."}"#;
-        assert!(check_roast(answer).is_ok());
     }
 
     // --- the ship ---------------------------------------------------------------
@@ -1322,22 +1074,15 @@ pub mod tests {
     /// noticed here rather than on the bill. Run with `--nocapture` to print it.
     #[test]
     fn one_call_stays_inside_its_budget() {
-        // A roast of someone with a full history: the whole message sample.
-        let full = Dossier { messages: sample(&(0..4_000).map(|i| Said { ts: i, text: format!("bhai ye {} wala match dekha kya, ekdum scene tha", i) }).collect::<Vec<_>>(), READ_BUDGET), ..arjun() };
-        let roast = estimate_tokens(&roast_prompt(&full));
-        let thin = estimate_tokens(&roast_prompt(&nobody()));
+        // Two members with a full history, and what they said at each other.
         let ship = estimate_tokens(&ship_prompt(&arjun(), &riya(), &together(), 87, "Arjya"));
-        println!("one /roast: {} tokens in (thin member: {}); one /ship: {} tokens in", roast, thin, ship);
-        // The prompt's own words, without anyone's messages.
-        let bare = estimate_tokens(&roast_prompt(&Dossier { messages: vec![], ..arjun() }));
-        println!("the roast prompt's own words: {} tokens", bare);
-        // Roughly: the instructions and the record are under a thousand tokens,
-        // the member's own messages are the rest, and a ship - which sends both
-        // records and what they said at each other, but neither member's whole
-        // message sample - is far cheaper than a roast.
-        assert!(bare < 1_000, "the instructions and the record alone cost {bare} tokens");
-        assert!(thin < 1_000, "a member with nothing to go on costs {thin} tokens");
-        assert!(roast < READ_BUDGET + 1_200, "a full roast costs {roast} tokens");
+        // Two strangers: both records, and nothing between them.
+        let strangers = estimate_tokens(&ship_prompt(&nobody(), &nobody(), &Together::default(), 4, "Ghosost"));
+        println!("one /ship: {} tokens in (two strangers: {})", ship, strangers);
+        // Roughly: the instructions and both records are the bulk of it, and
+        // what they said at each other is capped at fourteen short lines - so a
+        // ship never runs away with the bill.
+        assert!(strangers < 1_000, "two members with nothing to go on cost {strangers} tokens");
         assert!(ship < 3_000, "a ship costs {ship} tokens");
     }
 

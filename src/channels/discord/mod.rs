@@ -1777,7 +1777,6 @@ impl EventHandler for Handler {
         commands.push(standings::mypoints_builder());
         commands.push(notes::about_builder());
         commands.push(notes::forgetme_builder());
-        commands.push(roast::roast_builder());
         commands.push(roast::ship_builder());
         commands.push(roast::noroast_builder());
         commands.push(standings::today_builder());
@@ -2640,10 +2639,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "forgetme" {
                 notes::forgetme_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "roast" {
-                roast::roast_command(&ctx, &self.1.storage, &command).await;
                 return;
             }
             if command.data.name == "ship" {
