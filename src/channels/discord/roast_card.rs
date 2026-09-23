@@ -166,7 +166,7 @@ pub fn look(percent: u8) -> Look {
 /// if none of them is.
 const SCRIPT: &[&str] = &["Snell Roundhand", "Apple Chancery", "Parisienne", "Great Vibes", "Pinyon Script", "Dancing Script", "URW Chancery L", "Z003"];
 const SERIF: &[&str] =
-    &["Playfair Display", "Bodoni 72", "Didot", "Hoefler Text", "Baskerville", "Palatino", "Book Antiqua", "Charter", "Georgia", "Noto Serif Display", "Noto Serif", "DejaVu Serif", "Liberation Serif", "Times New Roman"];
+    &["Playfair Display", "Bodoni 72", "Didot", "Hoefler Text", "Baskerville", "EB Garamond", "Palatino", "Book Antiqua", "Charter", "Georgia", "Noto Serif Display", "Noto Serif", "DejaVu Serif", "Liberation Serif", "Times New Roman"];
 const PLAIN: &[&str] = &["Montserrat", "Avenir Next", "Noto Sans", "DejaVu Sans", "Liberation Sans"];
 
 fn installed(fs: &FontSystem, names: &[&str]) -> Option<String> {
