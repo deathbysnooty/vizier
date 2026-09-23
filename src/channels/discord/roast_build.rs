@@ -160,6 +160,8 @@ pub struct Together {
     pub stretches: usize,
     /// Fights the kalesh detector called with both of them in it.
     pub fights: usize,
+    /// Minutes in the same voice room at the same time, over the period.
+    pub vc_minutes: i64,
     /// Games they both play.
     pub shared_games: Vec<String>,
     /// A few of the things they said at each other: (who, what).
@@ -186,10 +188,32 @@ impl Together {
             1 => "The kalesh detector has called one fight with both of them in it.".to_string(),
             n => format!("The kalesh detector has called {} fights with both of them in them.", n),
         });
+        out.push(match self.vc_minutes {
+            0 => "They have not once been in a voice room together.".to_string(),
+            m => format!("{} in voice together.", hours(m)),
+        });
         if !self.shared_games.is_empty() {
             out.push(format!("Both play: {}.", self.shared_games.join(", ")));
         }
         out
+    }
+
+    /// One of them doing nearly all the replying: the quiet one has, in effect,
+    /// stopped answering. Only once there is enough traffic to mean anything.
+    pub fn one_sided(&self) -> bool {
+        let (lo, hi) = (self.replies_ab.min(self.replies_ba), self.replies_ab.max(self.replies_ba));
+        hi >= 20 && lo * 5 < hi
+    }
+
+    /// What this pair's number is nudged by.
+    pub fn signals(&self) -> Signals {
+        Signals {
+            replies: self.replies_ab + self.replies_ba,
+            vc_minutes: self.vc_minutes,
+            shared_games: self.shared_games.len(),
+            fights: self.fights,
+            one_sided: self.one_sided(),
+        }
     }
 }
 
@@ -320,6 +344,11 @@ Two members of the server have been shipped, as a joke, by a bot. The pairing is
 a bit, not a claim about anybody's real life. The score is already fixed at {percent}% and the ship name is already \
 \"{ship}\" - do not argue with either, do not repeat the number, just write the verdict that goes under them.
 
+The number is their own, worked out from their member ids, moved {drift} by what they have actually done:
+{moved}
+Your verdict has to agree with that. If the number is low because they fight, the verdict knows it; if it is high \
+because they never stop replying, the verdict knows that instead.
+
 Write the verdict: two or three short lines about how these two actually behave around each other, drawn only from the \
 record below - who replies to whom, the channels they share, the games they both play, the fights they have had, the \
 way each of them talks. Funny and sharp, the way the server talks to itself. It is a joke about their chat history and \
@@ -343,6 +372,19 @@ SOME OF WHAT THEY HAVE SAID AT EACH OTHER:
 {sample}",
         voice = VOICE,
         percent = percent,
+        drift = match drift(&t.signals()) {
+            0 => "not at all".to_string(),
+            d if d > 0 => format!("up {} points", d),
+            d => format!("down {} points", -d),
+        },
+        moved = {
+            let steps = steps(&t.signals());
+            if steps.is_empty() {
+                "- nothing has happened between them to move it either way".to_string()
+            } else {
+                steps.iter().map(|(what, by)| format!("- {} ({}{})", what, if *by > 0 { "+" } else { "" }, by)).collect::<Vec<_>>().join("\n")
+            }
+        },
         ship = ship_name,
         nothing = nothing,
         limits = LIMITS,
@@ -544,17 +586,100 @@ pub fn opted_out_message(who: u64, caller: u64, name: &str) -> String {
 
 // --- the ship ---------------------------------------------------------------------------------------
 
-/// The same score for the same two people, every time, whichever way round they
-/// are named: a hash of the pair and nothing else. It is a joke, so it must at
-/// least be a joke that doesn't change its mind.
-pub fn ship_percent(a: u64, b: u64) -> u8 {
+/// What a pair's number is nudged by. Every one of these is symmetric, so the
+/// score comes out the same whichever way round the pair was named.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Signals {
+    /// Replies between them, both ways, over the period looked at.
+    pub replies: usize,
+    /// Minutes in the same voice room at the same time.
+    pub vc_minutes: i64,
+    /// Games they both play.
+    pub shared_games: usize,
+    /// Fights the kalesh detector called with both of them in it.
+    pub fights: usize,
+    /// One of them doing nearly all the replying.
+    pub one_sided: bool,
+}
+
+/// The furthest the things that happened may carry a pair from their own base,
+/// either way. Past this the pair's own number would stop showing through.
+pub const MAX_DRIFT: i32 = 25;
+/// Never a suspiciously round nothing or everything.
+pub const MIN_PERCENT: u8 = 1;
+pub const MAX_PERCENT: u8 = 99;
+
+/// In plain English, for the help text and the report: what moves a pair's
+/// number, so nobody thinks it is a random roll.
+pub const WHAT_MOVES_IT: &str = "Each pair has a number of their own that never changes, worked out from their two member ids - nobody can reroll it. What the two of them actually do then nudges it, in a few chunky steps and never by more than 25 either way: replying to each other, sitting in voice together, playing the same games and being on the same side push it up; fights the kalesh detector called, and one of them doing nearly all the replying, pull it down. It only moves when one of those crosses a step, so it drifts slowly and only when something real changed.";
+
+/// Which rung of a ladder a count has reached. Saturating, so an absurd count
+/// lands on the top rung rather than wrapping round to nothing.
+fn step(value: usize, ladder: &[(i64, i32)]) -> i32 {
+    let value = i64::try_from(value).unwrap_or(i64::MAX);
+    ladder.iter().rev().find(|(at, _)| value >= *at).map(|(_, by)| *by).unwrap_or(0)
+}
+
+/// Every step this pair has earned, with what it is called. Coarse on purpose:
+/// a handful of steps of a few points, not a sliding score, so the number holds
+/// still until something real changes.
+pub fn steps(s: &Signals) -> Vec<(&'static str, i32)> {
+    let mut out: Vec<(&'static str, i32)> = Vec::new();
+    let replies = step(s.replies, &[(1, 2), (25, 5), (100, 9), (400, 13)]);
+    if replies != 0 {
+        out.push(("they reply to each other", replies));
+    }
+    let vc = step(s.vc_minutes.max(0) as usize, &[(1, 2), (60, 5), (300, 8)]);
+    if vc != 0 {
+        out.push(("time in voice together", vc));
+    }
+    let games = step(s.shared_games, &[(1, 2), (2, 4)]);
+    if games != 0 {
+        out.push(("games they both play", games));
+    }
+    let fights = step(s.fights, &[(1, -4), (2, -7), (4, -10)]);
+    if fights != 0 {
+        out.push(("kalesh between them", fights));
+    }
+    if s.one_sided {
+        out.push(("one of them has gone quiet on the other", -6));
+    }
+    out
+}
+
+/// How far the things that happened carry them from their base, capped.
+pub fn drift(s: &Signals) -> i32 {
+    steps(s).iter().map(|(_, by)| by).sum::<i32>().clamp(-MAX_DRIFT, MAX_DRIFT)
+}
+
+/// The pair's own number, from their two ids and nothing else: the same every
+/// time, whichever way round they are named, and nobody can reroll it.
+pub fn ship_base(a: u64, b: u64) -> i32 {
     let (lo, hi) = (a.min(b), a.max(b));
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in lo.to_le_bytes().iter().chain(hi.to_le_bytes().iter()) {
         h ^= *byte as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    (h % 101) as u8
+    (h % 101) as i32
+}
+
+/// Their base, nudged by what the two of them have actually done. Stable in
+/// both orders, because every signal is.
+pub fn ship_percent(a: u64, b: u64, s: &Signals) -> u8 {
+    (ship_base(a, b) + drift(s)).clamp(MIN_PERCENT as i32, MAX_PERCENT as i32) as u8
+}
+
+/// "up 6 since 5 days ago", or nothing at all when it hasn't moved. Silence is
+/// the point: a line that appears every time would stop meaning anything.
+pub fn movement(now: u8, last: Option<(u8, i64)>, now_ts: i64) -> Option<String> {
+    let (was, at) = last?;
+    let by = now as i32 - was as i32;
+    if by == 0 {
+        return None;
+    }
+    let ago = super::kalesh::later((now_ts - at).max(0) * 1000);
+    Some(format!("{} {} since {} ago", if by > 0 { "up" } else { "down" }, by.abs(), ago))
 }
 
 fn letters(name: &str) -> String {
@@ -583,6 +708,42 @@ fn capitalise(s: &str) -> String {
     }
 }
 
+/// The longest the card's one-line fact may be.
+pub const HEADLINE_CHARS: usize = 58;
+
+/// One real number about the pair, for the line under the bar on the card. It
+/// comes from what the bot counted, never from the model, so it cannot be
+/// wrong and cannot be unsafe. The most interesting thing available wins: a
+/// fight beats a reply count, a reply count beats a ping count, and a pair who
+/// have never said a word to each other get a line that says exactly that.
+pub fn headline(t: &Together, days: i64) -> String {
+    let replies = t.replies_ab + t.replies_ba;
+    let line = if t.fights > 0 {
+        format!("{} fight{} called · 0 apologies logged", t.fights, if t.fights == 1 { "" } else { "s" })
+    } else if replies > 0 {
+        format!("{} repl{} in {} days", replies, if replies == 1 { "y" } else { "ies" }, days)
+    } else if t.mentions > 0 {
+        format!("{} ping{} at each other, 0 replies", t.mentions, if t.mentions == 1 { "" } else { "s" })
+    } else if t.stretches > 0 {
+        format!("{} run-in{} in {} days, not one reply", t.stretches, if t.stretches == 1 { "" } else { "s" }, days)
+    } else if let Some(channel) = t.shared_channels.first() {
+        format!("Both live in #{} and have never once replied", cut(channel, 24))
+    } else {
+        format!("Not one word between them in {} days", days)
+    };
+    cut(&line, HEADLINE_CHARS)
+}
+
+/// The score as text, for the message when the card couldn't be drawn. With a
+/// card there is no need: the picture says it better.
+pub fn score_line(a: &str, b: &str, percent: u8, with_card: bool) -> String {
+    if with_card {
+        format!("**{}** × **{}**", a, b)
+    } else {
+        format!("**{}** × **{}**\n\n`{}` **{}%**", a, b, bar(percent), percent)
+    }
+}
+
 /// The percentage drawn as a bar, ten steps wide.
 pub fn bar(percent: u8) -> String {
     let filled = (percent as usize * 10).div_ceil(100).min(10);
@@ -607,13 +768,14 @@ pub fn needs_redirect_note(used_in: u64, roast_channel: u64) -> bool {
     used_in != roast_channel
 }
 
-/// The line above the card in the roast channel: both of them pinged, so they
-/// see it.
-pub fn ping_line(caller: u64, targets: &[u64]) -> String {
+/// The line above the card in the roast channel: everyone it is about, pinged
+/// so they see it, each once and in the order given. Who ran it is named in the
+/// footer instead - they know, they asked.
+pub fn ping_line(who: &[u64]) -> String {
     let mut ids: Vec<u64> = Vec::new();
-    for id in std::iter::once(caller).chain(targets.iter().copied()) {
-        if !ids.contains(&id) {
-            ids.push(id);
+    for id in who {
+        if !ids.contains(id) {
+            ids.push(*id);
         }
     }
     ids.iter().map(|id| format!("<@{}>", id)).collect::<Vec<_>>().join(" ")
@@ -701,6 +863,7 @@ pub mod tests {
             mentions: 61,
             stretches: 22,
             fights: 3,
+            vc_minutes: 640,
             shared_games: vec!["Chess".into()],
             sample: vec![
                 ("arjun".into(), "ek minute rematch dedo".into()),
@@ -743,8 +906,9 @@ pub mod tests {
         let note = posted_elsewhere(roast_channel, &link);
         assert_eq!(note, format!("Posted in <#{}> → {}", roast_channel, link));
         // Both of them are pinged where it lands, and nobody twice.
-        assert_eq!(ping_line(ARJUN, &[RIYA]), format!("<@{}> <@{}>", ARJUN, RIYA));
-        assert_eq!(ping_line(ARJUN, &[ARJUN]), format!("<@{}>", ARJUN), "roasting yourself pings you once");
+        assert_eq!(ping_line(&[ARJUN, RIYA]), format!("<@{}> <@{}>", ARJUN, RIYA));
+        assert_eq!(ping_line(&[ARJUN, ARJUN]), format!("<@{}>", ARJUN), "nobody is pinged twice");
+        assert_eq!(ping_line(&[]), "");
     }
 
     // --- opting out -----------------------------------------------------------
@@ -917,21 +1081,92 @@ pub mod tests {
 
     #[test]
     fn a_pair_always_scores_the_same_whichever_way_round_it_is_asked() {
+        let s = together().signals();
         for (a, b) in [(ARJUN, RIYA), (1, 2), (999_999_999_999_999_999, 4), (7, 7)] {
-            assert_eq!(ship_percent(a, b), ship_percent(b, a), "{a} and {b}");
+            assert_eq!(ship_percent(a, b, &s), ship_percent(b, a, &s), "{a} and {b}");
+            assert_eq!(ship_base(a, b), ship_base(b, a));
         }
         // The same every time it is asked, not a fresh roll.
-        let first = ship_percent(ARJUN, RIYA);
+        let first = ship_percent(ARJUN, RIYA, &s);
         for _ in 0..50 {
-            assert_eq!(ship_percent(RIYA, ARJUN), first);
+            assert_eq!(ship_percent(RIYA, ARJUN, &s), first);
         }
-        assert!((0..=100).contains(&(first as i32)));
+        // Never a suspiciously round nothing or everything, whatever happens.
+        for base_pair in [(1u64, 2u64), (ARJUN, RIYA), (5, 900), (12, 13)] {
+            for signals in [
+                Signals::default(),
+                Signals { replies: 100_000, vc_minutes: 100_000, shared_games: 9, ..Default::default() },
+                Signals { fights: 500, one_sided: true, ..Default::default() },
+            ] {
+                let p = ship_percent(base_pair.0, base_pair.1, &signals);
+                assert!((MIN_PERCENT..=MAX_PERCENT).contains(&p), "{p}% from {base_pair:?}");
+            }
+        }
         // Different pairs don't all land on the same number.
-        let spread: HashSet<u8> = (1..40u64).map(|i| ship_percent(i, i * 7 + 3)).collect();
+        let spread: HashSet<u8> = (1..40u64).map(|i| ship_percent(i, i * 7 + 3, &s)).collect();
         assert!(spread.len() > 15, "only {} distinct scores in 39 pairs", spread.len());
         assert_eq!(bar(0), "░░░░░░░░░░");
         assert_eq!(bar(100), "██████████");
         assert_eq!(bar(41).chars().filter(|c| *c == '█').count(), 5);
+    }
+
+    #[test]
+    fn what_they_do_moves_the_number_in_chunky_steps_and_only_so_far() {
+        // Nothing has happened: the pair's own number, untouched.
+        let (a, b) = (ARJUN, RIYA);
+        let base = ship_base(a, b);
+        let nothing = Signals::default();
+        assert_eq!(drift(&nothing), 0);
+        assert!(steps(&nothing).is_empty());
+        assert_eq!(ship_percent(a, b, &nothing) as i32, base.clamp(1, 99));
+        // Replies push it up; a fight pulls it down.
+        let chatty = Signals { replies: 412, ..Default::default() };
+        let fighty = Signals { fights: 3, ..Default::default() };
+        assert!(drift(&chatty) > 0, "lots of replies raise it: {:?}", steps(&chatty));
+        assert!(drift(&fighty) < 0, "a fight lowers it: {:?}", steps(&fighty));
+        assert!(ship_percent(a, b, &chatty) > ship_percent(a, b, &nothing));
+        assert!(ship_percent(a, b, &fighty) < ship_percent(a, b, &nothing));
+        // Coarse on purpose: within a step nothing moves at all.
+        assert_eq!(drift(&Signals { replies: 100, ..Default::default() }), drift(&Signals { replies: 399, ..Default::default() }));
+        assert!(drift(&Signals { replies: 400, ..Default::default() }) > drift(&Signals { replies: 399, ..Default::default() }));
+        assert_eq!(drift(&Signals { vc_minutes: 60, ..Default::default() }), drift(&Signals { vc_minutes: 299, ..Default::default() }));
+        // Every step is a few points, never a landslide.
+        for (_, by) in steps(&together().signals()) {
+            assert!((1..=13).contains(&by.abs()), "a step of {by} is not a nudge");
+        }
+        // The movement is capped, however much has happened either way.
+        let everything = Signals { replies: usize::MAX, vc_minutes: i64::MAX, shared_games: 50, ..Default::default() };
+        let worst = Signals { fights: 10_000, one_sided: true, ..Default::default() };
+        assert_eq!(drift(&everything), MAX_DRIFT.min(13 + 8 + 4));
+        assert!(drift(&everything) <= MAX_DRIFT && drift(&worst) >= -MAX_DRIFT);
+        for s in [everything, worst] {
+            assert!((ship_percent(a, b, &s) as i32 - base).abs() <= MAX_DRIFT, "the pair's own number still shows through");
+        }
+        // One of them going quiet counts, and only once there is enough to go on.
+        assert!(Together { replies_ab: 200, replies_ba: 3, ..Default::default() }.one_sided());
+        assert!(!Together { replies_ab: 200, replies_ba: 60, ..Default::default() }.one_sided(), "both talking is not ghosting");
+        assert!(!Together { replies_ab: 4, replies_ba: 0, ..Default::default() }.one_sided(), "four replies proves nothing");
+        assert!(steps(&Signals { one_sided: true, ..Default::default() }).iter().any(|(what, by)| what.contains("gone quiet") && *by < 0));
+        // And it is the same signal read from either side.
+        let t = together();
+        let other_way = Together { replies_ab: t.replies_ba, replies_ba: t.replies_ab, ..t.clone() };
+        assert_eq!(t.signals(), other_way.signals());
+        // The plain-English line names what moves it.
+        for must in ["never changes", "member ids", "replying to each other", "voice", "games", "kalesh", "25"] {
+            assert!(WHAT_MOVES_IT.contains(must), "the explanation lacks {must:?}");
+        }
+    }
+
+    #[test]
+    fn the_card_says_which_way_the_number_moved_only_when_it_moved() {
+        let now = 1_800_000_000;
+        assert_eq!(movement(61, None, now), None, "the first time, there is nothing to compare with");
+        assert_eq!(movement(61, Some((61, now - 86_400)), now), None, "it hasn't moved: say nothing");
+        assert_eq!(movement(67, Some((61, now - 7 * 86_400)), now).as_deref(), Some("up 6 since 7 days ago"));
+        assert_eq!(movement(52, Some((61, now - 2 * 3600)), now).as_deref(), Some("down 9 since 2 hours ago"));
+        assert_eq!(movement(62, Some((61, now - 30)), now).as_deref(), Some("up 1 since under a minute ago"));
+        // A clock that has gone backwards doesn't produce nonsense.
+        assert!(movement(70, Some((61, now + 500)), now).is_some_and(|m| m.starts_with("up 9")));
     }
 
     #[test]
@@ -949,7 +1184,7 @@ pub mod tests {
     fn the_ship_prompt_says_it_is_a_joke_and_carries_how_they_behave() {
         let (a, b) = (arjun(), riya());
         let t = together();
-        let pct = ship_percent(a.id, b.id);
+        let pct = ship_percent(a.id, b.id, &t.signals());
         let name = ship_name(&a.name, &b.name);
         let p = ship_prompt(&a, &b, &t, pct, &name);
         for must in [
@@ -973,6 +1208,56 @@ pub mod tests {
         let p = ship_prompt(&a, &b, &strangers, 4, "Arjiya");
         assert!(p.contains("basically never interacted") && p.contains("do not invent a history for them"), "{p}");
         assert!(p.contains("They don't really share a channel."));
+    }
+
+    #[test]
+    fn the_card_line_is_the_most_interesting_thing_the_bot_counted() {
+        let t = together();
+        assert_eq!(headline(&t, 60), "3 fights called · 0 apologies logged");
+        // A fight beats a reply count; without one, the replies speak.
+        let calm = Together { fights: 0, ..t.clone() };
+        assert_eq!(headline(&calm, 60), "412 replies in 60 days");
+        assert_eq!(headline(&Together { fights: 1, ..t.clone() }, 60), "1 fight called · 0 apologies logged");
+        assert_eq!(headline(&Together { replies_ab: 1, replies_ba: 0, ..calm.clone() }, 60), "1 reply in 60 days");
+        // Then pings, then run-ins, then a shared channel, then nothing at all.
+        let quiet = Together { replies_ab: 0, replies_ba: 0, ..calm.clone() };
+        assert_eq!(headline(&quiet, 60), "61 pings at each other, 0 replies");
+        let silent = Together { mentions: 0, ..quiet.clone() };
+        assert_eq!(headline(&silent, 60), "22 run-ins in 60 days, not one reply");
+        let strangers = Together { stretches: 0, ..silent.clone() };
+        assert_eq!(headline(&strangers, 60), "Both live in #chatting-hori and have never once replied");
+        let nothing = Together { shared_channels: vec![], ..strangers };
+        assert_eq!(headline(&nothing, 60), "Not one word between them in 60 days");
+        // Nothing the bot can count makes a line too long for the card.
+        let huge = Together {
+            fights: 999_999_999,
+            replies_ab: usize::MAX / 4,
+            replies_ba: usize::MAX / 4,
+            mentions: usize::MAX / 2,
+            stretches: usize::MAX / 2,
+            shared_channels: vec!["a-channel-name-that-someone-really-did-name-this-🥳".repeat(4)],
+            ..Default::default()
+        };
+        for t in [
+            huge.clone(),
+            Together { fights: 0, ..huge.clone() },
+            Together { fights: 0, replies_ab: 0, replies_ba: 0, ..huge.clone() },
+            Together { fights: 0, replies_ab: 0, replies_ba: 0, mentions: 0, ..huge.clone() },
+            Together { fights: 0, replies_ab: 0, replies_ba: 0, mentions: 0, stretches: 0, ..huge },
+        ] {
+            let line = headline(&t, 9_999_999);
+            assert!(line.chars().count() <= HEADLINE_CHARS, "{} chars: {:?}", line.chars().count(), line);
+        }
+    }
+
+    #[test]
+    fn the_score_is_written_out_only_when_there_is_no_card() {
+        let with_card = score_line("arjun", "riya", 87, true);
+        assert_eq!(with_card, "**arjun** × **riya**");
+        assert!(!with_card.contains('%'), "the picture carries the number");
+        let text_only = score_line("arjun", "riya", 87, false);
+        assert!(text_only.contains("**87%**") && text_only.contains("█"), "{text_only}");
+        assert!(text_only.starts_with("**arjun** × **riya**"));
     }
 
     #[test]

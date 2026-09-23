@@ -1301,9 +1301,19 @@ pub fn sections() -> Vec<Section> {
                     hours in voice, how often AutoMod eats them, who they never stop replying to. /ship @a @b gives a \
                     pair a percentage, a mashed-up name and a short verdict on how they really behave around each \
                     other, from their replies, shared channels and any fights the kalesh detector has called. The \
-                    percentage is a hash of the two member ids, so a pair always scores the same, whichever way round \
-                    it is asked. Both post only in the roast channel: run anywhere else, the card still lands there \
-                    and the channel it was run in gets a line linking to it, with both members pinged where it lands. \
+                    percentage is not a random roll. Each pair has a number of their own, worked out from their two \
+                    member ids, that never changes and nobody can reroll. What the two of them actually do then nudges \
+                    it, in a few chunky steps and never by more than 25 either way: replying to each other, sitting in \
+                    voice together and playing the same games push it up; fights the kalesh detector called, and one \
+                    of them going quiet on the other, pull it down. It comes out the same whichever way round the pair \
+                    is named, and never lands on a suspiciously round 0% or 100%. Each pair's last score is \
+                    remembered, so when it has moved the card says which way and since when. The /ship result is a \
+                    drawn card - both avatars, the ship name, the score, a bar coloured by it, the movement, and one \
+                    counted fact about the pair (\"412 replies in 60 days\") that the bot works out itself, never the \
+                    AI. If the card can't be drawn the message goes out as text instead. /roast is text only. Both \
+                    post only in the roast channel: run anywhere else, the result still lands there and the channel it \
+                    was run in gets a line linking to it. A roast pings the member and whoever asked; a ship pings \
+                    only the two being shipped, and names whoever asked in the footer. \
                     #safe-corner never reaches the AI, and every answer is checked before it is posted - no slurs and \
                     nothing about family, death, looks or body, mental health, gender or sexuality, religion or caste, \
                     even when the member jokes about those themselves. A answer that fails is asked for once more and \
@@ -1337,6 +1347,16 @@ pub fn sections() -> Vec<Section> {
                     "",
                 ),
                 setting(
+                    "VIZIER_ROAST_CACHE_MINS",
+                    "Reuse what was read for",
+                    "After reading a member's record (or a pair's history) for one of these commands, how long to reuse \
+                     it instead of reading it again. Repeated roasts in a burst then cost nothing but the AI call - the \
+                     AI is still asked every single time, so the wording is always new. It is only held in memory and \
+                     goes when the bot restarts. 0 reads everything fresh every time.",
+                    number(0, 180, "minutes"),
+                    "10",
+                ),
+                setting(
                     "VIZIER_ROAST_MAX_MESSAGES",
                     "Messages read per member",
                     "Most of a member's own messages read for one roast. A sample of these, spread over their whole \
@@ -1347,7 +1367,12 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("roast", EVERYONE, "/roast @member", "The AI roasts that member, in the roast channel, from what the bot has seen them do."),
-                command("ship", EVERYONE, "/ship @a @b", "Ships two members with a score, a name and a verdict. Leave the second empty and it is you."),
+                command(
+                    "ship",
+                    EVERYONE,
+                    "/ship @a @b",
+                    "Ships two members with a score, a name, a card and a verdict. Leave the second empty and it is you. The                      score is the pair's own number, from their two ids, nudged a few points by how much they reply to each                      other, time in voice together, games they both play, and kalesh between them - so it moves only when                      something real changed, never at random.",
+                ),
                 command("noroast", EVERYONE, "/noroast", "Keeps you out of /roast and /ship. Run it again to come back in. Not the same as /forgetme."),
             ],
         },

@@ -56,6 +56,8 @@ mod notes_facts;
 mod notes_store;
 mod roast;
 mod roast_build;
+mod roast_card;
+mod roast_store;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -215,6 +217,11 @@ impl VizierChannel for DiscordChannelReader {
         // Member notes. Not opening only means /about and the builds are unavailable.
         if let Err(err) = notes_store::open(&self.deps.config.workspace) {
             tracing::warn!("notes: store not opened: {}", err);
+        }
+        // /ship's memory of what each pair scored last. Not opening only means
+        // the card can't say which way the number has moved.
+        if let Err(err) = roast_store::open(&self.deps.config.workspace) {
+            tracing::warn!("roast: store not opened: {}", err);
         }
         // Deleted and edited messages for the panel. Not opening only means no log.
         if let Err(err) = msglog::start(&self.deps.config.workspace) {
