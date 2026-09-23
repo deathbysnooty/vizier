@@ -204,7 +204,7 @@ fn guild_of(ctx: &Context) -> Option<GuildId> {
 
 /// Name lookups from the cache, and every member's name as words (so a name is
 /// never picked as someone's catchphrase).
-fn cache_names(ctx: &Context) -> (HashMap<u64, String>, HashMap<u64, String>, HashSet<String>) {
+pub(super) fn cache_names(ctx: &Context) -> (HashMap<u64, String>, HashMap<u64, String>, HashSet<String>) {
     let mut channels = HashMap::new();
     let mut members = HashMap::new();
     let mut words = HashSet::new();
@@ -242,7 +242,7 @@ async fn joined(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierSt
 }
 
 /// The facts about `user`, from the cache of the last few minutes or read now.
-async fn facts_for(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierStorage>, user: u64, words: HashSet<String>) -> Facts {
+pub(super) async fn facts_for(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierStorage>, user: u64, words: HashSet<String>) -> Facts {
     let now = Utc::now().timestamp();
     if let Some(f) = facts::cached(user, now) {
         return f;
@@ -274,7 +274,7 @@ async fn answer(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierSt
     out
 }
 
-fn display_name(ctx: &Context, user: u64, fallback: &str) -> String {
+pub(super) fn display_name(ctx: &Context, user: u64, fallback: &str) -> String {
     guild_of(ctx)
         .and_then(|g| ctx.cache.guild(g).and_then(|guild| guild.members.get(&UserId::new(user)).map(|m| m.display_name().to_string())))
         .unwrap_or_else(|| fallback.to_string())

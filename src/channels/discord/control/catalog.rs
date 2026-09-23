@@ -1293,6 +1293,65 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "roast",
+            title: "Roast & ship",
+            icon: "🔥",
+            about: "Two joke commands. /roast @member has the AI write a sharp, personal roast from what the bot has \
+                    actually seen them do - the way they type, their catchphrases, the games they keep losing, their \
+                    hours in voice, how often AutoMod eats them, who they never stop replying to. /ship @a @b gives a \
+                    pair a percentage, a mashed-up name and a short verdict on how they really behave around each \
+                    other, from their replies, shared channels and any fights the kalesh detector has called. The \
+                    percentage is a hash of the two member ids, so a pair always scores the same, whichever way round \
+                    it is asked. Both post only in the roast channel: run anywhere else, the card still lands there \
+                    and the channel it was run in gets a line linking to it, with both members pinged where it lands. \
+                    #safe-corner never reaches the AI, and every answer is checked before it is posted - no slurs and \
+                    nothing about family, death, looks or body, mental health, gender or sexuality, religion or caste, \
+                    even when the member jokes about those themselves. A answer that fails is asked for once more and \
+                    then given up on, and the person is told plainly. There is no cooldown.",
+            settings: vec![
+                toggle("VIZIER_ROAST", "/roast on", "Off: /roast says it is switched off and nothing is sent to the AI. /ship is unaffected."),
+                toggle("VIZIER_SHIP", "/ship on", "Off: /ship says it is switched off and nothing is sent to the AI. /roast is unaffected."),
+                setting(
+                    "VIZIER_ROAST_CHANNEL",
+                    "Roast channel",
+                    "The one channel both commands post in. Run anywhere else, the card still lands here and the other \
+                     channel gets a link to it.",
+                    Kind::Channel,
+                    "1516534303968858312",
+                ),
+                setting(
+                    "VIZIER_ROAST_OPTOUTS",
+                    "Opted out of roasts",
+                    "Members who can't be roasted or shipped, and whose messages are never sent to the AI for either. \
+                     Members add and remove themselves with /noroast; you can edit the list here. This is a different \
+                     list from the member-notes opt-out (/forgetme) - changing one never changes the other.",
+                    Kind::Users,
+                    "",
+                ),
+                setting(
+                    "VIZIER_ROAST_MODEL",
+                    "AI model",
+                    "A model on the bot's own provider for writing roasts and ship verdicts. Empty means the bot's \
+                     main model: these are read by the whole channel, so the writing matters.",
+                    Kind::Text,
+                    "",
+                ),
+                setting(
+                    "VIZIER_ROAST_MAX_MESSAGES",
+                    "Messages read per member",
+                    "Most of a member's own messages read for one roast. A sample of these, spread over their whole \
+                     time on the server, is what the AI is shown - never more than about 3,500 tokens of it.",
+                    number(20, 3_000, "messages"),
+                    "250",
+                ),
+            ],
+            commands: vec![
+                command("roast", EVERYONE, "/roast @member", "The AI roasts that member, in the roast channel, from what the bot has seen them do."),
+                command("ship", EVERYONE, "/ship @a @b", "Ships two members with a score, a name and a verdict. Leave the second empty and it is you."),
+                command("noroast", EVERYONE, "/noroast", "Keeps you out of /roast and /ship. Run it again to come back in. Not the same as /forgetme."),
+            ],
+        },
+        Section {
             id: "kalesh",
             title: "Kalesh detector",
             icon: "🍿",

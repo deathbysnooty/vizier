@@ -54,6 +54,8 @@ mod notes;
 mod notes_build;
 mod notes_facts;
 mod notes_store;
+mod roast;
+mod roast_build;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -1761,6 +1763,9 @@ impl EventHandler for Handler {
         let _ = Command::create_global_command(ctx.http.clone(), standings::mypoints_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), notes::about_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), notes::forgetme_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), roast::roast_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), roast::ship_builder()).await;
+        let _ = Command::create_global_command(ctx.http.clone(), roast::noroast_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), standings::today_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::remind_builder()).await;
         let _ = Command::create_global_command(ctx.http.clone(), control::remind::reminders_builder()).await;
@@ -2617,6 +2622,18 @@ impl EventHandler for Handler {
             }
             if command.data.name == "forgetme" {
                 notes::forgetme_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "roast" {
+                roast::roast_command(&ctx, &self.1.storage, &command).await;
+                return;
+            }
+            if command.data.name == "ship" {
+                roast::ship_command(&ctx, &self.1.storage, &command).await;
+                return;
+            }
+            if command.data.name == "noroast" {
+                roast::noroast_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "today" {
