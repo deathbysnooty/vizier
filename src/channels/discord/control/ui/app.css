@@ -468,6 +468,14 @@ kbd {
 .chip-x:hover { background: var(--line-2); color: var(--text); }
 .chip-x .icon { width: 12px; height: 12px; }
 .chip.missing { border-style: dashed; color: var(--warn); }
+
+/* Someone who has left: everything shown for them is what the bot itself kept,
+   so the name carries a quiet mark wherever it is picked or listed. */
+.tag-left {
+  flex: none; padding: 1px 6px; border: 1px solid var(--line-2); border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; text-transform: lowercase; white-space: nowrap;
+}
 .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .role-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset; background: var(--faint); }
 .inline-ref { display: inline-flex; align-items: center; gap: 4px; font-weight: 550; color: var(--text); }

@@ -405,6 +405,10 @@ impl PanelData for FakeData {
         super::super::super::msglog::coverage(fake_log().store.lock().conn()).ok()
     }
 
+    async fn msglog_authors(&self, sensitive: Vec<u64>) -> Vec<super::super::super::msglog::Author> {
+        super::super::super::msglog::authors(fake_log().store.lock().conn(), &sensitive).unwrap_or_default()
+    }
+
     async fn msglog_deleted(&self, filter: super::super::super::msglog::ListFilter) -> anyhow::Result<super::super::super::msglog::Page<super::super::super::msglog::DeletedRow>> {
         Ok(super::super::super::msglog::list_deleted(fake_log().store.lock().conn(), &filter)?)
     }
@@ -1029,7 +1033,14 @@ fn fake_log() -> &'static FakeLog {
             snowflake(ms, seq)
         };
         let at = |c: u64, name: &str, parent: Option<u64>| Place { channel_id: c, parent_id: parent, channel_name: name.into() };
-        let name_of = |uid: u64| if uid == MEMBER { "Rohan".to_string() } else { ROSTER[(uid - 2000) as usize].to_string() };
+        // The roster, plus the names the join log kept for people who have left.
+        let name_of = |uid: u64| match uid {
+            MEMBER => "Rohan".to_string(),
+            _ => match JOINLOG.iter().find(|p| p.0 == uid) {
+                Some((_, name, ..)) => (*name).to_string(),
+                None => uid.checked_sub(2000).and_then(|i| ROSTER.get(i as usize)).map(|n| n.to_string()).unwrap_or_else(|| format!("member {}", uid)),
+            },
+        };
         let att = |id: u64, name: &str, kind: Option<&str>, size: u64| Attachment { id, filename: name.into(), content_type: kind.map(String::from), size, url: String::new() };
         fn keep(store: &mut Store, m: &NewMessage, pics: &[Vec<u8>]) {
             store.insert_new(m).unwrap();
@@ -1245,6 +1256,24 @@ fn fake_log() -> &'static FakeLog {
         // Longer stretches of one member, so "load more" has something to load.
         for i in 0..70i64 {
             let m = msg(now - 36 * hour - i * 17 * min, 2013, at(21, "general", None), &format!("thinking out loud number {}", 70 - i), vec![]);
+            keep(&mut store, &m, &[]);
+        }
+        // People who have since left. Discord knows nothing about them, but the
+        // log still holds what they said, which is what makes them findable.
+        let leavers: &[(i64, u64, &str, u64, Option<u64>, &str, &str)] = &[
+            (9 * hour, 3003, "notyourbhai", 21, None, "general", "bhai this server is peak, don't let it die"),
+            (8 * hour, 3003, "notyourbhai", 23, None, "desi-banter", "okay last one from me, see you all"),
+            (7 * hour, 3002, "kritika_x", 22, None, "memes", "posting this and leaving, bye"),
+            // Gone, and never in the join log: the message log is all there is of them.
+            // She shares a name with Riya, who is still here and must rank first.
+            (5 * hour, 3021, "Riya", 21, None, "general", "different Riya, hello"),
+            // Someone who only ever posted in #safe-corner: never findable at all.
+            (6 * hour, 3020, "vent_only", SAFE, None, "safe-corner", "SECRET-SAFE words from someone who left"),
+            (4 * hour, 3020, "vent_only", 77, Some(SAFE), "vent", "SECRET-SAFE more of the same"),
+        ];
+        for (ago, uid, who, channel, parent, name, text) in leavers {
+            let mut m = msg(now - ago, *uid, at(*channel, name, *parent), text, vec![]);
+            m.author_name = (*who).to_string();
             keep(&mut store, &m, &[]);
         }
         // Written straight in, as if the channel were listed later: never shown.
@@ -2209,6 +2238,101 @@ async fn member_profiles_bring_everything_together() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _, _) = call(&app, "GET", "/api/members/2012", Some(&session_for(MEMBER)), None, false).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Discord tells a bot nothing about someone who has left, so the search folds
+/// in the people the bot knows from its own records: the message log's authors
+/// and the join log. They are marked, and they rank behind anyone still here.
+#[tokio::test]
+async fn member_search_finds_people_who_have_left() {
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    // By the name the bot stored with their messages.
+    let (status, found, _) = call(&app, "GET", "/api/members?q=notyourbhai", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found[0]["id"], "3003", "{found}");
+    assert_eq!(found[0]["name"], "notyourbhai");
+    assert_eq!(found[0]["in_server"], false, "the mark the picker shows \u{201c}left\u{201d} by");
+
+    // By a pasted id, which Discord's own name search can never answer.
+    let (_, found, _) = call(&app, "GET", "/api/members?q=3003", Some(&session), None, false).await;
+    assert_eq!(found[0]["id"], "3003", "{found}");
+    assert_eq!(found[0]["in_server"], false);
+
+    // Someone the message log never kept a word from, but the join log names.
+    let (_, found, _) = call(&app, "GET", "/api/members?q=ghost_account", Some(&session), None, false).await;
+    assert_eq!(found[0]["id"], "3009", "{found}");
+    assert_eq!(found[0]["in_server"], false);
+
+    // Two people of one name: the one still here comes first.
+    let (_, found, _) = call(&app, "GET", "/api/members?q=riya", Some(&session), None, false).await;
+    let ids: Vec<&str> = found.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids[0], "2013", "the Riya who is still here leads: {found}");
+    assert_eq!(found[0]["in_server"], true);
+    assert!(ids.contains(&"3021"), "and the one who left is still offered: {found}");
+
+    // #safe-corner is never searchable: posting only there names nobody.
+    for q in ["vent_only", "3020"] {
+        let (_, found, _) = call(&app, "GET", &format!("/api/members?q={q}"), Some(&session), None, false).await;
+        assert!(found.as_array().unwrap().is_empty(), "\u{201c}{q}\u{201d} found somebody: {found}");
+    }
+
+    // The picker every other page uses answers the same way.
+    let (_, picked, _) = call(&app, "GET", "/api/discord/members?q=notyourbhai", Some(&session), None, false).await;
+    assert_eq!(picked[0]["id"], "3003", "{picked}");
+    assert_eq!(picked[0]["in_server"], false);
+    let (_, here, _) = call(&app, "GET", "/api/discord/members?q=zoy", Some(&session), None, false).await;
+    assert_eq!(here[0]["in_server"], true, "{here}");
+
+    // And a chip names them instead of saying "unknown member".
+    let (status, one, _) = call(&app, "GET", "/api/discord/members/3003", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{one}");
+    assert_eq!((one["name"].as_str(), one["in_server"].as_bool()), (Some("notyourbhai"), Some(false)));
+    let (status, _, _) = call(&app, "GET", "/api/discord/members/424242", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "somebody nothing knows is still nobody");
+}
+
+/// Picking someone who has left works through to the page: their messages come
+/// back, their profile opens, and a note can still be written about them.
+#[tokio::test]
+async fn pages_take_a_member_who_has_left() {
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    let (status, page, _) = call(&app, "GET", "/api/messages?member=3003&days=30", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["member"]["name"], "notyourbhai", "named from what the bot kept, not the bare id");
+    let rows = page["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{page}");
+    assert!(rows.iter().all(|r| r["member"]["id"] == "3003" && r["member"]["in_server"] == false), "{page}");
+    assert!(rows.iter().any(|r| r["text"].as_str().unwrap().contains("this server is peak")), "{page}");
+
+    // Nothing of theirs from #safe-corner, for them or for anybody.
+    let (_, safe, _) = call(&app, "GET", "/api/messages?member=3020&days=30", Some(&session), None, false).await;
+    assert!(safe["results"].as_array().unwrap().is_empty(), "{safe}");
+
+    // Their profile opens instead of 404ing, and says they are gone.
+    let (status, p, _) = call(&app, "GET", "/api/members/3021", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(p["name"], "Riya");
+    assert_eq!(p["in_server"], false);
+
+    // A note about them is the one thing a mod can still set for later.
+    let (status, saved, _) =
+        call(&app, "PUT", "/api/members/3003/note", Some(&session), Some(json!({ "tone": "gentle", "notes": "Left in September. Was fine." })), true).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["note"]["name"], "notyourbhai");
+    call(&app, "DELETE", "/api/members/3003/note", Some(&session), None, true).await;
+
+    // The look is written down exactly as any other look is.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let looked = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["key"] == "messages:look" && e["change"].as_str().is_some_and(|c| c.contains("@notyourbhai")));
+    assert!(looked, "the look at a member who left is in the activity log");
 }
 
 #[tokio::test]

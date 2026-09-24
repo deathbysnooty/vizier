@@ -4,7 +4,7 @@
 //! the AI is handed when it answers them.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
@@ -18,7 +18,7 @@ use super::super::super::house;
 use super::super::super::points;
 use super::super::super::ship_sheet;
 use super::super::members::{self as notes, MemberNote, Tone};
-use super::{ApiError, ApiResult, Caller, MemberInfo, Panel, ok, parse_id};
+use super::{ApiError, ApiResult, Caller, MemberInfo, Panel, ok, parse_id, search};
 
 // --- what the data layer hands over ---------------------------------------------
 
@@ -389,6 +389,163 @@ fn snippet(content: &str, terms: &[String]) -> String {
     format!("{}{}{}", if start > 0 { "…" } else { "" }, out, if end < chars.len() { "…" } else { "" })
 }
 
+// --- finding someone, here or gone -------------------------------------------------------
+
+/// Someone the bot knows from its own records rather than from Discord: an
+/// author in the message log, or a name in the join log. Discord tells a bot
+/// nothing about a member who has left, so these are the only names there are
+/// for them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KnownMember {
+    pub id: u64,
+    /// The name the bot stored when it last saw them.
+    pub name: String,
+    pub avatar: String,
+}
+
+impl KnownMember {
+    /// The same shape a Discord member has, so a picker needs no second path
+    /// for them. There is no username: the bot never stored one.
+    pub(super) fn info(&self) -> MemberInfo {
+        MemberInfo { id: self.id.to_string(), name: self.name.clone(), username: String::new(), avatar: self.avatar.clone(), bot: false }
+    }
+}
+
+/// One row of a member search.
+#[derive(Clone, Debug)]
+pub struct Hit {
+    pub info: MemberInfo,
+    /// False for someone only the bot's own records know: they have left.
+    pub in_server: bool,
+}
+
+/// How long the list of people the bot's own records know is kept before it is
+/// read again. A name search must never walk the whole message log per
+/// keystroke, so it is built once and shared.
+pub const KNOWN_FRESH: Duration = Duration::from_secs(300);
+
+/// The people the bot knows from its own records: every author in the message
+/// log, then the names in the join log the "Left the server" page reads, for
+/// anyone the log never kept a word from.
+async fn build_known(panel: &Panel) -> Vec<KnownMember> {
+    let mut out: Vec<KnownMember> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    for a in panel.data.msglog_authors(super::msglog::never_shown(panel)).await {
+        if !a.name.trim().is_empty() && seen.insert(a.id) {
+            out.push(KnownMember { id: a.id, name: a.name, avatar: a.avatar });
+        }
+    }
+    for row in super::left::logs(panel).await {
+        if !row.name.trim().is_empty() && seen.insert(row.id) {
+            out.push(KnownMember { id: row.id, name: row.name, avatar: String::new() });
+        }
+    }
+    out
+}
+
+/// [`build_known`], kept for [`KNOWN_FRESH`].
+pub(super) async fn known_members(panel: &Panel) -> Arc<Vec<KnownMember>> {
+    static CACHE: LazyLock<Mutex<Option<(Instant, Arc<Vec<KnownMember>>)>>> = LazyLock::new(|| Mutex::new(None));
+    if let Some((at, list)) = CACHE.lock().as_ref() {
+        if at.elapsed() < KNOWN_FRESH {
+            return list.clone();
+        }
+    }
+    let list = Arc::new(build_known(panel).await);
+    *CACHE.lock() = Some((Instant::now(), list.clone()));
+    list
+}
+
+/// One person from the bot's own records, for an id Discord has never heard of.
+pub(super) async fn known_one(panel: &Panel, id: u64) -> Option<KnownMember> {
+    known_members(panel).await.iter().find(|k| k.id == id).cloned()
+}
+
+/// The best name the panel has for someone, whether or not they are still here:
+/// the server's, then Discord's, then the name the bot stored for them.
+pub(super) async fn name_for(panel: &Panel, id: u64) -> Option<String> {
+    if let Some(m) = panel.data.cached_member(id) {
+        return Some(m.name);
+    }
+    if let Some(m) = panel.data.member(id).await {
+        return Some(m.name);
+    }
+    match known_one(panel, id).await {
+        Some(k) => Some(k.name),
+        None => notes::get(id).map(|n| n.name),
+    }
+}
+
+/// The same, falling back to the bare id so a log line always names somebody.
+pub(super) async fn name_or_id(panel: &Panel, id: u64) -> String {
+    name_for(panel, id).await.unwrap_or_else(|| id.to_string())
+}
+
+/// Current members first, in the order Discord gave them, then the people only
+/// the bot's own records know — an exact id before a name, and the earliest
+/// match inside a name before a later one. One row per id.
+pub fn rank(query: &str, asked: Option<u64>, live: Vec<MemberInfo>, known: &[KnownMember], limit: usize) -> Vec<Hit> {
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut out: Vec<Hit> = Vec::new();
+    for info in live {
+        let Ok(id) = info.id.parse::<u64>() else { continue };
+        if seen.insert(id) {
+            out.push(Hit { info, in_server: true });
+        }
+    }
+    let mut leavers: Vec<(u8, usize, String, &KnownMember)> = known
+        .iter()
+        .filter(|k| !seen.contains(&k.id))
+        .filter_map(|k| {
+            let (kind, at) = match asked {
+                Some(id) if id == k.id => (0, 0),
+                _ => (1, search::find_ci(&k.name, query)?.0),
+            };
+            Some((kind, at, k.name.to_lowercase(), k))
+        })
+        .collect();
+    leavers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.id.cmp(&b.3.id)));
+    for (.., k) in leavers {
+        if out.len() >= limit {
+            break;
+        }
+        if seen.insert(k.id) {
+            out.push(Hit { info: k.info(), in_server: false });
+        }
+    }
+    out.truncate(limit);
+    out
+}
+
+/// Everyone who answers to `query`, whether or not they are still in the
+/// server. Discord's member search only knows the people who are here and only
+/// matches names, so a pasted id and everyone who has left are folded in from
+/// the bot's own records.
+pub(super) async fn find(panel: &Panel, query: &str, limit: usize) -> Vec<Hit> {
+    let live = panel.data.search_members(query, limit).await;
+    if query.is_empty() {
+        return live.into_iter().map(|info| Hit { info, in_server: true }).collect();
+    }
+    let asked = parse_id(query);
+    let mut live = live;
+    // A pasted id is nobody's name, so Discord's search can't answer it.
+    if let Some(id) = asked.filter(|id| !live.iter().any(|m| m.id == id.to_string())) {
+        if let Some(m) = panel.data.member(id).await {
+            live.insert(0, m);
+        }
+    }
+    let known = known_members(panel).await;
+    rank(query, asked, live, &known, limit)
+}
+
+/// A search result. `in_server` false is the panel's mark for someone who has
+/// left: everything about them is what the bot itself kept.
+pub(super) fn hit_json(hit: &Hit) -> Value {
+    let mut v = json!(hit.info);
+    v["in_server"] = json!(hit.in_server);
+    v
+}
+
 // --- handlers ----------------------------------------------------------------------------
 
 fn member_id(raw: &str) -> Result<u64, ApiError> {
@@ -404,15 +561,12 @@ pub struct SearchQuery {
 pub async fn search(State(panel): State<Panel>, Query(q): Query<SearchQuery>) -> ApiResult {
     let query: String = q.q.trim().chars().take(64).collect();
     let noted: HashSet<String> = notes::list().into_iter().map(|n| n.user_id).collect();
-    let found: Vec<Value> = panel
-        .data
-        .search_members(&query, 25)
+    let found: Vec<Value> = find(&panel, &query, 25)
         .await
-        .into_iter()
-        .map(|m| {
-            let has_note = noted.contains(&m.id);
-            let mut v = json!(m);
-            v["has_note"] = json!(has_note);
+        .iter()
+        .map(|hit| {
+            let mut v = hit_json(hit);
+            v["has_note"] = json!(noted.contains(&hit.info.id));
             v
         })
         .collect();
@@ -465,8 +619,13 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
     let note = notes::get(id);
     let now = chrono::Utc::now().timestamp();
     let stats = panel.data.member_stats(id, now).await;
-    // Someone who left may still have points, a house or a note; anyone else is unknown.
-    if detail.is_none() && note.is_none() && stats.all_time == 0 && stats.house.is_none() && stats.joins.is_none() {
+    // Someone who left may still have points, a house, a note, or messages the
+    // bot kept; anyone none of that knows is unknown.
+    let known = match detail {
+        Some(_) => None,
+        None => known_one(&panel, id).await,
+    };
+    if detail.is_none() && note.is_none() && known.is_none() && stats.all_time == 0 && stats.house.is_none() && stats.joins.is_none() {
         return Err(ApiError::not_found("No such member."));
     }
     let roles = panel.data.roles();
@@ -475,6 +634,7 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
     let name = detail
         .as_ref()
         .map(|d| d.info.name.clone())
+        .or_else(|| known.as_ref().map(|k| k.name.clone()))
         .or_else(|| note.as_ref().map(|n| n.name.clone()))
         .unwrap_or_else(|| format!("Member {}", id));
     let house_meta = stats.house.as_deref().and_then(house::house);
@@ -498,7 +658,7 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
         "id": id.to_string(),
         "name": name,
         "username": detail.as_ref().map(|d| d.info.username.clone()),
-        "avatar": detail.as_ref().map(|d| d.info.avatar.clone()),
+        "avatar": detail.as_ref().map(|d| d.info.avatar.clone()).or_else(|| known.as_ref().map(|k| k.avatar.clone()).filter(|a| !a.is_empty())),
         "bot": detail.as_ref().is_some_and(|d| d.info.bot),
         "in_server": detail.is_some(),
         "admin": admins.contains(&id),
@@ -646,11 +806,10 @@ fn note_from(body: &[u8]) -> Result<NoteBody, ApiError> {
     serde_json::from_slice(body).map_err(|e| ApiError::bad(format!("The note isn't right: {}", e)))
 }
 
+/// The name a note is filed under. Someone who has left is named from the
+/// bot's own records, so a note can still be written about them.
 async fn display_name(panel: &Panel, id: u64) -> Result<String, ApiError> {
-    match panel.data.member(id).await {
-        Some(m) => Ok(m.name),
-        None => notes::get(id).map(|n| n.name).ok_or_else(|| ApiError::not_found("No such member in the server.")),
-    }
+    name_for(panel, id).await.ok_or_else(|| ApiError::not_found("Nobody here has ever seen that member."))
 }
 
 pub async fn save_note(
@@ -800,6 +959,37 @@ mod tests {
         assert_eq!(seen.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["second", "first"]);
         assert_eq!(seen[0].kind, "silent_read");
         assert_eq!(query_seen(&conn, "lodu", 42, 0, 1).unwrap().len(), 1);
+    }
+
+    /// The living first, then the gone: an id before a name, and the earliest
+    /// match in a name before a later one.
+    #[test]
+    fn a_search_puts_the_living_first_and_marks_the_gone() {
+        let live = |id: u64, name: &str| MemberInfo {
+            id: id.to_string(),
+            name: name.into(),
+            username: name.to_lowercase(),
+            avatar: String::new(),
+            bot: false,
+        };
+        let gone = |id: u64, name: &str| KnownMember { id, name: name.into(), avatar: String::new() };
+        let known = [gone(30, "Riya"), gone(31, "notyourbhai"), gone(32, "riya_the_second"), gone(20, "Zoya")];
+
+        let hits = rank("riya", None, vec![live(20, "Zoya"), live(10, "Riya")], &known, 25);
+        let ids: Vec<(&str, bool)> = hits.iter().map(|h| (h.info.id.as_str(), h.in_server)).collect();
+        assert_eq!(ids, vec![("20", true), ("10", true), ("30", false), ("32", false)], "anyone still here leads");
+
+        // An id nobody's name contains finds exactly the one person.
+        let by_id = rank("31", Some(31), Vec::new(), &known, 25);
+        assert_eq!(by_id.len(), 1);
+        assert_eq!((by_id[0].info.id.as_str(), by_id[0].in_server), ("31", false));
+        // Someone Discord answered for is never repeated out of the records.
+        let both = rank("zoya", None, vec![live(20, "Zoya")], &known, 25);
+        assert_eq!(both.len(), 1, "one row per id");
+        assert!(both[0].in_server);
+        // The name has no username behind it: the bot never stored one.
+        assert_eq!(rank("riya", None, Vec::new(), &known, 1).len(), 1, "the limit holds");
+        assert_eq!(gone(30, "Riya").info().username, "");
     }
 
     #[test]

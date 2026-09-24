@@ -855,14 +855,15 @@
   async function memberItems(q) {
     let list = [];
     try { list = remember(await api('GET', '/discord/members?q=' + encodeURIComponent(q))); } catch (e) { toast(e.message, 'error'); }
-    return list.map((m) => ({ id: m.id, label: m.name, sub: m.username && m.username !== m.name ? '@' + m.username : '', lead: avatar(m.avatar, m.name, 'xs'), member: m }));
+    return list.map((m) => ({ id: m.id, label: m.name, sub: m.in_server === false ? 'left the server' : (m.username && m.username !== m.name ? '@' + m.username : ''),
+      lead: avatar(m.avatar, m.name, 'xs'), trail: m.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null, member: m }));
   }
 
   function memberChip(id, onRemove) {
     const chip = h('span', { class: 'chip' });
     const fill = (m) => {
       clear(chip);
-      if (m) append(chip, [avatar(m.avatar, m.name, 'xs'), h('span', { class: 'chip-text' }, m.name)]);
+      if (m) append(chip, [avatar(m.avatar, m.name, 'xs'), h('span', { class: 'chip-text' }, m.name), m.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null]);
       else { chip.classList.add('missing'); append(chip, [icon('user'), h('span', { class: 'chip-text' }, 'Unknown member ' + id)]); }
       if (onRemove) chip.appendChild(h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + (m ? m.name : id), onclick: onRemove }, icon('x')));
     };
@@ -6233,9 +6234,10 @@
       try { list = await api('GET', '/members?q=' + encodeURIComponent(q)); } catch (e) { toast(e.message, 'error'); }
       if (mine !== seq) return;
       clear(results); results.hidden = false;
-      if (!list.length) { results.appendChild(h('li', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nobody called “' + q + '”.')); return; }
+      if (!list.length) { results.appendChild(h('li', { class: 'empty-small', style: 'padding:14px 16px' }, 'Nobody called “' + q + '”, here or gone.')); return; }
       list.forEach((m) => results.appendChild(h('li', null, h('a', { class: 'member-hit', href: '#/members/' + m.id },
-        avatar(m.avatar, m.name, 'lg'), h('span', { class: 'grow' }, h('b', null, m.name), h('small', null, '@' + m.username)),
+        avatar(m.avatar, m.name, 'lg'), h('span', { class: 'grow' }, h('b', null, m.name), h('small', null, m.username ? '@' + m.username : (m.in_server === false ? 'the name the bot stored' : ''))),
+        m.in_server === false ? h('span', { class: 'badge paused' }, icon('userminus'), 'Left the server') : null,
         m.has_note ? h('span', { class: 'badge src-panel' }, icon('edit'), 'Has notes') : null, m.bot ? h('span', { class: 'badge' }, 'Bot') : null, icon('right')))));
     };
     input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 200); });
@@ -6331,7 +6333,7 @@
       p.bot ? h('span', { class: 'badge' }, 'Bot') : null,
       p.captain ? h('span', { class: 'badge rank first' }, icon('trophy'), 'House captain') : null,
       p.muggle ? h('span', { class: 'badge paused' }, 'Muggle · out of the houses') : null,
-      p.in_server ? null : h('span', { class: 'badge paused' }, 'Not in the server'),
+      p.in_server ? null : h('span', { class: 'badge paused' }, icon('userminus'), p.joins && p.joins.leaves ? 'Left the server' : 'Not in the server'),
     ];
     const hs = p.house;
     holder.appendChild(h('section', { class: 'profile-head card', style: hs ? '--house:' + hs.colour : '' },

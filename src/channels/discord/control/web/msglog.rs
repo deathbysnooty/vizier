@@ -114,10 +114,7 @@ fn filter(panel: &Panel, a: &Asked) -> ListFilter {
 /// names the member and channel asked for.
 async fn log_look(panel: &Panel, user: u64, what: &str, a: &Asked) -> (Option<String>, Option<String>) {
     let member_name = match a.member {
-        Some(id) => Some(match panel.data.cached_member(id) {
-            Some(m) => m.name,
-            None => panel.data.member(id).await.map(|m| m.name).unwrap_or_else(|| id.to_string()),
-        }),
+        Some(id) => Some(super::members::name_or_id(panel, id).await),
         None => None,
     };
     let channel_name = a.channel.map(|c| panel.data.channels().iter().find(|x| x.id == c.to_string()).map(|x| x.name.clone()).unwrap_or_else(|| format!("channel {}", c)));

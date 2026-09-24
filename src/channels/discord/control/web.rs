@@ -276,6 +276,12 @@ pub trait PanelData: Send + Sync + 'static {
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
         None
     }
+    /// Everyone the message log has a kept message from, with the name it
+    /// stored: the bot's own record of who has spoken here, so a member who
+    /// has left can still be looked up. Never the channels that are never shown.
+    async fn msglog_authors(&self, _sensitive: Vec<u64>) -> Vec<super::super::msglog::Author> {
+        Vec::new()
+    }
     /// The Kalesh page: the chosen members' own kept messages between two moments,
     /// deleted and blocked ones included, oldest first.
     async fn kalesh_authors(&self, _people: Vec<u64>, _since_ms: i64, _until_ms: i64, _channel: Option<u64>) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
@@ -664,6 +670,13 @@ impl PanelData for LiveData {
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
         let reader = super::super::msglog::reader()?;
         tokio::task::spawn_blocking(move || super::super::msglog::coverage(&reader.conn.lock()).ok()).await.ok().flatten()
+    }
+
+    async fn msglog_authors(&self, sensitive: Vec<u64>) -> Vec<super::super::msglog::Author> {
+        let Some(reader) = super::super::msglog::reader() else { return Vec::new() };
+        tokio::task::spawn_blocking(move || super::super::msglog::authors(&reader.conn.lock(), &sensitive).unwrap_or_default())
+            .await
+            .unwrap_or_default()
     }
 
     async fn msglog_deleted(&self, filter: super::super::msglog::ListFilter) -> anyhow::Result<super::super::msglog::Page<super::super::msglog::DeletedRow>> {
@@ -1638,13 +1651,22 @@ struct MemberQuery {
 
 async fn members(State(panel): State<Panel>, Query(q): Query<MemberQuery>) -> ApiResult {
     let query: String = q.q.trim().chars().take(64).collect();
-    ok(panel.data.search_members(&query, 25).await)
+    let found: Vec<Value> = members::find(&panel, &query, 25).await.iter().map(members::hit_json).collect();
+    ok(found)
 }
 
+/// One member by id, for a name the panel shows. Someone who has left is
+/// answered from the bot's own records, marked `in_server: false`, so a chip
+/// names them instead of saying "unknown member".
 async fn member(State(panel): State<Panel>, Path(id): Path<String>) -> ApiResult {
     let id = parse_id(&id).ok_or_else(|| ApiError::bad("That isn't a member id."))?;
-    match panel.data.member(id).await {
-        Some(m) => ok(m),
+    if let Some(m) = panel.data.member(id).await {
+        let mut v = json!(m);
+        v["in_server"] = json!(true);
+        return ok(v);
+    }
+    match members::known_one(&panel, id).await {
+        Some(k) => ok(members::hit_json(&members::Hit { info: k.info(), in_server: false })),
         None => Err(ApiError::not_found("No such member in the server.")),
     }
 }

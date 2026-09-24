@@ -397,10 +397,7 @@ pub async fn search(State(panel): State<Panel>, axum::Extension(Caller(user)): a
     let since_ms = days.map(|d| now_ms - d * 86_400_000).unwrap_or(0);
 
     let member_name = match member {
-        Some(id) => Some(match panel.data.cached_member(id) {
-            Some(m) => m.name,
-            None => panel.data.member(id).await.map(|m| m.name).unwrap_or_else(|| id.to_string()),
-        }),
+        Some(id) => Some(super::members::name_or_id(&panel, id).await),
         None => None,
     };
     let channel_name = channel.map(|c| channels.iter().find(|x| x.id == c.to_string()).map(|x| format!("#{}", x.name)).unwrap_or_else(|| format!("channel {}", c)));

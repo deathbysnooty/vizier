@@ -1477,6 +1477,41 @@ pub fn coverage(conn: &Connection) -> rusqlite::Result<Coverage> {
     })
 }
 
+/// One person the log has a kept message from, with the name and picture it
+/// stored with the newest of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Author {
+    pub id: u64,
+    pub name: String,
+    pub avatar: String,
+}
+
+/// Everyone the log has a kept message from: the bot's own record of who has
+/// spoken here, which is the only way to look up somebody who has since left.
+///
+/// Channels that are never shown are left out, so posting only in #safe-corner
+/// never makes a person findable. It walks the whole table, so the panel reads
+/// it once and keeps the list rather than asking per keystroke.
+pub fn authors(conn: &Connection, sensitive: &[u64]) -> rusqlite::Result<Vec<Author>> {
+    // A thread has no row of its own here, so the parent is checked too. -1 is
+    // never a channel id, so it stands in for "not a thread", and 0 stands in
+    // for an empty skip list, which SQLite would not take as `IN ()`.
+    let skip: Vec<String> = sensitive.iter().filter(|c| **c != 0).map(|c| c.to_string()).collect();
+    let skip = if skip.is_empty() { "0".to_string() } else { skip.join(",") };
+    // SQLite hands the bare columns from the row MAX() picked, so the name and
+    // picture are the ones stored with their newest message.
+    let sql = format!(
+        "SELECT author_id, author_name, avatar, MAX(message_id) FROM recent
+         WHERE channel_id NOT IN ({skip}) AND COALESCE(parent_id, -1) NOT IN ({skip})
+         GROUP BY author_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Author { id: r.get::<_, i64>(0)? as u64, name: r.get(1)?, avatar: r.get(2)? })
+    })?;
+    Ok(rows.flatten().filter(|a| a.id != 0).collect())
+}
+
 /// A saved picture of a DELETED message: its bytes and content type. Nothing
 /// for a message that wasn't deleted, a picture that isn't there, or a stored
 /// path that would leave the folder.
@@ -1859,6 +1894,35 @@ mod tests {
 
     fn count(store: &Store, table: &str) -> i64 {
         store.conn().query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    /// The roll of who has spoken here: the name stored with their newest
+    /// message, and never a channel that is never shown.
+    #[test]
+    fn the_author_roll_names_everyone_but_the_quiet_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(&dir);
+        let at = |id: u64, ms: i64, who: u64, name: &str, channel: u64, parent: Option<u64>| NewMessage {
+            message_id: id,
+            place: Place { channel_id: channel, parent_id: parent, channel_name: "c".into() },
+            author_id: who,
+            author_name: name.into(),
+            ..msg(id, ms, "hi", vec![])
+        };
+        // Two messages from one person: the later name is the one kept.
+        store.insert_new(&at(id_at(NOW - 2 * DAY_MS, 1), NOW - 2 * DAY_MS, 42, "old name", 21, None)).unwrap();
+        store.insert_new(&at(id_at(NOW - DAY_MS, 2), NOW - DAY_MS, 42, "Riya", 21, None)).unwrap();
+        store.insert_new(&at(id_at(NOW - DAY_MS, 3), NOW - DAY_MS, 7, "gone_guy", 22, None)).unwrap();
+        // Only ever in #safe-corner, or in a thread inside it: not on the roll.
+        store.insert_new(&at(id_at(NOW - DAY_MS, 4), NOW - DAY_MS, 9, "vent_only", SAFE, None)).unwrap();
+        store.insert_new(&at(id_at(NOW - DAY_MS, 5), NOW - DAY_MS, 9, "vent_only", 77, Some(SAFE))).unwrap();
+
+        let roll = authors(store.conn(), &[SAFE]).unwrap();
+        let mut named: Vec<(u64, &str)> = roll.iter().map(|a| (a.id, a.name.as_str())).collect();
+        named.sort();
+        assert_eq!(named, vec![(7, "gone_guy"), (42, "Riya")], "the newest name wins, #safe-corner is absent");
+        // With nothing to leave out the query still stands up.
+        assert_eq!(authors(store.conn(), &[]).unwrap().len(), 3);
     }
 
     #[test]

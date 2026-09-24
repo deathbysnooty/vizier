@@ -172,10 +172,7 @@ pub async fn list(State(panel): State<Panel>, axum::Extension(Caller(user)): axu
     let asked = read_query(&q, now)?;
 
     let member_name = match asked.member {
-        Some(id) => Some(match panel.data.cached_member(id) {
-            Some(m) => m.name,
-            None => panel.data.member(id).await.map(|m| m.name).unwrap_or_else(|| id.to_string()),
-        }),
+        Some(id) => Some(super::members::name_or_id(&panel, id).await),
         None => None,
     };
     search::log_quietly("automod:flags", user, &audit_words(&asked, member_name.as_deref()));

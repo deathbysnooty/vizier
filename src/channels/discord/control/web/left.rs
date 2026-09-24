@@ -288,7 +288,7 @@ fn period_words(days: Option<i64>) -> String {
 
 /// The join log, kept for a minute: the page reads it, and so does the Overview
 /// tile on every status poll.
-async fn logs(panel: &Panel) -> Vec<JoinRow> {
+pub(super) async fn logs(panel: &Panel) -> Vec<JoinRow> {
     static CACHE: std::sync::LazyLock<Mutex<Option<(Instant, Vec<JoinRow>)>>> = std::sync::LazyLock::new(|| Mutex::new(None));
     const FRESH: Duration = Duration::from_secs(60);
     if let Some((at, rows)) = CACHE.lock().as_ref() {
