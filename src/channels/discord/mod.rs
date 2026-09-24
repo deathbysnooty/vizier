@@ -46,6 +46,7 @@ mod frog_trade;
 mod house;
 mod invites;
 mod invites_store;
+mod deepdive;
 mod kalesh;
 mod kalesh_store;
 mod msglog;

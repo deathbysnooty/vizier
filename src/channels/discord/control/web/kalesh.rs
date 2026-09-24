@@ -771,10 +771,10 @@ pub struct SummariseBody {
 /// Summaries being written right now, so two mods pressing at once pay once.
 static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-struct Running(String);
+pub(super) struct Running(String);
 
 impl Running {
-    fn claim(key: &str) -> Option<Self> {
+    pub(super) fn claim(key: &str) -> Option<Self> {
         RUNNING.lock().insert(key.to_string()).then(|| Running(key.to_string()))
     }
 }
@@ -804,7 +804,7 @@ pub fn why_failed(err: &str) -> &'static str {
 /// The model's reply, tried up to [`TRIES`] times with a wait between: the
 /// provider does fail once now and then, and a second try usually works. An
 /// empty reply counts as a failure. The error is the reason, in words.
-async fn ask_model(panel: &Panel, prompt: &str) -> Result<k::Reply, String> {
+pub(super) async fn ask_model(panel: &Panel, prompt: &str) -> Result<k::Reply, String> {
     let mut last = String::new();
     for attempt in 1..=TRIES {
         match panel.data.kalesh_summarise(prompt.to_string()).await {
@@ -1204,7 +1204,34 @@ pub mod fake {
         let fight = prompt.contains("#desi-banter");
         let flaky = prompt.contains("Channel: #flaky.");
         let down = prompt.contains("Channel: #down.");
+        // The Deep dive asks the same model through the same plumbing. A dive
+        // into kritika_x never answers, so the page's error box can be tested.
+        let dive = prompt.contains("The member: ");
+        let dive_down = prompt.contains("The member: kritika_x.");
         PROMPTS.lock().push(prompt);
+        if dive_down {
+            anyhow::bail!("HttpError: Http client error: error sending request for url (https://openrouter.ai/api/v1/chat/completions)");
+        }
+        if dive {
+            let text = serde_json::json!({
+                "overview": "Mostly in #general and #desi-banter, chatting about cricket and the koto. A steady week, nothing unusual.",
+                "topics": [{ "what": "the koto streak and how hard today's word was", "refs": [1] }],
+                "people": [{ "who": "Dev", "how": "trading RCB jokes most evenings" }],
+                "rhythm": "Busier late in the evening, quiet before noon.",
+                "places": "#general and #desi-banter, with a little voice in Lounge.",
+                "watch": [],
+                "thin": "",
+                "interpretation": ["Seems to be around less than they were a month ago."]
+            })
+            .to_string();
+            let input_tokens = super::super::super::super::notes_build::estimate_tokens(PROMPTS.lock().last().map(String::as_str).unwrap_or("")) as u64;
+            return Ok(Reply {
+                output_tokens: super::super::super::super::notes_build::estimate_tokens(&text) as u64,
+                text,
+                input_tokens,
+                model: "fake/main-model".into(),
+            });
+        }
         if down {
             anyhow::bail!("HttpError: Http client error: error sending request for url (https://openrouter.ai/api/v1/chat/completions)");
         }

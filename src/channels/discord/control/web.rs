@@ -196,6 +196,15 @@ pub trait PanelData: Send + Sync + 'static {
     fn voice_pairs(&self, _since: i64, _now: i64) -> Vec<super::super::activity::VoicePair> {
         Vec::new()
     }
+    /// Every stretch anybody spent in a voice room inside the window: what the
+    /// Deep dive works one member's sessions and their company out of.
+    fn voice_stays(&self, _start: i64, _end: i64, _now: i64) -> Vec<super::super::deepdive::VoiceStay> {
+        Vec::new()
+    }
+    /// House points a member took between two moments, by source, most first.
+    async fn points_between(&self, _id: u64, _from: i64, _to: i64) -> Vec<(String, i64)> {
+        Vec::new()
+    }
     /// The bot's own user id.
     fn bot_id(&self) -> Option<u64> {
         None
@@ -291,6 +300,11 @@ pub trait PanelData: Send + Sync + 'static {
     async fn kalesh_picture(&self, _message: u64, _n: usize) -> Option<super::super::msglog::Picture> {
         None
     }
+    /// The Deep dive: one member's own kept messages between two moments,
+    /// deleted and blocked ones in their places, oldest first.
+    async fn deepdive_messages(&self, _member: u64, _since_ms: i64, _until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        anyhow::bail!("the message log isn't open")
+    }
     /// The Kalesh page: everything kept from one channel between two moments, oldest first.
     async fn kalesh_channel(&self, _channel: u64, _since_ms: i64, _until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
         anyhow::bail!("the message log isn't open")
@@ -349,6 +363,7 @@ pub mod housecup;
 mod houses;
 mod insights;
 mod invites;
+mod deepdive;
 mod kalesh;
 mod left;
 mod media;
@@ -667,6 +682,16 @@ impl PanelData for LiveData {
         tokio::task::spawn_blocking(move || super::super::msglog::said_file(&reader.conn.lock(), &reader.root, message, n)).await.ok().flatten()
     }
 
+    async fn deepdive_messages(&self, member: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::msglog::SaidRow>> {
+        let reader = super::super::msglog::reader().ok_or_else(|| anyhow::anyhow!("the message log isn't open"))?;
+        let limit = super::super::deepdive::MAX_ROWS + 1;
+        tokio::task::spawn_blocking(move || {
+            super::super::kalesh::authors_between(&reader.conn.lock(), &[member], since_ms, until_ms, None, limit).map_err(anyhow::Error::from)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    }
+
     async fn msglog_coverage(&self) -> Option<super::super::msglog::Coverage> {
         let reader = super::super::msglog::reader()?;
         tokio::task::spawn_blocking(move || super::super::msglog::coverage(&reader.conn.lock()).ok()).await.ok().flatten()
@@ -746,6 +771,36 @@ impl PanelData for LiveData {
         let conn = db.lock();
         // now + 1: a room still open at this moment counts up to it.
         super::super::activity::voice_pairs(&conn, since, now + 1, now).unwrap_or_default()
+    }
+
+    fn voice_stays(&self, start: i64, end: i64, now: i64) -> Vec<super::super::deepdive::VoiceStay> {
+        let Some(db) = super::super::stats::db() else { return Vec::new() };
+        let conn = db.lock();
+        super::super::activity::voice_stays(&conn, start, end, now)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(user_id, channel_id, start, end)| super::super::deepdive::VoiceStay { user_id, channel_id, start, end })
+            .collect()
+    }
+
+    async fn points_between(&self, id: u64, from: i64, to: i64) -> Vec<(String, i64)> {
+        tokio::task::spawn_blocking(move || {
+            let Some(db) = super::super::house::db() else { return Vec::new() };
+            let conn = db.lock();
+            let mut stmt = match conn.prepare("SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND ts >= ?2 AND ts < ?3 GROUP BY source") {
+                Ok(stmt) => stmt,
+                Err(_) => return Vec::new(),
+            };
+            let rows = stmt.query_map(rusqlite::params![id as i64, from, to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+            let mut out: Vec<(String, i64)> = match rows {
+                Ok(rows) => rows.flatten().filter(|(_, n)| *n != 0).collect(),
+                Err(_) => return Vec::new(),
+            };
+            out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            out
+        })
+        .await
+        .unwrap_or_default()
     }
 
     fn bot_id(&self) -> Option<u64> {
@@ -1158,6 +1213,8 @@ pub fn router(panel: Panel) -> Router {
         .route("/kalesh/picture/{id}/{n}", get(kalesh::picture))
         .route("/kalesh/detections/{id}", get(kalesh::detection))
         .route("/kalesh/summarise", post(kalesh::summarise))
+        .route("/deepdive", get(deepdive::dive))
+        .route("/deepdive/summarise", post(deepdive::summarise))
         .route("/members", get(members::search))
         .route("/members/left", get(left::list))
         .route("/members/notes", get(members::noted))
@@ -1925,6 +1982,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(left::audit_entry(e));
             } else if e.key.starts_with("kalesh:") {
                 obj.extend(kalesh::audit_entry(e));
+            } else if e.key.starts_with("deepdive:") {
+                obj.extend(deepdive::audit_entry(e));
             } else if e.key.starts_with("invites:") {
                 obj.extend(invites::audit_entry(e));
             } else if e.key == "automod:flags" {

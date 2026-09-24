@@ -814,6 +814,35 @@ pub(crate) fn voice_pairs(conn: &Connection, start: i64, end: i64, now: i64) -> 
     Ok(pair_seconds(&real, &BOTS.lock().clone()))
 }
 
+/// Every stretch in every room inside `[start, end)`, everybody's, as
+/// `(user, room, start, end)` — the rows behind [`voice_pairs`] before they are
+/// folded into pairs. The Deep dive needs them whole, so that one member's
+/// sessions can be listed with the company each one had. Counted exactly as
+/// voice points are: the AFK room, excluded rooms and stretches over
+/// `MAX_SITTING` are nothing, deafened time is cut out when that rule is on,
+/// and a room still open counts up to `now`. Read-only.
+pub(crate) fn voice_stays(conn: &Connection, start: i64, end: i64, now: i64) -> rusqlite::Result<Vec<(u64, u64, i64, i64)>> {
+    let exclude: HashSet<u64> = super::control::ids("VIZIER_STATS_EXCLUDE_CHANNELS").into_iter().collect();
+    let afk = super::control::id("VIZIER_VOICE_AFK_CHANNEL");
+    // Company can't be known from one person's rows, so this reads everyone's.
+    let mut stmt = conn.prepare(
+        "SELECT user_id, action, channel_id, ts FROM voice_events WHERE ts >= ?1 AND ts < ?2 ORDER BY user_id, ts, msg_id",
+    )?;
+    let events: Vec<VoiceEvent> = stmt
+        .query_map(params![start - MAX_SITTING, end + MAX_SITTING], |r| {
+            Ok(VoiceEvent {
+                user: r.get::<_, i64>(0)? as u64,
+                left: r.get::<_, String>(1)? == "left",
+                room: r.get::<_, i64>(2)? as u64,
+                ts: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let real = undeafened_sittings(conn, &events, (start, end), &exclude, afk, now, None)?;
+    let bots = BOTS.lock().clone();
+    Ok(real.iter().filter(|s| !bots.contains(&s.user)).map(|s| (s.user, s.room, s.start, s.end)).collect())
+}
+
 /// The awards owed for one day: a chat point per tier reached and a voice point
 /// per full hour (with company, when that rule is on). The same rows always give
 /// the same list, and each key names the person, the day and the tier, so a

@@ -393,6 +393,13 @@ impl PanelData for FakeData {
         super::kalesh::fake::picture(message, n)
     }
 
+    /// The Deep dive reads the same log the Messages page does, not the Kalesh
+    /// fixture, so a dive and a look at someone's messages agree.
+    async fn deepdive_messages(&self, member: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
+        let limit = super::super::super::deepdive::MAX_ROWS + 1;
+        Ok(super::super::super::kalesh::authors_between(fake_log().store.lock().conn(), &[member], since_ms, until_ms, None, limit)?)
+    }
+
     async fn kalesh_channel(&self, channel: u64, since_ms: i64, until_ms: i64) -> anyhow::Result<Vec<super::super::super::msglog::SaidRow>> {
         super::kalesh::fake::channel(channel, since_ms, until_ms)
     }
@@ -492,6 +499,50 @@ impl PanelData for FakeData {
             }
         }
         out.into_iter().filter(|d| d.2 >= since).collect()
+    }
+
+    /// Voice stretches for the Deep dive: three rooms over the last few days,
+    /// some of them shared, and one for a member who has since left.
+    fn voice_stays(&self, start: i64, end: i64, _now: i64) -> Vec<super::super::super::deepdive::VoiceStay> {
+        let now = chrono::Utc::now().timestamp();
+        let (hour, day) = (3_600i64, 86_400i64);
+        let raw: &[(u64, u64, i64, i64)] = &[
+            // Lounge last night: Sameer for two hours, Dev for most of it, Riya briefly.
+            (2012, 41, now - 20 * hour, now - 18 * hour),
+            (2010, 41, now - 20 * hour, now - 19 * hour),
+            (2013, 41, now - 19 * hour, now - 19 * hour + 30),
+            // Gaming, two days ago, Sameer and Dev again.
+            (2012, 42, now - 2 * day, now - 2 * day + hour),
+            (2010, 42, now - 2 * day, now - 2 * day + hour),
+            // Sameer alone, five days ago.
+            (2012, 41, now - 5 * day, now - 5 * day + 40 * 60),
+            // Someone who has since left, on their last night here.
+            (3003, 41, now - 3 * day, now - 3 * day + 90 * 60),
+            (2010, 41, now - 3 * day, now - 3 * day + 45 * 60),
+        ];
+        raw.iter()
+            .filter(|(_, _, s, e)| *e > start && *s < end)
+            .map(|(user_id, channel_id, s, e)| super::super::super::deepdive::VoiceStay {
+                user_id: *user_id,
+                channel_id: *channel_id,
+                start: *s,
+                end: *e,
+            })
+            .collect()
+    }
+
+    async fn points_between(&self, id: u64, from: i64, to: i64) -> Vec<(String, i64)> {
+        let conn = fake_ledger(chrono::Utc::now().timestamp()).lock();
+        let mut stmt = match conn.prepare("SELECT source, SUM(points) FROM ledger WHERE user_id = ?1 AND ts >= ?2 AND ts < ?3 GROUP BY source") {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<(String, i64)> = stmt
+            .query_map(rusqlite::params![id as i64, from, to], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map(|rows| rows.flatten().filter(|(_, n)| *n != 0).collect())
+            .unwrap_or_default();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
     }
 
     fn hour_counts(&self, _since_day: &str) -> Vec<(u64, i64, i64, i64)> {
@@ -1270,6 +1321,9 @@ fn fake_log() -> &'static FakeLog {
             // Someone who only ever posted in #safe-corner: never findable at all.
             (6 * hour, 3020, "vent_only", SAFE, None, "safe-corner", "SECRET-SAFE words from someone who left"),
             (4 * hour, 3020, "vent_only", 77, Some(SAFE), "vent", "SECRET-SAFE more of the same"),
+            // Long gone: a deep dive has to move its window back to find these.
+            (100 * 24 * hour, 3010, "old_timer", 21, None, "general", "signing off for good, it was fun"),
+            (100 * 24 * hour + hour, 3010, "old_timer", 21, None, "general", "who is taking over the quiz nights"),
         ];
         for (ago, uid, who, channel, parent, name, text) in leavers {
             let mut m = msg(now - ago, *uid, at(*channel, name, *parent), text, vec![]);
@@ -2333,6 +2387,192 @@ async fn pages_take_a_member_who_has_left() {
         .iter()
         .any(|e| e["key"] == "messages:look" && e["change"].as_str().is_some_and(|c| c.contains("@notyourbhai")));
     assert!(looked, "the look at a member who left is in the activity log");
+}
+
+/// The Deep dive: one member, one window, everything the bot kept about them.
+#[tokio::test]
+async fn a_deep_dive_reads_one_member_over_a_period() {
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    let (status, dive, _) = call(&app, "GET", "/api/deepdive?member=2012&days=30", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{dive}");
+    assert_eq!(dive["member"]["name"], "Sameer");
+    assert_eq!(dive["member"]["in_server"], true);
+    assert_eq!(dive["period"]["days"], "30");
+    assert_eq!(dive["period"]["shifted"], false);
+    assert_eq!(dive["period"]["words"], "last 30 days");
+
+    // Their messages, oldest first, numbered, each with where it was said.
+    let msgs = dive["messages"].as_array().unwrap();
+    assert!(msgs.len() >= 4, "{dive}");
+    assert_eq!(msgs[0]["n"], 1);
+    assert!(msgs.windows(2).all(|w| w[0]["ts_ms"].as_i64() <= w[1]["ts_ms"].as_i64()), "in time order");
+    assert!(msgs.iter().all(|m| m["member"]["id"] == "2012"), "only theirs");
+    assert!(msgs.iter().all(|m| m["channel"]["name"].is_string()), "the channel is on every one");
+    assert!(msgs.iter().any(|m| m["text"].as_str().unwrap().contains("snitch drop")), "{dive}");
+    // A deleted one is back in its place, marked, with no link to jump to.
+    let deleted = msgs.iter().find(|m| m["gone"]["kind"] == "deleted").expect("a deleted message of theirs");
+    assert!(deleted["url"].is_null(), "a deleted message is not in Discord any more");
+    // Pictures come back as thumbnails the panel serves.
+    assert!(msgs.iter().any(|m| m["images"].as_array().is_some_and(|i| !i.is_empty())), "{dive}");
+
+    // #safe-corner is not in it, whatever was written straight into the log.
+    assert!(!dive.to_string().contains("SECRET-SAFE"), "something from a channel that is never shown got out");
+
+    // Voice: the rooms they sat in, and who was in there with them.
+    let voice = &dive["voice"];
+    let sessions = voice["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 3, "{voice}");
+    let lounge = sessions.iter().find(|s| s["secs"] == 7_200).expect("last night in the Lounge");
+    assert_eq!(lounge["channel"]["name"], "Lounge");
+    assert_eq!(lounge["words"], "2h");
+    let with: Vec<&str> = lounge["with"].as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+    assert_eq!(with, vec!["Dev"], "half an hour counts as company; thirty seconds does not");
+    assert_eq!(voice["partners"][0]["name"], "Dev");
+    assert_eq!(voice["total_secs"], 7_200 + 3_600 + 2_400);
+
+    // The plain shape of their days: no model anywhere near it.
+    let shape = &dive["shape"];
+    assert_eq!(shape["messages"], msgs.len());
+    assert_eq!(shape["per_day"].as_array().unwrap().len(), 31, "a row for every day of the window");
+    assert_eq!(shape["hours"].as_array().unwrap().len(), 24);
+    assert!(shape["channels"].as_array().unwrap().iter().any(|c| c["name"] == "memes"), "{shape}");
+    assert!(shape["deleted"].as_i64().unwrap() >= 1);
+    assert!(shape["ship_sheet"].is_object() || shape["ship_sheet"].is_null());
+
+    // The summary is not written until it is asked for, and the page carries
+    // the same "read the messages first" note the Kalesh page does.
+    assert!(dive["summary"].is_null() || dive["summary"]["model"].is_string());
+    assert!(dive["read_first"].as_str().unwrap().contains("Read the messages"));
+
+    // The look is one line in the activity log, naming who was looked at.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let entry = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["key"] == "deepdive:look" && e["change"] == "@Sameer · last 30 days")
+        .expect("this dive is in the log");
+    assert_eq!(entry["label"], "Deep dive into a member");
+    assert_eq!(entry["section"]["id"], "deepdive");
+    assert!(entry["new"].is_null(), "what was read never goes in the log");
+
+    // Guards: a member nobody has ever seen, a period that isn't offered, nobody at all.
+    for (path, want) in [
+        ("/api/deepdive?member=424242&days=7", StatusCode::NOT_FOUND),
+        ("/api/deepdive?member=2012&days=9", StatusCode::BAD_REQUEST),
+        ("/api/deepdive?days=7", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body, _) = call(&app, "GET", path, Some(&session), None, false).await;
+        assert_eq!(status, want, "{path} gave {body}");
+    }
+    let (status, _, _) = call(&app, "GET", "/api/deepdive?member=2012", Some(&session_for(MEMBER)), None, false).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "mods only, like every page");
+}
+
+/// A member who has left: the window moves back to their last days here rather
+/// than showing an empty one, and everything else works as it does for anyone.
+#[tokio::test]
+async fn a_deep_dive_follows_a_member_who_has_left() {
+    let app = panel();
+    let session = session_for(ADMIN);
+
+    // Gone two days ago, still inside the plain window: nothing moves.
+    let (status, recent, _) = call(&app, "GET", "/api/deepdive?member=3003&days=7", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{recent}");
+    assert_eq!(recent["member"]["name"], "notyourbhai");
+    assert_eq!(recent["member"]["in_server"], false, "the page can say they are gone");
+    assert!(recent["member"]["left_ts"].as_i64().is_some(), "and when: {recent}");
+    assert_eq!(recent["period"]["shifted"], false);
+    assert_eq!(recent["messages"].as_array().unwrap().len(), 2, "{recent}");
+    // Their last night in voice is there too, with who was in with them.
+    assert_eq!(recent["voice"]["sessions"][0]["with"][0]["name"], "Dev", "{}", recent["voice"]);
+
+    // Gone a hundred days ago: the plain week would be empty, so it moves.
+    let (status, old, _) = call(&app, "GET", "/api/deepdive?member=3010&days=7", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{old}");
+    assert_eq!(old["member"]["name"], "old_timer");
+    assert_eq!(old["period"]["shifted"], true, "it moved back to them: {}", old["period"]);
+    assert_eq!(old["period"]["to"].as_i64().unwrap() - old["period"]["from"].as_i64().unwrap(), 7 * 86_400);
+    let texts: Vec<&str> = old["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(texts.len(), 2, "their last days here, not an empty week: {old}");
+    assert!(texts.iter().any(|t| t.contains("signing off for good")));
+    assert!(old["period"]["words"].as_str().unwrap().contains(" to "), "a moved window says its dates");
+
+    // Two dates of a mod's own are taken as given and never moved.
+    let now = chrono::Utc::now().timestamp();
+    let (from, to) = (now - 3 * 86_400, now);
+    let (status, ranged, _) =
+        call(&app, "GET", &format!("/api/deepdive?member=3003&from={from}&to={to}"), Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::OK, "{ranged}");
+    assert_eq!(ranged["period"]["custom"], true);
+    assert_eq!(ranged["period"]["shifted"], false);
+    assert_eq!((ranged["period"]["from"].as_i64(), ranged["period"]["to"].as_i64()), (Some(from), Some(to)));
+
+    // Somebody who only ever posted in #safe-corner is nobody as far as the
+    // panel is concerned: there is no dive to open, and nothing leaks saying so.
+    let (status, quiet, _) = call(&app, "GET", "/api/deepdive?member=3020&days=30", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{quiet}");
+    assert!(!quiet.to_string().contains("SECRET-SAFE") && !quiet.to_string().contains("vent_only"));
+}
+
+/// The summary: written once by the model, stored, and handed back the second
+/// time. A model that won't answer reaches the page as words, not an empty box.
+#[tokio::test]
+async fn a_deep_dive_summary_is_written_once_and_kept() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let ask = |member: &str| json!({ "member": member, "days": "30" });
+
+    let before = super::kalesh::fake::PROMPTS.lock().len();
+    let (status, first, _) = call(&app, "POST", "/api/deepdive/summarise", Some(&session), Some(ask("2012")), true).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["reused"], false);
+    let s = &first["summary"];
+    assert!(s["summary"]["overview"].as_str().unwrap().contains("#general"), "{s}");
+    assert_eq!(s["summary"]["watch"], json!([]), "nothing to raise, and nothing invented");
+    assert_eq!(s["summary"]["interpretation"].as_array().unwrap().len(), 1);
+    assert_eq!(s["model"], "fake/main-model");
+    assert!(s["input_tokens"].as_u64().unwrap() > 0 && s["messages"].as_u64().unwrap() > 0);
+
+    // What the model was actually sent: their messages, no #safe-corner, and
+    // the voice rooms with no word of what was said in them.
+    let prompt = super::kalesh::fake::PROMPTS.lock().last().cloned().unwrap();
+    assert!(prompt.contains("The member: Sameer."), "{prompt}");
+    assert!(prompt.contains("Voice: 3 sessions"), "the voice rooms are in it");
+    assert!(prompt.contains("with Dev"), "and the company");
+    assert!(!prompt.contains("SECRET-SAFE"), "#safe-corner never reaches a model");
+    assert!(prompt.contains("do not diagnose") || prompt.contains("Describe; do not diagnose"));
+
+    // Asked again, the stored one comes back and the model is not called.
+    let calls = super::kalesh::fake::PROMPTS.lock().len();
+    let (status, again, _) = call(&app, "POST", "/api/deepdive/summarise", Some(&session), Some(ask("2012")), true).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["reused"], true, "the same window is never paid for twice");
+    assert_eq!(again["summary"]["id"], first["summary"]["id"]);
+    assert_eq!(super::kalesh::fake::PROMPTS.lock().len(), calls, "the model was not asked again");
+    assert!(calls > before);
+
+    // A model that will not answer reaches the page as words, after the tries.
+    let (status, failed, _) = call(&app, "POST", "/api/deepdive/summarise", Some(&session), Some(ask("3002")), true).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{failed}");
+    let says = failed["error"].as_str().or_else(|| failed.as_str()).unwrap_or_default().to_string() + &failed.to_string();
+    assert!(says.contains("network error"), "it says why: {failed}");
+    assert!(says.contains("Try again"), "and what to do: {failed}");
+
+    // Nothing to summarise is said plainly rather than sent to a model. 3009
+    // is in the join log but the message log never kept a word from them.
+    let (status, empty, _) =
+        call(&app, "POST", "/api/deepdive/summarise", Some(&session), Some(json!({ "member": "3009", "days": "30" })), true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{empty}");
+    assert!(empty.to_string().contains("nothing to summarise"), "{empty}");
+
+    // The summary is in the activity log, told apart from a plain look.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let entry = audit.as_array().unwrap().iter().find(|e| e["key"] == "deepdive:summary").expect("the summary is logged");
+    assert_eq!(entry["label"], "Summarised a deep dive");
+    assert!(entry["change"].as_str().unwrap().contains("@Sameer"));
 }
 
 #[tokio::test]

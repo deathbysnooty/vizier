@@ -566,6 +566,7 @@
       navItem('#/messages', icon('message'), 'Messages'),
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
       navItem('#/kalesh', icon('flame'), 'Kalesh'),
+      navItem('#/deepdive', icon('search'), 'Deep dive'),
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/invites', icon('userplus'), 'Invites'),
@@ -616,6 +617,7 @@
       ['Search messages', '#/messages?q=', 'search', 'Find who said something and when, in every channel or in the long archive'],
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
       ['Kalesh', '#/kalesh', 'flame', 'Look back at a fight between two members: the messages, and a neutral summary on request'],
+      ['Deep dive', '#/deepdive', 'search', 'One member over a period: every message, their voice rooms and company, the shape of their days, and what the bot makes of it'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Invites', '#/invites', 'userplus', 'Which invite each new member joined through, who made it, and who each inviter brought in'],
@@ -761,6 +763,7 @@
       case 'messages': case 'search': renderMessages(page, r.q); break;
       case 'deleted': renderDeleted(page, r.q); break;
       case 'kalesh': renderKalesh(page, r); break;
+      case 'deepdive': renderDeepDive(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
       case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
       case 'automod': renderAutomod(page, r.q); break;
@@ -2348,6 +2351,345 @@
         (m.files || []).length ? h('p', { class: 'msg-hit-files' }, icon(m.files.every((f) => f.image) ? 'image' : 'tag'), m.files.map((f) => f.name).join(', ')) : null),
       m.url ? h('a', { class: 'btn sm ghost kalesh-open', href: m.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open message ' + m.n + ' in Discord', title: 'Open in Discord' }, icon('external'), h('span', { class: 'hide-sm' }, 'Discord'))
         : h('span', { class: 'kalesh-open none', title: m.gone ? (m.gone.kind === 'blocked' ? 'Never posted, so not in Discord' : 'Deleted, so no longer in Discord') : 'No link' }, m.gone ? (m.gone.kind === 'blocked' ? '🛑' : '🗑') : ''));
+  }
+
+  // --- deep dive ----------------------------------------------------------------------
+
+  const DIVE_PERIODS = [['3', '3 days'], ['7', '7 days'], ['14', '14 days'], ['30', '30 days']];
+  const DIVE_WATCH = { argument: 'Argument', going_quiet: 'Gone quiet', rule_problem: 'Rule problem', other: 'Worth a look' };
+
+  /** The page's own link, so the period and the member live in the address. */
+  function diveHref(st) {
+    const p = new URLSearchParams();
+    if (st.member) p.set('member', st.member);
+    if (st.from && st.to) { p.set('from', st.from); p.set('to', st.to); }
+    else if (st.days !== '7') p.set('days', st.days);
+    const qs = p.toString();
+    return '#/deepdive' + (qs ? '?' + qs : '');
+  }
+
+  function renderDeepDive(page, rq) {
+    document.title = 'Deep dive · Loduchand';
+    const days = rq.get('days');
+    const st = {
+      member: (rq.get('member') || '').trim(),
+      days: DIVE_PERIODS.some((x) => x[0] === days) ? days : '7',
+      from: (rq.get('from') || '').trim(),
+      to: (rq.get('to') || '').trim(),
+    };
+    const custom = !!(st.from && st.to);
+    const apply = (over) => navigate(diveHref(Object.assign({}, st, over)));
+
+    page.appendChild(pageHead('Deep dive',
+      'One member, one period, in one screen: what they said and where, the voice rooms they sat in and who was in there with them, the shape of their days — and, on a button, what the bot makes of it.'));
+
+    // Who, and over what.
+    const pick = h('button', { class: 'btn picker-btn', type: 'button' }, icon('user'), h('span', { class: 'grow' }, 'Pick a member'));
+    const chosen = h('span', { class: 'dive-chosen' });
+    const fillChosen = (m) => {
+      clear(chosen);
+      if (!m) return;
+      append(chosen, [avatar(m.avatar, m.name, 'xs'), h('b', null, m.name), m.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null]);
+    };
+    if (st.member) memberById(st.member).then(fillChosen);
+    pick.addEventListener('click', () => openPicker(pick, {
+      title: 'Deep dive into', placeholder: 'Search members by name or paste an ID', debounce: 180,
+      empty: 'Type a name. Members who have left are in here too.',
+      load: memberItems, onPick: (it) => apply({ member: it.id }),
+    }));
+    const period = segmented(DIVE_PERIODS, st.days, 'Period', (v) => apply({ days: v, from: '', to: '' }));
+    const fromEl = h('input', { type: 'date', value: st.from ? istDateInput(+st.from) : '', 'aria-label': 'From' });
+    const toEl = h('input', { type: 'date', value: st.to ? istDateInput(+st.to) : '', 'aria-label': 'To' });
+    const useRange = () => {
+      const from = dateInputToTs(fromEl.value), to = dateInputToTs(toEl.value);
+      if (!from || !to) { toast('Pick both dates.', 'error'); return; }
+      if (to <= from) { toast('The range ends before it starts.', 'error'); return; }
+      apply({ from: String(from), to: String(to + 86399) });
+    };
+    page.appendChild(h('form', { class: 'card msg-search dive-filters', role: 'search', onsubmit: (e) => { e.preventDefault(); useRange(); } },
+      h('div', { class: 'msg-search-filters' },
+        h('div', { class: 'dive-who' }, pick, chosen),
+        period,
+        h('div', { class: 'dive-range' }, h('span', null, 'or'), fromEl, h('span', null, '→'), toEl,
+          h('button', { class: 'btn sm', type: 'submit' }, 'Use these dates'),
+          custom ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => apply({ from: '', to: '' }) }, 'Clear') : null))));
+
+    if (!st.member) {
+      page.appendChild(h('div', { class: 'card empty' }, icon('search'), h('h3', null, 'Pick a member'),
+        h('p', null, 'Anyone the bot has seen — including members who have left, whose messages it still has.')));
+      return;
+    }
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading everything about them…')));
+    page.appendChild(holder);
+    const p = new URLSearchParams({ member: st.member });
+    if (custom) { p.set('from', st.from); p.set('to', st.to); } else p.set('days', st.days);
+    api('GET', '/deepdive?' + p.toString()).then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      fillChosen(d.member);
+      document.title = d.member.name + ' · Deep dive · Loduchand';
+      drawDive(holder, d, st);
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'),
+        h('h3', null, e.status === 404 ? 'Nothing to dive into' : 'Couldn’t read this member'), h('p', null, e.message)));
+    });
+  }
+
+  /** "2026-09-24" in India time, for a date input. */
+  function istDateInput(ts) {
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: IST, year: 'numeric', month: '2-digit', day: '2-digit' });
+    return p.format(new Date(ts * 1000));
+  }
+
+  /** The start of that India day, in unix seconds. */
+  function dateInputToTs(value) {
+    if (!value) return 0;
+    const t = Date.parse(value + 'T00:00:00+05:30');
+    return isNaN(t) ? 0 : Math.floor(t / 1000);
+  }
+
+  function drawDive(holder, d, st) {
+    const m = d.member;
+    const gone = m.in_server === false;
+    const head = h('section', { class: 'card profile-head dive-head', style: m.house ? '--house:' + m.house.colour : '' },
+      avatar(m.avatar, m.name, 'xl'),
+      h('div', { class: 'grow' },
+        h('div', { class: 'title-row' }, h('h1', null, m.name),
+          m.house ? h('span', { class: 'house-chip big' }, m.house.crest + ' ' + m.house.name) : null,
+          gone ? h('span', { class: 'badge paused' }, icon('userminus'), m.left_ts ? 'Left the server ' + dayMonth(m.left_ts) : 'Not in the server') : null),
+        h('p', { class: 'profile-sub' }, d.period.words, h('span', { class: 'field-key' }, m.id)),
+        d.period.shifted ? h('p', { class: 'dive-shifted' }, icon('clock'),
+          'They are gone, so this is their last ' + plural(Math.round((d.period.to - d.period.from) / 86400), 'day') + ' on the server rather than an empty week.') : null,
+        h('div', { class: 'profile-dates' },
+          h('a', { class: 'open-link', href: '#/members/' + m.id }, icon('user'), 'Their profile'),
+          h('a', { class: 'open-link', href: '#/messages?member=' + encodeURIComponent(m.id) }, icon('message'), 'All their messages'),
+          h('a', { class: 'open-link', href: '#/deleted?member=' + encodeURIComponent(m.id) }, icon('trash'), 'Deleted messages'))));
+    holder.appendChild(head);
+
+    const sh = d.shape;
+    holder.appendChild(h('div', { class: 'tiles dive-tiles' },
+      tile('Messages', 'message', numberFmt.format(sh.messages), d.cut ? 'the newest ' + numberFmt.format(d.max_rows) : d.period.words),
+      tile('Voice', 'voice', d.voice.total_secs ? d.voice.total_words : '—', d.voice.sessions.length ? plural(d.voice.sessions.length, 'session') : 'not in voice'),
+      tile('House points', 'trophy', fmtPoints(sh.points_total), plural(sh.points.length, 'source')),
+      tile('Gone', 'trash', numberFmt.format(sh.deleted + sh.blocked), sh.deleted + ' deleted · ' + sh.blocked + ' blocked')));
+
+    holder.appendChild(h('div', { class: 'banner inline kalesh-warning', role: 'note' }, icon('alert'),
+      h('p', null, h('b', null, 'Read the messages before acting. '), h('span', null, d.read_first))));
+
+    // --- the summary ---------------------------------------------------------------
+    const summaryBox = h('div', { class: 'kalesh-summary-box' });
+    holder.appendChild(summaryBox);
+    const byN = (n) => d.messages[n - 1];
+    const jump = (msg) => {
+      const el = msg && document.getElementById('dmsg-' + msg.id);
+      if (!el) return;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    };
+    const drawSummary = (s, note) => {
+      clear(summaryBox);
+      summaryBox.appendChild(s ? diveSummaryCard(s, d, byN, jump, note)
+        : diveAskCard(d, st, (got) => drawSummary(got.summary, got.reused ? 'Already summarised — this is the stored one, nothing new was spent.' : null)));
+    };
+    drawSummary(d.summary, null);
+
+    // --- the shape of their days ----------------------------------------------------
+    const perDay = sh.per_day || [];
+    const dayMax = Math.max(1, ...perDay.map((x) => x.messages));
+    const bars = h('div', { class: 'dive-days', role: 'img', 'aria-label': 'Messages per day over the period' },
+      perDay.map((x) => {
+        const bar = h('span', { class: 'dive-day', style: '--v:' + Math.max(x.messages ? 6 : 2, Math.round((x.messages / dayMax) * 100)) + '%' });
+        bar.addEventListener('mousemove', (e) => showTip(e, [x.day, plural(x.messages, 'message')]));
+        bar.addEventListener('mouseleave', hideTip);
+        return bar;
+      }));
+    const hours = sh.hours || [];
+    const hmax = Math.max(1, ...hours);
+    const peak = hours.indexOf(Math.max(...hours));
+    const spark = h('div', { class: 'hours', role: 'img', 'aria-label': 'Messages by hour, India time' },
+      hours.map((n, i) => {
+        const bar = h('span', { class: 'hour' + (i === peak && n ? ' peak' : ''), style: '--v:' + Math.max(n ? 6 : 2, Math.round((n / hmax) * 100)) + '%' });
+        bar.addEventListener('mousemove', (e) => showTip(e, [String(i).padStart(2, '0') + ':00–' + String((i + 1) % 24).padStart(2, '0') + ':00 IST', plural(n, 'message')]));
+        bar.addEventListener('mouseleave', hideTip);
+        return bar;
+      }));
+    const chMax = Math.max(1, ...sh.channels.map((c) => c.messages));
+    const ptMax = Math.max(1, ...sh.points.map((x) => Math.abs(x.points)));
+    holder.appendChild(card('dive-shape', 'The shape of it', 'Plain counts. Nothing here is a model’s reading.', h('div', { class: 'card-body pad' },
+      h('h4', { class: 'mini-title' }, 'Messages a day', h('span', null, perDay.length ? perDay[0].day + ' → ' + perDay[perDay.length - 1].day : '')),
+      bars,
+      h('div', { class: 'two-mini' },
+        h('div', null, h('h4', { class: 'mini-title' }, 'Busiest hours', h('span', null, hours.some(Boolean) ? 'peak ' + String(peak).padStart(2, '0') + ':00' : '')),
+          spark, h('div', { class: 'range-scale' }, h('span', null, '00'), h('span', null, '06'), h('span', null, '12'), h('span', null, '18'), h('span', null, '23'))),
+        h('div', null, h('h4', { class: 'mini-title' }, 'Where', h('span', null, 'channels')),
+          sh.channels.length ? h('ul', { class: 'hbars compact' }, sh.channels.map((c) => h('li', null,
+            h('span', { class: 'hb-label' }, '#' + (c.name || 'unknown')),
+            h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.max(2, (c.messages / chMax) * 100) + '%' })),
+            h('b', null, numberFmt.format(c.messages))))) : h('p', { class: 'empty-small' }, 'Nothing kept in this period.'))),
+      sh.points.length ? h('div', null, h('h4', { class: 'mini-title' }, 'Points in the period', h('span', null, fmtPoints(sh.points_total) + ' in all')),
+        h('ul', { class: 'hbars compact' }, sh.points.map((x) => h('li', null,
+          h('span', { class: 'hb-label' }, sourceLabel(x.source)),
+          h('span', { class: 'hb-track' }, h('i', { style: 'width:' + Math.max(2, (Math.abs(x.points) / ptMax) * 100) + '%' })),
+          h('b', null, fmtPoints(x.points)))))) : null)));
+
+    // --- voice ------------------------------------------------------------------------
+    const v = d.voice;
+    const vBody = h('div', { class: 'card-body pad' });
+    if (!v.sessions.length) {
+      vBody.appendChild(h('p', { class: 'empty-small' }, 'They were not in voice at all in this period.'));
+    } else {
+      if (v.partners.length) {
+        vBody.appendChild(h('div', { class: 'dive-partners' }, h('span', { class: 'mini-title' }, 'Mostly with'),
+          v.partners.map((p) => h('span', { class: 'chip' }, avatar(p.avatar, p.name, 'xs'),
+            h('span', { class: 'chip-text' }, p.name), p.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null,
+            h('small', null, p.words)))));
+      }
+      vBody.appendChild(h('ul', { class: 'dive-sessions' }, v.sessions.slice().reverse().map((s) => h('li', null,
+        h('span', { class: 'dive-room' }, icon('voice'), s.channel.name || ('room ' + s.channel.id)),
+        h('span', { class: 'dive-when' }, msgWhen(s.start), ' → ', kaleshClock(s.end)),
+        h('b', { class: 'dive-secs' }, s.words),
+        h('span', { class: 'dive-with' }, s.with.length
+          ? ['with ', s.with.map((w, i) => [i ? ', ' : '', h('a', { href: '#/deepdive?member=' + w.id }, w.name)])]
+          : h('i', null, 'alone'))))));
+    }
+    const vSub = v.sessions.length
+      ? v.total_words + ' across ' + plural(v.sessions.length, 'session') + ', newest first. The bot never records what is said in voice.'
+      : 'Nothing in this period. The bot never records what is said in voice either way.';
+    holder.appendChild(card('dive-voice', 'In voice', vSub, vBody));
+
+    // --- their messages ----------------------------------------------------------------
+    const rows = h('div', { class: 'kalesh-exchange dive-messages' });
+    let lastDay = null;
+    d.messages.forEach((msg) => {
+      const day = dayMonth(msg.ts);
+      if (day !== lastDay) { rows.appendChild(h('div', { class: 'kalesh-divider' }, h('span', null, day))); lastDay = day; }
+      rows.appendChild(diveMessage(msg));
+    });
+    if (!d.messages.length) rows.appendChild(h('div', { class: 'empty' }, icon('message'), h('h3', null, 'Nothing kept'),
+      h('p', null, 'The message log has nothing from them in this period. #safe-corner is never kept, so nothing said there is here or anywhere else on the panel.')));
+    const legend = h('div', { class: 'kalesh-legend' },
+      sh.deleted ? h('span', null, '🗑 Deleted later') : null,
+      sh.blocked ? h('span', null, '🛑 Blocked by AutoMod') : null,
+      h('span', null, plural(d.count, 'message') + ' in time order'));
+    holder.appendChild(card('dive-messages', 'Everything they said', 'In order, oldest first, the whole period at once. #safe-corner is never in here.'
+      + (d.cut ? ' Only the newest ' + numberFmt.format(d.max_rows) + ' are shown.' : ''), [legend, rows], { cls: 'kalesh-exchange-card dive-scroll' }));
+  }
+
+  function diveMessage(m) {
+    const member = m.member || {};
+    const name = member.name || 'Member ' + member.id;
+    const d = new Date(m.ts * 1000);
+    const reply = m.reply_to ? h('p', { class: 'msg-hit-reply' }, icon('reply'), h('span', null, 'replying to ',
+      h('b', null, '@' + (m.reply_to.author || 'someone')), m.reply_to.text ? ': “' + m.reply_to.text + '”' : '')) : null;
+    const images = m.images || [];
+    const thumbs = images.length ? h('div', { class: 'msglog-thumbs kalesh-thumbs' + (images.length === 1 ? ' one' : '') }, images.map((im, i) =>
+      h('button', { class: 'msglog-thumb', type: 'button', 'aria-label': 'Open picture ' + (im.name || i + 1), onclick: () => openLightbox(images, i) },
+        h('img', { src: im.url, alt: im.name || '', loading: 'lazy' })))) : null;
+    const stickers = (m.stickers || []).length ? h('div', { class: 'kalesh-stickers' }, m.stickers.map((st) => st.url
+      ? h('img', { class: 'kalesh-sticker', src: st.url, alt: 'Sticker: ' + st.name, title: 'Sticker: ' + st.name, loading: 'lazy', referrerpolicy: 'no-referrer' })
+      : h('span', { class: 'msglog-file' }, icon('smile'), h('span', { class: 'name' }, 'Sticker: ' + st.name)))) : null;
+    return h('article', { class: 'kalesh-msg dive-msg' + (m.gone ? ' is-' + m.gone.kind : ''), id: 'dmsg-' + m.id },
+      h('span', { class: 'kalesh-n', 'aria-label': 'Message ' + m.n }, '#' + m.n),
+      h('div', { class: 'kalesh-msg-main' },
+        h('div', { class: 'msg-hit-head' },
+          m.channel && m.channel.name ? h('span', { class: 'inline-ref' }, h('span', { class: 'glyph' }, '#'), m.channel.name) : null,
+          h('time', { class: 'msg-hit-time', datetime: d.toISOString(), title: fmtFull.format(d) + ' IST' }, kaleshClock(m.ts)),
+          goneBadge(m.gone, m.ts)),
+        reply,
+        m.text ? h('p', { class: 'msg-hit-text' }, m.text) : null,
+        thumbs, stickers,
+        (m.files || []).length ? h('p', { class: 'msg-hit-files' }, icon(m.files.every((f) => f.image) ? 'image' : 'tag'), m.files.map((f) => f.name).join(', ')) : null),
+      m.url ? h('a', { class: 'btn sm ghost kalesh-open', href: m.url, target: '_blank', rel: 'noopener', 'aria-label': 'Open message ' + m.n + ' in Discord', title: 'Open in Discord' }, icon('external'), h('span', { class: 'hide-sm' }, 'Discord'))
+        : h('span', { class: 'kalesh-open none', title: m.gone ? (m.gone.kind === 'blocked' ? 'Never posted, so not in Discord' : 'Deleted, so no longer in Discord') : 'No link' }, m.gone ? (m.gone.kind === 'blocked' ? '🛑' : '🗑') : ''));
+  }
+
+  function diveAskCard(d, st, done) {
+    const btn = h('button', { class: 'btn primary lg', type: 'button' }, icon('spark'), 'What have they been up to?');
+    const plain = d.count
+      ? 'The model reads all ' + plural(d.count, 'message') + ' in order, with the channels, replies and the voice rooms they sat in' + ((d.shape.deleted || d.shape.blocked) ? ', deleted and blocked ones marked' : '') + '. Nothing from #safe-corner is ever sent.'
+      : 'There is nothing kept from this period, so there is nothing to summarise.';
+    const status = h('p', { class: 'hint', role: 'status' }, plain);
+    const failure = h('div', { class: 'kalesh-failed', role: 'alert', hidden: true });
+    const section = h('section', { class: 'card kalesh-ask', 'aria-label': 'Summary', 'aria-busy': 'false' });
+    let timer = null;
+    const run = async () => {
+      btn.disabled = true;
+      failure.hidden = true;
+      section.classList.add('busy');
+      section.setAttribute('aria-busy', 'true');
+      clear(btn);
+      append(btn, [h('span', { class: 'spinner' }), 'Summarising…']);
+      const started = Date.now();
+      const tick = () => { status.textContent = 'Reading ' + plural(d.count, 'message') + '… ' + Math.round((Date.now() - started) / 1000) + 's. This can take a minute or two; if the model hiccups it is asked again. It is kept once written, so nobody pays for it twice.'; };
+      tick();
+      timer = setInterval(() => { if (!section.isConnected) { clearInterval(timer); return; } tick(); }, 1000);
+      const body = { member: d.member.id };
+      if (st.from && st.to) Object.assign(body, { from: st.from, to: st.to }); else body.days = st.days;
+      try {
+        const got = await api('POST', '/deepdive/summarise', body);
+        clearInterval(timer);
+        if (!got || !got.summary) throw new ApiError('The summary came back empty. Nothing was saved — try again.', 0);
+        done(got);
+        refreshAudit();
+      } catch (e) {
+        clearInterval(timer);
+        section.classList.remove('busy');
+        section.setAttribute('aria-busy', 'false');
+        btn.disabled = false;
+        clear(btn);
+        append(btn, [icon('restart'), 'Try again']);
+        status.textContent = plain;
+        clear(failure);
+        append(failure, [icon('alert'), h('div', { class: 'grow' }, h('b', null, 'No summary this time. '), h('span', null, e.message || 'The summary model didn’t answer — try again.'))]);
+        failure.hidden = false;
+        toast(e.message || 'The summary didn’t come back.', 'error');
+      }
+    };
+    btn.addEventListener('click', run);
+    btn.disabled = !d.count;
+    append(section, h('div', { class: 'kalesh-ask-body' },
+      h('div', { class: 'grow' }, h('h2', null, 'What they’ve been up to'),
+        h('p', null, 'A few neutral paragraphs: what they talk about, who with, how the period went for them, and anything a moderator would want to know — a fight brewing, somebody going quiet, a rule problem — linked to the message it came from. It says so when there is too little to go on.'),
+        status, failure),
+      btn));
+    return section;
+  }
+
+  function diveSummaryCard(s, d, byN, jump, note) {
+    const sum = s.summary;
+    const refs = (list) => (list || []).map((n) => byN(n)).filter(Boolean).map((msg, i) =>
+      h('button', { class: 'kalesh-ref' + (msg.gone ? ' ' + msg.gone.kind : ''), type: 'button', title: 'Show message ' + list[i], onclick: () => jump(msg) }, '#' + list[i]));
+    const parts = [h('p', { class: 'kalesh-meta' }, 'Summarised · ' + msgWhen(s.run_ts) + ' · ' + s.model + ' · '
+      + numberFmt.format(s.input_tokens) + ' in + ' + numberFmt.format(s.output_tokens) + ' out tokens')];
+    if (note) parts.push(h('p', { class: 'kalesh-note' }, icon('info'), note));
+    if (s.trimmed) parts.push(h('p', { class: 'kalesh-note warn' }, icon('alert'), 'Trimmed: the model saw ' + numberFmt.format(s.sent)
+      + ' of ' + numberFmt.format(s.messages) + ' messages — the opening, the busiest run and the end. What was left out is not in this summary.'));
+    if (!sum) {
+      parts.push(h('p', { class: 'kalesh-sec-title' }, 'The model’s answer (it didn’t come back in the usual shape)'));
+      parts.push(h('pre', { class: 'kalesh-raw' }, s.raw || ''));
+    } else {
+      const sec = (title, body, cls) => h('div', { class: 'kalesh-sec' + (cls ? ' ' + cls : '') }, h('h3', { class: 'kalesh-sec-title' }, title), body);
+      const watch = sum.watch || [];
+      parts.push(sec('For a moderator', watch.length
+        ? h('ul', { class: 'kalesh-flags' }, watch.map((w) => h('li', null,
+          h('span', { class: 'badge kalesh-flag' }, icon('alert'), DIVE_WATCH[w.kind] || w.kind),
+          h('div', { class: 'grow' }, w.what, w.refs && w.refs.length ? [' ', refs(w.refs)] : null))))
+        : h('p', { class: 'kalesh-clear' }, icon('check'), 'Nothing to raise: no argument left hanging, no rule problem, nothing that looks like somebody dropping out.'),
+        watch.length ? 'flagged' : 'clear'));
+      if (sum.thin) parts.push(h('p', { class: 'kalesh-note warn' }, icon('alert'), sum.thin));
+      if (sum.overview) parts.push(h('p', { class: 'kalesh-overview' }, sum.overview));
+      if ((sum.topics || []).length) parts.push(sec('What they talked about', h('ul', { class: 'dive-list' },
+        sum.topics.map((t) => h('li', null, t.what, t.refs && t.refs.length ? [' ', refs(t.refs)] : null)))));
+      if ((sum.people || []).length) parts.push(sec('Who with', h('ul', { class: 'dive-list' },
+        sum.people.map((p) => h('li', null, h('b', null, p.who + ': '), p.how)))));
+      if (sum.rhythm) parts.push(sec('How the period went', h('p', null, sum.rhythm)));
+      if (sum.places) parts.push(sec('Where they are', h('p', null, sum.places)));
+      if ((sum.interpretation || []).length) parts.push(sec('Reading between the lines', h('ul', { class: 'dive-list hedged' },
+        sum.interpretation.map((x) => h('li', null, x))), 'hedged'));
+    }
+    return h('section', { class: 'card kalesh-summary' }, h('div', { class: 'card-body pad' }, parts));
   }
 
   // --- deleted & edited messages ------------------------------------------------------
@@ -6342,6 +6684,7 @@
         h('div', { class: 'title-row' }, h('h1', null, p.name), hs ? h('span', { class: 'house-chip big' }, hs.crest + ' ' + hs.name) : null, flags),
         h('p', { class: 'profile-sub' }, p.username ? '@' + p.username : '', h('span', { class: 'field-key' }, p.id)),
         h('div', { class: 'profile-dates' },
+          h('a', { class: 'open-link', href: '#/deepdive?member=' + encodeURIComponent(p.id) }, icon('search'), 'Deep dive'),
           p.joined_at ? h('span', null, icon('calendar'), 'Joined ' + fmtDate(p.joined_at * 1000)) : null,
           p.created_at ? h('span', null, icon('user'), 'Account from ' + fmtDate(p.created_at * 1000)) : null,
           p.joins ? h('span', null, icon('repeat'), plural(p.joins.joins, 'join') + ', ' + plural(p.joins.leaves, 'leave')) : null,

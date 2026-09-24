@@ -2228,6 +2228,57 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 }
 .msg-hit-chan .icon { width: 13px; height: 13px; margin-right: 3px; align-self: center; color: var(--faint); }
 
+/* --- deep dive ---------------------------------------------------------------------------- */
+
+.dive-filters .msg-search-filters { flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+.dive-who { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dive-chosen { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); }
+.dive-chosen b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dive-range { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+.dive-range input[type="date"] { width: auto; }
+
+.dive-head { align-items: flex-start; }
+.dive-shifted { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+.dive-shifted .icon { width: 13px; height: 13px; flex: none; }
+.dive-tiles { margin-bottom: var(--gap); }
+
+/* Messages a day: one bar per day of the window, so a quiet stretch shows as a
+   gap rather than being smoothed away. */
+.dive-days { display: flex; align-items: flex-end; gap: 2px; height: 58px; margin: 6px 0 14px; }
+.dive-day { flex: 1 1 0; min-width: 2px; height: var(--v); border-radius: 2px 2px 0 0; background: var(--accent); opacity: .75; }
+.dive-day:hover { opacity: 1; }
+
+.dive-partners { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+.dive-partners .mini-title { margin: 0 4px 0 0; }
+.dive-partners .chip small { color: var(--faint); }
+
+.dive-sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.dive-sessions li {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2);
+  font-size: 13px;
+}
+.dive-room { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: var(--text); }
+.dive-room .icon { width: 14px; height: 14px; color: var(--faint); }
+.dive-when { color: var(--muted); font-variant-numeric: tabular-nums; }
+.dive-secs { color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.dive-with { color: var(--muted); margin-left: auto; }
+.dive-with i { color: var(--faint); }
+
+/* The whole period at once: it scrolls inside the card rather than paging. */
+.dive-scroll .kalesh-exchange { max-height: min(70vh, 760px); overflow-y: auto; }
+.dive-msg .msg-hit-head { gap: 8px; }
+.dive-msg .inline-ref { color: var(--muted); font-size: 12.5px; }
+
+.dive-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.dive-list.hedged { color: var(--muted); font-style: italic; }
+
+@media (max-width: 640px) {
+  .dive-filters .msg-search-filters .segmented { width: 100%; }
+  .dive-with { margin-left: 0; width: 100%; }
+  .dive-days { height: 44px; }
+}
+
 /* --- left the server -------------------------------------------------------------------- */
 
 .left-note { margin-bottom: 14px; }

@@ -705,7 +705,7 @@ pub async fn profile(State(panel): State<Panel>, Path(id): Path<String>) -> ApiR
 /// When this member's nightly `/ship` sheet was last built, and the plain
 /// counts on it. Numbers only: a sheet holds nothing anybody said, and no model
 /// ever sees one. Null when the store isn't open at all.
-fn ship_sheet_of(id: u64) -> Value {
+pub(super) fn ship_sheet_of(id: u64) -> Value {
     let Some(db) = ship_sheet::db() else { return Value::Null };
     let sheet = ship_sheet::get(&db.lock(), id);
     let mut out = json!({

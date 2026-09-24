@@ -384,6 +384,12 @@ pub fn ist_day(ts: i64) -> String {
     ist().timestamp_opt(ts, 0).single().map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
 }
 
+/// The India hour of the day a moment falls in, 0 to 23.
+pub fn ist_hour(ts: i64) -> i64 {
+    use chrono::Timelike;
+    ist().timestamp_opt(ts, 0).single().map(|t| t.hour() as i64).unwrap_or(0)
+}
+
 /// The moment an India day begins, from the day's own name. The inverse of
 /// [`ist_day`], for the stores that keep timestamps rather than day names.
 pub fn ist_day_start(day: &str) -> Option<i64> {
