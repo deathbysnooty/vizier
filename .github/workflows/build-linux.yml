@@ -12,6 +12,11 @@ name: Build Linux binary
 on:
   workflow_dispatch:
 
+env:
+  # Only the changed parts of this crate are recompiled between builds, which
+  # is the point of keeping the target directory above.
+  CARGO_INCREMENTAL: '1'
+
 jobs:
   build:
     name: Build x86_64-unknown-linux-gnu
@@ -25,10 +30,23 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # The whole target directory, not only the dependencies: this crate is
+      # one big one, so its own artefacts are most of the build. The key
+      # carries the commit so every build saves a fresh cache; the prefixes
+      # fall back to the newest earlier one, which is what makes a small
+      # change compile in a minute instead of five.
+      - name: Cache the build
+        uses: actions/cache@v4
         with:
-          key: x86_64-unknown-linux-gnu
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: build-linux-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            build-linux-${{ hashFiles('Cargo.lock') }}-
+            build-linux-
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
