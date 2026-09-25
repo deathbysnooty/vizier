@@ -212,7 +212,9 @@ pub async fn prepare(panel: &Panel, user: u64, name: &str, now: i64) -> (String,
     let activity = activity_cached(panel, now).await;
     let (stats_text, snapshot) = stats_text(&stats, activity.iter().find(|a| a.user_id == user), &channel_name, &sensitive);
     let chars = transcript.chars().count();
-    (profiles::build_prompt(name, &stats_text, &transcript, count), count, chars, snapshot)
+    // Their pronouns off their role, so the draft never works a gender out.
+    let said = super::super::super::pronouns::of(user);
+    (profiles::build_prompt(name, &stats_text, &transcript, count, said), count, chars, snapshot)
 }
 
 pub async fn analyse_one(panel: &Panel, user: u64, by: u64, now: i64) -> Result<Profile, String> {

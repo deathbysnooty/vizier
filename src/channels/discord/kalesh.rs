@@ -518,6 +518,9 @@ continued after someone asked for it to stop. A deleted or blocked message is fl
 Ordinary swearing and roasting are not flags. If there is nothing, return an empty list: do not invent flags to \
 seem thorough.
 6. Write in plain English. Quote Hinglish only when the exact words matter, with a short translation in brackets.
+7. PRONOUNS. Never guess, infer or imply anyone's gender - not from their name, not from how they write, not from \
+what anyone calls them, not from anything else. Each person's pronouns are given below, from this server's own \
+roles. Use exactly those, and use they/them for anybody whose pronouns are not given.
 
 Reply with JSON only, in exactly this shape:
 {
@@ -589,7 +592,11 @@ pub fn marker(row: &SaidRow, people: &HashMap<u64, String>) -> Option<String> {
 }
 
 /// The whole prompt for one stretch, or for every stretch of a period.
-pub fn build_prompt(names: &[String], scope: Scope, lines: &[Line], max: usize) -> Prompt {
+///
+/// `said` is everybody's pronouns as their roles have them. Anybody missing from
+/// it is still named to the model, as they/them — a summary may never work
+/// somebody's gender out from their name or their words.
+pub fn build_prompt(names: &[String], scope: Scope, lines: &[Line], max: usize, said: &HashMap<u64, super::pronouns::Pronouns>) -> Prompt {
     let total = lines.len();
     let times: Vec<i64> = lines.iter().map(|l| l.row.created_ms).collect();
     let ranges = pick(&times, max);
@@ -653,6 +660,12 @@ pub fn build_prompt(names: &[String], scope: Scope, lines: &[Line], max: usize) 
             sent, total
         ));
     }
+    // Whose pronouns are whose, off the server's roles. Sorted, so the same
+    // stretch always builds the same prompt and is charged for once.
+    let mut who: Vec<(u64, String)> = known.iter().map(|(id, n)| (*id, n.clone())).collect();
+    who.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.0.cmp(&b.0)));
+    text.push('\n');
+    text.push_str(&super::pronouns::block_for(&who, said));
     text.push_str("\nMessages, numbered in order (\"↪ #9\" means a reply to message 9):\n");
     let mut last_day = String::new();
     let mut last_channel = None;
@@ -909,6 +922,12 @@ pub mod tests {
         vec!["gooner".to_string(), "potus".to_string()]
     }
 
+    /// The pair's pronouns, as their roles on the server have them.
+    fn said() -> HashMap<u64, super::super::pronouns::Pronouns> {
+        use super::super::pronouns::Pronouns::*;
+        [(A, He), (B, She)].into_iter().collect()
+    }
+
     const A: u64 = 711;
     const B: u64 = 935;
     const T0: i64 = 1_790_000_000_000;
@@ -996,7 +1015,7 @@ pub mod tests {
     fn a_stretch_that_fits_is_sent_whole() {
         let rows: Vec<SaidRow> = (0..30).map(|i| row(T0 + i * MIN, i as u64, if i % 2 == 0 { A } else { B }, if i % 2 == 0 { "gooner" } else { "potus" }, 5, "text", None)).collect();
         let lines = exchange(&rows, &[A, B]);
-        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400, &said());
         assert_eq!((p.sent, p.total, p.trimmed), (30, 30, false));
         assert!(!p.text.contains("left out"));
         assert!(!p.text.contains("too long to show whole"));
@@ -1014,7 +1033,7 @@ pub mod tests {
             })
             .collect();
         let lines = exchange(&rows, &[A, B]);
-        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400, &said());
         assert_eq!((p.sent, p.total, p.trimmed), (400, 600, true));
         assert!(p.text.contains("you are shown 400 of its 600 messages"), "the prompt says it was trimmed");
         assert!(p.text.contains("messages left out"));
@@ -1035,7 +1054,7 @@ pub mod tests {
         let b1 = row(T0 + MIN, 2, B, "potus", 5, "tu hoga", Some(a1.message_id));
         let rows = vec![a1, b1];
         let lines = exchange(&rows, &[A, B]);
-        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "🥳chatting-hori" }, &lines, 400);
+        let p = build_prompt(&pair(), Scope::Stretch { channel_name: "🥳chatting-hori" }, &lines, 400, &said());
         for must in [
             "Be neutral",
             "Do not say who was right",
@@ -1053,9 +1072,16 @@ pub mod tests {
             "India time",
             "A = gooner, B = potus",
             "#🥳chatting-hori",
+            // Whose pronouns are whose, from the roles rather than the names.
+            "- gooner: he/him",
+            "- potus: she/her",
         ] {
             assert!(p.text.contains(must), "the prompt lacks {must:?}");
         }
+        assert!(p.text.to_lowercase().contains("never guess"), "a summary may never work anybody's gender out");
+        // Nobody's roles readable: everyone is named as they/them regardless.
+        let bare = build_prompt(&pair(), Scope::Stretch { channel_name: "chatting" }, &lines, 400, &HashMap::new());
+        assert!(bare.text.contains("- gooner: they/them") && bare.text.contains("- potus: they/them"), "{}", bare.text);
         // Mentions read as names, replies as numbers.
         assert!(p.text.contains("@potus bhai tu pagal hai kya"), "{}", p.text);
         assert!(p.text.contains("#2 [") && p.text.contains("potus (B) ↪ #1: tu hoga"), "{}", p.text);

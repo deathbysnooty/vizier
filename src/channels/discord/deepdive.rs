@@ -280,6 +280,9 @@ sexual content aimed at a person, harassment that carried on after being asked t
 Ordinary swearing and roasting are not a rule problem. If there is nothing, return an empty list: never invent \
 something to seem thorough.
 6. Write in plain English. Quote Hinglish only where the exact words matter, with a short translation in brackets.
+7. PRONOUNS. Never guess, infer or imply anyone's gender - not from their name, not from how they write, not from \
+what anyone calls them, not from anything else. Each person's pronouns are given below, from this server's own \
+roles. Use exactly those, and use they/them for anybody whose pronouns are not given.
 
 Reply with JSON only, in exactly this shape:
 {
@@ -343,7 +346,11 @@ fn voice_lines(sessions: &[VoiceSession], rooms: &HashMap<u64, String>, names: &
 
 /// The whole prompt for one member over one window. `rows` are theirs alone, in
 /// time order; the numbering the model refers to is their position in it.
+/// `said` is everybody's pronouns as their roles have them. Anyone missing from
+/// it is named to the model as they/them: the model is never left to work
+/// somebody's gender out for itself.
 pub fn build_prompt(
+    member: u64,
     name: &str,
     period: &str,
     rows: &[&SaidRow],
@@ -351,6 +358,7 @@ pub fn build_prompt(
     rooms: &HashMap<u64, String>,
     names: &HashMap<u64, String>,
     max: usize,
+    said: &HashMap<u64, super::pronouns::Pronouns>,
 ) -> Prompt {
     let total = rows.len();
     let times: Vec<i64> = rows.iter().map(|r| r.created_ms).collect();
@@ -378,6 +386,14 @@ pub fn build_prompt(
         text.push_str(&format!("There were too many to send: you are seeing {} of them - the opening, the busiest run and the end.\n", sent));
     }
     text.push_str(&voice_lines(sessions, rooms, &known));
+    // Whose pronouns are whose, off the server's roles rather than out of the
+    // model's head. Sorted, so the same window always builds the same prompt.
+    let mut who: Vec<(u64, String)> = known.iter().filter(|(id, _)| **id != member).map(|(id, n)| (*id, n.clone())).collect();
+    who.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.0.cmp(&b.0)));
+    // The member this is about goes first, under the name the page calls them.
+    who.insert(0, (member, name.to_string()));
+    text.push('\n');
+    text.push_str(&super::pronouns::block_for(&who, said));
     text.push_str("\nTheir messages, in order:\n");
     let mut last: Option<usize> = None;
     for range in &ranges {
@@ -604,5 +620,33 @@ mod tests {
             assert!(i.contains(must), "the instructions dropped “{must}”");
         }
         assert!(i.contains("caste") && i.contains("sexuality"), "it still forbids guessing sensitive things");
+        // A dive writes about somebody in the third person all the way through,
+        // so it has to be handed the pronouns rather than reaching for them.
+        for must in ["never guess", "they/them", "use exactly those"] {
+            assert!(i.contains(must), "the instructions stopped saying “{must}”");
+        }
+    }
+
+    /// The member's pronouns, and everyone else's, reach the prompt — from the
+    /// server's roles, with they/them for anybody the roles cannot answer for.
+    #[test]
+    fn the_prompt_carries_the_pronouns_it_was_given() {
+        use super::super::kalesh::tests::row;
+        const MEMBER: u64 = 711;
+        let rows = [row(1_780_000_000_000, 1, MEMBER, "gooner", 5, "kal ka match dekha", None)];
+        let refs: Vec<&SaidRow> = rows.iter().collect();
+        let names: HashMap<u64, String> = [(99u64, "riya".to_string())].into_iter().collect();
+        let said: HashMap<u64, super::super::pronouns::Pronouns> =
+            [(MEMBER, super::super::pronouns::Pronouns::He), (99, super::super::pronouns::Pronouns::She)].into_iter().collect();
+
+        let p = build_prompt(MEMBER, "gooner", "the last 7 days", &refs, &[], &HashMap::new(), &names, 400, &said);
+        assert!(p.text.contains("- gooner: he/him"), "{}", p.text);
+        assert!(p.text.contains("- riya: she/her"), "{}", p.text);
+
+        // Nothing known about anybody: everyone is named as they/them all the
+        // same, so the model is never left to work it out.
+        let p = build_prompt(MEMBER, "gooner", "the last 7 days", &refs, &[], &HashMap::new(), &names, 400, &HashMap::new());
+        assert!(p.text.contains("- gooner: they/them") && p.text.contains("- riya: they/them"), "{}", p.text);
+        assert!(p.text.to_lowercase().contains("never guess"));
     }
 }

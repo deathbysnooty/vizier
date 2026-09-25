@@ -190,6 +190,14 @@ pub async fn week(State(panel): State<Panel>, axum::Extension(Caller(user)): axu
                 "members": run.map(|r| r.members).unwrap_or(0),
                 "failed": run.map(|r| r.failed).unwrap_or(0),
                 "note": run.map(|r| r.note.clone()).unwrap_or_default(),
+                // What the night did not read. A night that ran into its cap or
+                // lost a channel looks fine by its counts alone, so it has to
+                // say so here or nobody will ever know a channel went missing.
+                "capped": run.map(|r| r.capped).unwrap_or(0),
+                "dropped": run
+                    .map(|r| r.dropped.iter().map(|(name, lost)| json!({ "channel": name, "messages": lost })).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "lost": run.map(|r| r.lost.clone()).unwrap_or_default(),
                 "tokens": run.map(|r| r.input_tokens + r.output_tokens).unwrap_or(0),
                 "model": run.map(|r| r.model.clone()).unwrap_or_default(),
             })

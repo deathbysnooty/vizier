@@ -12,6 +12,13 @@
 //! it stack up into "what they have been talking about lately", which is the
 //! point.
 //!
+//! Nothing here ever works out anybody's gender. Each chunk's prompt carries the
+//! pronouns for everyone in it, read off the server's own roles (`pronouns.rs`),
+//! with they/them for anybody the roles cannot answer for — and the instructions
+//! forbid the model reaching for its own. The first real night wrote "He was
+//! explaining rules…" off nothing but a name, which is the one inference this
+//! feature may not make.
+//!
 //! Two gates stand between a day and an entry. A **floor** — usable messages
 //! and real characters, both settings — so somebody who dropped four "lol"s and
 //! a sticker gets no entry at all rather than an invented one; `usable` is
@@ -36,6 +43,7 @@ use serde_json::Value;
 use super::control;
 use super::kalesh::Reply;
 use super::notes_build;
+use super::pronouns;
 
 // --- settings ---------------------------------------------------------------------------------
 
@@ -57,8 +65,13 @@ pub fn chunk_tokens() -> usize {
 
 /// Chunks one night's pass may send at all: the cap on the work. A day that
 /// needs more than this loses its quietest channels, never its busiest.
+///
+/// The first real night ran into 40 of 40, which means it quietly dropped the
+/// quiet channels — so the cap is well clear of an ordinary day now. A whole
+/// night costs a few pence on the model the pass runs on; a cap that bites every
+/// night costs a channel.
 pub fn max_chunks() -> usize {
-    control::number("VIZIER_TOPICS_MAX_CHUNKS", 40).clamp(0, 500) as usize
+    control::number("VIZIER_TOPICS_MAX_CHUNKS", 80).clamp(0, 500) as usize
 }
 
 /// Usable messages a member must have said that day before they can get an
@@ -101,7 +114,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { chunk_tokens: 12_000, max_chunks: 40, min_messages: 5, min_chars: 120 }
+        Settings { chunk_tokens: 12_000, max_chunks: 80, min_messages: 5, min_chars: 120 }
     }
 }
 
@@ -189,6 +202,22 @@ fn cost(m: &Said) -> usize {
     notes_build::estimate_tokens(&notes_build::cut(&m.text, MESSAGE_CHARS)) + notes_build::estimate_tokens(&m.author_name) + 4
 }
 
+/// The day as the cap left it: what will be sent, and what the cap took.
+///
+/// The second half is the point. A night that runs into its cap used to look
+/// exactly like a night that did not — the log printed a chunk count and the
+/// page printed a number — so the quietest channels could go missing every night
+/// and nobody would know. Now the night knows what it dropped and says so.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cut {
+    pub chunks: Vec<Chunk>,
+    /// Chunks the cap refused to send.
+    pub capped: usize,
+    /// The channels those chunks were of, quietest last, with how many messages
+    /// of theirs went unread.
+    pub dropped: Vec<(String, usize)>,
+}
+
 /// The day cut channel by channel into chunks that fit `chunk_tokens`. Busiest
 /// channel first, and in time order inside each, so a chunk reads as a stretch
 /// of one conversation rather than a shuffle.
@@ -198,6 +227,11 @@ fn cost(m: &Said) -> usize {
 /// its tail. Messages with nothing in them are left out of the chunks entirely —
 /// they cost tokens and say nothing.
 pub fn chunks(day: &[Said], set: &Settings) -> Vec<Chunk> {
+    cut(day, set).chunks
+}
+
+/// The same, with what the cap took written down beside it.
+pub fn cut(day: &[Said], set: &Settings) -> Cut {
     let mut by_channel: Vec<(u64, String, Vec<usize>)> = Vec::new();
     for (i, m) in day.iter().enumerate() {
         if notes_build::usable(&m.text).is_none() {
@@ -228,8 +262,18 @@ pub fn chunks(day: &[Said], set: &Settings) -> Vec<Chunk> {
             out.push(Chunk { channel_id, channel_name, lines });
         }
     }
+    // What the cap takes, before it is taken: the tail of the list, which is the
+    // quiet end of the server.
+    let mut dropped: Vec<(String, usize)> = Vec::new();
+    for chunk in out.iter().skip(set.max_chunks.min(out.len())) {
+        match dropped.iter_mut().find(|(name, _)| *name == chunk.channel_name) {
+            Some((_, lost)) => *lost += chunk.lines.len(),
+            None => dropped.push((chunk.channel_name.clone(), chunk.lines.len())),
+        }
+    }
+    let capped = out.len().saturating_sub(set.max_chunks);
     out.truncate(set.max_chunks);
-    out
+    Cut { chunks: out, capped, dropped }
 }
 
 // --- the prompt --------------------------------------------------------------------------------
@@ -256,8 +300,12 @@ family situation. Leave these out even when they are talked about openly and at 
 day discussing one of these, they simply get no tags for it.
 2. Never quote anyone. Not a phrase, not a few words. Paraphrase, in your own words.
 3. Nothing about a named third party's private business: do not record what somebody said about somebody else's \
-life.
+life. The line about a person is about that person and nobody else.
 4. Describe, do not judge. No opinions about anyone, no guesses at their character, mood or motives.
+5. PRONOUNS. Never guess, infer or imply anyone's gender - not from their name, not from how they write, not from \
+what anyone calls them, not from anything else. Each person's pronouns are given below. Use exactly those, and use \
+they/them for anybody whose pronouns are not given. Writing \"he\" or \"she\" about somebody you were not given it \
+for throws the whole line away.
 
 If a person's messages here do not amount to anything worth recording - a few one-word replies, reactions, spam, \
 a game command over and over - leave that person out entirely. Do not invent a topic to have something to say, and \
@@ -280,26 +328,49 @@ fn clock(ts: i64) -> String {
         .unwrap_or_default()
 }
 
-/// The whole prompt for one chunk, and the names it may answer about.
-pub fn build_prompt(day_label: &str, chunk: &Chunk, day: &[Said]) -> String {
-    let mut who: Vec<String> = Vec::new();
+/// The whole prompt for one chunk, the names it may answer about, and the
+/// pronouns it must use for each of them.
+///
+/// `known` is read off the server's roles (`pronouns::everyone`). Anybody it
+/// does not have is named all the same, as they/them: the model is never left to
+/// work somebody out for itself, which is the whole point.
+pub fn build_prompt(day_label: &str, chunk: &Chunk, day: &[Said], known: &HashMap<u64, pronouns::Pronouns>) -> String {
+    let mut who: Vec<(u64, String)> = Vec::new();
     for i in &chunk.lines {
-        let name = &day[*i].author_name;
-        if !who.contains(name) {
-            who.push(name.clone());
+        let m = &day[*i];
+        if !who.iter().any(|(_, name)| *name == m.author_name) {
+            who.push((m.author_id, m.author_name.clone()));
         }
     }
     let mut text = String::with_capacity(INSTRUCTIONS.len() + chunk.lines.len() * 80);
     text.push_str(INSTRUCTIONS);
     text.push_str("\n\n---\n\n");
     text.push_str(&format!("Channel: #{}. Day: {}. Times are India time (IST).\n", chunk.channel_name, day_label));
-    text.push_str(&format!("The people who spoke here: {}.\n", who.join(", ")));
-    text.push_str("Use these names exactly. Never answer about anybody who is not in that list.\n\nMessages:\n");
+    text.push_str(&format!("The people who spoke here: {}.\n", who.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ")));
+    text.push_str("Use these names exactly. Never answer about anybody who is not in that list.\n\n");
+    text.push_str(&pronouns::block_for(&who, known));
+    text.push_str("\nMessages:\n");
     for i in &chunk.lines {
         let m = &day[*i];
         text.push_str(&format!("[{}] {}: {}\n", clock(m.ts), m.author_name, notes_build::cut(&m.text, MESSAGE_CHARS)));
     }
     text
+}
+
+/// What is put in front of a chunk's prompt when its first answer could not be
+/// read. The other features' retries say the same thing in their own words: the
+/// model is told what went wrong, not asked the same question again.
+pub const UNREADABLE_RETRY: &str = "\
+YOUR LAST ANSWER COULD NOT BE READ and was thrown away. It was not valid JSON of the shape asked for, or it was not \
+JSON at all. Answer again, and this time reply with the JSON object and nothing else: no explanation before it, no \
+markdown fence around it, no trailing note. If there is genuinely nobody here worth recording, the right answer is \
+{\"people\": []}.
+
+";
+
+/// The same prompt again, with that told to the model first.
+pub fn retry_prompt(prompt: &str) -> String {
+    format!("{}{}", UNREADABLE_RETRY, prompt)
 }
 
 // --- reading the answer -------------------------------------------------------------------------
@@ -440,7 +511,13 @@ pub fn reject_tag(tag: &str, names: &HashSet<String>) -> Option<&'static str> {
 pub const QUOTE_RUN: usize = 5;
 
 /// Why a line must go, or `None` when it may stay: a banned area, a quotation,
-/// or a run of words lifted straight out of one of their messages.
+/// a mention, or a run of words lifted straight out of one of their messages.
+///
+/// The ban list is the tags' own — [`BANNED_RES`], read off `notes_build`'s
+/// words — so a line can never carry what a tag is not allowed to. That is what
+/// keeps a third party's private business out of a line as well: "asked around
+/// about Dev's sister's wedding" trips *family* exactly as the tag would, and a
+/// raw `<@id>` or `@name` goes for the same reason it goes from a tag.
 pub fn reject_line(line: &str, source: &HashSet<String>) -> Option<&'static str> {
     let l = line.trim();
     if l.chars().filter(|c| c.is_alphabetic()).count() < 6 {
@@ -453,6 +530,9 @@ pub fn reject_line(line: &str, source: &HashSet<String>) -> Option<&'static str>
     }
     if QUOTED.captures_iter(l).any(|c| c[1].split_whitespace().count() >= 3) {
         return Some("a quotation");
+    }
+    if MENTION.is_match(l) {
+        return Some("names a person");
     }
     let w = words_of(l);
     if w.windows(QUOTE_RUN).any(|window| source.contains(&window.join(" "))) {
@@ -488,6 +568,15 @@ pub struct Pass {
     /// Of those, the ones that never came back. Their people are simply missing
     /// from the day; the rest of it is written down all the same.
     pub failed: usize,
+    /// Chunks that came back unreadable once and were asked again.
+    pub retried: usize,
+    /// The channels the failed chunks were of: what the day actually lost, in
+    /// words, rather than a number nobody can act on.
+    pub lost: Vec<String>,
+    /// Chunks the cap refused to send at all.
+    pub capped: usize,
+    /// The channels those were of, with how many messages went unread.
+    pub dropped: Vec<(String, usize)>,
     /// Members the floor kept out before anybody paid for them.
     pub too_thin: usize,
     /// Tags and lines the filter threw away.
@@ -495,6 +584,39 @@ pub struct Pass {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub model: String,
+}
+
+impl Pass {
+    /// What a night lost, in one plain sentence, or nothing when it lost nothing.
+    /// This is what goes on the run row and into the log, so the page and the
+    /// journal say the same thing.
+    pub fn note(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.capped > 0 {
+            let names: Vec<String> =
+                self.dropped.iter().take(6).map(|(name, lost)| format!("#{} ({} messages)", name, lost)).collect();
+            let more = self.dropped.len().saturating_sub(names.len());
+            parts.push(format!(
+                "hit the cap of {} chunks, so {} more went unsent: {}{}",
+                self.chunks,
+                self.capped,
+                if names.is_empty() { "the quietest channels".to_string() } else { names.join(", ") },
+                if more > 0 { format!(" and {} more", more) } else { String::new() }
+            ));
+        }
+        if self.failed > 0 {
+            let names: Vec<String> = self.lost.iter().take(6).map(|n| format!("#{}", n)).collect();
+            let more = self.lost.len().saturating_sub(names.len());
+            parts.push(format!(
+                "{} of {} chunks never came back{}{}",
+                self.failed,
+                self.chunks,
+                if names.is_empty() { String::new() } else { format!(", losing {}", names.join(", ")) },
+                if more > 0 { format!(" and {} more", more) } else { String::new() }
+            ));
+        }
+        parts.join("; ")
+    }
 }
 
 /// The day's answers turned into entries: the floor applied for real, the filter
@@ -563,41 +685,79 @@ pub fn merge(day_label: &str, day: &[Said], parts: Vec<About>, substance: &HashM
 /// One night's pass over one day, with the model passed in so the tests can hand
 /// it a fake one — including one that fails on a chunk.
 ///
-/// A chunk the model refuses is counted and stepped over: the rest of the day is
-/// still read, still merged, and still written down. Nothing is written until
-/// every chunk has been tried, so a half-finished pass never leaves half a day
-/// in the store.
-pub async fn run_day<F, Fut>(day_label: &str, day: &[Said], set: &Settings, ask: F) -> Pass
+/// A chunk whose answer cannot be read is **asked once more**, with the model
+/// told plainly that its last answer was thrown away — the same patience every
+/// other feature's retry has. Two channels were lost that way on the first real
+/// night for want of it. Only then is the chunk given up, counted, and its
+/// channel written down on the pass so the page can say what the day is missing.
+///
+/// A chunk the model refuses outright is counted and stepped over the same way:
+/// the rest of the day is still read, still merged, and still written down.
+/// Nothing is written until every chunk has been tried, so a half-finished pass
+/// never leaves half a day in the store.
+pub async fn run_day<F, Fut>(day_label: &str, day: &[Said], set: &Settings, known: &HashMap<u64, pronouns::Pronouns>, ask: F) -> Pass
 where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Result<Reply, String>>,
 {
     let substance = substance(day);
     let too_thin = substance.values().filter(|s| !eligible(s, set)).count();
-    let cut = chunks(day, set);
-    let mut pass = Pass { chunks: cut.len(), too_thin, ..Pass::default() };
+    let cut = cut(day, set);
+    let mut pass = Pass { chunks: cut.chunks.len(), capped: cut.capped, dropped: cut.dropped, too_thin, ..Pass::default() };
+    if pass.capped > 0 {
+        tracing::warn!("topics: {} ran into the cap — {}", day_label, pass.note());
+    }
     let mut parts: Vec<About> = Vec::new();
-    for chunk in &cut {
+    for chunk in &cut.chunks {
         let roster = roster(chunk, day);
-        let prompt = build_prompt(day_label, chunk, day);
-        match ask(prompt).await {
-            Ok(reply) => {
-                pass.input_tokens += reply.input_tokens;
-                pass.output_tokens += reply.output_tokens;
-                if pass.model.is_empty() {
-                    pass.model = reply.model.clone();
-                }
-                match parse_chunk(&reply.text, &roster, day, chunk) {
-                    Some(about) => parts.extend(about),
-                    None => {
-                        tracing::warn!("topics: #{} on {} came back unreadable", chunk.channel_name, day_label);
-                        pass.failed += 1;
+        let prompt = build_prompt(day_label, chunk, day, known);
+        let mut got: Option<Vec<About>> = None;
+        let mut unreadable = false;
+        // Once, then once more with the model told why the first went in the bin.
+        for attempt in 0..2 {
+            let asked = if attempt == 0 { prompt.clone() } else { retry_prompt(&prompt) };
+            match ask(asked).await {
+                Ok(reply) => {
+                    pass.input_tokens += reply.input_tokens;
+                    pass.output_tokens += reply.output_tokens;
+                    if pass.model.is_empty() {
+                        pass.model = reply.model.clone();
+                    }
+                    match parse_chunk(&reply.text, &roster, day, chunk) {
+                        Some(about) => {
+                            got = Some(about);
+                            break;
+                        }
+                        None => {
+                            unreadable = true;
+                            tracing::warn!(
+                                "topics: #{} on {} came back unreadable{}",
+                                chunk.channel_name,
+                                day_label,
+                                if attempt == 0 { ", asking again" } else { ", and again — giving it up" }
+                            );
+                        }
                     }
                 }
+                Err(err) => {
+                    // The provider itself failed, which has already been retried
+                    // where the call is made. Asking the same thing again here
+                    // would only spend the same money twice.
+                    tracing::warn!("topics: #{} on {} failed: {}", chunk.channel_name, day_label, err);
+                    break;
+                }
             }
-            Err(err) => {
-                tracing::warn!("topics: #{} on {} failed: {}", chunk.channel_name, day_label, err);
+        }
+        if unreadable && got.is_some() {
+            pass.retried += 1;
+        }
+        match got {
+            Some(about) => parts.extend(about),
+            None => {
                 pass.failed += 1;
+                if !pass.lost.contains(&chunk.channel_name) {
+                    pass.lost.push(chunk.channel_name.clone());
+                }
             }
         }
     }
@@ -712,6 +872,18 @@ pub mod tests {
         Reply { text: text.into(), input_tokens: 100, output_tokens: 20, model: "cheap".into() }
     }
 
+    /// Nobody's roles are known: every prompt then says they/them for everyone,
+    /// which is the answer the bot has to give when it cannot read a role.
+    pub fn nobody() -> HashMap<u64, pronouns::Pronouns> {
+        HashMap::new()
+    }
+
+    /// The day's four talkers, with roles on the server.
+    fn roles() -> HashMap<u64, pronouns::Pronouns> {
+        use pronouns::Pronouns::*;
+        [(11u64, He), (22, He), (33, She), (44, They)].into_iter().collect()
+    }
+
     fn answer(people: &[(&str, &[&str], &str)]) -> String {
         let list: Vec<Value> = people.iter().map(|(n, t, l)| serde_json::json!({ "name": n, "topics": t, "line": l })).collect();
         serde_json::json!({ "people": list }).to_string()
@@ -727,7 +899,7 @@ pub mod tests {
         let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
         let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
         let asked = seen.clone();
-        let pass = run_day("2026-09-21", &day, &set, move |prompt: String| {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), move |prompt: String| {
             let asked = asked.clone();
             async move {
                 asked.lock().push(prompt.clone());
@@ -771,7 +943,7 @@ pub mod tests {
     async fn a_chunk_the_model_fails_on_does_not_lose_the_rest_of_the_day() {
         let day = a_day();
         let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
-        let pass = run_day("2026-09-21", &day, &set, |prompt: String| async move {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |prompt: String| async move {
             if prompt.contains("#chatting") {
                 return Err("the provider returned an error".to_string());
             }
@@ -784,7 +956,7 @@ pub mod tests {
         assert!(!pass.entries.iter().any(|e| e.user_id == 11), "and the failed chunk's people simply have no entry");
 
         // An unreadable answer counts the same way and loses no more than itself.
-        let pass = run_day("2026-09-21", &day, &set, |prompt: String| async move {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |prompt: String| async move {
             if prompt.contains("#chatting") {
                 return Ok(reply("sorry, I can't help with that"));
             }
@@ -827,7 +999,7 @@ pub mod tests {
         let s = substance(&day);
         assert_eq!(s[&77].usable, 4);
         assert!(!eligible(&s[&77], &set), "four is under five");
-        let pass = run_day("2026-09-21", &day, &set, |_| async {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |_| async {
             Ok(reply(&answer(&[("barely", &["cricket"], "Talked about a match.")])))
         })
         .await;
@@ -847,7 +1019,7 @@ pub mod tests {
         assert!(s[&88].usable >= 5, "six short messages clear the message floor: {}", s[&88].usable);
         assert!(s[&88].chars < 120, "and are nowhere near the text floor: {} characters", s[&88].chars);
         assert!(!eligible(&s[&88], &set));
-        let pass = run_day("2026-09-21", &day, &set, |_| async {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |_| async {
             Ok(reply(&answer(&[("shorty", &["cricket"], "Agreed with people about cricket.")])))
         })
         .await;
@@ -865,7 +1037,7 @@ pub mod tests {
         assert_eq!(s[&66].usable, 0, "forty bot commands are not somebody talking");
         assert_eq!(s[&66].messages, 40, "the counts still exist; this pass is only about what was said");
 
-        let pass = run_day("2026-09-21", &day, &set, |_| async {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |_| async {
             Ok(reply(&answer(&[("quiet", &["chatting"], "Was around."), ("spammer", &["games"], "Playing a game bot.")])))
         })
         .await;
@@ -888,7 +1060,7 @@ pub mod tests {
             day.push(said(99, "open", 5, "chatting", 30_000 + i * 60, &format!("aaj bahut kuch hua mere saath, story number {} suno pura", i)));
         }
         let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
-        let pass = run_day("2026-09-21", &day, &set, |_| async {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |_| async {
             Ok(reply(&answer(&[(
                 "open",
                 &["his depression", "namaz timings", "being gay", "his mother's health", "caste politics", "cricket"],
@@ -936,7 +1108,7 @@ pub mod tests {
         // A day whose every tag is filler is a day with no entry at all.
         let day = a_day();
         let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
-        let pass = run_day("2026-09-21", &day, &set, |_| async {
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |_| async {
             Ok(reply(&answer(&[
                 ("gooner", &["chatting", "general conversation"], "Was chatting."),
                 ("potus", &["cricket"], "Arguing about the batting order."),
@@ -971,6 +1143,78 @@ pub mod tests {
         assert_eq!(reject_tag("!!", &names), Some("nothing in it"));
     }
 
+    /// The line is held to the tags' own ban list, not a looser one of its own,
+    /// and it never carries somebody else's private business either.
+    ///
+    /// The lines the first real night wrote happened to be clean. That is not the
+    /// same as them being kept clean, which is what this is for.
+    #[test]
+    fn the_line_is_held_to_the_same_ban_list_as_the_tags() {
+        let source: HashSet<String> = HashSet::new();
+        let names = HashSet::new();
+        // Every banned area, by name, on a line — exactly as on a tag.
+        for (line, area) in [
+            ("Talked about their depression and the therapy that follows.", "health"),
+            ("Was asking when namaz is and whether anyone else goes.", "religion or caste"),
+            ("Spent the evening on what being gay is like at college.", "sexuality or gender identity"),
+            ("Went on about their mother and how the house has been.", "family"),
+        ] {
+            assert_eq!(reject_line(line, &source), Some(area), "{line:?} should go as {area}");
+        }
+        // A third party's private business is that same list doing its job: the
+        // line is about the member, never about somebody else's life.
+        for (line, area) in [
+            ("Asked around about Dev's sister's wedding all evening.", "family"),
+            ("Was relaying who is in hospital and how bad it is.", "health"),
+            ("Told the channel which caste somebody else is from.", "religion or caste"),
+        ] {
+            assert_eq!(reject_line(line, &source), Some(area), "{line:?} carries a third party's business");
+        }
+        // Whatever the tags' list holds, the line is held to the very same list:
+        // every word that throws a tag away throws a line away too. This is the
+        // part that must not be allowed to drift.
+        assert_eq!(BANNED_RES.len(), BANNED_AREAS.len(), "the two features share one list of areas");
+        for area in BANNED_AREAS {
+            assert!(notes_build::BANNED.iter().any(|(a, _)| *a == area), "{area} left notes_build's list");
+        }
+        for (area, words) in notes_build::BANNED.iter().filter(|(a, _)| BANNED_AREAS.contains(a)) {
+            for word in words.split('|').filter(|w| w.chars().all(|c| c.is_ascii_alphabetic()) && w.len() > 3).take(8) {
+                assert_eq!(reject_tag(word, &names), Some(*area), "{word:?} should throw a tag away as {area}");
+                assert_eq!(reject_line(&format!("Spent the day on {} and little else.", word), &source), Some(*area), "{word:?} must throw the line away too");
+            }
+        }
+        // A mention has no business in a line any more than in a tag.
+        assert_eq!(reject_line("Was arguing with <@123456789> about the batting order.", &source), Some("names a person"));
+        assert_eq!(reject_line("Kept @riya busy about the batting order all evening.", &source), Some("names a person"));
+        assert_eq!(reject_tag("<@123456789>", &names), Some("names a person"));
+        // And an ordinary line about their own day still stands.
+        assert_eq!(reject_line("Argued about the batting order for most of the morning.", &source), None);
+    }
+
+    /// End to end: a line that breaks the rules never reaches a stored entry,
+    /// even when every tag beside it was fine.
+    #[tokio::test]
+    async fn a_line_that_breaks_the_rules_never_reaches_the_store() {
+        let day = a_day();
+        let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), |prompt: String| async move {
+            Ok(if prompt.contains("#chatting") {
+                reply(&answer(&[
+                    ("gooner", &["cricket"], "Arguing about the order while asking after potus's mother's health."),
+                    ("potus", &["cricket"], "Defending the captain all morning."),
+                ]))
+            } else {
+                reply(&answer(&[]))
+            })
+        })
+        .await;
+        let gooner = pass.entries.iter().find(|e| e.user_id == 11).expect("the tags survived, so there is an entry");
+        assert_eq!(gooner.topics, vec!["cricket"]);
+        assert_eq!(gooner.line, "", "the line named somebody else's business and went");
+        assert_eq!(pass.entries.iter().find(|e| e.user_id == 22).unwrap().line, "Defending the captain all morning");
+        assert!(pass.rejected >= 1);
+    }
+
     /// #safe-corner cannot reach the pass: it is never in the messages, and a
     /// row that somehow arrived is still not what the prompt is built from.
     #[test]
@@ -982,7 +1226,7 @@ pub mod tests {
         // The prompt only ever holds the chunk's own channel and its own lines.
         let cut = chunks(&day, &Settings::default());
         for chunk in &cut {
-            let prompt = build_prompt("2026-09-21", chunk, &day);
+            let prompt = build_prompt("2026-09-21", chunk, &day, &nobody());
             assert!(!prompt.contains("safe-corner"), "a prompt named #safe-corner");
             assert!(prompt.contains(&format!("Channel: #{}", chunk.channel_name)));
             for i in &chunk.lines {
@@ -1003,6 +1247,170 @@ pub mod tests {
         for must in ["leave that person out entirely", "do not invent a topic", "chatting", "general conversation"] {
             assert!(i.contains(must), "the instructions stopped forbidding “{must}”");
         }
+        // The pronoun rule is a hard rule, not a suggestion, and it says where
+        // the answer comes from.
+        for must in ["never guess", "they/them", "pronouns are given below", "use exactly those"] {
+            assert!(i.contains(must), "the instructions stopped saying “{must}”");
+        }
+    }
+
+    // --- pronouns come from the roles, never from the model ---------------------------------
+
+    /// Every person in a chunk is named with their pronouns, and anybody the
+    /// roles cannot answer for is named as they/them rather than left out for
+    /// the model to work out.
+    #[test]
+    fn the_prompt_carries_every_persons_pronouns() {
+        let day = a_day();
+        let cut = chunks(&day, &Settings::default());
+        let chatting = cut.iter().find(|c| c.channel_id == 5).expect("the chatting chunk");
+        let study = cut.iter().find(|c| c.channel_id == 6).expect("the study-room chunk");
+
+        let known = roles();
+        let p = build_prompt("2026-09-21", chatting, &day, &known);
+        assert!(p.contains("- gooner: he/him"), "the Male role reached the prompt:\n{p}");
+        assert!(p.contains("- potus: he/him"), "{p}");
+        assert!(!p.contains("riya"), "a chunk only ever names its own people");
+
+        let p = build_prompt("2026-09-21", study, &day, &known);
+        assert!(p.contains("- riya: she/her"), "the Female role reached the prompt:\n{p}");
+        assert!(p.contains("- dev: they/them"), "Mystery is they/them, and it is said out loud: {p}");
+
+        // Nobody's roles readable at all: everybody is they/them, and nobody is
+        // quietly missing from the list.
+        let p = build_prompt("2026-09-21", chatting, &day, &nobody());
+        assert!(p.contains("- gooner: they/them") && p.contains("- potus: they/them"), "{p}");
+        assert!(p.to_lowercase().contains("never guess"), "and the rule travels with them");
+    }
+
+    /// A day the pass runs end to end still carries the pronouns into every
+    /// prompt it sends — not only into the one a unit test builds by hand.
+    #[tokio::test]
+    async fn a_whole_night_hands_the_model_the_pronouns_for_everyone_it_asks_about() {
+        let day = a_day();
+        let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let asked = seen.clone();
+        run_day("2026-09-21", &day, &set, &roles(), move |prompt: String| {
+            let asked = asked.clone();
+            async move {
+                asked.lock().push(prompt);
+                Ok(reply(&answer(&[])))
+            }
+        })
+        .await;
+        let prompts = seen.lock().clone();
+        assert!(!prompts.is_empty());
+        for p in &prompts {
+            assert!(p.to_lowercase().contains("never guess"), "a prompt went without the rule");
+            // Every name the prompt is allowed to answer about has pronouns.
+            for (name, words) in [("gooner", "he/him"), ("potus", "he/him"), ("riya", "she/her"), ("dev", "they/them")] {
+                if p.contains(&format!("{}: ", name)) && p.contains("The people who spoke here") && p.contains(name) {
+                    assert!(p.contains(&format!("- {}: {}", name, words)), "{} went in without pronouns:\n{}", name, p);
+                }
+            }
+        }
+    }
+
+    // --- an unreadable answer is asked again -------------------------------------------------
+
+    /// The first real night lost two channels to answers that could not be read.
+    /// A chunk gets one more go, with the model told what went wrong.
+    #[tokio::test]
+    async fn an_unreadable_chunk_is_asked_once_more_before_it_is_given_up() {
+        let day = a_day();
+        let set = Settings { min_messages: 5, min_chars: 60, ..Settings::default() };
+
+        // Unreadable, then good: nothing is lost and the retry is counted.
+        let tries = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let seen = tries.clone();
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), move |prompt: String| {
+            let seen = seen.clone();
+            async move {
+                let first = !seen.lock().iter().any(|p: &String| p.contains("#chatting"));
+                seen.lock().push(prompt.clone());
+                if prompt.contains("#chatting") && first {
+                    return Ok(reply("here you go! ```(no json at all)```"));
+                }
+                Ok(reply(&answer(&[("gooner", &["cricket"], "Arguing about the batting order."), ("riya", &["college exams"], "Revising.")])))
+            }
+        })
+        .await;
+        assert_eq!(pass.failed, 0, "the second try landed, so nothing was lost");
+        assert_eq!(pass.retried, 1);
+        assert!(pass.lost.is_empty());
+        assert!(pass.entries.iter().any(|e| e.user_id == 11), "the channel that stumbled is still in the day");
+        assert!(pass.entries.iter().any(|e| e.user_id == 33), "and so is the rest of it");
+        // The second ask told the model why the first was thrown away.
+        let asked = tries.lock().clone();
+        let retried = asked.iter().filter(|p| p.starts_with(UNREADABLE_RETRY)).count();
+        assert_eq!(retried, 1, "exactly one prompt carried the retry note: {:?}", asked.len());
+        assert!(asked.iter().any(|p| p.to_lowercase().contains("could not be read")), "the retry never told the model what went wrong");
+
+        // Unreadable twice: that channel is given up, named, and costs nothing else.
+        let count = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+        let calls = count.clone();
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), move |prompt: String| {
+            let calls = calls.clone();
+            async move {
+                *calls.lock() += 1;
+                if prompt.contains("#chatting") {
+                    return Ok(reply("sorry, I can't help with that"));
+                }
+                Ok(reply(&answer(&[("riya", &["college exams"], "Revising in a hurry.")])))
+            }
+        })
+        .await;
+        assert_eq!(pass.failed, 1, "one chunk given up");
+        assert_eq!(pass.retried, 0, "a retry that did not work is not a retry that worked");
+        assert_eq!(pass.lost, vec!["chatting".to_string()], "and the day says which channel it is missing");
+        assert!(!pass.entries.iter().any(|e| e.user_id == 11));
+        assert!(pass.entries.iter().any(|e| e.user_id == 33), "the rest of the day survived either way");
+        // Two goes at the bad chunk, one at each of the others.
+        let others = chunks(&day, &set).len() - 1;
+        assert_eq!(*count.lock(), others + 2, "the bad chunk was asked twice and no chunk more than that");
+
+        // A provider that errors is not asked again here: that retry already
+        // happened where the call is made, and paying twice for it is waste.
+        let count = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+        let calls = count.clone();
+        let pass = run_day("2026-09-21", &day, &set, &nobody(), move |prompt: String| {
+            let calls = calls.clone();
+            async move {
+                *calls.lock() += 1;
+                if prompt.contains("#chatting") {
+                    return Err("the provider returned an error".to_string());
+                }
+                Ok(reply(&answer(&[("riya", &["college exams"], "Revising in a hurry.")])))
+            }
+        })
+        .await;
+        assert_eq!((pass.failed, pass.retried), (1, 0));
+        assert_eq!(pass.lost, vec!["chatting".to_string()]);
+        assert_eq!(*count.lock(), chunks(&day, &set).len(), "one call a chunk");
+    }
+
+    /// The note is what the page and the log both read: it has to name the
+    /// channels, not print a count.
+    #[test]
+    fn a_night_that_lost_something_says_so_in_words() {
+        let capped = Pass {
+            chunks: 80,
+            capped: 6,
+            dropped: vec![("music".into(), 620), ("vent-lite".into(), 240)],
+            ..Pass::default()
+        };
+        let note = capped.note();
+        assert!(note.contains("hit the cap of 80 chunks"), "{note}");
+        assert!(note.contains("#music (620 messages)") && note.contains("#vent-lite (240 messages)"), "{note}");
+
+        let lost = Pass { chunks: 41, failed: 2, lost: vec!["💅female-ladiez-only".into(), "🐱cat-game".into()], ..Pass::default() };
+        let note = lost.note();
+        assert!(note.contains("2 of 41 chunks never came back"), "{note}");
+        assert!(note.contains("#💅female-ladiez-only") && note.contains("#🐱cat-game"), "{note}");
+
+        // A night that read the whole day says nothing at all.
+        assert_eq!(Pass { chunks: 30, ..Pass::default() }.note(), "");
     }
 
     // --- the cap and the shape of the work -----------------------------------------------------
@@ -1019,10 +1427,26 @@ pub mod tests {
         }
         let all = chunks(&day, &Settings { max_chunks: 500, chunk_tokens: 200, ..Settings::default() });
         assert!(all.len() > 12, "this day needs plenty of chunks: {}", all.len());
-        let capped = chunks(&day, &Settings { max_chunks: 4, chunk_tokens: 200, ..Settings::default() });
+        let short = cut(&day, &Settings { max_chunks: 4, chunk_tokens: 200, ..Settings::default() });
+        let capped = &short.chunks;
         assert_eq!(capped.len(), 4, "the cap holds");
         assert!(capped.iter().all(|c| c.channel_id == 5 || c.channel_id == 6), "the busiest channels are the ones kept: {:?}", capped.iter().map(|c| c.channel_id).collect::<Vec<_>>());
         assert!(chunks(&day, &Settings { max_chunks: 0, ..Settings::default() }).is_empty(), "nought chunks is the whole thing off");
+
+        // And the night knows exactly what the cap took from it, by name, so
+        // "40 of 40 chunks" can never again read as a night that went fine.
+        assert_eq!(short.capped, all.len() - 4);
+        assert!(!short.dropped.is_empty(), "the cap named nothing it dropped");
+        let names: Vec<&str> = short.dropped.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.iter().any(|n| n.starts_with("side-")), "the quiet channels are the ones named: {names:?}");
+        assert!(!names.contains(&"chatting"), "the busiest channel was never dropped: {names:?}");
+        let lost: usize = short.dropped.iter().map(|(_, n)| n).sum();
+        let kept: usize = capped.iter().map(|c| c.lines.len()).sum();
+        let want: usize = day.iter().filter(|m| notes_build::usable(&m.text).is_some()).count();
+        assert_eq!(kept + lost, want, "every message is either sent or counted as dropped");
+        // A day that fits drops nothing and says nothing.
+        let whole = cut(&day, &Settings { max_chunks: 500, chunk_tokens: 200, ..Settings::default() });
+        assert_eq!((whole.capped, whole.dropped.len()), (0, 0));
 
         // A chunk stays inside its budget, except where one message is bigger than it.
         for chunk in &all {
@@ -1122,7 +1546,7 @@ pub mod tests {
 
         let set = Settings::default();
         let cut = chunks(&day, &set);
-        let prompts: Vec<String> = cut.iter().map(|c| build_prompt("2026-09-21", c, &day)).collect();
+        let prompts: Vec<String> = cut.iter().map(|c| build_prompt("2026-09-21", c, &day, &nobody())).collect();
         let sent: usize = prompts.iter().map(|p| notes_build::estimate_tokens(p)).sum();
         let overhead = cut.len() * notes_build::estimate_tokens(INSTRUCTIONS);
         println!(
@@ -1151,7 +1575,10 @@ pub mod tests {
         assert!(topics_on(), "the nightly pass is on by default");
         assert_eq!(run_hour(), 5);
         assert_eq!((min_messages(), min_chars()), (5, 120));
-        assert_eq!((chunk_tokens(), max_chunks()), (12_000, 40));
+        // The cap was 40 and an ordinary night used all 40 of them, so the quiet
+        // channels were being dropped every night. It is 80 now.
+        assert_eq!((chunk_tokens(), max_chunks()), (12_000, 80));
+        assert_eq!(Settings::default().max_chunks, max_chunks(), "the panel's cap and the tests' cap are the same cap");
         assert_eq!(day_words("2026-09-21"), "Monday 21 September 2026");
         // With nothing set the pass falls through to the summary model, and on
         // through that to the bot's own.

@@ -488,7 +488,9 @@ async fn dive_into(picked: &Picked, cache: &Cache, now: i64) -> Result<Option<su
         sessions.iter().flat_map(|s| s.with.iter().map(|(id, _)| *id)).collect::<std::collections::HashSet<u64>>().into_iter().filter_map(|id| cache.members.get(&id).map(|n| (id, n.clone()))).collect();
     let name = cache.members.get(&member).cloned().unwrap_or_else(|| refs.last().map(|r| r.author_name.clone()).unwrap_or_else(|| member.to_string()));
     let words = super::deepdive::period_words(&period, false);
-    let prompt = super::deepdive::build_prompt(&name, &words, &refs, &sessions, &rooms, &names, super::kalesh::summary_max());
+    // Pronouns off their roles, for the member and everyone named beside them.
+    let said = super::pronouns::for_users(std::iter::once(member).chain(names.keys().copied()));
+    let prompt = super::deepdive::build_prompt(member, &name, &words, &refs, &sessions, &rooms, &names, super::kalesh::summary_max(), &said);
 
     // The same retrying path a moderator's own press goes through.
     let reply = super::kalesh::ask_retrying("watch: dive", || super::kalesh::ask_live(prompt.text.clone())).await?;

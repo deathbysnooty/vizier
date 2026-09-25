@@ -829,7 +829,10 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
         What::Stretch { channel_json, .. } => Scope::Stretch { channel_name: channel_json["name"].as_str().unwrap_or("") },
         What::Period { label, stretches } => Scope::Period { label, stretches: stretches.len() },
     };
-    let prompt = k::build_prompt(&loaded.names, scope, &lines, k::summary_max());
+    // Pronouns off the server's own roles, for everyone the stretch names.
+    let said =
+        super::super::super::pronouns::for_users(loaded.people.iter().copied().chain(lines.iter().map(|l| l.row.author_id)).collect::<HashSet<u64>>());
+    let prompt = k::build_prompt(&loaded.names, scope, &lines, k::summary_max(), &said);
     let reply = ask_model(&panel, &prompt.text).await.map_err(|err| {
         tracing::warn!("kalesh: a summary failed after {} tries: {}", TRIES, err);
         ApiError(

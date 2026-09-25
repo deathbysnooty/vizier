@@ -2576,14 +2576,31 @@
       nights.forEach((n) => {
         // A night that started and never came back is a failure, not a gap: it
         // has to look like one, whatever the counts on it say.
-        const cls = n.state === 'read' ? (n.failed ? ' warn' : '') : n.state === 'started' ? ' bad warn' : ' bad';
+        // A night that ran into its cap read only part of the day, so it is a
+        // warning even when every chunk it did send came back.
+        const short = (n.failed || 0) + (n.capped || 0) > 0;
+        const cls = n.state === 'read' ? (short ? ' warn' : '') : n.state === 'started' ? ' bad warn' : ' bad';
         const tip = n.state === 'read'
-          ? plural(n.members, 'member') + ' recorded' + (n.failed ? ' · ' + plural(n.failed, 'chunk') + ' failed' : '') + (n.note ? ' · ' + n.note : '')
+          ? plural(n.members, 'member') + ' recorded' + (short ? ' · part of the day was never read' : '') + (n.note ? ' · ' + n.note : '')
           : n.state === 'started' ? 'Started and never finished' + (n.note ? ': ' + n.note : '') : 'The pass hasn’t run for that day';
         strip.appendChild(h('span', { class: 'night' + cls, 'data-tip': tip },
           topicDay(n.day), h('small', null, n.state === 'read' ? numberFmt.format(n.members) : n.state === 'started' ? 'failed' : '—')));
       });
-      holder.appendChild(card('topics-nights', 'The nights behind this', 'A day nobody has read is not a quiet day. Hover for what each night did.', h('div', { class: 'card-body pad' }, strip)));
+      // Said plainly, not only in a tooltip: which nights read less than the
+      // whole day, and what they missed.
+      const shortfalls = nights.filter((n) => n.state === 'read' && ((n.capped || 0) > 0 || (n.lost || []).length));
+      const missed = shortfalls.length ? h('div', { class: 'card-body pad' }, shortfalls.map((n) => {
+        const bits = [];
+        if ((n.capped || 0) > 0) {
+          const where = (n.dropped || []).map((d) => '#' + d.channel + ' (' + plural(d.messages, 'message') + ')').join(', ');
+          bits.push('hit the chunk cap, so ' + plural(n.capped, 'chunk') + ' went unsent' + (where ? ': ' + where : ''));
+        }
+        if ((n.lost || []).length) bits.push('no readable answer for ' + n.lost.map((c) => '#' + c).join(', '));
+        return h('p', { class: 'empty-small' }, h('strong', null, topicDay(n.day)), ' — ' + bits.join('; ') + '.');
+      })) : null;
+      holder.appendChild(card('topics-nights', 'The nights behind this',
+        'A day nobody has read is not a quiet day, and a night that ran out of chunks did not read the whole day. Hover for what each night did.',
+        h('div', null, h('div', { class: 'card-body pad' }, strip), missed)));
 
       const body = h('div', { class: 'topic-rows' });
       if (!(d.topics || []).length) {

@@ -419,7 +419,20 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
             names.insert(id, m.name);
         }
     }
-    let prompt = dive::build_prompt(&loaded.name, &dive::period_words(&loaded.period, custom), &rows, &sessions, &rooms, &names, summary_max());
+    // Pronouns off the server's own roles, for the member and everyone named
+    // beside them, so the summary never works anybody's gender out for itself.
+    let said = super::super::super::pronouns::for_users(std::iter::once(loaded.asked.member).chain(names.keys().copied()));
+    let prompt = dive::build_prompt(
+        loaded.asked.member,
+        &loaded.name,
+        &dive::period_words(&loaded.period, custom),
+        &rows,
+        &sessions,
+        &rooms,
+        &names,
+        summary_max(),
+        &said,
+    );
     let reply = ask_model(&panel, &prompt.text).await.map_err(|err| {
         tracing::warn!("deepdive: a summary failed after {} tries: {}", TRIES, err);
         ApiError(

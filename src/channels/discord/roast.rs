@@ -173,6 +173,8 @@ fn dossier_from(id: u64, name: &str, f: &Facts, now: i64, channels: &HashMap<u64
     Dossier {
         id,
         name: name.to_string(),
+        // Off their role on the server, never out of the model's head.
+        pronouns: super::pronouns::of(id),
         days_here: f.member_since.map(|since| ((now - since).max(0)) / 86_400),
         messages_all: f.messages_all,
         messages_month: f.messages_month,
@@ -200,7 +202,8 @@ async fn dossier(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierS
         if let Some((read_at, d)) = dossier_cache().lock().get(&user).cloned() {
             if at.duration_since(read_at) < window {
                 tracing::debug!("roast: reusing what was read about {} {:?} ago", user, at.duration_since(read_at));
-                return Dossier { name: name.to_string(), ..d };
+                // The name and the pronouns are both cheap and both live.
+                return Dossier { name: name.to_string(), pronouns: super::pronouns::of(user), ..d };
             }
         }
     }

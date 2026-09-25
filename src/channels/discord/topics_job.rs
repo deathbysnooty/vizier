@@ -12,10 +12,14 @@
 //! on a blocking thread. Twenty thousand messages is a lot to walk through, and
 //! the bot has a server to answer while it does.
 //!
-//! Nothing is written until the whole day has been read. A chunk the model
-//! refuses is counted and stepped over; a night where nothing at all came back
-//! gives its claim up again with the reason on the row, so the page says what
-//! happened rather than showing an empty day.
+//! Nothing is written until the whole day has been read. A chunk whose answer
+//! cannot be read is asked once more, with the model told why the first one went
+//! in the bin; only then is it given up, counted, and its channel written on the
+//! run row. A night where nothing at all came back gives its claim up again with
+//! the reason on the row, so the page says what happened rather than showing an
+//! empty day — and a night that ran into its chunk cap says which channels it
+//! never reached, in the log and on the page, rather than printing a count that
+//! reads like success.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,6 +105,13 @@ fn read_day(from_ms: i64, to_ms: i64, names: &HashMap<u64, String>) -> Vec<Said>
         .collect()
 }
 
+/// Everybody's pronouns, off their roles, as the guild cache has them now. Read
+/// once a night and handed to every chunk's prompt: the model is never left to
+/// work somebody's gender out, which is the one inference the bot may not make.
+fn member_pronouns(ctx: &Context) -> HashMap<u64, super::pronouns::Pronouns> {
+    super::pronouns::everyone(ctx)
+}
+
 /// Every channel and thread the cache can name.
 fn channel_names(ctx: &Context) -> HashMap<u64, String> {
     let mut out: HashMap<u64, String> = HashMap::new();
@@ -127,18 +138,28 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// Nothing between the claim and the finish can leave the store holding half a
 /// day, because the entries go in one transaction after every chunk has been
 /// tried.
-pub async fn run_night(day: String, now: i64, names: HashMap<u64, String>) -> Option<topics::Pass> {
+pub async fn run_night(
+    day: String,
+    now: i64,
+    names: HashMap<u64, String>,
+    pronouns: HashMap<u64, super::pronouns::Pronouns>,
+) -> Option<topics::Pass> {
     let db = store::db()?;
     if RUNNING.swap(true, Ordering::SeqCst) {
         return None;
     }
-    let out = run_claimed(&day, now, names).await;
+    let out = run_claimed(&day, now, names, pronouns).await;
     RUNNING.store(false, Ordering::SeqCst);
     let _ = db;
     out
 }
 
-async fn run_claimed(day: &str, now: i64, names: HashMap<u64, String>) -> Option<topics::Pass> {
+async fn run_claimed(
+    day: &str,
+    now: i64,
+    names: HashMap<u64, String>,
+    pronouns: HashMap<u64, super::pronouns::Pronouns>,
+) -> Option<topics::Pass> {
     let db = store::db()?;
     let claimed = { store::claim(&db.lock(), KIND_TOPICS, day, now).unwrap_or(false) };
     if !claimed {
@@ -158,7 +179,7 @@ async fn run_claimed(day: &str, now: i64, names: HashMap<u64, String>) -> Option
 
     let set = topics::settings();
     let model = topics::topics_model();
-    let pass = topics::run_day(day, &day_rows, &set, |prompt| {
+    let pass = topics::run_day(day, &day_rows, &set, &pronouns, |prompt| {
         let model = model.clone();
         async move {
             // A breath between chunks: it is nobody's hurry.
@@ -172,12 +193,12 @@ async fn run_claimed(day: &str, now: i64, names: HashMap<u64, String>) -> Option
     // says why. A morning with no topics is better than a morning with wrong ones.
     if pass.chunks > 0 && pass.failed == pass.chunks {
         tracing::error!("topics: {} failed outright — all {} chunks", day, pass.chunks);
-        let _ = store::release(&db.lock(), KIND_TOPICS, day, &format!("the model answered none of the {} chunks", pass.chunks));
+        let note = format!("the model answered none of the {} chunks readably, even asked twice — {}", pass.chunks, pass.note());
+        let _ = store::release(&db.lock(), KIND_TOPICS, day, &note);
         return Some(pass);
     }
 
     let entries = pass.entries.clone();
-    let note = if pass.failed > 0 { format!("{} of {} chunks failed", pass.failed, pass.chunks) } else { String::new() };
     let written = {
         let mut conn = db.lock();
         match store::save(&mut conn, &entries, now) {
@@ -191,20 +212,25 @@ async fn run_claimed(day: &str, now: i64, names: HashMap<u64, String>) -> Option
     };
     {
         let conn = db.lock();
-        let _ = store::finish(&conn, KIND_TOPICS, day, &Done { note, ..Done::from(&pass) }, now);
+        let _ = store::finish(&conn, KIND_TOPICS, day, &Done::from(&pass), now);
         let _ = store::trim(&conn, &super::points::ist_day(now - KEEP_DAYS * DAY));
     }
+    // The count, and then what the night did not read — in words, because "40 of
+    // 40 chunks" is the one line nobody reads as a warning.
+    let note = pass.note();
     tracing::info!(
-        "topics: {} — {} members written down from {} messages in {} chunk(s), {} failed, {} too thin, {} + {} tokens on {}",
+        "topics: {} — {} members written down from {} messages in {} chunk(s), {} failed, {} retried, {} too thin, {} + {} tokens on {}{}",
         day,
         written,
         day_rows.len(),
         pass.chunks,
         pass.failed,
+        pass.retried,
         pass.too_thin,
         pass.input_tokens,
         pass.output_tokens,
-        if pass.model.is_empty() { "the bot's model" } else { pass.model.as_str() }
+        if pass.model.is_empty() { "the bot's model" } else { pass.model.as_str() },
+        if note.is_empty() { " — the whole day was read".to_string() } else { format!(" — NOT ALL OF THE DAY WAS READ: {}", note) }
     );
     Some(pass)
 }
@@ -221,7 +247,7 @@ pub fn spawn(ctx: Context) {
             if topics::topics_on() && store::db().is_some() {
                 let now = chrono::Utc::now().timestamp();
                 if due(super::points::ist_hour(now) as u32, topics::run_hour()) {
-                    run_night(target_day(now), now, channel_names(&ctx)).await;
+                    run_night(target_day(now), now, channel_names(&ctx), member_pronouns(&ctx)).await;
                 }
             }
             tokio::time::sleep(CHECK_EVERY).await;
@@ -258,15 +284,15 @@ mod tests {
         assert_eq!(day, "2026-02-10");
         // No message log in a test, so the day reads as empty — but it is still
         // claimed, worked and finished, which is the part that has to be once.
-        let first = run_night(day.clone(), now, HashMap::new()).await;
+        let first = run_night(day.clone(), now, HashMap::new(), HashMap::new()).await;
         assert!(first.is_some(), "the first run took the night");
         let db = store::db().expect("the test store");
         let row = store::run_for(&db.lock(), KIND_TOPICS, &day).unwrap().expect("a row for the night");
         assert!(!row.unfinished(), "and finished it");
         assert_eq!(row.note, "nothing in the log for that day", "with the reason on the row, where the page can read it");
 
-        assert!(run_night(day.clone(), now + 60, HashMap::new()).await.is_none(), "a restart a minute later does nothing");
-        assert!(run_night(day.clone(), now + 86_400, HashMap::new()).await.is_none(), "and nor does tomorrow");
+        assert!(run_night(day.clone(), now + 60, HashMap::new(), HashMap::new()).await.is_none(), "a restart a minute later does nothing");
+        assert!(run_night(day.clone(), now + 86_400, HashMap::new(), HashMap::new()).await.is_none(), "and nor does tomorrow");
         assert_eq!(store::runs(&db.lock(), KIND_TOPICS, 50).unwrap().iter().filter(|r| r.day == day).count(), 1, "one row, not two");
     }
 

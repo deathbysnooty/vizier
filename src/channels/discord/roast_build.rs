@@ -40,6 +40,9 @@ pub const TRIES: usize = 2;
 pub struct Dossier {
     pub id: u64,
     pub name: String,
+    /// Their pronouns, off this server's own roles. Never worked out from their
+    /// name or their messages: unknown is they/them, like everywhere else.
+    pub pronouns: super::pronouns::Pronouns,
     /// How long they have been on the server.
     pub days_here: Option<i64>,
     pub messages_all: i64,
@@ -211,6 +214,8 @@ sexuality, their religion or their caste. These stay out even if they joke about
 - Invent nothing. Every joke lands on something written in the record below - no made-up incidents, no made-up quotes, \
 no guessing at what they are like off the server.
 - Punch at what they do, never at what they are.
+- Never guess, infer or imply anyone's gender - not from their name, not from how they write, not from anything else. \
+Their pronouns are given below, from this server's own roles. Use exactly those.
 - No emoji spam: one at most, and none is better. No @everyone or @here.";
 
 pub fn ship_prompt(a: &Dossier, b: &Dossier, t: &Together, score: &Score, ship_name: &str) -> String {
@@ -255,6 +260,7 @@ Length: under 60 words in all.
 
 Reply with only a JSON object and nothing else: {{\"verdict\": \"...\"}}
 
+{pronouns}
 THE TWO OF THEM
 {a}
 
@@ -283,6 +289,7 @@ SOME OF WHAT THEY HAVE SAID AT EACH OTHER:
         ship = ship_name,
         nothing = nothing,
         limits = LIMITS,
+        pronouns = super::pronouns::block(&[(a.name.clone(), a.pronouns), (b.name.clone(), b.pronouns)]),
         a = each(a),
         b = each(b),
         between = between,
@@ -618,6 +625,7 @@ pub mod tests {
         Dossier {
             id: ARJUN,
             name: "arjun".into(),
+            pronouns: super::super::pronouns::Pronouns::He,
             days_here: Some(412),
             messages_all: 18_420,
             messages_month: 1_930,
@@ -644,6 +652,7 @@ pub mod tests {
         Dossier {
             id: RIYA,
             name: "riya".into(),
+            pronouns: super::super::pronouns::Pronouns::She,
             days_here: Some(300),
             messages_all: 9_100,
             messages_month: 2_400,
@@ -923,9 +932,16 @@ pub mod tests {
             "Both play: Chess",
             "Chess: 58 games, 41 won, 3 drawn",
             "arjun: ek minute rematch dedo",
+            // Their pronouns come off their roles; the verdict never guesses.
+            "- arjun: he/him",
+            "- riya: she/her",
+            "Never guess, infer or imply anyone's gender",
         ] {
             assert!(p.contains(must), "the ship prompt lacks {must:?}");
         }
+        // Two members with no role the bot can read are both they/them.
+        let unknown = ship_prompt(&nobody(), &Dossier { id: 56, name: "spectre".into(), ..Default::default() }, &t, &scored, "Ghospectre");
+        assert!(unknown.contains("- ghost: they/them") && unknown.contains("- spectre: they/them"), "{unknown}");
         assert!(p.contains(&format!("{}%", scored.percent)) && p.contains(&name));
         // The verdict is told which way the number moved and what moved it.
         assert!(p.contains("how much of each other's talking they get"), "{p}");
@@ -1065,8 +1081,10 @@ pub mod tests {
         println!("one /ship: {} tokens in (two strangers: {})", ship, strangers);
         // Roughly: the instructions and both records are the bulk of it, and
         // what they said at each other is capped at fourteen short lines - so a
-        // ship never runs away with the bill.
-        assert!(strangers < 1_000, "two members with nothing to go on cost {strangers} tokens");
+        // ship never runs away with the bill. The floor moved once, by about
+        // sixty tokens, when the verdict started being handed both members'
+        // pronouns instead of working them out for itself.
+        assert!(strangers < 1_100, "two members with nothing to go on cost {strangers} tokens");
         assert!(ship < 3_000, "a ship costs {ship} tokens");
     }
 

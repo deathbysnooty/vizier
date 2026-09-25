@@ -39,6 +39,11 @@ const SCHEMA: &str = "
         rejected INTEGER NOT NULL DEFAULT 0,
         input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
         model TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+        -- What the night did not read, so a short night can never be mistaken
+        -- for a quiet one: chunks the cap refused, the channels they were of,
+        -- and the channels whose answers never came back readable.
+        capped INTEGER NOT NULL DEFAULT 0,
+        dropped_json TEXT NOT NULL DEFAULT '[]', lost_json TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (kind, day));
     CREATE INDEX IF NOT EXISTS runs_started ON runs (kind, started_ts);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -56,7 +61,22 @@ pub fn db() -> Option<&'static Mutex<Connection>> {
 }
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    // Added once a night had to say what it did not read. A store made before
+    // this simply shows nothing dropped for the nights it already has.
+    let have: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (name, kind) in
+        [("capped", "INTEGER NOT NULL DEFAULT 0"), ("dropped_json", "TEXT NOT NULL DEFAULT '[]'"), ("lost_json", "TEXT NOT NULL DEFAULT '[]'")]
+    {
+        if !have.iter().any(|h| h == name) {
+            conn.execute_batch(&format!("ALTER TABLE runs ADD COLUMN {} {}", name, kind))?;
+        }
+    }
+    Ok(())
 }
 
 /// Opens (or makes) `<workspace>/.runtime/topics.db`. Once per process.
@@ -209,6 +229,12 @@ pub struct Run {
     /// Why a night that finished badly finished badly, in words. This is what
     /// puts a failure on the page rather than only in the log.
     pub note: String,
+    /// Chunks the cap refused to send. Nought means the night fitted.
+    pub capped: i64,
+    /// The channels those chunks were of, and how many messages went unread.
+    pub dropped: Vec<(String, i64)>,
+    /// The channels whose answers never came back readable, even after the retry.
+    pub lost: Vec<String>,
 }
 
 impl Run {
@@ -234,11 +260,14 @@ fn run_row(r: &rusqlite::Row) -> rusqlite::Result<Run> {
         output_tokens: r.get(10)?,
         model: r.get(11)?,
         note: r.get(12)?,
+        capped: r.get(13)?,
+        dropped: serde_json::from_str(&r.get::<_, String>(14)?).unwrap_or_default(),
+        lost: serde_json::from_str(&r.get::<_, String>(15)?).unwrap_or_default(),
     })
 }
 
-const RUN_COLUMNS: &str =
-    "kind, day, started_ts, finished_ts, chunks, failed, members, too_thin, rejected, input_tokens, output_tokens, model, note";
+const RUN_COLUMNS: &str = "kind, day, started_ts, finished_ts, chunks, failed, members, too_thin, rejected, input_tokens, output_tokens, \
+     model, note, capped, dropped_json, lost_json";
 
 /// Takes tonight's day for one job, or says somebody already has it.
 ///
@@ -277,6 +306,9 @@ pub struct Done {
     pub output_tokens: i64,
     pub model: String,
     pub note: String,
+    pub capped: i64,
+    pub dropped: Vec<(String, i64)>,
+    pub lost: Vec<String>,
 }
 
 impl From<&Pass> for Done {
@@ -290,7 +322,11 @@ impl From<&Pass> for Done {
             input_tokens: p.input_tokens as i64,
             output_tokens: p.output_tokens as i64,
             model: p.model.clone(),
-            note: String::new(),
+            // What the night lost, in the same words the log used.
+            note: p.note(),
+            capped: p.capped as i64,
+            dropped: p.dropped.iter().map(|(name, lost)| (name.clone(), *lost as i64)).collect(),
+            lost: p.lost.clone(),
         }
     }
 }
@@ -301,7 +337,8 @@ impl From<&Pass> for Done {
 pub fn finish(conn: &Connection, kind: &str, day: &str, done: &Done, now: i64) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE runs SET finished_ts = ?3, chunks = ?4, failed = ?5, members = ?6, too_thin = ?7, rejected = ?8,
-             input_tokens = ?9, output_tokens = ?10, model = ?11, note = ?12 WHERE kind = ?1 AND day = ?2",
+             input_tokens = ?9, output_tokens = ?10, model = ?11, note = ?12, capped = ?13, dropped_json = ?14, lost_json = ?15
+           WHERE kind = ?1 AND day = ?2",
         params![
             kind,
             day,
@@ -315,6 +352,9 @@ pub fn finish(conn: &Connection, kind: &str, day: &str, done: &Done, now: i64) -
             done.output_tokens,
             done.model,
             done.note,
+            done.capped,
+            serde_json::to_string(&done.dropped).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string(&done.lost).unwrap_or_else(|_| "[]".into()),
         ],
     )?;
     Ok(())

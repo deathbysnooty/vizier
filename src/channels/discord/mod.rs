@@ -102,6 +102,7 @@ mod sudoku_store;
 mod house_card;
 mod house_draft;
 mod points;
+mod pronouns;
 mod puzzle;
 mod puzzle_bank;
 mod puzzle_rules;

@@ -1414,6 +1414,42 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "pronouns",
+            title: "Pronouns",
+            icon: "🪶",
+            about: "Everywhere the bot writes about a member in the third person - the daily topic line, a Kalesh \
+                    summary, a Deep dive summary, a /ship verdict - it uses the pronouns from that member's own \
+                    role on this server, and is told in so many words never to work anybody's gender out from \
+                    their name, their words or anything else. The Male role means he/him and the Female role means \
+                    she/her. The Mystery role, no role at all, both roles somehow, or a member the bot cannot read \
+                    all mean they/them - and so does anyone the bot is unsure about. Nothing is stored: the roles \
+                    are read when a summary is written and thrown away with it.",
+            settings: vec![
+                setting(
+                    "VIZIER_ROLE_MALE",
+                    "Male role",
+                    "The role that means he/him. Members wearing it are written about as he/him and nothing else reads on their gender.",
+                    Kind::Role,
+                    "1516564878742261913",
+                ),
+                setting(
+                    "VIZIER_ROLE_FEMALE",
+                    "Female role",
+                    "The role that means she/her. Members wearing it are written about as she/her and nothing else reads on their gender.",
+                    Kind::Role,
+                    "1516564973222887545",
+                ),
+                setting(
+                    "VIZIER_ROLE_MYSTERY",
+                    "Mystery role",
+                    "The role that means they/them on purpose. It beats the other two: anyone wearing it is written about as they/them even if they wear another as well.",
+                    Kind::Role,
+                    "1516565038930985051",
+                ),
+            ],
+            commands: vec![],
+        },
+        Section {
             id: "topics",
             title: "Daily topics",
             icon: "🏷️",
@@ -1448,9 +1484,9 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_TOPICS_MAX_CHUNKS",
                     "Chunks a night",
-                    "The cap on one night's work. A day too big for this loses its quietest channels, never its busiest. Nought stops the pass as surely as switching it off.",
+                    "The cap on one night's work. A day too big for this loses its quietest channels, never its busiest, and the night says on the Topics page which channels it dropped. An ordinary day is well under this; nought stops the pass as surely as switching it off.",
                     number(0, 500, "chunks"),
-                    "40",
+                    "80",
                 ),
                 setting(
                     "VIZIER_TOPICS_MIN_MESSAGES",
