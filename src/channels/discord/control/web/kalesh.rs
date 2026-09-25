@@ -43,12 +43,9 @@ use super::{ApiError, ApiResult, Caller, Panel, ok, parse_id, search};
 pub const LIST_LIMIT: usize = 50;
 /// Stretches one search lists at most.
 pub const MAX_STRETCHES: usize = 60;
-/// Tries at the model for one summary, and the waits between them.
-pub const TRIES: usize = 3;
-#[cfg(not(test))]
-const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(8)];
-#[cfg(test)]
-const RETRY_WAITS: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
+/// Tries at the model for one summary, and the waits between them: `kalesh`'s,
+/// because every feature that writes with the model shares one retrying path.
+pub use super::super::super::kalesh::{TRIES, why_failed};
 const HOUR_MS: i64 = 3_600_000;
 
 fn store_db() -> Result<&'static Mutex<rusqlite::Connection>, ApiError> {
@@ -785,44 +782,11 @@ impl Drop for Running {
     }
 }
 
-/// Why a model call failed, in words a mod can act on.
-pub fn why_failed(err: &str) -> &'static str {
-    let e = err.to_ascii_lowercase();
-    if e.contains("took over") || e.contains("timed out") || e.contains("timeout") {
-        "it took too long to answer"
-    } else if e.contains("error sending request") || e.contains("connect") || e.contains("dns") || e.contains("http client error") || e.contains("connection") {
-        "network error"
-    } else if e.contains("empty") {
-        "it sent back nothing"
-    } else if e.contains("429") || e.contains("rate") {
-        "the provider is rate-limiting us"
-    } else {
-        "the provider returned an error"
-    }
-}
-
-/// The model's reply, tried up to [`TRIES`] times with a wait between: the
-/// provider does fail once now and then, and a second try usually works. An
-/// empty reply counts as a failure. The error is the reason, in words.
+/// The model's reply, through the one retrying path every feature shares. The
+/// call itself goes through the panel's data trait, so a test can hand the page
+/// a model that fails.
 pub(super) async fn ask_model(panel: &Panel, prompt: &str) -> Result<k::Reply, String> {
-    let mut last = String::new();
-    for attempt in 1..=TRIES {
-        match panel.data.kalesh_summarise(prompt.to_string()).await {
-            Ok(reply) if !reply.text.trim().is_empty() => return Ok(reply),
-            Ok(_) => {
-                last = "the model sent back an empty reply".into();
-                tracing::warn!("kalesh: summary try {} of {} came back empty", attempt, TRIES);
-            }
-            Err(err) => {
-                last = err.to_string();
-                tracing::warn!("kalesh: summary try {} of {} failed: {}", attempt, TRIES, err);
-            }
-        }
-        if let Some(wait) = RETRY_WAITS.get(attempt - 1) {
-            tokio::time::sleep(*wait).await;
-        }
-    }
-    Err(last)
+    k::ask_retrying("kalesh: summary", || panel.data.kalesh_summarise(prompt.to_string())).await
 }
 
 pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user)): axum::Extension<Caller>, body: axum::body::Bytes) -> ApiResult {
@@ -898,6 +862,8 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
         output_tokens: reply.output_tokens,
         summary: parsed,
         raw: reply.text,
+        // A fight is only ever summarised because somebody pressed the button.
+        reason: String::new(),
     };
     let id = store::add_summary(&store_db()?.lock(), &new).map_err(db_error)?;
     search::log_quietly("kalesh:summary", user, &label);
@@ -1712,12 +1678,17 @@ mod tests {
             let (status, _) = call(&app, method, path, Some(&member), None).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
         }
-        let before = PROMPTS.lock().len();
+        // A window in 1970, which no other test asks about: the prompts are one
+        // list shared by every test in this file, so the count has to be of
+        // prompts only this request could have produced.
+        let asked = || PROMPTS.lock().iter().filter(|p| p.contains("Channel: #general.") && p.contains("1 Jan")).count();
+        let before = asked();
         let body = json!({ "a": "2020", "b": "2021", "channel": "21", "start": "1", "end": "2" });
         let (status, _) = call(&app, "POST", "/api/kalesh/summarise", Some(&member), Some(body.clone())).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         let (status, _) = call(&app, "POST", "/api/kalesh/summarise", None, Some(body)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(PROMPTS.lock().len(), before, "no model call for a non-admin");
+        assert_eq!(asked(), before, "no model call for a non-admin");
+        assert_eq!(before, 0, "and nobody else asks about that window either");
     }
 }

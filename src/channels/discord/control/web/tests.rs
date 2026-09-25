@@ -1700,6 +1700,11 @@ async fn everything_needs_a_session() {
         ("GET", "/api/audit"),
         ("PUT", "/api/settings/PANEL_TEST_ARENA"),
         ("POST", "/api/restart"),
+        // The pages that say what members have been talking about and who has
+        // been dived into are as private as anything else here.
+        ("GET", "/api/deepdives"),
+        ("GET", "/api/topics?member=1"),
+        ("GET", "/api/topics/week"),
     ] {
         let (status, _, _) = call(&app, method, path, None, Some(json!({ "value": "off" })), true).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");

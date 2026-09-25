@@ -40,6 +40,15 @@ pub const EXCHANGE_ROWS: usize = 3_000;
 pub const MAX_TEXT_CHARS: usize = 1_200;
 /// How long one try at a summary may take. A whole period is a long prompt.
 const MODEL_WAIT: Duration = Duration::from_secs(240);
+/// Tries at the model for one answer, and the waits between them. Every feature
+/// that asks the model to write something goes through [`ask_retrying`], so
+/// there is one place where "the provider failed" is decided, and one place to
+/// change how patient the bot is.
+pub const TRIES: usize = 3;
+#[cfg(not(test))]
+const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(8)];
+#[cfg(test)]
+const RETRY_WAITS: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
 /// The most members one look may be about.
 pub const MAX_PEOPLE: usize = 6;
 
@@ -779,17 +788,71 @@ pub struct Reply {
     pub model: String,
 }
 
+/// Why a model call failed, in words a moderator can act on.
+pub fn why_failed(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    if e.contains("took over") || e.contains("timed out") || e.contains("timeout") {
+        "it took too long to answer"
+    } else if e.contains("error sending request") || e.contains("connect") || e.contains("dns") || e.contains("http client error") || e.contains("connection") {
+        "network error"
+    } else if e.contains("empty") {
+        "it sent back nothing"
+    } else if e.contains("429") || e.contains("rate") {
+        "the provider is rate-limiting us"
+    } else {
+        "the provider returned an error"
+    }
+}
+
+/// One answer from the model, tried up to [`TRIES`] times with a wait between:
+/// the provider does fail once now and then, and a second try usually works. An
+/// empty reply counts as a failure. The error is the reason, in words.
+///
+/// Every feature that writes with the model comes through here — the panel's
+/// summaries, the deep dives, the nightly topic pass, the nightly scan — so a
+/// failure means the same thing, and costs the same patience, everywhere.
+pub async fn ask_retrying<F, Fut>(what: &str, ask: F) -> Result<Reply, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Reply>>,
+{
+    let mut last = String::new();
+    for attempt in 1..=TRIES {
+        match ask().await {
+            Ok(reply) if !reply.text.trim().is_empty() => return Ok(reply),
+            Ok(_) => {
+                last = "the model sent back an empty reply".into();
+                tracing::warn!("{}: try {} of {} came back empty", what, attempt, TRIES);
+            }
+            Err(err) => {
+                last = err.to_string();
+                tracing::warn!("{}: try {} of {} failed: {}", what, attempt, TRIES, err);
+            }
+        }
+        if let Some(wait) = RETRY_WAITS.get(attempt - 1) {
+            tokio::time::sleep(*wait).await;
+        }
+    }
+    Err(last)
+}
+
 /// One call to the summary model: `VIZIER_KALESH_SUMMARY_MODEL` on the bot's
 /// own provider, or the bot's main model when that is empty. Providers that
 /// don't report usage get an estimate from the text.
 pub async fn ask_live(prompt: String) -> anyhow::Result<Reply> {
+    ask_live_as(prompt, summary_model()).await
+}
+
+/// The same, on a named model of the caller's choosing: what lets the nightly
+/// passes put a whole day through a cheap one without touching the model a
+/// moderator's own summaries use.
+pub async fn ask_live_as(prompt: String, name: Option<String>) -> anyhow::Result<Reply> {
     use crate::agents::agent::model::{VizierModel, VizierModelTrait};
     use crate::storage::agent::AgentStorage;
     use rig_core::message::{AssistantContent, Message as ModelMessage};
 
     let (deps, agent_id) = control::web::bot_agent().ok_or_else(|| anyhow::anyhow!("the agent isn't reachable"))?;
     let config = deps.storage.get_agent(agent_id).await?.ok_or_else(|| anyhow::anyhow!("no config for {}", agent_id))?;
-    let name = summary_model();
     let named = name.clone().map(|n| (config.provider.clone(), n));
     let model = VizierModel::new_with_override(deps, &config, named).await?;
     let prompt_tokens = super::notes_build::estimate_tokens(&prompt) as u64;

@@ -49,7 +49,7 @@ fn prepare(conn: &Connection) -> rusqlite::Result<()> {
         let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    for (name, kind) in [("people_json", "TEXT"), ("scope", "TEXT NOT NULL DEFAULT 'stretch'")] {
+    for (name, kind) in [("people_json", "TEXT"), ("scope", "TEXT NOT NULL DEFAULT 'stretch'"), ("reason", "TEXT NOT NULL DEFAULT ''")] {
         if !have.iter().any(|h| h == name) {
             conn.execute_batch(&format!("ALTER TABLE summaries ADD COLUMN {} {}", name, kind))?;
         }
@@ -198,6 +198,9 @@ pub struct NewSummary {
     /// The model's answer, read into the page's shape; none when it wasn't JSON.
     pub summary: Option<serde_json::Value>,
     pub raw: String,
+    /// Why it was written, when nobody pressed a button: the nightly scan's
+    /// reasons, in words. Empty for one a moderator asked for.
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -209,8 +212,8 @@ pub struct Summary {
 pub fn add_summary(conn: &Connection, s: &NewSummary) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO summaries (stretch_key, channel_id, a_id, b_id, start_ms, end_ms, detection_id, message_ids_json, message_count,
-             sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             s.stretch_key,
             s.channel_id as i64,
@@ -232,13 +235,14 @@ pub fn add_summary(conn: &Connection, s: &NewSummary) -> rusqlite::Result<i64> {
             s.raw,
             serde_json::to_string(&s.people.iter().map(|i| i.to_string()).collect::<Vec<_>>()).unwrap_or_else(|_| "[]".into()),
             s.scope,
+            s.reason,
         ],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
 const SUMMARY_COLUMNS: &str = "id, stretch_key, channel_id, a_id, b_id, start_ms, end_ms, detection_id, message_ids_json, \
-                               sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope";
+                               sent_count, trimmed, run_by, run_ts, model, input_tokens, output_tokens, summary_json, raw, people_json, scope, reason";
 
 fn summary_row(r: &rusqlite::Row) -> rusqlite::Result<Summary> {
     let ids: Vec<String> = serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default();
@@ -271,6 +275,7 @@ fn summary_row(r: &rusqlite::Row) -> rusqlite::Result<Summary> {
             output_tokens: r.get::<_, i64>(15)? as u64,
             summary: r.get::<_, Option<String>>(16)?.and_then(|s| serde_json::from_str(&s).ok()),
             raw: r.get(17)?,
+            reason: r.get::<_, Option<String>>(20)?.unwrap_or_default(),
         },
     })
 }
@@ -317,6 +322,25 @@ pub fn period_summaries(conn: &Connection, people: &[u64], start_ms: i64, end_ms
     let rows = stmt.query_map(params![start_ms, end_ms], summary_row)?;
     let all: Vec<Summary> = rows.collect::<rusqlite::Result<_>>()?;
     Ok(all.into_iter().filter(|s| same_people(&s.new.people, people)).take(20).collect())
+}
+
+/// Every deep dive ever run, newest first — one member's, or everybody's. This
+/// is what the Deep dives page lists: a dive that has been paid for once can be
+/// opened again for nothing, for as long as the store keeps it.
+pub fn member_summaries(conn: &Connection, member: Option<u64>, limit: usize) -> rusqlite::Result<Vec<Summary>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {} FROM summaries WHERE scope = 'member' AND (?1 IS NULL OR a_id = ?1) ORDER BY run_ts DESC, id DESC LIMIT ?2",
+        SUMMARY_COLUMNS
+    ))?;
+    let rows = stmt.query_map(params![member.map(|m| m as i64), limit as i64], summary_row)?;
+    rows.collect()
+}
+
+/// How many deep dives are kept, and how many of those the nightly scan wrote.
+pub fn member_summary_counts(conn: &Connection) -> (i64, i64) {
+    let all = conn.query_row("SELECT COUNT(*) FROM summaries WHERE scope = 'member'", [], |r| r.get(0)).unwrap_or(0);
+    let nightly = conn.query_row("SELECT COUNT(*) FROM summaries WHERE scope = 'member' AND reason != ''", [], |r| r.get(0)).unwrap_or(0);
+    (all, nightly)
 }
 
 /// The newest summaries, for the page's list.
@@ -391,6 +415,7 @@ mod tests {
             output_tokens: 2,
             summary: Some(serde_json::json!({ "overview": "x" })),
             raw: "{}".into(),
+            reason: String::new(),
         };
         let sid = add_summary(&conn, &s).unwrap();
         assert_eq!(summary_for(&conn, "k").unwrap().unwrap().id, sid);
@@ -406,5 +431,53 @@ mod tests {
         assert_eq!(summary(&conn, pid).unwrap().unwrap().new.people, vec![3, 1, 2]);
         assert_eq!(summarised_detections(&conn, &[id, id + 1]).unwrap(), vec![id]);
         assert_eq!(summary(&conn, sid).unwrap().unwrap().new, s);
+    }
+
+    /// Deep dives are listed on their own, newest first, and a nightly one
+    /// carries the reason it was picked.
+    #[test]
+    fn deep_dives_are_listed_apart_from_the_fights_and_keep_why_they_were_run() {
+        let conn = open_memory().unwrap();
+        let dive = |member: u64, run_ts: i64, run_by: u64, reason: &str| NewSummary {
+            stretch_key: format!("member:{}:7d:{}-{}:3", member, run_ts, run_ts + 2),
+            channel_id: 0,
+            a_id: member,
+            b_id: member,
+            people: vec![member],
+            scope: "member".into(),
+            start_ms: 0,
+            end_ms: 100_000,
+            detection_id: None,
+            message_ids: vec![11, 12, 13],
+            sent_count: 3,
+            trimmed: false,
+            run_by,
+            run_ts,
+            model: "cheap".into(),
+            input_tokens: 10,
+            output_tokens: 2,
+            summary: Some(serde_json::json!({ "overview": "a quiet week" })),
+            raw: "{}".into(),
+            reason: reason.into(),
+        };
+        add_summary(&conn, &dive(700, 10, 99, "")).unwrap();
+        let nightly = add_summary(&conn, &dive(800, 20, 0, "In 1 fight the detector called today")).unwrap();
+        // A fight summary is not a deep dive and never shows up in the list.
+        add_summary(&conn, &NewSummary { scope: SCOPE_STRETCH.into(), channel_id: 23, ..dive(900, 30, 99, "") }).unwrap();
+
+        let all = member_summaries(&conn, None, 50).unwrap();
+        assert_eq!(all.iter().map(|s| s.new.a_id).collect::<Vec<_>>(), vec![800, 700], "newest first, fights left out");
+        assert_eq!(all[0].id, nightly);
+        assert_eq!(all[0].new.reason, "In 1 fight the detector called today", "why the night picked them");
+        assert_eq!(all[0].new.run_by, 0, "nobody pressed a button");
+        assert_eq!(all[1].new.reason, "", "one a moderator asked for has no reason");
+        // Searchable by member.
+        assert_eq!(member_summaries(&conn, Some(700), 50).unwrap().len(), 1);
+        assert!(member_summaries(&conn, Some(4_040), 50).unwrap().is_empty());
+        assert_eq!(member_summaries(&conn, None, 1).unwrap().len(), 1, "the limit holds");
+        assert_eq!(member_summary_counts(&conn), (2, 1), "two dives, one of them the scan's");
+        // And a stored one comes back whole, so opening it costs nothing.
+        let again = summary_for(&conn, &all[0].new.stretch_key).unwrap().unwrap();
+        assert_eq!(again.new.summary, Some(serde_json::json!({ "overview": "a quiet week" })));
     }
 }

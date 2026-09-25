@@ -20,7 +20,8 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::kalesh::{Prompt, marker, pick};
+use super::kalesh::{Prompt, Reply, marker, pick};
+use super::kalesh_store::NewSummary;
 use super::msglog::SaidRow;
 
 /// A summary of one member over one period, as `kalesh_store` files it.
@@ -460,6 +461,55 @@ pub fn parse_summary(raw: &str, total: usize) -> Option<Value> {
     out.insert("thin".into(), json!(text_of(o.get("thin"))));
     out.insert("interpretation".into(), json!(list("interpretation").iter().map(|s| text_of(Some(s))).filter(|s| !s.is_empty()).collect::<Vec<_>>()));
     Some(Value::Object(out))
+}
+
+// --- filing one away ---------------------------------------------------------------------------
+
+/// Who a dive is about, over what, and how it came to be run. Everything the
+/// store files a summary under, so a dive a moderator pressed for and one the
+/// nightly scan picked are the same kind of row and read the same way back.
+#[derive(Clone, Debug)]
+pub struct Filed<'a> {
+    pub member: u64,
+    pub days: i64,
+    pub period: Period,
+    /// The exact messages it covered, in order: `[#n]` is `message_ids[n - 1]`.
+    pub message_ids: Vec<u64>,
+    /// The moderator who asked, or 0 when nobody did.
+    pub run_by: u64,
+    pub run_ts: i64,
+    /// Why the nightly scan picked them, in words; empty when somebody asked.
+    pub reason: &'a str,
+}
+
+/// One deep dive's summary as the store takes it. The model's answer is read
+/// into the page's shape here, so a reply that was not JSON is filed with its
+/// raw text and no summary rather than being lost.
+pub fn new_summary(filed: &Filed, key: String, prompt: &Prompt, reply: Reply) -> NewSummary {
+    let parsed = parse_summary(&reply.text, filed.message_ids.len());
+    NewSummary {
+        stretch_key: key,
+        channel_id: 0,
+        // One person, in all three places the store keeps people.
+        a_id: filed.member,
+        b_id: filed.member,
+        people: vec![filed.member],
+        scope: SCOPE_MEMBER.to_string(),
+        start_ms: filed.period.from * 1000,
+        end_ms: filed.period.to * 1000,
+        detection_id: None,
+        message_ids: filed.message_ids.clone(),
+        sent_count: prompt.sent,
+        trimmed: prompt.trimmed,
+        run_by: filed.run_by,
+        run_ts: filed.run_ts,
+        model: reply.model,
+        input_tokens: reply.input_tokens,
+        output_tokens: reply.output_tokens,
+        summary: parsed,
+        raw: reply.text,
+        reason: filed.reason.to_string(),
+    }
 }
 
 #[cfg(test)]

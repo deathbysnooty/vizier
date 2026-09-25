@@ -2628,3 +2628,95 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .inv-table td:first-child::before { content: none; }
   .inv-head h1 { font-size: 21px; }
 }
+
+/* --- deep dives, and the topics the nightly pass writes down ---------------------- */
+
+/* A row opens in place: the summary is already in the payload, so opening one
+   costs nothing and never asks the model again. */
+.dive-entry { border-top: 1px solid var(--line); }
+.dive-entry:first-child { border-top: 0; }
+.dive-row { width: 100%; border: 0; border-top: 0; background: transparent; text-align: left; font: inherit; cursor: pointer; }
+.dive-row .kalesh-row-go { transition: transform .15s ease; color: var(--muted); }
+.dive-row.open .kalesh-row-go { transform: rotate(180deg); }
+.dive-row .kalesh-row-head .badge { margin-left: 0; }
+.dive-why { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.badge.nightly { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
+.dive-saved-wrap { padding: 0 var(--pad-card) 14px; }
+.dive-saved { display: grid; gap: 10px; justify-items: start; padding: 12px 14px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line); }
+.dive-overview { margin: 0; line-height: 1.55; }
+.dive-quiet { margin: 0; color: var(--text-2); font-size: 13px; }
+.dive-watch-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; line-height: 1.5; }
+.dive-watch-row .badge { flex: none; margin-top: 2px; }
+
+/* A topic is a short tag and nothing more: it never names a person, and never
+   touches anybody's sexuality, gender, religion, caste, health or family. */
+.topic-chips { display: flex; flex-wrap: wrap; gap: 5px 6px; }
+.topic-chip {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px; border-radius: 999px;
+  background: var(--accent-soft); border: 1px solid var(--accent-line); color: var(--accent-text);
+  font-size: 12.5px; font-weight: 600; line-height: 1.3;
+}
+.topic-chip.big { font-size: 14px; padding: 4px 12px; }
+.topic-chip.new { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.topic-chip.gone { color: var(--muted); background: transparent; border-style: dashed; border-color: var(--line-2); }
+
+.topics-lately { display: grid; gap: 7px; margin-bottom: 14px; }
+.topics-drift { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 16px; }
+.topics-drift h4, .topics-lately h4, .topics-head {
+  display: flex; align-items: center; gap: 5px; margin: 0 0 6px;
+  font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+}
+.topics-drift h4 .icon, .topics-lately h4 .icon { width: 13px; height: 13px; }
+
+.topic-days { display: grid; gap: 2px; }
+.topic-day { display: grid; grid-template-columns: 116px 1fr; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+.topic-day:first-child { border-top: 0; }
+.topic-day-when { display: grid; gap: 2px; font-size: 13px; font-weight: 600; }
+.topic-day-when small { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+.topic-day-body { display: grid; gap: 6px; min-width: 0; }
+.topic-day-body p { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+/* A day with nothing on it reads as nothing much — never as missing data. */
+.topic-day.quiet .topic-day-when { color: var(--muted); font-weight: 500; }
+.topic-none { display: inline-flex; align-items: center; gap: 5px; justify-self: start; font-size: 13px; }
+/* Said nothing worth recording: quiet, and plainly finished. */
+.topic-none.quiet { color: var(--muted); font-style: italic; }
+/* Never read: a gap in the record, and it has to look like one. */
+.topic-none.unread {
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn); font-weight: 600; font-size: 12px;
+}
+.topic-none.unread .icon { width: 12px; height: 12px; }
+
+/* Which nights the pass actually read, so an empty week can never be mistaken
+   for a quiet one. */
+.night-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.night {
+  display: grid; gap: 2px; justify-items: center;
+  padding: 6px 10px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  font-size: 12px; font-weight: 600;
+}
+.night small { color: var(--muted); font-weight: 500; }
+.night.warn { border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.night.bad { border-style: dashed; border-color: var(--line-2); background: transparent; color: var(--muted); }
+/* Started and never finished: a gap that is somebody's fault, not a quiet day. */
+.night.bad.warn { border-color: color-mix(in srgb, var(--warn) 55%, transparent); color: var(--warn); }
+.night.bad.warn small { color: var(--warn); }
+
+.topic-rows { display: grid; }
+.topic-row { display: grid; gap: 8px; padding: 12px var(--pad-card); border-top: 1px solid var(--line); }
+.topic-row:first-child { border-top: 0; }
+.topic-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.topic-row-head .msg-hit-time { margin-left: auto; }
+.topic-people { display: flex; flex-wrap: wrap; gap: 6px; }
+.topic-people .chip { height: 26px; font-size: 12.5px; text-decoration: none; }
+.topic-people .chip:hover { border-color: var(--accent-line); }
+
+@media (max-width: 640px) {
+  .topic-day { grid-template-columns: 1fr; gap: 5px; }
+  .topic-row-head .msg-hit-time { margin-left: 0; }
+}

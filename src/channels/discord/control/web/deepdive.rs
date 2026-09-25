@@ -431,29 +431,18 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
             ),
         )
     })?;
-    let parsed = dive::parse_summary(&reply.text, rows.len());
-    let new = store::NewSummary {
-        stretch_key: key,
-        channel_id: 0,
-        // One person, in all three places the store keeps people.
-        a_id: loaded.asked.member,
-        b_id: loaded.asked.member,
-        people: vec![loaded.asked.member],
-        scope: dive::SCOPE_MEMBER.to_string(),
-        start_ms: loaded.period.from * 1000,
-        end_ms: loaded.period.to * 1000,
-        detection_id: None,
+    // The same builder the nightly scan files its dives through, so a dive a
+    // moderator pressed for and one the scan picked are the same kind of row.
+    let filed = dive::Filed {
+        member: loaded.asked.member,
+        days: loaded.asked.days,
+        period: loaded.period,
         message_ids: rows.iter().map(|r| r.message_id).collect(),
-        sent_count: prompt.sent,
-        trimmed: prompt.trimmed,
         run_by: user,
         run_ts: now,
-        model: reply.model,
-        input_tokens: reply.input_tokens,
-        output_tokens: reply.output_tokens,
-        summary: parsed,
-        raw: reply.text,
+        reason: "",
     };
+    let new = dive::new_summary(&filed, key, &prompt, reply);
     let id = store::add_summary(&store_db()?.lock(), &new).map_err(db_error)?;
     search::log_quietly("deepdive:summary", user, &label);
     tracing::info!("deepdive: {} summarised {} ({} + {} tokens)", user, label, new.input_tokens, new.output_tokens);

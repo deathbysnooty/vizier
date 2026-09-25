@@ -364,6 +364,7 @@ mod houses;
 mod insights;
 mod invites;
 mod deepdive;
+mod deepdives;
 mod kalesh;
 mod left;
 mod media;
@@ -378,6 +379,7 @@ mod rules;
 mod scorers;
 mod search;
 mod sudoku;
+mod topics;
 mod welcomes;
 
 // --- the live implementation ------------------------------------------------------
@@ -1215,6 +1217,9 @@ pub fn router(panel: Panel) -> Router {
         .route("/kalesh/summarise", post(kalesh::summarise))
         .route("/deepdive", get(deepdive::dive))
         .route("/deepdive/summarise", post(deepdive::summarise))
+        .route("/deepdives", get(deepdives::list))
+        .route("/topics", get(topics::member))
+        .route("/topics/week", get(topics::week))
         .route("/members", get(members::search))
         .route("/members/left", get(left::list))
         .route("/members/notes", get(members::noted))
@@ -1982,8 +1987,12 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(left::audit_entry(e));
             } else if e.key.starts_with("kalesh:") {
                 obj.extend(kalesh::audit_entry(e));
+            } else if e.key.starts_with("deepdives:") {
+                obj.extend(deepdives::audit_entry(e));
             } else if e.key.starts_with("deepdive:") {
                 obj.extend(deepdive::audit_entry(e));
+            } else if e.key.starts_with("topics:") {
+                obj.extend(topics::audit_entry(e));
             } else if e.key.starts_with("invites:") {
                 obj.extend(invites::audit_entry(e));
             } else if e.key == "automod:flags" {

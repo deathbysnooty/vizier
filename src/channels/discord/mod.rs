@@ -61,6 +61,10 @@ mod roast_card;
 mod roast_store;
 mod ship_score;
 mod ship_sheet;
+mod topics;
+mod topics_store;
+mod topics_job;
+mod watchlist;
 mod anagram;
 mod anagram_store;
 mod anagram_words;
@@ -239,6 +243,12 @@ impl VizierChannel for DiscordChannelReader {
         // Fights the kalesh detector called, and the panel's summaries of them.
         if let Err(err) = kalesh_store::open(&self.deps.config.workspace) {
             tracing::warn!("kalesh: store not opened: {}", err);
+        }
+        // What each member talked about, night by night, and what the nightly
+        // jobs have already done. Not opening only means the topic pass and the
+        // scan stay quiet; nothing else in the bot depends on it.
+        if let Err(err) = topics_store::open(&self.deps.config.workspace) {
+            tracing::warn!("topics: store not opened: {}", err);
         }
         // Invite tracking: the invite snapshot and which invite each join used.
         if let Err(err) = invites_store::open(&self.deps.config.workspace) {
@@ -1569,6 +1579,12 @@ impl EventHandler for Handler {
         // /ship's nightly sheets: one row of counts per active member, rebuilt
         // in the small hours so a ship never has to read the whole log itself.
         ship_sheet::spawn(ctx.clone());
+        // The nightly topic pass: yesterday's chat read once, channel by
+        // channel, into a handful of tags per member.
+        topics_job::spawn(ctx.clone());
+        // And an hour after it, the scan that picks who is worth a deep dive,
+        // so a mod opening the panel sees who needs attention.
+        watchlist::spawn(ctx.clone());
 
         let thinking = CreateCommand::new("thinking").description("toggle showing thinking output");
 

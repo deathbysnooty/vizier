@@ -1414,6 +1414,105 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "topics",
+            title: "Daily topics",
+            icon: "🏷️",
+            about: "Once a night the bot reads the day that has just finished and writes down, for each member, a \
+                    few short tags for what they were on about and one plain line about their day. It reads the day \
+                    in one pass - channel by channel, in chunks - rather than asking about each member in turn, so a \
+                    server of two hundred people costs one day's worth of tokens, not two hundred calls. What is \
+                    kept per member per day is tiny: the tags, the line, a message count and which channels. No \
+                    message text is ever stored. Weeks of it stack up into \"what they have been talking about \
+                    lately\" on a member's profile and on the Deep dive page, and into the server-wide Topics page. \
+                    Two floors stand in front of it: somebody who dropped a few one-word replies gets no entry at \
+                    all rather than an invented one. And it will never record or infer anything about anybody's \
+                    sexuality, gender, religion, caste, health or family - a tag that touches one of those is thrown \
+                    away, whatever was said. #safe-corner is never read, here or anywhere.",
+            settings: vec![
+                toggle("VIZIER_TOPICS", "Daily topics", "The nightly pass over yesterday's chat. Off stops it; days already recorded stay on the pages."),
+                setting("VIZIER_TOPICS_HOUR", "Hour it runs", "The India hour the pass reads yesterday at. Best in the small hours, when the server is quiet.", number(0, 23, "o'clock"), "5"),
+                setting(
+                    "VIZIER_TOPICS_MODEL",
+                    "Topics model",
+                    "The model the nightly pass uses, on the bot's own provider. This one reads a whole day, so a cheap fast model is the right choice. Empty falls back to the Kalesh summary model, and through that to the bot's main model.",
+                    Kind::Text,
+                    "",
+                ),
+                setting(
+                    "VIZIER_TOPICS_CHUNK_SIZE",
+                    "Chunk size",
+                    "How much of one channel's day goes into one call. Bigger chunks mean fewer calls and more context; smaller ones are easier on a small model.",
+                    number(1000, 60000, "tokens"),
+                    "12000",
+                ),
+                setting(
+                    "VIZIER_TOPICS_MAX_CHUNKS",
+                    "Chunks a night",
+                    "The cap on one night's work. A day too big for this loses its quietest channels, never its busiest. Nought stops the pass as surely as switching it off.",
+                    number(0, 500, "chunks"),
+                    "40",
+                ),
+                setting(
+                    "VIZIER_TOPICS_MIN_MESSAGES",
+                    "Messages before an entry",
+                    "Messages with something in them - not bot commands, one-word replies or the same line again - before a member's day is worth recording at all. Below this they get no entry, which the panel shows as \"nothing much\".",
+                    number(1, 500, "messages"),
+                    "5",
+                ),
+                setting(
+                    "VIZIER_TOPICS_MIN_CHARS",
+                    "Characters before an entry",
+                    "Characters of real text across those messages, on top of the count. Five \"lol\"s clear the message floor and not this one, and a day of one-word replies stays a no-entry day however busy it was.",
+                    number(0, 20000, "characters"),
+                    "120",
+                ),
+            ],
+            commands: vec![],
+        },
+        Section {
+            id: "watch",
+            title: "Nightly watch",
+            icon: "🔎",
+            about: "Every morning a mod should be able to open the panel and see who needs a look. This does the \
+                    picking. First, from counts alone - no AI, no tokens - it flags members whose day stood out: a \
+                    fight the kalesh detector called, AutoMod stopping them over and over, a pile of deleted \
+                    messages, a day far quieter or far louder than their own fortnight, or a new member who has just \
+                    become properly active. Then, for only those few, it runs the ordinary deep-dive summary and \
+                    puts it on the Deep dives page marked with why they were picked. A flag says \"their day stands \
+                    out from their own other days\", never \"they are a problem\"; the summary is written under the \
+                    same neutral instructions a mod's own deep dive is, and the messages themselves are still there \
+                    to read.",
+            settings: vec![
+                toggle("VIZIER_WATCH", "Nightly watch", "The scan and the dives it runs. Off stops both; dives already written stay on the page."),
+                setting("VIZIER_WATCH_HOUR", "Hour it runs", "The India hour the scan runs at. An hour after the topic pass, so the morning has both.", number(0, 23, "o'clock"), "6"),
+                setting(
+                    "VIZIER_WATCH_MAX",
+                    "Dives a night",
+                    "Members the scan may write a summary for in one night. The page is meant to be a short list somebody will actually read; the worst days are the ones that fit. Nought stops the dives.",
+                    number(0, 60, "members"),
+                    "12",
+                ),
+                setting("VIZIER_WATCH_AUTOMOD", "AutoMod blocks", "Messages AutoMod stopped in one day before that day is worth a look.", number(1, 500, "messages"), "3"),
+                setting("VIZIER_WATCH_DELETED", "Deleted messages", "Messages of theirs deleted in one day before that day is worth a look.", number(1, 1000, "messages"), "8"),
+                setting(
+                    "VIZIER_WATCH_QUIET",
+                    "Chatty enough to read",
+                    "How much somebody has to say on an ordinary day before a quiet one or a loud one means anything. Below this the numbers are too small to read anything into.",
+                    number(1, 5000, "messages"),
+                    "25",
+                ),
+                setting("VIZIER_WATCH_NEW_DAYS", "Still counts as new", "How long after joining a member still counts as new, for \"settled in\".", number(1, 120, "days"), "14"),
+                setting(
+                    "VIZIER_WATCH_NEW_MESSAGES",
+                    "Properly active",
+                    "The day that counts as a new member settling in. It fires once - the day they first pass it - and not again.",
+                    number(1, 5000, "messages"),
+                    "30",
+                ),
+            ],
+            commands: vec![],
+        },
+        Section {
             id: "kalesh",
             title: "Kalesh detector",
             icon: "🍿",

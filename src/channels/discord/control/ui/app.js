@@ -567,6 +567,8 @@
       navItem('#/deleted', icon('trash'), 'Deleted messages'),
       navItem('#/kalesh', icon('flame'), 'Kalesh'),
       navItem('#/deepdive', icon('search'), 'Deep dive'),
+      navItem('#/deepdives', icon('flask'), 'Deep dives'),
+      navItem('#/topics', icon('tag'), 'Topics'),
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/invites', icon('userplus'), 'Invites'),
@@ -618,6 +620,9 @@
       ['Deleted messages', '#/deleted', 'trash', 'Deleted and edited messages: what was said, who and when'],
       ['Kalesh', '#/kalesh', 'flame', 'Look back at a fight between two members: the messages, and a neutral summary on request'],
       ['Deep dive', '#/deepdive', 'search', 'One member over a period: every message, their voice rooms and company, the shape of their days, and what the bot makes of it'],
+      ['Deep dives', '#/deepdives', 'flask', 'Every deep dive that has been run, newest first, with the ones the nightly scan picked out — reopenable for nothing'],
+      ['Picked by the night', '#/deepdives?only=nightly', 'moon', 'Who the nightly scan flagged: a fight, AutoMod blocks, deletions, a sharp drop or jump, a new member settling in'],
+      ['Topics', '#/topics', 'tag', 'What the server has been talking about this week, and who is in each topic'],
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Invites', '#/invites', 'userplus', 'Which invite each new member joined through, who made it, and who each inviter brought in'],
@@ -764,6 +769,8 @@
       case 'deleted': renderDeleted(page, r.q); break;
       case 'kalesh': renderKalesh(page, r); break;
       case 'deepdive': renderDeepDive(page, r.q); break;
+      case 'deepdives': renderDeepDives(page, r.q); break;
+      case 'topics': renderTopics(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
       case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
       case 'automod': renderAutomod(page, r.q); break;
@@ -2353,6 +2360,250 @@
         : h('span', { class: 'kalesh-open none', title: m.gone ? (m.gone.kind === 'blocked' ? 'Never posted, so not in Discord' : 'Deleted, so no longer in Discord') : 'No link' }, m.gone ? (m.gone.kind === 'blocked' ? '🛑' : '🗑') : ''));
   }
 
+  // --- deep dives: every dive that has been run ------------------------------------------
+
+  const DIVE_WHY = { kalesh: 'Kalesh', automod: 'AutoMod', deleted: 'Deletions', drop: 'Gone quiet', jump: 'Much louder', newly_active: 'New and active' };
+
+  function divesHref(st) {
+    const p = new URLSearchParams();
+    if (st.member) p.set('member', st.member);
+    if (st.only === 'nightly') p.set('only', 'nightly');
+    const qs = p.toString();
+    return '#/deepdives' + (qs ? '?' + qs : '');
+  }
+
+  /** The stored summary, drawn from what the list already carries: no second call, no second token. */
+  function diveStored(d) {
+    const s = d.summary;
+    if (!s) return h('div', { class: 'empty-small' }, d.raw ? 'The model’s answer could not be read as a summary. It is kept as it came.' : 'Nothing was stored for this one.');
+    const body = h('div', { class: 'dive-saved' });
+    if (s.overview) body.appendChild(h('p', { class: 'dive-overview' }, s.overview));
+    if (s.thin) body.appendChild(h('p', { class: 'empty-small' }, s.thin));
+    const tags = (s.topics || []).filter((t) => t.what);
+    if (tags.length) body.appendChild(h('div', { class: 'topic-chips' }, tags.map((t) => h('span', { class: 'topic-chip' }, t.what))));
+    (s.watch || []).forEach((w) => body.appendChild(h('div', { class: 'dive-watch-row' },
+      h('span', { class: 'badge warn' }, DIVE_WATCH[w.kind] || 'Worth a look'), h('span', null, w.what))));
+    if (s.rhythm) body.appendChild(h('p', { class: 'dive-quiet' }, s.rhythm));
+    body.appendChild(h('a', { class: 'btn sm ghost', href: d.href }, icon('search'), 'Open the full deep dive'));
+    return body;
+  }
+
+  function diveRow(d) {
+    const m = d.member;
+    const why = h('div', { class: 'dive-why' });
+    if (d.nightly) {
+      (d.why || '').split(' · ').filter(Boolean).forEach((line) => why.appendChild(h('span', { class: 'badge warn' }, line)));
+      if (!d.why) why.appendChild(h('span', { class: 'badge warn' }, 'Picked by the nightly scan'));
+    }
+    const saved = h('div', { class: 'dive-saved-wrap', hidden: true });
+    let drawn = false;
+    const head = h('button', { class: 'kalesh-row dive-row', type: 'button', 'aria-expanded': 'false' },
+      avatar(m.avatar, m.name, 'xs'),
+      h('div', { class: 'kalesh-row-main' },
+        h('div', { class: 'kalesh-row-head' }, h('b', null, m.name),
+          m.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null,
+          h('span', { class: 'badge' }, d.period.words),
+          d.nightly ? h('span', { class: 'badge nightly' }, icon('moon'), 'Nightly') : null),
+        why,
+        h('div', { class: 'kalesh-row-how' },
+          (d.nightly ? 'Written by the nightly scan ' : 'Summarised by ' + ((d.run_by && d.run_by.name) || 'a moderator') + ' ') + ago(d.run_ts)
+          + ' · ' + d.model + ' · ' + numberFmt.format((d.input_tokens || 0) + (d.output_tokens || 0)) + ' tokens'
+          + (d.trimmed ? ' · trimmed' : ''))),
+      icon('chevron', 'kalesh-row-go'));
+    head.addEventListener('click', () => {
+      const open = saved.hidden;
+      if (open && !drawn) { saved.appendChild(diveStored(d)); drawn = true; }
+      saved.hidden = !open;
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      head.classList.toggle('open', open);
+    });
+    return h('div', { class: 'dive-entry' }, head, saved);
+  }
+
+  function renderDeepDives(page, rq) {
+    document.title = 'Deep dives · Loduchand';
+    const st = { member: (rq.get('member') || '').trim(), only: rq.get('only') === 'nightly' ? 'nightly' : 'all' };
+    const apply = (over) => navigate(divesHref(Object.assign({}, st, over)));
+
+    page.appendChild(pageHead('Deep dives',
+      'Every dive that has been run — who it was about, over what period, who asked and when. Opening one again is free: the summary is kept, so nothing is ever paid for twice.'));
+
+    const pick = h('button', { class: 'btn picker-btn', type: 'button' }, icon('user'), h('span', { class: 'grow' }, st.member ? 'Change member' : 'Any member'));
+    const chosen = h('span', { class: 'dive-chosen' });
+    if (st.member) memberById(st.member).then((m) => { if (m) append(clear(chosen), [avatar(m.avatar, m.name, 'xs'), h('b', null, m.name),
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: () => apply({ member: '' }) }, 'Clear')]); });
+    pick.addEventListener('click', () => openPicker(pick, {
+      title: 'Dives into', placeholder: 'Search members by name or paste an ID', debounce: 180,
+      empty: 'Type a name. Members who have left are in here too.',
+      load: memberItems, onPick: (it) => apply({ member: it.id }),
+    }));
+    page.appendChild(h('div', { class: 'card msg-search dive-filters' }, h('div', { class: 'msg-search-filters' },
+      h('div', { class: 'dive-who' }, pick, chosen),
+      segmented([['all', 'All dives'], ['nightly', 'Picked by the night']], st.only, 'Which dives', (v) => apply({ only: v })),
+      h('a', { class: 'btn sm ghost', href: '#/deepdive' }, icon('plus'), 'Run a new one'))));
+
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the dives…')));
+    page.appendChild(holder);
+    const p = new URLSearchParams();
+    if (st.member) p.set('member', st.member);
+    api('GET', '/deepdives' + (p.toString() ? '?' + p.toString() : '')).then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      const all = d.dives || [];
+      const list = st.only === 'nightly' ? all.filter((x) => x.nightly) : all;
+      holder.appendChild(h('div', { class: 'tiles' },
+        tile('Dives kept', 'search', numberFmt.format(d.total || 0), 'every one ever run'),
+        tile('From the night', 'moon', numberFmt.format(d.nightly || 0), d.watch_on ? 'the scan is on' : 'the scan is off'),
+        tile('Showing', 'table', numberFmt.format(list.length), st.member ? 'this member' : 'newest first')));
+      // A scan that failed has to say so here: a short list this morning is
+      // either a quiet night or a broken one, and a mod must be able to tell.
+      const lastScan = (d.scans || [])[0];
+      if (lastScan && (lastScan.state === 'failed' || lastScan.failed)) {
+        holder.appendChild(h('div', { class: 'banner inline', role: 'alert' }, icon('alert'),
+          h('p', null, h('b', null, lastScan.state === 'failed' ? 'Last night’s scan didn’t finish. ' : 'Last night’s scan had failures. '),
+            h('span', null, (lastScan.note || 'It was picked up and never came back.')
+              + ' ' + plural(lastScan.dived, 'dive') + ' were written from ' + plural(lastScan.looked_at, 'member') + ' looked at. What is below may be short.'))));
+      }
+      if (list.length) {
+        holder.appendChild(h('div', { class: 'banner inline kalesh-warning', role: 'note' }, icon('alert'),
+          h('p', null, h('b', null, 'Read the messages before acting. '), h('span', null, d.read_first))));
+      }
+      const body = h('div', { class: 'kalesh-rows' });
+      if (!list.length) {
+        body.appendChild(h('p', { class: 'empty-small' }, st.only === 'nightly'
+          ? 'The nightly scan hasn’t picked anybody out yet. It runs in the small hours and only flags a day that stands out.'
+          : 'No deep dives yet. Run one from the Deep dive page, or wait for the nightly scan.'));
+      }
+      list.forEach((x) => body.appendChild(diveRow(x)));
+      holder.appendChild(card('deepdives-list', st.only === 'nightly' ? 'Picked out by the nightly scan' : 'Every deep dive',
+        'Newest first. Opening one costs nothing — the summary was kept when it was written.', body, { cls: 'kalesh-card' }));
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the dives'), h('p', null, e.message)));
+    });
+  }
+
+  // --- topics ---------------------------------------------------------------------------
+
+  const TOPIC_DAYS = [['7', '7 days'], ['14', '14 days'], ['30', '30 days']];
+  // The two empty days are not the same thing and must not look the same: one is
+  // a day they said nothing worth recording, the other is a day nobody has read.
+  const DAY_STATE = {
+    'nothing much': ['Nothing much', 'They were about, but said nothing worth recording that day', 'quiet'],
+    'not read yet': ['Not read yet', 'The nightly pass hasn’t covered that day — this is a gap, not a quiet day', 'unread'],
+  };
+
+  /** "Today", "Yesterday", or "Mon 21 Sep": an India day as a column label rather
+      than as a phrase, so it reads straight in a list or on a chip. */
+  function topicDay(day) {
+    const words = dayWords(day);
+    if (words === 'today' || words === 'yesterday') return words[0].toUpperCase() + words.slice(1);
+    const t = Date.parse(day + 'T12:00:00+05:30');
+    return isNaN(t) ? day : new Intl.DateTimeFormat('en-GB', { timeZone: IST, weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(t));
+  }
+
+  function topicChips(list, cls) {
+    return h('div', { class: 'topic-chips' }, list.map((t) => h('span', { class: 'topic-chip' + (cls ? ' ' + cls : '') }, t)));
+  }
+
+  /** One member's topics, for their profile and for the Deep dive page. */
+  function memberTopicsCard(id) {
+    const body = h('div', { class: 'card-body pad' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading what they’ve been on about…'));
+    const el = card('pf-topics', 'What they’ve been talking about', 'From the nightly topic pass. Tags only — never anything anybody said.', body);
+    api('GET', '/topics?member=' + encodeURIComponent(id)).then((d) => {
+      if (!el.isConnected) return;
+      clear(body);
+      const lately = (d.lately || []).map((t) => t.topic);
+      if (!d.on) body.appendChild(h('p', { class: 'empty-small' }, 'The nightly topic pass is switched off. What is here was recorded before it was.'));
+      if (!lately.length && !d.recorded) {
+        body.appendChild(h('p', { class: 'empty-small' }, 'Nothing recorded for them yet. The pass runs in the small hours, and only writes a day down when somebody has actually said something.'));
+        return;
+      }
+      if (lately.length) body.appendChild(h('div', { class: 'topics-lately' }, h('h4', null, 'Lately'), topicChips(lately)));
+      const dr = d.drift || {};
+      const drift = h('div', { class: 'topics-drift' });
+      if ((dr.new || []).length) drift.appendChild(h('div', null, h('h4', null, icon('up'), 'New this week'), topicChips(dr.new, 'new')));
+      if ((dr.kept || []).length) drift.appendChild(h('div', null, h('h4', null, icon('repeat'), 'Kept up'), topicChips(dr.kept)));
+      if ((dr.dropped || []).length) drift.appendChild(h('div', null, h('h4', null, icon('down'), 'Dropped'), topicChips(dr.dropped, 'gone')));
+      if (drift.children.length) body.appendChild(drift);
+
+      const days = h('div', { class: 'topic-days' });
+      (d.days || []).forEach((day) => {
+        const state = DAY_STATE[day.state];
+        days.appendChild(h('div', { class: 'topic-day' + (state ? ' quiet' : '') },
+          h('div', { class: 'topic-day-when' }, topicDay(day.day), day.messages ? h('small', null, plural(day.messages, 'message')) : null),
+          state
+            ? h('div', { class: 'topic-day-body' }, h('span', { class: 'topic-none ' + state[2], 'data-tip': state[1] },
+                state[2] === 'unread' ? icon('alert') : null, state[0]))
+            : h('div', { class: 'topic-day-body' }, topicChips(day.topics || []), day.line ? h('p', null, day.line) : null)));
+      });
+      body.appendChild(h('div', null, h('h4', { class: 'topics-head' }, 'Day by day'), days));
+    }).catch((e) => {
+      if (!el.isConnected) return;
+      clear(body).appendChild(h('p', { class: 'empty-small' }, 'Couldn’t read their topics: ' + e.message));
+    });
+    return el;
+  }
+
+  function renderTopics(page, rq) {
+    document.title = 'Topics · Loduchand';
+    const days = rq.get('days');
+    const st = { days: TOPIC_DAYS.some((x) => x[0] === days) ? days : '7' };
+    page.appendChild(pageHead('Topics',
+      'What the server has been talking about, from the nightly pass. Tags only, never anything anybody said, and nothing about anyone’s sexuality, gender, religion, caste, health or family.',
+      [h('a', { class: 'btn', href: '#/deepdives' }, icon('search'), 'Deep dives')]));
+    page.appendChild(h('div', { class: 'card msg-search' }, h('div', { class: 'msg-search-filters' },
+      segmented(TOPIC_DAYS, st.days, 'Period', (v) => navigate('#/topics?days=' + v)))));
+
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the week…')));
+    page.appendChild(holder);
+    api('GET', '/topics/week?days=' + st.days).then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      const nights = d.nights || [];
+      const read = nights.filter((n) => n.state === 'read').length;
+      const tokens = nights.reduce((a, n) => a + (n.tokens || 0), 0);
+      holder.appendChild(h('div', { class: 'tiles' },
+        tile('Topics', 'tag', numberFmt.format((d.topics || []).length), 'in the last ' + plural(d.days, 'day')),
+        tile('Members', 'users', numberFmt.format(d.members || 0), 'with something recorded'),
+        tile('Nights read', 'moon', read + '/' + nights.length, d.on ? 'the pass is on' : 'the pass is off'),
+        tile('Tokens', 'zap', numberFmt.format(tokens), 'for the whole period')));
+
+      // Which nights were read and which were not, so an empty week can never be
+      // mistaken for a quiet one.
+      const strip = h('div', { class: 'night-strip' });
+      nights.forEach((n) => {
+        // A night that started and never came back is a failure, not a gap: it
+        // has to look like one, whatever the counts on it say.
+        const cls = n.state === 'read' ? (n.failed ? ' warn' : '') : n.state === 'started' ? ' bad warn' : ' bad';
+        const tip = n.state === 'read'
+          ? plural(n.members, 'member') + ' recorded' + (n.failed ? ' · ' + plural(n.failed, 'chunk') + ' failed' : '') + (n.note ? ' · ' + n.note : '')
+          : n.state === 'started' ? 'Started and never finished' + (n.note ? ': ' + n.note : '') : 'The pass hasn’t run for that day';
+        strip.appendChild(h('span', { class: 'night' + cls, 'data-tip': tip },
+          topicDay(n.day), h('small', null, n.state === 'read' ? numberFmt.format(n.members) : n.state === 'started' ? 'failed' : '—')));
+      });
+      holder.appendChild(card('topics-nights', 'The nights behind this', 'A day nobody has read is not a quiet day. Hover for what each night did.', h('div', { class: 'card-body pad' }, strip)));
+
+      const body = h('div', { class: 'topic-rows' });
+      if (!(d.topics || []).length) {
+        body.appendChild(h('p', { class: 'empty-small' }, read ? 'Nothing was recorded over this period.' : 'The nightly pass hasn’t read any of these days yet.'));
+      }
+      (d.topics || []).forEach((t) => {
+        body.appendChild(h('div', { class: 'topic-row' },
+          h('div', { class: 'topic-row-head' }, h('span', { class: 'topic-chip big' }, t.topic),
+            h('span', { class: 'msg-hit-time' }, plural(t.members, 'member') + ' · ' + plural(t.days, 'member-day'))),
+          h('div', { class: 'topic-people' }, (t.people || []).map((p) => h('a', { class: 'chip', href: '#/members/' + p.id, 'data-tip': 'On it ' + plural(p.days, 'day') },
+            avatar(p.avatar, p.name, 'xs'), h('span', { class: 'chip-text' }, p.name))))));
+      });
+      holder.appendChild(card('topics-list', 'What the server talked about', 'Commonest first, with who was in each.', body, { cls: 'kalesh-card' }));
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the topics'), h('p', null, e.message)));
+    });
+  }
+
   // --- deep dive ----------------------------------------------------------------------
 
   const DIVE_PERIODS = [['3', '3 days'], ['7', '7 days'], ['14', '14 days'], ['30', '30 days']];
@@ -2494,6 +2745,10 @@
         : diveAskCard(d, st, (got) => drawSummary(got.summary, got.reused ? 'Already summarised — this is the stored one, nothing new was spent.' : null)));
     };
     drawSummary(d.summary, null);
+
+    // --- what they have been talking about ------------------------------------------
+    // From the nightly pass, so it is already paid for: no button, no tokens.
+    holder.appendChild(memberTopicsCard(m.id));
 
     // --- the shape of their days ----------------------------------------------------
     const perDay = sh.per_day || [];
@@ -6745,6 +7000,9 @@
         stat('House rank', pts.house_rank ? '#' + pts.house_rank.rank : '—', pts.house_rank ? 'of ' + pts.house_rank.of + (p.house ? ' in ' + p.house.name : '') : 'not ranked'),
         stat('All time', fmtPoints(pts.all_time), 'points')),
       bars)));
+
+    // What the nightly topic pass has been writing down about them.
+    panel.appendChild(memberTopicsCard(p.id));
 
     const a = p.activity;
     const hours = a.hours;
