@@ -46,6 +46,14 @@ mod frog_trade;
 mod house;
 mod invites;
 mod invites_store;
+// The image toolkit: /image and everything under it.
+mod imagefx;
+mod imagefx_effects;
+mod imagefx_engine;
+mod imagefx_fetch;
+mod imagefx_recent;
+mod imagefx_seam;
+mod imagefx_text;
 mod deepdive;
 mod kalesh;
 mod kalesh_store;
@@ -1808,6 +1816,7 @@ impl EventHandler for Handler {
         commands.push(notes::forgetme_builder());
         commands.push(roast::ship_builder());
         commands.push(roast::noroast_builder());
+        commands.push(imagefx::builder());
         commands.push(standings::today_builder());
         commands.push(control::remind::remind_builder());
         commands.push(control::remind::reminders_builder());
@@ -1909,6 +1918,15 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        // The /image effect picker, answered as it is typed in. Autocomplete is
+        // its own kind of interaction and never a command, so it returns here
+        // rather than falling through to the dispatch below.
+        if let Interaction::Autocomplete(ref auto) = interaction {
+            if auto.data.name == "image" {
+                imagefx::autocomplete(&ctx, auto).await;
+            }
+            return;
+        }
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
@@ -2676,6 +2694,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "noroast" {
                 roast::noroast_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "image" {
+                imagefx::command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "today" {
@@ -3474,6 +3496,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         movie::note_message(&ctx, &msg);
         // And in the geo channel.
         geo::note_message(&ctx, &msg);
+        // A picture posted in the image channel is remembered, so `/image` with
+        // no arguments has something to work on. Before the bot check on
+        // purpose: the bot's own output is what a second effect chains onto.
+        imagefx::on_message(&msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {

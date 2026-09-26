@@ -72,7 +72,14 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 roxmltree = "0.20"
 cosmic-text = "0.12"
 tiny-skia = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# "gif" is for the image toolkit (`/image`): animated input in, animated output
+# back. It pulls in `gif` and `color_quant`, both MIT/Apache-2.0.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# The same `gif` crate image already pulls in, named here as well because the
+# encoder needs to set each frame's disposal method - which `image` does not
+# expose, and without which a frame with transparent corners shows the frame
+# before it through the holes. MIT OR Apache-2.0.
+gif = "0.14.2"
 sqlite-vec = "0.1.9"
 fastembed = "4.9.1"
 croner = { version = "3.0.1", features = ["serde"] }

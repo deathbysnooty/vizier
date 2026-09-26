@@ -1414,6 +1414,129 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "image",
+            title: "Image toolkit",
+            icon: "🖼\u{fe0f}",
+            about: "One command, /image, with about thirty effects on it: magik (the melty one - the picture is \
+                    content-aware shrunk and grown again, which is what crowds the detail and eats the flat parts), \
+                    deepfry, jpeg, pixelate, swirl, explode, implode, wave, glitch, edges, wide, tall, the four \
+                    mirrors, flip, flop, rotate, invert, grayscale, hue, blurple, caption, meme, ascii, and gif \
+                    versions - spin, shake, zoom, magikgif, glitchgif. Start typing in the effect box and it \
+                    searches by name or by group. Everything is done inside the bot, on the bot's own CPU: no \
+                    ImageMagick, no web service, nothing leaves the machine except fetching the picture itself. \
+                    PNG, JPEG, WEBP and GIF go in; a PNG or a GIF comes back, or a code block for ascii. An \
+                    animated picture has the effect applied to every frame. \
+                    The picture is taken from the first of these there is: a file attached to the command, a member \
+                    (their profile picture), a link, a custom emoji, or - with none of those - the last picture \
+                    posted in the channel, which is what makes it quick to use. That last one is remembered as \
+                    pictures are posted rather than looked up when asked for, so it costs nothing; the bot's own \
+                    output counts, which is how one effect gets run on another's result. \
+                    It works in ONE channel. Run anywhere else it answers only to whoever asked, with a pointer to \
+                    the right channel, and posts nothing where it was asked. \
+                    Anyone on the /noroast list cannot have their profile picture used; they are told kindly and \
+                    every other picture still works. Words in a caption have every at-sign and every mention taken \
+                    out before they are drawn, so a caption can never ping anyone. \
+                    A link is fetched carefully: http and https only, the address is checked before the connection \
+                    is made and refused if it is private, loopback, link-local (which is where a cloud provider's \
+                    credential service lives), carrier-grade NAT or an intranet name, redirects are followed by \
+                    hand and re-checked at every hop, the size and the time are capped, and the bytes have to be a \
+                    real picture whatever the server called them. \
+                    Work is capped as well: the picture is scaled down before anything touches it, an animation is \
+                    read to the frame cap and no further, and a job that runs past its time budget hands back what \
+                    it finished. All of it happens off the main thread, so the bot keeps answering. \
+                    If the result is too heavy for Discord it is thinned and scaled until it fits rather than \
+                    failing. Every effect shares one allowance, per member and per channel; somebody over it who \
+                    asks again within a second gets an emoji and no words, so the channel is never filled with \
+                    slow-down notices.",
+            settings: vec![
+                toggle("VIZIER_IMAGE", "/image on", "Off: /image says it is switched off, and no picture is remembered."),
+                setting(
+                    "VIZIER_IMAGE_CHANNEL",
+                    "Image channel",
+                    "The one channel /image works in, and the only channel whose pictures are remembered for it. \
+                     Run anywhere else, whoever asked gets a pointer to this channel and nothing is posted.",
+                    Kind::Channel,
+                    "1516534303968858312",
+                ),
+                setting(
+                    "VIZIER_IMAGE_MAX_SIDE",
+                    "Biggest side worked on",
+                    "A still picture is scaled down to fit a square this many pixels across before any effect \
+                     touches it. 800 is what NotSoBot uses. Higher looks better and costs more CPU per command.",
+                    number(64, 2_048, "pixels"),
+                    "800",
+                ),
+                setting(
+                    "VIZIER_IMAGE_ANIM_SIDE",
+                    "Biggest side for a gif",
+                    "The same, for a frame of an animation - much smaller, because a sixty-frame gif is sixty of \
+                     everything. Raise it and gifs get sharper, slower and heavier.",
+                    number(32, 768, "pixels"),
+                    "256",
+                ),
+                setting(
+                    "VIZIER_IMAGE_MAX_FRAMES",
+                    "Most frames",
+                    "How many frames of an animated picture are read at all. A longer gif is cut to its first this \
+                     many. Also caps how many frames a gif effect makes from a still.",
+                    number(1, 300, "frames"),
+                    "60",
+                ),
+                setting(
+                    "VIZIER_IMAGE_SECONDS",
+                    "Time budget",
+                    "How long one command may spend bending pixels. Past this, a multi-frame job stops and posts \
+                     the frames it finished; there is nothing to cut short about a single picture, which is capped \
+                     by its size instead. Also caps how long fetching a link may take.",
+                    number(1, 120, "seconds"),
+                    "20",
+                ),
+                setting(
+                    "VIZIER_IMAGE_FETCH_MB",
+                    "Biggest download",
+                    "The most a picture may weigh when it is fetched from a link, an attachment or an avatar. A \
+                     server that promises less and sends more is cut off at this point too.",
+                    number(1, 25, "MB"),
+                    "8",
+                ),
+                setting(
+                    "VIZIER_IMAGE_PER_MEMBER",
+                    "Per member",
+                    "How many effects one member may run inside the window below. Every effect shares the one \
+                     allowance. Over it, they are told once and then only get an emoji.",
+                    number(1, 60, "commands"),
+                    "4",
+                ),
+                setting(
+                    "VIZIER_IMAGE_PER_CHANNEL",
+                    "Per channel",
+                    "How many effects the channel may run inside the window, across everyone. This is what stops \
+                     six people at once from eating the CPU the games need.",
+                    number(1, 240, "commands"),
+                    "12",
+                ),
+                setting(
+                    "VIZIER_IMAGE_WINDOW_SECS",
+                    "Allowance window",
+                    "How long the two allowances above are counted over.",
+                    number(5, 3_600, "seconds"),
+                    "60",
+                ),
+            ],
+            commands: vec![
+                command(
+                    "image",
+                    EVERYONE,
+                    "/image effect: [text:] [strength:] [picture:] [member:] [url:] [emoji:]",
+                    "Runs an effect on a picture. Pick the effect by typing part of its name. The picture comes \
+                     from the attachment, else the member's avatar, else the link, else the custom emoji, else the \
+                     last picture posted in the channel. text is for caption and meme (meme splits it on a |); \
+                     strength is 1 to 10, and for rotate it means that many 45-degree turns. Only works in the \
+                     image channel.",
+                ),
+            ],
+        },
+        Section {
             id: "pronouns",
             title: "Pronouns",
             icon: "🪶",
