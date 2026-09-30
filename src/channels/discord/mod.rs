@@ -1311,6 +1311,16 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
     }
 }
 
+/// The commands that come off Discord's list while the House Cup is paused:
+/// everything about houses, house points and Snitch drops. The card commands
+/// (`/housecards`, `/frogs`, `/frogcard`, `/trade`, `/trades`) are deliberately
+/// not here - collections and trading carry on.
+const PAUSED_OFF: &[&str] = &[
+    "housecup", "housepoints", "housetop", "houses", "houselist", "houseping", "housecaptain",
+    "housechannels", "housedraft", "housedraw", "houseroles", "houseopt", "mypoints", "today",
+    "snitchdrop", "frogdrop", "sellset", "modgive", "modpoints",
+];
+
 /// Slash commands the owner retired (2026-09-15), deleted from Discord on start.
 const RETIRED_COMMANDS: &[&str] = &[
     "ping", "new", "session", "abort", "checkpoint", "lobotomy", "thinking", "tool_calls", "adminonly", "awards", "warrior",
@@ -1918,11 +1928,33 @@ impl EventHandler for Handler {
             );
         commands.push(admin_command(trace));
         
+// While the Cup is paused the house and Snitch commands come off the list
+// entirely - a command nobody can use is worse than no command, because
+// Discord still offers it and it only answers with a refusal. The card
+// commands stay: people keep their collections and go on trading.
+let commands = match house_cup::running() {
+    true => commands,
+    false => {
+        let kept: Vec<CreateCommand> = commands
+            .into_iter()
+            .filter(|c| {
+                serde_json::to_value(c)
+                    .ok()
+                    .and_then(|v| v["name"].as_str().map(|n| !PAUSED_OFF.contains(&n)))
+                    .unwrap_or(true)
+            })
+            .collect();
+        tracing::info!("commands: the Cup is paused, so {} house and Snitch commands are off the list", PAUSED_OFF.len());
+        kept
+    }
+};
 if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
     tracing::error!("discord: could not register the slash commands: {e}");
 }
 
-        // Commands the owner retired: registering fewer doesn't remove them from Discord.
+        // Commands the owner retired: a bulk overwrite above already drops
+        // anything left out, but an older build may have registered these
+        // one at a time, so they are deleted by name as well.
         if let Ok(existing) = Command::get_global_commands(&ctx.http).await {
             for command in existing.iter().filter(|c| RETIRED_COMMANDS.contains(&c.name.as_str())) {
                 match Command::delete_global_command(&ctx.http, command.id).await {
@@ -4052,6 +4084,26 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                     typing.stop();
                 }
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod paused_commands_tests {
+    use super::{PAUSED_OFF, RETIRED_COMMANDS};
+
+    /// The cards outlive the Cup: people keep their collections and go on
+    /// trading, so those commands must never be taken off the list.
+    #[test]
+    fn the_card_commands_survive_a_paused_cup() {
+        for kept in ["housecards", "frogs", "frogcard", "trade", "trades"] {
+            assert!(!PAUSED_OFF.contains(&kept), "/{} must stay while the Cup is paused", kept);
+        }
+        for gone in ["housecup", "housepoints", "housetop", "snitchdrop", "frogdrop", "modgive"] {
+            assert!(PAUSED_OFF.contains(&gone), "/{} should come off the list", gone);
+        }
+        for name in PAUSED_OFF {
+            assert!(!RETIRED_COMMANDS.contains(name), "/{} is retired already", name);
         }
     }
 }
