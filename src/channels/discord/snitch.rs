@@ -336,6 +336,10 @@ fn caught_text(points: i64, house: &House) -> String {
     format!("Accio! **+{}** to {} **{}**", points, house.crest, house.name)
 }
 
+/// The same catch while the House Cup is paused: no drop is scheduled then, but
+/// one already in the air can still be caught, and it says nothing about a house.
+const CAUGHT_PAUSED: &str = "Accio! Caught it ✨";
+
 // --- catching ---------------------------------------------------------------
 
 /// A Snitch that is still in the air.
@@ -819,7 +823,7 @@ pub async fn on_message(ctx: &Context, msg: &Message) -> bool {
             catch.house.name
         );
         let reply = CreateMessage::new()
-            .content(caught_text(catch.points, catch.house))
+            .content(if super::house_cup::running() { caught_text(catch.points, catch.house) } else { CAUGHT_PAUSED.to_string() })
             .reference_message(msg)
             .allowed_mentions(CreateAllowedMentions::new());
         if let Err(err) = call(msg.channel_id.send_message(&ctx.http, reply)).await {
@@ -910,7 +914,7 @@ async fn schedule(ctx: Context) {
     let mut last_any = 0i64;
     loop {
         tokio::time::sleep(TICK).await;
-        let Some(channels) = channels().filter(|_| control::on("VIZIER_SNITCH", true)) else {
+        let Some(channels) = channels().filter(|_| control::on("VIZIER_SNITCH", true) && super::house_cup::gate("Snitch drops")) else {
             // Off: nothing pending carries over to when it comes back on.
             watching = None;
             rematch_at = None;
@@ -1013,6 +1017,10 @@ pub async fn drop_command(ctx: &Context, command: &CommandInteraction) {
     }
     if !super::admin_ids().contains(&command.user.id.get()) {
         let _ = command.create_response(&ctx.http, whisper("Only mods can drop a Snitch.")).await;
+        return;
+    }
+    if !super::house_cup::gate("/snitchdrop") {
+        let _ = command.create_response(&ctx.http, whisper(&super::house_cup::drop_refused("a Snitch"))).await;
         return;
     }
     let kind = command

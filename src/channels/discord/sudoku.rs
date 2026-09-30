@@ -470,6 +470,11 @@ fn meta_get(key: &str) -> Option<String> {
 
 /// The house crest and name of whoever won, for the Solved card.
 fn badge_of(user: u64) -> String {
+    // Paused: nobody wears a crest in a game, Muggle or not. The round card is
+    // about the game's own points and says nothing about a house.
+    if super::house_cup::paused() {
+        return String::new();
+    }
     if super::house::opted_out(user) {
         return "🧙 Muggle".to_string();
     }
@@ -635,7 +640,7 @@ async fn sync_rules(ctx: &Context, channel: Option<u64>) {
         }
     }
     let Some(channel) = wanted else { return };
-    let body = rules_text::sudoku_rules_text(&sudoku_rules());
+    let body = rules_text::sudoku_rules_text(&sudoku_rules(), super::house_cup::running());
     let hash = rules_text::digest(&[rules_text::SUDOKU_RULES_TITLE, &body]);
     let current = old.filter(|_| old_channel == Some(channel));
     let present = match current {
@@ -1468,7 +1473,7 @@ const TOP_LIST: usize = 10;
 /// What `/sudokutop` says. `rows` is the whole board, already ranked; only the
 /// first [`TOP_LIST`] are listed, and whoever asked gets their own line under
 /// them when they didn't make it.
-pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64, cup: bool) -> String {
     let mut text = format!("🧩 **Sudoku points** · {}", period);
     if rows.is_empty() {
         text.push_str("\nNobody has solved one yet. The puzzle is waiting in the channel.");
@@ -1489,7 +1494,11 @@ pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
             text.push_str(&format!("\n-# **You:** {}", mine));
         }
     }
-    text.push_str("\n-# Sudoku points are this game's own score — no daily limit, and everyone has them. They don't move the House Cup.");
+    text.push_str(if cup {
+        "\n-# Sudoku points are this game's own score — no daily limit, and everyone has them. They don't move the House Cup."
+    } else {
+        "\n-# Sudoku points are this game's own score — no daily limit, and everyone has them."
+    });
     text
 }
 
@@ -1596,7 +1605,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
     } else {
         (today_rows, "today".to_string())
     };
-    let text = top_text(&period, &rows, command.user.id.get());
+    let text = top_text(&period, &rows, command.user.id.get(), super::house_cup::running());
     reply_command(ctx, command, CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
 }
 
@@ -1605,7 +1614,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
 fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title(rules_text::SUDOKU_RULES_TITLE)
-        .description(rules_text::sudoku_help_text(&sudoku_rules()))
+        .description(rules_text::sudoku_help_text(&sudoku_rules(), super::house_cup::running()))
         .colour(COLOUR)
 }
 
@@ -1885,7 +1894,7 @@ mod tests {
     fn the_sudoku_points_board_lists_ten_and_finds_the_asker_below_them() {
         let mut rows: Vec<store::Tally> = (1..=12).map(|i| tally(i, (40 - 2 * i) as i64, 3, 100 + i as i64)).collect();
         store::rank(&mut rows);
-        let text = top_text("today", &rows, 12);
+        let text = top_text("today", &rows, 12, true);
         assert!(text.starts_with("🧩 **Sudoku points** · today"), "{}", text);
         assert!(text.contains("\n🥇 <@1> **38** · 3 puzzles"), "{}", text);
         assert!(text.contains("\n🥈 <@2> **36**") && text.contains("\n🥉 <@3> **34**"), "{}", text);
@@ -1894,12 +1903,12 @@ mod tests {
         // Outside the ten: their own line, and where they stand.
         assert!(text.contains("-# **You:** 12th of 12 · **16 sudoku points** · 3 puzzles"), "{}", text);
         // Inside the ten: marked in place, with no line of their own.
-        let inside = top_text("today", &rows, 3);
+        let inside = top_text("today", &rows, 3, true);
         assert!(inside.contains("🥉 <@3> **34** · 3 puzzles ← you"), "{}", inside);
         assert!(!inside.contains("**You:**"), "{}", inside);
         // The board says what a sudoku point is, so nobody reads it as a house point.
         assert!(text.contains("no daily limit, and everyone has them. They don't move the House Cup."), "{}", text);
-        assert!(top_text("September so far", &[], 1).contains("Nobody has solved one yet"));
+        assert!(top_text("September so far", &[], 1, true).contains("Nobody has solved one yet"));
         // Ordering is the store's: points, then puzzles, then who got there first.
         let mut close = vec![tally(1, 6, 1, 50), tally(2, 6, 2, 90), tally(3, 6, 2, 60)];
         store::rank(&mut close);
@@ -2197,8 +2206,8 @@ mod tests {
             play_text(128, Level::Easy, 2, None, &p.givens),
             mine_text(Some(&live), &board, &board, 1, &[(live.clone(), false)], Some("https://p.example"), Some(55)),
             mine_text(None, &[], &[], 99, &[], None, None),
-            top_text("today", &board, 1),
-            top_text("September so far", &[], 1),
+            top_text("today", &board, 1, true),
+            top_text("September so far", &[], 1, true),
             wrong_words(Verdict::Wrong(3), 2),
             wrong_words(Verdict::Unfinished(1), 0),
             OFF.to_string(),

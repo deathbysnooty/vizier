@@ -316,6 +316,9 @@ pub struct Won {
     pub full_points: i64,
     /// Whether the winner is in a house at all.
     pub housed: bool,
+    /// Whether the House Cup is running. False takes the house out of the line
+    /// altogether: the movie points are said, and nothing else.
+    pub cup: bool,
     /// Their movie points today, this round included.
     pub tally: i64,
     pub hinted: bool,
@@ -326,14 +329,18 @@ pub struct Won {
 /// as a win: the movie points are the score that always counts.
 pub fn won_text(w: &Won) -> String {
     let badge = if w.badge.is_empty() { String::new() } else { format!(" {}", w.badge) };
-    let why = match (w.points, w.housed) {
-        (0, true) => Some("that's your house points for today, but the movie points still count"),
-        (0, false) => Some("no house to pay, but the movie points still count"),
+    let why = match (w.cup, w.points, w.housed) {
+        // Paused: there is no house to explain, so there is nothing to explain.
+        (false, ..) => None,
+        (true, 0, true) => Some("that's your house points for today, but the movie points still count"),
+        (true, 0, false) => Some("no house to pay, but the movie points still count"),
         _ => None,
     };
-    let (scored, today) = match why {
-        Some(_) => (plural(w.worth, "movie point", "movie points"), format!("{} today", w.tally)),
-        None => (w.points.to_string(), format!("{} movie points today", w.tally)),
+    // The movie points are the number shown whenever no house point was paid -
+    // capped, unhoused, or the whole Cup paused.
+    let (scored, today) = match why.is_some() || !w.cup {
+        true => (plural(w.worth, "movie point", "movie points"), format!("{} today", w.tally)),
+        false => (w.points.to_string(), format!("{} movie points today", w.tally)),
     };
     let mut text = format!("✅ <@{}>{} had it: **{}** ({}) · **+{}** · {}", w.winner, badge, w.title, w.year, scored, today);
     let mut notes = vec![format!("round #{} in {}", w.round, spent_words(w.seconds))];
@@ -459,7 +466,7 @@ pub fn mine_text(live: Option<&store::Row>, today: &[store::Tally], month: &[sto
 const TOP_LIST: usize = 10;
 
 /// What `/movietop` says.
-pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64, cup: bool) -> String {
     let mut text = format!("🎬 **Movie points** · {}", period);
     if rows.is_empty() {
         text.push_str("\nNobody has named one yet. The card is waiting in the channel.");
@@ -480,7 +487,11 @@ pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
             text.push_str(&format!("\n-# **You:** {}", mine));
         }
     }
-    text.push_str("\n-# Movie points count every solve at its full value — the daily house-points limit never takes one away.");
+    text.push_str(if cup {
+        "\n-# Movie points count every solve at its full value — the daily house-points limit never takes one away."
+    } else {
+        "\n-# Movie points count every solve at its full value, and nothing is capped."
+    });
     text
 }
 
@@ -588,7 +599,11 @@ pub fn break_text(ready: &[u64], min: usize, films: i64, votes: usize, now: i64,
     if votes == 0 && !ready.is_empty() {
         text.push_str("Waiting on the vote — **one press below** and it can start.\n");
     }
-    text.push_str(&format!("-# 🥇 **{}** house points · 🥈 **{}** · you can join a match already running", win_points(), second_points()));
+    text.push_str(&if super::house_cup::running() {
+        format!("-# 🥇 **{}** house points · 🥈 **{}** · you can join a match already running", win_points(), second_points())
+    } else {
+        "-# You can join a match already running".to_string()
+    });
     text
 }
 
@@ -759,6 +774,11 @@ fn meta_set(key: &str, value: &str) {
 
 /// The house crest and name of whoever won.
 fn badge_of(user: u64) -> String {
+    // Paused: nobody wears a crest in a game, Muggle or not. The round card is
+    // about the game's own points and says nothing about a house.
+    if super::house_cup::paused() {
+        return String::new();
+    }
     if super::house::opted_out(user) {
         return "🧙 Muggle".to_string();
     }
@@ -1668,6 +1688,7 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
             worth,
             full_points: row.points,
             housed: super::house::house_of(winner).is_some(),
+            cup: super::house_cup::running(),
             tally: solves.iter().filter(|s| s.user == winner).map(|s| s.worth).sum(),
             hinted: row.hinted(),
             seconds: row.seconds.unwrap_or(0),
@@ -1874,7 +1895,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
     } else {
         (today_rows, "today".to_string())
     };
-    let text = top_text(&period, &rows, command.user.id.get());
+    let text = top_text(&period, &rows, command.user.id.get(), super::house_cup::running());
     reply(ctx, command, CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
 }
 
@@ -1892,7 +1913,7 @@ pub fn month_label(day: &str) -> String {
 /// The rules as a card, the same words for the command and anything else that
 /// wants them.
 fn help_embed() -> CreateEmbed {
-    CreateEmbed::new().title(rules_text::MOVIE_RULES_TITLE).description(rules_text::movie_help_text(&movie_rules())).colour(COLOUR)
+    CreateEmbed::new().title(rules_text::MOVIE_RULES_TITLE).description(rules_text::movie_help_text(&movie_rules(), super::house_cup::running())).colour(COLOUR)
 }
 
 /// `/moviehelp` — everyone.
@@ -2254,6 +2275,7 @@ mod tests {
             worth: 3,
             full_points: 3,
             housed: true,
+            cup: true,
             tally: 9,
             hinted: false,
             seconds: 41,
@@ -2335,16 +2357,16 @@ mod tests {
     #[test]
     fn the_movie_points_board_lists_ten_and_finds_the_asker_below_them() {
         let rows: Vec<store::Tally> = (1..=12).map(|n| tally(n, (20 - n) as i64, 2, n as i64 * 10)).collect();
-        let text = top_text("today", &rows, 12);
+        let text = top_text("today", &rows, 12, true);
         assert!(text.contains("🥇 <@1>") && text.contains("🥉 <@3>"), "{}", text);
         assert!(text.contains("`10.` <@10>"), "{}", text);
         assert!(!text.contains("<@11>"), "only ten are listed");
         assert!(text.contains("**You:** 12th of 12"), "the asker gets their own line: {}", text);
         // Somebody inside the ten is marked there rather than twice.
-        let text = top_text("today", &rows, 2);
+        let text = top_text("today", &rows, 2, true);
         assert!(text.contains("← you") && !text.contains("**You:**"), "{}", text);
         // An empty board says so instead of printing a heading over nothing.
-        assert!(top_text("today", &[], 1).contains("Nobody has named one yet"));
+        assert!(top_text("today", &[], 1, true).contains("Nobody has named one yet"));
         assert_eq!(standing(&rows, 99), None, "somebody who hasn't played has no line");
         assert_eq!(ordinal(1), "1st");
         assert_eq!(ordinal(11), "11th");

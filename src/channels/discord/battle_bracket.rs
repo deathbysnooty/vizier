@@ -344,7 +344,13 @@ fn draw(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout) {
     }
     final_block(pen, b, lay, &art, ground(lay.final_y()));
 
-    let legend = "Gold = winner · HP left after the fight · crest = house";
+    // No crest is drawn while the House Cup is paused, so the legend must not
+    // promise one.
+    let legend = if b.entrants.iter().any(|e| e.house.is_some()) {
+        "Gold = winner · HP left after the fight · crest = house"
+    } else {
+        "Gold = winner · HP left after the fight"
+    };
     pen.centered(legend, w / 2.0, h - 22.0, 14.0, Weight::MEDIUM, FAINT);
 }
 

@@ -417,6 +417,8 @@ pub fn result_line(r: &MatchResult) -> String {
     let mut parts = Vec::new();
     for (user, score, place, paid) in &r.places {
         let medal = if *place == 1 { "🥇" } else { "🥈" };
+        // Paid is always nought while the Cup is paused, so there is nothing to
+        // add here - the line becomes the geo points on their own.
         let pay = if *paid > 0 { format!(", +{} house points", paid) } else { String::new() };
         parts.push(format!("{} <@{}> — {}{}", medal, user, plural(*score, "point", "points"), pay));
     }
@@ -593,6 +595,11 @@ fn meta_set(key: &str, value: &str) {
 
 /// The house crest and name of whoever won.
 fn badge_of(user: u64) -> String {
+    // Paused: nobody wears a crest in a game, Muggle or not. The round card is
+    // about the game's own points and says nothing about a house.
+    if super::house_cup::paused() {
+        return String::new();
+    }
     if super::house::opted_out(user) {
         return "🧙 Muggle".to_string();
     }
@@ -1399,7 +1406,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
 }
 
 fn help_embed() -> CreateEmbed {
-    CreateEmbed::new().title("🗺️ Geo").description(rules_text::geo_help_text(&geo_rules())).colour(COLOUR)
+    CreateEmbed::new().title("🗺️ Geo").description(rules_text::geo_help_text(&geo_rules(), super::house_cup::running())).colour(COLOUR)
 }
 
 pub async fn help_command(ctx: &Context, command: &CommandInteraction) {

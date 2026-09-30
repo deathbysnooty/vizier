@@ -361,6 +361,12 @@ fn too_late_text(winner: &str) -> String {
 
 const HOPPED: &str = "This frog hopped away";
 const HOUSE_ONLY: &str = "Only house members and mods can catch frogs";
+/// The same refusal with no house in it, for while the Cup is paused.
+const CATCHERS_ONLY: &str = "Only members and mods can catch frogs";
+
+fn catcher_refusal() -> &'static str {
+    if super::house_cup::running() { HOUSE_ONLY } else { CATCHERS_ONLY }
+}
 const OUT_OF_TRIES: &str = "You've used your 3 tries on this frog";
 
 /// What the winner is told. `granted` is what the ledger actually paid.
@@ -506,6 +512,10 @@ pub async fn drop_command(ctx: &Context, command: &CommandInteraction) {
         let _ = command.create_response(&ctx.http, whisper("Only mods can drop a frog.".into())).await;
         return;
     }
+    if !super::house_cup::gate("/frogdrop") {
+        let _ = command.create_response(&ctx.http, whisper(super::house_cup::drop_refused("a Chocolate Frog"))).await;
+        return;
+    }
     let rarity = command.data.options.iter().find_map(|o| match (&o.name[..], &o.value) {
         ("rarity", CommandDataOptionValue::String(key)) => Rarity::from_key(key),
         _ => None,
@@ -579,7 +589,9 @@ async fn collection_message(owner: u64, name: &str, page: usize) -> CreateIntera
         None => (Vec::new(), Vec::new(), 0),
     };
     let points = frog_points_of(owner);
-    let house = super::house::house_of(owner);
+    // Paused: the collection is still theirs and still listed, it just doesn't
+    // wear a house.
+    let house = super::house_cup::running().then(|| super::house::house_of(owner)).flatten();
     let view = frogs_text(&plain(name), &cards, &wizards, points, house, dropped, page);
     let top = rarest(&cards).cloned();
     let mut embed = CreateEmbed::new()
@@ -834,7 +846,7 @@ async fn finish(ctx: &Context, d: &Drop, give_up_after: bool) {
         return;
     };
     let canonical = store::db().and_then(|db| store::riddle(&db.lock(), &d.riddle_id)).map(|r| r.canonical().to_string()).unwrap_or_default();
-    let house = d.winner.and_then(super::house::house_of);
+    let house = super::house_cup::running().then(|| d.winner.and_then(super::house::house_of)).flatten();
     let mut edited = false;
     for wait in EDIT_RETRIES {
         tokio::time::sleep(Duration::from_secs(wait)).await;
@@ -924,7 +936,7 @@ async fn catch_pressed(ctx: &Context, component: &ComponentInteraction) {
         _ => return whisper_component(ctx, component, HOPPED).await,
     }
     if !house_member(user) {
-        return whisper_component(ctx, component, HOUSE_ONLY).await;
+        return whisper_component(ctx, component, catcher_refusal()).await;
     }
     if used >= MAX_TRIES {
         return whisper_component(ctx, component, OUT_OF_TRIES).await;
@@ -972,7 +984,7 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
     let data = serde_json::to_value(&modal.data).unwrap_or(Value::Null);
     let guess = answer_from(&data).unwrap_or_default();
     if !house_member(user) {
-        return reply_modal(ctx, modal, HOUSE_ONLY.into(), None).await;
+        return reply_modal(ctx, modal, catcher_refusal().into(), None).await;
     }
     let name = modal.member.as_ref().map(|m| m.display_name().to_string()).unwrap_or_else(|| modal.user.display_name().to_string());
     let Some(db) = store::db() else {
@@ -1041,9 +1053,12 @@ pub fn spawn(ctx: Context) {
         tokio::spawn(async move { finish(&ctx, &d, true).await });
     }
     match (switched_on(), channels()) {
-        (true, Some(list)) => tracing::info!("frog: dropping into {:?}", list),
-        (true, None) => tracing::info!("frog: switched on but no channels to drop into"),
-        (false, _) => tracing::info!("frog: VIZIER_FROGS is off, no scheduled drops until it is switched on"),
+        _ if !switched_on() => tracing::info!("frog: VIZIER_FROGS is off, no scheduled drops until it is switched on"),
+        _ if super::house_cup::paused() => {
+            tracing::info!("frog: the House Cup is paused, so nothing drops - the cards people already own are untouched")
+        }
+        (_, Some(list)) => tracing::info!("frog: dropping into {:?}", list),
+        (_, None) => tracing::info!("frog: switched on but no channels to drop into"),
     }
     // Earned cards each morning, and offers that run out of time.
     super::frog_rewards::spawn_daily(ctx.clone());
@@ -1056,7 +1071,7 @@ async fn schedule(ctx: Context) {
     let mut retry_at = 0i64;
     loop {
         tokio::time::sleep(TICK).await;
-        let Some(channels) = channels().filter(|_| switched_on()) else {
+        let Some(channels) = channels().filter(|_| switched_on() && super::house_cup::gate("frog drops")) else {
             continue;
         };
         let now = Utc::now().timestamp();

@@ -166,10 +166,13 @@ fn daily_cap() -> Option<i64> {
 /// Every setting the rules post and the House Cup posts mention, as they are now.
 pub fn npat_rules(cap: Option<i64>) -> NpatRules {
     let (p, prizes) = (points(), prizes());
+    // Paused: no house prizes and no house requirement to start. The game score
+    // is exactly as it was, and the copy below says only that.
+    let cup = super::house_cup::running();
     NpatRules {
         channel: live_channel(),
         min_players: min_players() as i64,
-        min_houses: min_houses() as i64,
+        min_houses: if cup { min_houses() as i64 } else { 1 },
         join_secs: join_secs(),
         start_secs: start_secs(),
         letters: judge::letter_pool(&letters()).into_iter().collect(),
@@ -177,9 +180,10 @@ pub fn npat_rules(cap: Option<i64>) -> NpatRules {
         round_secs: round_secs(),
         break_secs: break_secs(),
         scores: [p.unique, p.shared],
-        prizes: [prizes.first, prizes.second],
+        prizes: if cup { [prizes.first, prizes.second] } else { [0, 0] },
         cap,
         min_scored: min_scored() as i64,
+        cup,
     }
 }
 
@@ -418,12 +422,22 @@ fn md(text: &str) -> String {
     text.chars().filter(|c| !matches!(c, '*' | '_' | '`' | '~' | '|' | '<' | '>' | '\\' | '#')).collect::<String>().trim().to_string()
 }
 
+/// A round the mods stopped. Paused, there were no house points to lose, so it
+/// says only that it stopped.
+pub(super) fn stopped_line() -> &'static str {
+    if super::house_cup::running() { "🛑 Stopped by a mod · no house points" } else { "🛑 Stopped by a mod" }
+}
+
 fn plural(n: i64, one: &str, many: &str) -> String {
     format!("{} {}", n, if n == 1 { one } else { many })
 }
 
-/// "🥇 +2 🥈 +1 house points", leaving out a place worth nothing.
-fn prize_words(prizes: [i64; 2]) -> String {
+/// "🥇 +2 🥈 +1 house points", leaving out a place worth nothing. Empty while
+/// the House Cup is paused: there is no house prize to name.
+pub(super) fn prize_words(prizes: [i64; 2], cup: bool) -> String {
+    if !cup {
+        return String::new();
+    }
     let mut parts = Vec::new();
     if prizes[0] > 0 {
         parts.push(format!("🥇 +{}", prizes[0]));
@@ -456,15 +470,16 @@ const COUNTDOWN_EDIT_SECS: i64 = 5;
 const LOBBY_COUNTDOWN_EDIT_SECS: i64 = 10;
 
 pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules, now: i64) -> String {
+    let prizes = prize_words(n.prizes, n.cup);
     let mut text = format!(
         "A game is **{}**. For each, find a **Name, Place, Animal and Thing** starting with it in **{} s**.\n\
-         ✍️ Answers go in a private pop-up · unique **{}** · shared **{}** · the game's best two house members win {}\n\
+         ✍️ Answers go in a private pop-up · unique **{}** · shared **{}**{}\n\
          -# {} · 📜 full rules above\n\n",
         plural(n.letters_per_game, "letter", "letters"),
         n.round_secs,
         n.scores[0],
         n.scores[1],
-        prize_words(n.prizes),
+        if prizes.is_empty() { String::new() } else { format!(" · the game's best two house members win {}", prizes) },
         RULES_IN_SHORT
     );
     let houses = house_count(joined) as i64;
@@ -489,7 +504,10 @@ pub fn lobby_text(joined: &[Player], state: LobbyState, n: &NpatRules, now: i64)
                 crests.push(crest);
             }
         }
-        let houses_words = if houses == 0 || n.min_houses <= 1 { String::new() } else { format!(" · {} {}", crests.join(""), plural(houses, "house", "houses")) };
+        // No crests and no house count while the Cup is paused - `min_houses` is
+        // 1 then, so this is already quiet, and the `cup` check makes it plain.
+        let houses_words =
+            if !n.cup || houses == 0 || n.min_houses <= 1 { String::new() } else { format!(" · {} {}", crests.join(""), plural(houses, "house", "houses")) };
         text.push_str(&format!("\n\n**{}/{} players{}**\n", joined.len(), n.min_players, houses_words));
         let names: Vec<String> = joined.iter().take(LOBBY_NAMES).map(|(u, _)| format!("<@{}>", u)).collect();
         text.push_str(&names.join(" · "));
@@ -535,7 +553,7 @@ pub fn round_text(letter: char, ends_at: i64, answers: usize, state: RoundState,
     let tail = match state {
         RoundState::Live => format!("⏱️ **{}** left\n{}", left_words(ends_at, now), count),
         RoundState::Judging => format!("⏱️ Time's up · {} · judging…", count),
-        RoundState::Stopped => "🛑 Stopped by a mod · no house points".to_string(),
+        RoundState::Stopped => stopped_line().to_string(),
     };
     head + &tail
 }
@@ -684,14 +702,24 @@ fn fit_lines(rows: &[String], reserve: usize) -> String {
 /// A letter's results card: (title, description, footer). Lines are expected
 /// best game score first.
 #[allow(clippy::too_many_arguments)]
-pub fn letter_results_text(game_id: i64, letter_no: i64, letters: i64, letter: char, lines: &[LetterLine], letter_only: bool, p: Points) -> (String, String, String) {
+pub fn letter_results_text(
+    game_id: i64,
+    letter_no: i64,
+    letters: i64,
+    letter: char,
+    lines: &[LetterLine],
+    letter_only: bool,
+    p: Points,
+    cup: bool,
+) -> (String, String, String) {
     let title = format!("Letter {} · {}/{} · Game {}", letter, letter_no, letters, game_id);
     let mut notes = Vec::new();
     if letter_only {
         notes.push("-# ⚠️ Checked by letter only: the judge couldn't be reached".to_string());
     }
     if !lines.is_empty() {
-        notes.push(format!("-# 🎯 Letter {}/{} · the last number is the game score so far · house points are paid when the game ends", letter_no, letters));
+        let paid = if cup { " · house points are paid when the game ends" } else { "" };
+        notes.push(format!("-# 🎯 Letter {}/{} · the last number is the game score so far{}", letter_no, letters, paid));
         notes.push("-# ⚖️ Think an answer was judged wrong? Press Challenge within 30 min".to_string());
     }
     let notes = notes.join("\n");
@@ -746,14 +774,18 @@ pub fn final_results_text(game_id: i64, letters: &[char], lines: &[FinalLine], p
     if !winners.is_empty() {
         notes.push(format!("🏠 **House points:** {}", winners.join(" · ")));
     }
-    if pays && lines.iter().any(|l| l.rank <= 2 && l.total > 0 && l.badge == "🧙 Muggle") {
+    if n.cup && pays && lines.iter().any(|l| l.rank <= 2 && l.total > 0 && l.badge == "🧙 Muggle") {
         notes.push("-# 🧙 Muggles keep their place, but house points go to the two best house members".to_string());
     }
-    if !lines.is_empty() && !pays {
+    if n.cup && !lines.is_empty() && !pays {
         notes.push(format!("-# Fewer than {} played this game, so it pays no house points", plural(n.min_scored, "person", "people")));
     }
     if !lines.is_empty() {
-        notes.push("-# ⚖️ Each letter's results can still be challenged for 30 min; places and house points update by themselves".to_string());
+        notes.push(if n.cup {
+            "-# ⚖️ Each letter's results can still be challenged for 30 min; places and house points update by themselves".to_string()
+        } else {
+            "-# ⚖️ Each letter's results can still be challenged for 30 min; the places update by themselves".to_string()
+        });
     }
     let notes = notes.join("\n");
     let body = if lines.is_empty() {
@@ -771,7 +803,8 @@ pub fn final_results_text(game_id: i64, letters: &[char], lines: &[FinalLine], p
         Some(c) => format!("up to {} a day", c),
         None => "no daily limit".to_string(),
     };
-    let footer = format!("{} · {}", prize_words(n.prizes), limit);
+    let prizes = prize_words(n.prizes, n.cup);
+    let footer = if prizes.is_empty() { limit } else { format!("{} · {}", prizes, limit) };
     (title, text, footer)
 }
 
@@ -1154,7 +1187,7 @@ fn letter_lines(round: &Round) -> Vec<LetterLine> {
 }
 
 fn letter_results_embed(round: &Round, lines: &[LetterLine]) -> CreateEmbed {
-    let (title, text, footer) = letter_results_text(round.game_id, round.letter_no, game_letters(round.game_id), round.letter, lines, round.letter_only, points());
+    let (title, text, footer) = letter_results_text(round.game_id, round.letter_no, game_letters(round.game_id), round.letter, lines, round.letter_only, points(), super::house_cup::running());
     CreateEmbed::new().title(title).description(text).colour(COLOUR).footer(CreateEmbedFooter::new(footer))
 }
 
@@ -1624,6 +1657,14 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
 }
 
 const HOUSE_ONLY: &str = "🏠 Join a house first — house members, Muggles and mods can play Name Place Animal Thing.";
+/// The same refusal with no house in it, for while the Cup is paused. Who may
+/// play is unchanged; only the reason given is.
+const NOT_A_PLAYER: &str = "🔤 A mod has to add you before you can play Name Place Animal Thing — ask one and they'll sort it.";
+
+/// Which of the two to show.
+fn join_refusal() -> &'static str {
+    if super::house_cup::running() { HOUSE_ONLY } else { NOT_A_PLAYER }
+}
 
 async fn join_pressed(ctx: &Context, component: &ComponentInteraction) {
     if live_channel().is_none() {
@@ -1631,7 +1672,7 @@ async fn join_pressed(ctx: &Context, component: &ComponentInteraction) {
     }
     let user = component.user.id.get();
     let Some(house) = player_house(user) else {
-        return whisper(ctx, component, HOUSE_ONLY).await;
+        return whisper(ctx, component, join_refusal()).await;
     };
     let now = Utc::now().timestamp();
     let t = timing();
@@ -1678,7 +1719,7 @@ async fn submit_pressed(ctx: &Context, component: &ComponentInteraction, round_i
         return whisper(ctx, component, "⏱️ This letter is over.").await;
     };
     if player_house(user).is_none() {
-        return whisper(ctx, component, HOUSE_ONLY).await;
+        return whisper(ctx, component, join_refusal()).await;
     }
     let modal = modal_json_timed(round_id, round.letter, previous.as_ref(), Some((round.ends_at, now)));
     match ctx.http.create_interaction_response(component.id, &component.token, &modal, Vec::new()).await {
@@ -1860,6 +1901,13 @@ fn review_rows(options: Vec<CreateSelectMenuOption>, round_id: i64) -> Vec<Creat
 }
 
 const REVIEW_HELP: &str = "Pick an answer to flip between ✅ valid and ❌ not valid. Scores, the game's 1st and 2nd, house points and the results cards update straight away.";
+/// The same, with the house points left out for while the Cup is paused.
+const REVIEW_HELP_PAUSED: &str =
+    "Pick an answer to flip between ✅ valid and ❌ not valid. Scores, the game's 1st and 2nd and the results cards update straight away.";
+
+fn review_help() -> &'static str {
+    if super::house_cup::running() { REVIEW_HELP } else { REVIEW_HELP_PAUSED }
+}
 
 async fn review_pressed(ctx: &Context, component: &ComponentInteraction, round_id: i64) {
     if !super::admin_ids().contains(&component.user.id.get()) {
@@ -1981,17 +2029,26 @@ async fn review_picked(ctx: &Context, component: &ComponentInteraction, round_id
         old,
         new
     );
+    let cup = super::house_cup::running();
     if !fixes.is_empty() {
         let moves: Vec<String> = fixes.iter().map(|(u, amount, _)| format!("<@{}> {}{}", u, if *amount > 0 { "+" } else { "" }, amount)).collect();
         text.push_str(&format!("\n🏅 The game's 1st and 2nd changed · house points {}", moves.join(" · ")));
+    } else if !cup {
+        // Paused: no house points move either way, so there is nothing to add.
     } else if !done {
         text.push_str("\n-# The game is still going: house points are worked out when it ends.");
     } else if game.as_ref().is_some_and(|g| !g.pays) {
         text.push_str("\n-# This game paid no house points, so only the cards changed.");
     }
-    text.push_str(&format!("\n\n{}", REVIEW_HELP));
+    text.push_str(&format!("\n\n{}", review_help()));
     let options = review_options(ctx, component.guild_id, round_id);
     update(ctx, component, text, review_rows(options, round_id)).await;
+}
+
+/// What a stopped game costs: nothing to say while the Cup is paused, since it
+/// was never going to pay a house anything.
+fn stopped_note() -> &'static str {
+    if super::house_cup::running() { " No house points;" } else { "" }
 }
 
 /// `/npatstop` - admins only.
@@ -2004,8 +2061,10 @@ pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
     let stopped = store::db().and_then(|db| store::stop_live(&db.lock(), command.user.id.get()).ok());
     SHARED.lock().stop = true;
     let text = match &stopped {
-        Some((Some(round), _)) => format!("🛑 Game {} stopped at letter {} ({}). No house points; back to the lobby.", round.game_id, round.letter_no, round.letter),
-        Some((None, Some(game))) => format!("🛑 Game {} stopped between letters. No house points; back to the lobby.", game.id),
+        Some((Some(round), _)) => {
+            format!("🛑 Game {} stopped at letter {} ({}).{} Back to the lobby.", round.game_id, round.letter_no, round.letter, stopped_note())
+        }
+        Some((None, Some(game))) => format!("🛑 Game {} stopped between letters.{} Back to the lobby.", game.id, stopped_note()),
         _ => "No game was running. The lobby is reset.".to_string(),
     };
     tracing::info!("npat: /npatstop by {}: {:?}", command.user.id, stopped.map(|(r, g)| (r.map(|r| r.id), g.map(|g| g.id))));
@@ -2163,7 +2222,7 @@ mod tests {
         assert_eq!(left_words(1_000, 840), "2:40");
         assert_eq!(left_words(1_000, 1_200), "0 s");
         assert!(round_text('P', 0, 1, RoundState::Judging, 0).ends_with("⏱️ Time's up · 📝 **1 answer** in · judging…"));
-        assert!(round_text('P', 0, 1, RoundState::Stopped, 0).ends_with("🛑 Stopped by a mod · no house points"));
+        assert!(round_text('P', 0, 1, RoundState::Stopped, 0).ends_with(stopped_line()));
         assert_eq!(break_text(3, 5, 1_789_367_500, 1_789_367_485), "⏭️ Letter **3/5** starts in **15 s**");
         let open = serde_json::to_value(round_row(12, true)).unwrap();
         assert_eq!((open["components"][0]["custom_id"].as_str(), open["components"][0]["disabled"].as_bool()), (Some("npatsubmit:12"), Some(false)));
@@ -2251,29 +2310,29 @@ mod tests {
         let muggle = LetterLine { badge: badge(MUGGLE), ..lline(7, "Pune", 40, 40) };
         assert!(letter_line(&muggle).starts_with("<@7> 🧙 Muggle — "));
 
-        let (title, text, footer) = letter_results_text(4, 3, 5, 'P', &[lline(1, "Pune", 35, 90), lline(2, "Patna", 30, 60)], false, P);
+        let (title, text, footer) = letter_results_text(4, 3, 5, 'P', &[lline(1, "Pune", 35, 90), lline(2, "Patna", 30, 60)], false, P, true);
         assert_eq!(title, "Letter P · 3/5 · Game 4");
         assert!(text.starts_with("<@1> 🦁 — Pune ✅"), "{text}");
         assert!(text.contains("\n-# 🎯 Letter 3/5 · the last number is the game score so far · house points are paid when the game ends"), "{text}");
         assert!(text.ends_with("-# ⚖️ Think an answer was judged wrong? Press Challenge within 30 min"), "{text}");
         assert!(!text.contains("House points:"), "no house points per letter");
         assert_eq!(footer, "✅ unique 10 · 🟰 shared 5 · ❌ 0");
-        let (_, text, _) = letter_results_text(4, 1, 5, 'P', &[lline(1, "Pune", 3, 3)], true, P);
+        let (_, text, _) = letter_results_text(4, 1, 5, 'P', &[lline(1, "Pune", 3, 3)], true, P, true);
         assert!(text.contains("-# ⚠️ Checked by letter only: the judge couldn't be reached"), "{text}");
-        assert_eq!(letter_results_text(4, 2, 5, 'M', &[], false, P).1, "Nobody answered this letter.");
+        assert_eq!(letter_results_text(4, 2, 5, 'M', &[], false, P, true).1, "Nobody answered this letter.");
 
         let long = "W".repeat(40);
         let crowd: Vec<LetterLine> = (0..60).map(|i| LetterLine { answers: [long.clone(), long.clone(), long.clone(), long.clone()], marks: [Mark::Shared; 4], ..lline(1_000_000_000_000_000_000 + i, "", 20, 200) }).collect();
-        let (_, text, _) = letter_results_text(99, 5, 5, 'W', &crowd, true, P);
+        let (_, text, _) = letter_results_text(99, 5, 5, 'W', &crowd, true, P, true);
         assert!(text.chars().count() <= DESCRIPTION_LIMIT, "{} chars", text.chars().count());
         let shown = text.lines().filter(|l| l.starts_with("<@")).count();
         assert!(shown > 0 && shown <= RESULT_LINES, "{shown} lines");
         assert!(text.contains(&format!("…and {} more", 60 - shown)), "{text}");
         assert!(text.ends_with("within 30 min"), "notes survive the trim");
         let short: Vec<LetterLine> = (0..26).map(|i| lline(1_000_000_000_000_000_000 + i, "Pune", 10, 10)).collect();
-        let (_, few, _) = letter_results_text(99, 1, 5, 'P', &short[..25], false, P);
+        let (_, few, _) = letter_results_text(99, 1, 5, 'P', &short[..25], false, P, true);
         assert_eq!(few.lines().filter(|l| l.starts_with("<@")).count(), 25);
-        assert!(letter_results_text(99, 1, 5, 'P', &short, false, P).1.contains("\n…and 1 more\n"));
+        assert!(letter_results_text(99, 1, 5, 'P', &short, false, P, true).1.contains("\n…and 1 more\n"));
         let rows = serde_json::to_value(results_rows(12, 2, true)).unwrap();
         assert_eq!(rows[0]["components"][0]["custom_id"], "npatchal:12");
         assert_eq!(rows[0]["components"][1]["label"], "🛡️ Review · 2 challenged");

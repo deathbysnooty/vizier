@@ -111,6 +111,7 @@ mod sudoku_code;
 mod sudoku_gen;
 mod sudoku_store;
 mod house_card;
+mod house_cup;
 mod house_draft;
 mod points;
 mod pronouns;
@@ -180,6 +181,8 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = house::open(&self.deps.config.workspace) {
             tracing::warn!("house: store not opened: {}", err);
         }
+        // Which month this is: the Cup running, or paused with the games still on.
+        house_cup::log_state();
         if let Err(err) = snitch::open(&self.deps.config.workspace) {
             tracing::warn!("snitch: store not opened: {}", err);
         }

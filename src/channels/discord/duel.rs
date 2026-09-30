@@ -251,7 +251,13 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 }
 
 /// A house crest for a member, or a hat for somebody in no house.
+///
+/// While the House Cup is paused everybody gets the hat: a board in a game says
+/// nothing about houses until the Cup is back.
 pub fn crest(user: u64) -> &'static str {
+    if super::house_cup::paused() {
+        return "🧙";
+    }
     super::house::house_of(user).map(|h| h.crest).unwrap_or("🧙")
 }
 
@@ -274,6 +280,10 @@ pub fn left_words(until: i64, now: i64) -> String {
 
 /// What the prizes come to, in one line.
 pub fn worth_words(p: Prizes) -> String {
+    // Paused: the house prizes do not exist, so the line is only about the game.
+    if super::house_cup::paused() {
+        return "🎯 Duel points for everybody who plays to the end - no limit, and the board is `/dueltop`.".to_string();
+    }
     let limit = match p.cap {
         Some(n) => format!(" · max **{}** a day", n),
         None => String::new(),
@@ -521,7 +531,7 @@ pub fn result_line(p: &Player, place: usize) -> String {
 
 /// The whole result card. `places` is each player's finishing place, in seat
 /// order, which the caller has already worked out from the totals.
-pub fn result_text(game: &Game, places: &[usize], lasted: i64, why_nothing: &str) -> (String, String) {
+pub fn result_text(game: &Game, places: &[usize], lasted: i64, why_nothing: &str, cup: bool) -> (String, String) {
     let title = format!("{} · Game #{}", result_headline(game.result.as_deref().unwrap_or("done")), game.id);
     let mut ranked: Vec<(usize, &Player)> =
         game.players.iter().enumerate().map(|(i, p)| (places.get(i).copied().unwrap_or(9), p)).collect();
@@ -530,7 +540,10 @@ pub fn result_text(game: &Game, places: &[usize], lasted: i64, why_nothing: &str
 
     let paid: Vec<String> =
         game.players.iter().filter(|p| p.points > 0).map(|p| format!("<@{}> **+{}**", p.user, p.points)).collect();
-    if paid.is_empty() {
+    // Paused: not a word about the Cup either way. The duel points below are the
+    // whole of what the game paid, and they are unchanged.
+    if !cup {
+    } else if paid.is_empty() {
         let why = if why_nothing.is_empty() { "no House Cup points this time".to_string() } else { format!("no House Cup points: {}", why_nothing) };
         body.push_str(&format!("\n\n🏠 {}", why));
     } else {
@@ -1375,7 +1388,7 @@ async fn post_result(ctx: &Context, game_id: i64) {
     let now = Utc::now().timestamp();
     let totals: Vec<i64> = game.players.iter().map(|p| p.total()).collect();
     let places = rules::placings(&totals);
-    let (title, body) = result_text(&game, &places, game.finished_at.unwrap_or(now) - game.started_at, &game.why_nothing);
+    let (title, body) = result_text(&game, &places, game.finished_at.unwrap_or(now) - game.started_at, &game.why_nothing, super::house_cup::running());
     let mut message = CreateMessage::new()
         .embed(CreateEmbed::new().title(title).description(body).colour(RESULT_COLOUR).image(format!("attachment://{}", BOARD_FILE)))
         .allowed_mentions(CreateAllowedMentions::new());
@@ -1491,7 +1504,7 @@ pub fn help_text(min: usize, max: usize, lobby: i64, turn: i64, p: Prizes) -> St
          **The end.** The bag empties and somebody puts their last tile down: they gain what everybody else is still \
          holding, and everybody else loses theirs. Or everybody passes twice in a row, and each player loses what \
          they are holding.\n\n{}\n-# `/dueltop` is the duel points board — those have no daily limit, and everybody \
-         scores them whatever their house.",
+         scores them.",
         clock_words(lobby),
         min,
         max,
@@ -2057,7 +2070,7 @@ pub mod tests {
         g.players[2].worth = 1;
         let totals: Vec<i64> = g.players.iter().map(|p| p.total()).collect();
         let places = rules::placings(&totals);
-        let (title, body) = result_text(&g, &places, 900, "");
+        let (title, body) = result_text(&g, &places, 900, "", true);
         assert!(title.contains("Last tile down") && title.contains("#7"));
         assert!(body.contains("🥇 <@111>") && body.contains("**252**"), "{}", body);
         assert!(body.contains("🥈 <@222>") && body.contains("🥉 <@333>"), "{}", body);
@@ -2073,7 +2086,7 @@ pub mod tests {
         g.result = Some("passed out".into());
         g.players[0].worth = 2;
         let totals: Vec<i64> = g.players.iter().map(|p| p.total()).collect();
-        let (_, body) = result_text(&g, &rules::placings(&totals), 300, "a two-player game only pays its winner, so nobody can farm points");
+        let (_, body) = result_text(&g, &rules::placings(&totals), 300, "a two-player game only pays its winner, so nobody can farm points", true);
         assert!(body.contains("no House Cup points: a two-player game only pays its winner"), "{}", body);
         assert!(body.contains("Duel points: <@111> **+2**"), "{}", body);
     }
@@ -2458,7 +2471,7 @@ pub mod tests {
 
         // And the whole thing reads as a result card.
         let g = store::get_game(&conn, game.id).expect("still there");
-        let (title, body) = result_text(&g, &places, 70, &g.why_nothing);
+        let (title, body) = result_text(&g, &places, 70, &g.why_nothing, true);
         assert!(title.contains("Everybody passed"));
         assert!(body.contains("🥇 <@111>"), "{}", body);
         assert!(body.contains("Duel points: <@111> **+2**"), "{}", body);

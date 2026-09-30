@@ -483,6 +483,16 @@ pub fn write(conn: &Connection, entry: &Entry, ts: i64) -> rusqlite::Result<Outc
     Ok(if capped { Outcome::Capped } else { Outcome::Granted(granted) })
 }
 
+/// The last month the ledger has any row in, as that month's start. `None` when
+/// the ledger is empty.
+///
+/// What a paused House Cup shows: September's final numbers stay readable after
+/// the month turns, instead of a live table of noughts.
+pub fn last_played_month(conn: &Connection) -> Option<i64> {
+    let newest: Option<i64> = conn.query_row("SELECT MAX(ts) FROM ledger", [], |r| r.get(0)).ok().flatten();
+    newest.map(month_start)
+}
+
 /// Points per house since `since`.
 pub fn house_totals(conn: &Connection, since: i64) -> rusqlite::Result<HashMap<&'static str, i64>> {
     let mut out: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();

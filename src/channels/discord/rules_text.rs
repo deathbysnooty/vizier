@@ -21,6 +21,10 @@ pub const EMBEDS_LIMIT: usize = 6000;
 /// Every live value the posts mention. A limit of `None` means no limit.
 #[derive(Clone, Debug)]
 pub struct Rules {
+    /// Whether the House Cup is running. False parks it: the posts and the help
+    /// texts say nothing about houses or house points, and every game's own
+    /// score is described on its own.
+    pub cup: bool,
     pub scoreboard_on: bool,
     /// The public scoreboard page is on and has an address to live at.
     pub housecup_on: bool,
@@ -253,6 +257,11 @@ pub struct NpatRules {
     pub cap: Option<i64>,
     /// People who must play a game for it to pay.
     pub min_scored: i64,
+    /// Whether the House Cup is running. False parks the house side of the
+    /// game: no prizes, no house requirement to start, and not a word about
+    /// houses on the lobby, the letter cards or the final card. The game score
+    /// itself is untouched.
+    pub cup: bool,
 }
 
 /// Chess's live settings, for `/chesshelp`, its idle card and the House Cup posts.
@@ -294,6 +303,7 @@ impl Rules {
         let frogs_on = control::on("VIZIER_FROGS", false);
         let cards = super::frog_store::db().map(|db| super::frog_store::wizards(&db.lock()).into_iter().filter(|w| w.enabled).count());
         Rules {
+            cup: super::house_cup::running(),
             scoreboard_on: control::on("VIZIER_SCOREBOARD", true) && control::id("VIZIER_SCOREBOARD_CHANNEL").is_some(),
             housecup_on: control::on("VIZIER_HOUSECUP", true) && control::web::panel_url().is_some(),
             house_channel: control::id("VIZIER_HOUSE_CHANNEL"),
@@ -473,6 +483,15 @@ pub fn digest(parts: &[&str]) -> String {
 
 /// The plain-text welcome that sits first in the channel.
 pub fn welcome_text(r: &Rules) -> String {
+    let paused = if r.cup {
+        String::new()
+    } else {
+        format!(
+            "> 🏆 **The House Cup is paused.** No house points are being awarded and no Chocolate Frogs or Snitches are \
+             dropping. Every game below still runs and still keeps its own score, and nothing anybody has won has been \
+             taken away.\n\n"
+        )
+    };
     let houses: Vec<String> = HOUSES.iter().map(|h| format!("{} **{}**", h.crest, h.name)).collect();
     let rooms: Vec<String> = house::common_room_names()
         .into_iter()
@@ -497,7 +516,11 @@ pub fn welcome_text(r: &Rules) -> String {
         action.push(format!("🔢 {} · a sudoku always waiting, first to solve it wins", c));
     }
     if let Some(c) = channel(r.chess.channel) {
-        action.push(format!("♟️ {} · chess — press ⚔️ Challenge someone on the card; chess points, not house points", c));
+        action.push(format!(
+            "♟️ {} · chess — press ⚔️ Challenge someone on the card; chess points{}",
+            c,
+            if r.cup { ", not house points" } else { "" }
+        ));
     }
     if let Some(c) = channel(r.anagrams.channel) {
         action.push(format!("🔀 {} · anagrams — unscramble the letters and type the word", c));
@@ -529,11 +552,18 @@ pub fn welcome_text(r: &Rules) -> String {
     }
 
     let mut text = String::from("## 🏰 Welcome to the House Cup!\n\n");
+    text.push_str(&paused);
     text.push_str(
-        "Whether you're here to chat, climb the quiz board or throw hands in the arena, **everything you do on MLCI now \
-         counts for your house**. This channel is your home base: the rules are right below, and the live scoreboard \
-         always sits at the very bottom.\n\n",
+        if r.cup {
+            "Whether you're here to chat, climb the quiz board or throw hands in the arena, **everything you do on MLCI now \
+             counts for your house**. This channel is your home base: the rules are right below, and the live scoreboard \
+             always sits at the very bottom."
+        } else {
+            "Whether you're here to chat, climb the quiz board or throw hands in the arena, there is always something on. \
+             This channel is your home base: the rules are right below, and the scoreboard always sits at the very bottom."
+        },
     );
+    text.push_str("\n\n");
     text.push_str("**🎩 Your house**\n");
     text.push_str(&format!(
         "Every member is sorted into one of four houses: {}. Your house role shows next to your name. New here? The \
@@ -559,7 +589,7 @@ pub fn welcome_text(r: &Rules) -> String {
         "Banter is welcome, bullying isn't. Points can't be bought, farmed or begged for, and mods can take away points \
          won unfairly. Want to sit it out? `/houseopt` makes you a Muggle, no hard feelings.\n\n",
     );
-    text.push_str("Now scroll down, learn the ropes, and go win it for your house. ⬇️");
+    text.push_str(if r.cup { "Now scroll down, learn the ropes, and go win it for your house. ⬇️" } else { "Now scroll down and learn the ropes. ⬇️" });
     text
 }
 
@@ -585,7 +615,18 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
         (false, true) => ("✨ Chocolate Frog Cards", "Chocolate Frogs hop around MLCI every day."),
         (false, false) => return None,
     };
-    let mut text = format!("## {}\n\n{} Watch the busy chats: the fastest hands win.\n", title, intro);
+    let mut text = format!("## {}\n\n", title);
+    if r.cup {
+        text.push_str(&format!("{} Watch the busy chats: the fastest hands win.\n", intro));
+    } else {
+        // Paused: neither drops. The cards people already hold are untouched, and
+        // the post says so rather than promising a hunt that isn't happening.
+        text.push_str(
+            "> 🏆 **The House Cup is paused**, so nothing is dropping at the moment — no Snitches and no Chocolate Frogs. \
+             Every card anybody already owns is still theirs: `/frogs`, `/frogcard`, `/housecards` and trading all still \
+             work, and the collections carry over.\n\n",
+        );
+    }
 
     if r.snitch_on {
         let (start, end) = r.snitch_hours;
@@ -602,7 +643,7 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
             when
         ));
         text.push_str("• **Reply** to the Snitch's message with just `ACCIO`\n");
-        text.push_str("• The **first three** to catch it score for their house:\n");
+        text.push_str(if r.cup { "• The **first three** to catch it score for their house:\n" } else { "• The **first three** to catch it win it:\n" });
         text.push_str(&format!(
             "> 🥉 Bronze **{}**  ·  🥈 Silver **{}**  ·  🥇 Gold **{}**\n",
             places(bronze),
@@ -627,7 +668,11 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
         ));
         text.push_str("• Press **🐸 Catch it** and a riddle pops up that **only you** can see\n");
         text.push_str(&format!("• You get **{}**, and small spelling slips are forgiven\n", plural(MAX_TRIES, "try", "tries")));
-        text.push_str("• The **first correct answer** keeps the card and scores for the house:\n");
+        text.push_str(if r.cup {
+            "• The **first correct answer** keeps the card and scores for the house:\n"
+        } else {
+            "• The **first correct answer** keeps the card:\n"
+        });
         text.push_str(&format!(
             "> 🥛 Common **{}**  ·  🍫 Uncommon **{}**  ·  🔥 The Eternal Phoenix **{}**\n",
             common, uncommon, legendary
@@ -653,13 +698,19 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
             text.push_str("• 👑 **Battle Royale:** the champion *and* the runner-up each win a bonus card\n");
         }
         if r.daily_top_cards || r.royale_cards {
-            text.push_str("• *(Bonus cards give no house points. Points only come from catching frogs.)*\n");
+            if r.cup {
+                text.push_str("• *(Bonus cards give no house points. Points only come from catching frogs.)*\n");
+            }
         }
         if r.trades_on {
             text.push_str("• 🔁 `/trade` swap, gift or ask for cards with anyone\n");
         }
-        text.push_str("• 🏠 `/housecards` what your house holds, by card or by member\n");
-        let selling = r.set_bonus > 0;
+        if r.cup {
+            text.push_str("• 🏠 `/housecards` what your house holds, by card or by member\n");
+        }
+        // Selling a set pays nothing while the Cup is paused and `/sellset`
+        // refuses, so it is not offered here either.
+        let selling = r.set_bonus > 0 && r.cup;
         if selling {
             let all = r.cards.map(|n| format!("**all {}**", n)).unwrap_or_else(|| "**every card**".to_string());
             text.push_str(&format!(
@@ -674,11 +725,10 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
             "\n**{}** Low numbers and rare cards may matter later. Something is coming. 👀\n",
             if selling { "…or keep them." } else { "Keep them." }
         ));
-        let mut commands = vec![
-            "📖 `/frogs` your collection",
-            "🔎 `/frogcard` look up any card by number",
-            "🏠 `/housecards` your house's cards",
-        ];
+        let mut commands = vec!["📖 `/frogs` your collection", "🔎 `/frogcard` look up any card by number"];
+        if r.cup {
+            commands.push("🏠 `/housecards` your house's cards");
+        }
         if r.trades_on {
             commands.push("🔁 `/trades` your offers");
         }
@@ -800,19 +850,34 @@ fn game_lines(r: &Rules) -> Vec<String> {
             r.npat.prizes[1],
             max_words(r.npat.cap)
         ));
+    } else if let Some(c) = channel(r.npat.channel) {
+        // Paused: `prizes` is [0, 0], so the line above is skipped. The game is
+        // still on, so it still belongs on the list - just its own score.
+        lines.push(format!(
+            "🔤 **Name Place Animal Thing** in {} — press I'm in; a game is {}, and the best game score takes it",
+            c,
+            plural(r.npat.letters_per_game, "letter", "letters")
+        ));
     }
     if let Some(c) = channel(r.sudoku.channel).filter(|_| r.sudoku.points.iter().any(|p| *p > 0)) {
         lines.push(format!(
-            "🔢 **Sudoku** in {} — one is always waiting; the first correct code wins 🟢 **{}** · 🟡 **{}** · 🔴 **{}** **sudoku points**, the game's own score (no house points, no daily limit — `/sudokutop` is the board)",
-            c, r.sudoku.points[0], r.sudoku.points[1], r.sudoku.points[2]
+            "🔢 **Sudoku** in {} — one is always waiting; the first correct code wins 🟢 **{}** · 🟡 **{}** · 🔴 **{}** **sudoku points**, the game's own score ({}no daily limit — `/sudokutop` is the board)",
+            c,
+            r.sudoku.points[0],
+            r.sudoku.points[1],
+            r.sudoku.points[2],
+            if r.cup { "no house points, " } else { "" }
         ));
     }
     // Chess is on this list as a game, but it is no longer a way to earn house
     // points: it scores chess points of its own, which nothing limits.
     if let Some(c) = channel(r.chess.channel).filter(|_| r.chess.win > 0 || r.chess.draw > 0) {
         lines.push(format!(
-            "♟️ **Chess** in {} — press ⚔️ Challenge someone (or `/chess @member`); **chess points**, not house points: win **+{}**, draw **+{}** each, no daily limit, `/chesstop`",
-            c, r.chess.win, r.chess.draw
+            "♟️ **Chess** in {} — press ⚔️ Challenge someone (or `/chess @member`); **chess points**{}: win **+{}**, draw **+{}** each, no daily limit, `/chesstop`",
+            c,
+            if r.cup { ", not house points" } else { "" },
+            r.chess.win,
+            r.chess.draw
         ));
     }
     if let Some(c) = channel(r.anagrams.channel).filter(|_| r.anagrams.points.iter().any(|p| *p > 0)) {
@@ -858,13 +923,24 @@ fn game_lines(r: &Rules) -> Vec<String> {
 pub fn guide(r: &Rules, cards_post_above: bool) -> Vec<Panel> {
     let houses: Vec<String> = HOUSES.iter().map(|h| format!("{} **{}**", h.crest, h.name)).collect();
     let draw = if r.draw_minimum > 0 { format!(" (**{}+** points that month)", r.draw_minimum) } else { String::new() };
-    let mut intro = format!(
-        "Every member belongs to one of four houses: {}. Almost everything you do here earns points for your house.\n\n\
-         🏆 The house with the most points at the end of the month wins the **House Cup**. Its captain and one lucky \
-         active member{} win **Discord Nitro**.",
-        and_list(&houses, "and"),
-        draw
-    );
+    let mut intro = if r.cup {
+        format!(
+            "Every member belongs to one of four houses: {}. Almost everything you do here earns points for your house.\n\n\
+             🏆 The house with the most points at the end of the month wins the **House Cup**. Its captain and one lucky \
+             active member{} win **Discord Nitro**.",
+            and_list(&houses, "and"),
+            draw
+        )
+    } else {
+        // Paused: the guide is about the games, which are all still on. It says
+        // plainly that the Cup is parked so nobody plays for points that aren't
+        // being paid, and it promises nothing has been taken away.
+        "🏆 **The House Cup is paused.** No house points are being awarded, and no Chocolate Frogs or Snitches are \
+         dropping.\n\nEvery game below still runs exactly as it did and still keeps its own score — anagram points, \
+         guess points, movie points, geo points, sudoku points, chess points, duel points, puzzle points. Nothing \
+         anybody has already won has been taken away."
+            .to_string()
+    };
     if cards_post_above {
         let what = match (r.snitch_on, r.frogs_on) {
             (true, true) => "Snitch and card rules are",
@@ -873,9 +949,12 @@ pub fn guide(r: &Rules, cards_post_above: bool) -> Vec<Panel> {
         };
         intro.push_str(&format!("\n\n✨ {} in the post above ⬆️", what));
     }
-    intro.push_str("\n-# Not sorted yet? The Sorting Hat sorts newcomers when they join. Don't want to play? `/houseopt` makes you a Muggle.");
+    if r.cup {
+        intro.push_str("\n-# Not sorted yet? The Sorting Hat sorts newcomers when they join. Don't want to play? `/houseopt` makes you a Muggle.");
+    }
 
-    let mut panels = vec![Panel { title: "📖 How to play · House Cup for beginners".into(), body: intro, colour: 0xE8B923, footer: None }];
+    let title = if r.cup { "📖 How to play · House Cup for beginners" } else { "📖 How to play · the games on MLCI" };
+    let mut panels = vec![Panel { title: title.into(), body: intro, colour: 0xE8B923, footer: None }];
     let mut sections: Vec<(&str, &str, String, u32)> = Vec::new();
 
     if r.activity_on {
@@ -927,6 +1006,11 @@ pub fn embed_chars(panels: &[Panel]) -> usize {
 
 /// The private reply to "How to earn": the guide in a few lines.
 pub fn earn_text(r: &Rules) -> String {
+    // Paused: nothing on this card would be true. Every game still keeps its own
+    // score, so that is the card - one line per board, and not a house in it.
+    if !r.cup {
+        return earn_paused_text(r);
+    }
     let mut lines = vec!["❓ **How to earn points**".to_string()];
     if r.activity_on {
         if !r.chat_tiers.is_empty() && r.chat_cap != Some(0) {
@@ -1059,6 +1143,42 @@ pub fn earn_text(r: &Rules) -> String {
     lines.join("\n")
 }
 
+/// The "How to earn" card while the House Cup is paused: what each game scores
+/// for itself, and where its board is. No house, no limits, nothing capped.
+pub fn earn_paused_text(r: &Rules) -> String {
+    let mut lines = vec![
+        "❓ **The House Cup is paused**".to_string(),
+        "Every game still runs and still keeps its own score - these are the boards:".to_string(),
+    ];
+    let mut boards = Vec::new();
+    if r.anagrams.channel.is_some() {
+        boards.push("🔀 anagram points · `/anagramtop`");
+    }
+    if r.guess.channel.is_some() {
+        boards.push("🎨 guess points · `/guesstop`");
+    }
+    if r.movie.channel.is_some() {
+        boards.push("🎬 movie points · `/movietop`");
+    }
+    if r.geo.channel.is_some() {
+        boards.push("🗺️ geo points · `/geotop`");
+    }
+    if r.sudoku.channel.is_some() {
+        boards.push("🔢 sudoku points · `/sudokutop`");
+    }
+    if r.chess.channel.is_some() {
+        boards.push("♟️ chess points · `/chesstop`");
+    }
+    for chunk in boards.chunks(3) {
+        lines.push(chunk.join(" · "));
+    }
+    if r.npat.channel.is_some() {
+        lines.push("🔤 Name Place Animal Thing keeps its game score for each game played.".to_string());
+    }
+    lines.push("-# The games' own points are never capped. Nothing already won has been taken away.".into());
+    lines.join("\n")
+}
+
 // --- the Name Place Animal Thing rules post -------------------------------------------
 
 pub const NPAT_RULES_TITLE: &str = "📜 How Name · Place · Animal · Thing works";
@@ -1104,7 +1224,11 @@ pub fn npat_rules_text(n: &NpatRules) -> String {
         houses,
         duration_words(n.start_secs)
     ));
-    t.push_str("• Anyone in a house can play. 🧙 Muggles can play too: they count as players but not as a house, and never win house points. Not in a house? Join one first.\n");
+    t.push_str(if n.cup {
+        "• Anyone in a house can play. 🧙 Muggles can play too: they count as players but not as a house, and never win house points. Not in a house? Join one first.\n"
+    } else {
+        "• Everyone can play, mods included.\n"
+    });
     t.push_str("• Not enough players in time? The lobby resets, and anyone can press **I'm in** to try again.\n");
 
     t.push_str("\n**✍️ Playing**\n");
@@ -1127,18 +1251,28 @@ pub fn npat_rules_text(n: &NpatRules) -> String {
         letters
     ));
 
-    t.push_str("\n**🏠 House points** (paid when the game ends)\n");
-    t.push_str(&format!("• 🥇 The game's best house member gets **+{}**, 🥈 the next **+{}**.\n", n.prizes[0], n.prizes[1]));
-    t.push_str("• Level scores go to whoever locked in their final score first.\n");
-    let limit = match n.cap {
-        Some(c) => format!("Up to **{}** a day each.", plural(c, "house point", "house points")),
-        None => "No daily limit.".to_string(),
-    };
-    t.push_str(&format!("• Only when at least **{}** played the game. {}\n", plural(n.min_scored, "person", "people"), limit));
-    t.push_str("• Muggles keep their place, but the points pass to the next house members.\n");
+    if n.cup {
+        t.push_str("\n**🏠 House points** (paid when the game ends)\n");
+        t.push_str(&format!("• 🥇 The game's best house member gets **+{}**, 🥈 the next **+{}**.\n", n.prizes[0], n.prizes[1]));
+        t.push_str("• Level scores go to whoever locked in their final score first.\n");
+        let limit = match n.cap {
+            Some(c) => format!("Up to **{}** a day each.", plural(c, "house point", "house points")),
+            None => "No daily limit.".to_string(),
+        };
+        t.push_str(&format!("• Only when at least **{}** played the game. {}\n", plural(n.min_scored, "person", "people"), limit));
+        t.push_str("• Muggles keep their place, but the points pass to the next house members.\n");
+    } else {
+        t.push_str("\n**🏁 Winning a game**\n");
+        t.push_str("• 🥇 The best game score takes the game, 🥈 the next is runner-up.\n");
+        t.push_str("• Level scores go to whoever locked in their final score first.\n");
+    }
 
     t.push_str("\n**⚖️ Challenges**\n");
-    t.push_str("Think an answer was judged wrong? Press **⚖️ Challenge** on that letter's results within 30 minutes. A mod decides with 🛡️ Review, and scores and house points are corrected automatically.\n");
+    t.push_str(if n.cup {
+        "Think an answer was judged wrong? Press **⚖️ Challenge** on that letter's results within 30 minutes. A mod decides with 🛡️ Review, and scores and house points are corrected automatically.\n"
+    } else {
+        "Think an answer was judged wrong? Press **⚖️ Challenge** on that letter's results within 30 minutes. A mod decides with 🛡️ Review, and the scores are corrected automatically.\n"
+    });
 
     t.push_str("\n**🔁 Letters keep coming**\n");
     t.push_str(&format!(
@@ -1166,7 +1300,7 @@ fn sudoku_where(id: Option<u64>) -> String {
 
 /// What `/sudokuhelp` says: the whole game in one private message, from the
 /// settings as they are now. Kept under one Discord message.
-pub fn sudoku_help_text(s: &SudokuRules) -> String {
+pub fn sudoku_help_text(s: &SudokuRules, cup: bool) -> String {
     let mut t = String::new();
     t.push_str(&format!(
         "**🔢 What it is**\nA sudoku is always waiting {}. Solve it before anyone else and it's yours.\n\n",
@@ -1183,10 +1317,11 @@ pub fn sudoku_help_text(s: &SudokuRules) -> String {
     }
     t.push_str(&format!(
         "**🧩 Sudoku points**\n{} — to the **first** correct code only. The moment one is solved the next puzzle appears.\n\
-         • Sudoku pays **sudoku points**, this game's own score. They are **not** house points: solving a puzzle doesn't move the House Cup, and nothing here is capped.\n\
-         • Everyone has them — houses or no houses, mods included.\n\
+         • Sudoku pays **sudoku points**, this game's own score, and nothing here is capped.{}\n\
+         • Everyone has them, mods included.\n\
          • `/sudokutop` is the board for today or this month, `/sudoku` shows where you stand, and the day's top scorer is the one the 🐸 frog card goes to.\n\n",
-        sudoku_points_words(&s.points)
+        sudoku_points_words(&s.points),
+        if cup { " They are **not** house points: solving a puzzle doesn't move the House Cup." } else { "" }
     ));
     t.push_str(&format!(
         "**💡 Hints**\n**💡 Hint** shows you one square and takes **{}** off what that puzzle is worth to you, {} per puzzle. It's a button here, so the bot knows whose hint it was.\n\n",
@@ -1204,8 +1339,8 @@ pub fn sudoku_help_text(s: &SudokuRules) -> String {
 
 /// The rules post that sits at the top of the sudoku channel: everything in
 /// `/sudokuhelp`, and the small print about tries as well.
-pub fn sudoku_rules_text(s: &SudokuRules) -> String {
-    let mut t = sudoku_help_text(s);
+pub fn sudoku_rules_text(s: &SudokuRules, cup: bool) -> String {
+    let mut t = sudoku_help_text(s, cup);
     let mix = ["easy", "medium", "hard"];
     let total: u32 = s.mix.iter().sum();
     let shares: Vec<String> = mix
@@ -1235,7 +1370,7 @@ pub const PUZZLE_RULES_TITLE: &str = "🧩 How the chess puzzle works";
 /// Two things it must always say, whatever the settings: that an engine would
 /// solve any of these instantly and the point is to do it yourself, and where
 /// the puzzles came from - the bank's own attribution line, word for word.
-pub fn puzzle_help_text(p: &PuzzleRules) -> String {
+pub fn puzzle_help_text(p: &PuzzleRules, cup: bool) -> String {
     let place = channel(p.channel).map(|c| format!(" in {}", c)).unwrap_or_else(|| " in the chess channel".to_string());
     let mut t = String::new();
     t.push_str(&format!(
@@ -1253,10 +1388,13 @@ pub fn puzzle_help_text(p: &PuzzleRules) -> String {
     t.push_str("**🏅 What it scores**\n");
     t.push_str(&format!(
         "• Everyone who solves a puzzle scores **puzzle points** — **{}** for an easy one, **{}** for a medium, **{}** for a hard. \
-         They have no daily limit, they are **not** house points, and everyone has them: houses or no houses, mods included.\n",
-        p.band_points[0], p.band_points[1], p.band_points[2]
+         They have no daily limit{}, and everyone has them, mods included.\n",
+        p.band_points[0], p.band_points[1], p.band_points[2],
+        if cup { ", they are **not** house points" } else { "" }
     ));
-    if p.cap > 0 && p.first > 0 {
+    if !cup {
+        // Paused: nothing to say about house points either way.
+    } else if p.cap > 0 && p.first > 0 {
         t.push_str(&format!(
             "• The **first** person to crack each puzzle also takes **{}**, up to **{}** a day. Nobody else earns house points from a puzzle.\n",
             plural(p.first, "house point", "house points"),
@@ -1284,7 +1422,11 @@ pub fn puzzle_help_text(p: &PuzzleRules) -> String {
     }
 
     t.push_str("\n**🤖 About cheating**\n");
-    t.push_str("• A chess engine would find any of these in a blink, and the bot has no way of knowing whether you used one. **The point is to find it yourself.** That is exactly why a puzzle is worth so little, and why the house points are capped — or off.\n");
+    t.push_str(if cup {
+        "• A chess engine would find any of these in a blink, and the bot has no way of knowing whether you used one. **The point is to find it yourself.** That is exactly why a puzzle is worth so little, and why the house points are capped — or off.\n"
+    } else {
+        "• A chess engine would find any of these in a blink, and the bot has no way of knowing whether you used one. **The point is to find it yourself.** That is exactly why a puzzle is worth so little.\n"
+    });
 
     t.push_str(&format!("\n-# {}\n", p.attribution));
     t.push_str("-# `/puzzle` the one that's up · `/puzzletop` the board · `/puzzlehelp` this card · mods: `/puzzleskip` for a fresh one");
@@ -1303,7 +1445,7 @@ fn per_move_words(secs: i64) -> String {
 }
 
 /// What `/chesshelp` says, written from the live settings.
-pub fn chess_help_text(c: &ChessRules) -> String {
+pub fn chess_help_text(c: &ChessRules, cup: bool) -> String {
     let place = channel(c.channel).map(|ch| format!(" in {}", ch)).unwrap_or_default();
     let mut t = String::new();
     t.push_str("**♟️ Starting a game**\n");
@@ -1353,8 +1495,12 @@ pub fn chess_help_text(c: &ChessRules) -> String {
 
     t.push_str("\n**♟️ Chess points**\n");
     t.push_str(&format!("• Winner **+{}**, or **+{}** each for a draw.\n", c.win, c.draw));
-    t.push_str("• Chess points are the game's own score. There is **no daily limit** on them, it makes no difference which house either of you is in, and mods and anyone not yet sorted have them too.\n");
-    t.push_str("• Games of chess move **nothing** in the House Cup — the Cup is won elsewhere, and this board is chess's own.\n");
+    if cup {
+        t.push_str("• Chess points are the game's own score. There is **no daily limit** on them, it makes no difference which house either of you is in, and mods and anyone not yet sorted have them too.\n");
+        t.push_str("• Games of chess move **nothing** in the House Cup — the Cup is won elsewhere, and this board is chess's own.\n");
+    } else {
+        t.push_str("• Chess points are the game's own score. There is **no daily limit** on them, and everybody has them, mods included.\n");
+    }
     t.push_str("• The same pair is scored for one game a day, so a rematch is for pride.\n");
     if c.min_plies > 0 {
         t.push_str(&format!(
@@ -1382,9 +1528,9 @@ fn anagram_where(id: Option<u64>) -> String {
 
 /// What `/anagramhelp` says: the whole game in one card, from the settings as
 /// they are now.
-pub fn anagram_help_text(a: &AnagramRules) -> String {
+pub fn anagram_help_text(a: &AnagramRules, cup: bool) -> String {
     let mut t = format!(
-        "**🔀 What it is**\nThe bot shuffles a word's letters and puts them up {}. Be the first to type a word that uses **all** of them and your house scores.\n\n",
+        "**🔀 What it is**\nThe bot shuffles a word's letters and puts them up {}. Be the first to type a word that uses **all** of them and you score.\n\n",
         anagram_where(a.channel)
     );
     t.push_str("**⌨️ How to play**\n");
@@ -1398,18 +1544,24 @@ pub fn anagram_help_text(a: &AnagramRules) -> String {
     t.push_str("• `!skip` moves on to a new word, but only once a hint has been used. It pays nobody.\n");
     t.push_str(&format!("• A round nobody answers is replaced after **{}**, so the channel is never stuck on one word.\n\n", plural(a.idle_minutes, "minute", "minutes")));
 
-    t.push_str("**🏠 House points**\n");
-    t.push_str(&format!(
-        "• **{}** for a 4–5 letter word, **{}** for 6–7, **{}** for 8 or more.\n",
-        a.points[0], a.points[1], a.points[2]
-    ));
-    t.push_str(&format!("• {}\n", match a.cap {
-        Some(n) => format!("Up to **{}** a day from anagrams.", plural(n, "house point", "house points")),
-        None => "No daily limit from anagrams.".to_string(),
-    }));
-    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    if cup {
+        t.push_str("**🏠 House points**\n");
+        t.push_str(&format!(
+            "• **{}** for a 4–5 letter word, **{}** for 6–7, **{}** for 8 or more.\n",
+            a.points[0], a.points[1], a.points[2]
+        ));
+        t.push_str(&format!("• {}\n", match a.cap {
+            Some(n) => format!("Up to **{}** a day from anagrams.", plural(n, "house point", "house points")),
+            None => "No daily limit from anagrams.".to_string(),
+        }));
+        t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    }
     t.push_str("\n**🔀 Anagram points**\n");
-    t.push_str("• Every solve also scores **anagram points**: what the round was worth, the hint taken off, with no daily limit at all. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str(if cup {
+        "• Every solve also scores **anagram points**: what the round was worth, the hint taken off, with no daily limit at all. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n"
+    } else {
+        "• Every solve scores **anagram points**: what the round was worth, the hint taken off, with no daily limit at all. Everybody has them, mods included.\n"
+    });
     t.push_str("• `/anagramtop` shows the board for today or this month, and the day's top scorer is the one the frog card goes to.\n");
     if a.no_repeat_days > 0 {
         t.push_str(&format!("• The same set of letters doesn't come round again for **{}**.\n", plural(a.no_repeat_days, "day", "days")));
@@ -1437,9 +1589,9 @@ fn guess_where(id: Option<u64>) -> String {
 /// What `/guesshelp` says: the whole game in one card, from the settings as
 /// they are now. The doodles are somebody else's work, so the credit the
 /// dataset's licence asks for goes out with every telling of the rules.
-pub fn guess_help_text(g: &GuessRules) -> String {
+pub fn guess_help_text(g: &GuessRules, cup: bool) -> String {
     let mut t = format!(
-        "**🎨 What it is**\nThe bot puts a hand-drawn doodle up {}. Be the first to type what it is and your house scores.\n\n",
+        "**🎨 What it is**\nThe bot puts a hand-drawn doodle up {}. Be the first to type what it is and you score.\n\n",
         guess_where(g.channel)
     );
     t.push_str("**⌨️ How to play**\n");
@@ -1453,15 +1605,21 @@ pub fn guess_help_text(g: &GuessRules) -> String {
     t.push_str("• `!skip` moves on to a new doodle, but only once a hint has been used. It pays nobody.\n");
     t.push_str(&format!("• A round nobody gets is replaced after **{}**, so the channel is never stuck on one picture.\n\n", plural(g.idle_minutes, "minute", "minutes")));
 
-    t.push_str("**🏠 House points**\n");
-    t.push_str(&format!("• **{}** for naming the doodle first.\n", plural(g.points, "house point", "house points")));
-    t.push_str(&format!("• {}\n", match g.cap {
-        Some(n) => format!("Up to **{}** a day from guessing.", plural(n, "house point", "house points")),
-        None => "No daily limit from guessing.".to_string(),
-    }));
-    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    if cup {
+        t.push_str("**🏠 House points**\n");
+        t.push_str(&format!("• **{}** for naming the doodle first.\n", plural(g.points, "house point", "house points")));
+        t.push_str(&format!("• {}\n", match g.cap {
+            Some(n) => format!("Up to **{}** a day from guessing.", plural(n, "house point", "house points")),
+            None => "No daily limit from guessing.".to_string(),
+        }));
+        t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    }
     t.push_str("\n**🎨 Guess points**\n");
-    t.push_str("• Every doodle you name also scores **guess points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str(if cup {
+        "• Every doodle you name also scores **guess points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n"
+    } else {
+        "• Every doodle you name scores **guess points**: what the round was worth, hint taken off, with no daily limit. Everybody has them, mods included.\n"
+    });
     t.push_str("• `/guesstop` shows the board for today or this month, and the day's top scorer takes the frog card.\n");
     if g.no_repeat_days > 0 {
         t.push_str(&format!("• Neither the same word nor the same drawing comes round again for **{}**.\n", plural(g.no_repeat_days, "day", "days")));
@@ -1490,9 +1648,9 @@ fn movie_where(id: Option<u64>) -> String {
 /// What `/moviehelp` says: the whole game in one card, from the settings as
 /// they are now. The stills are TMDB's, so the credit their terms ask for goes
 /// out with every telling of the rules.
-pub fn movie_help_text(m: &MovieRules) -> String {
+pub fn movie_help_text(m: &MovieRules, cup: bool) -> String {
     let mut t = format!(
-        "**🎬 What it is**\nThe bot puts ONE clue up {} — {} words about it, a line out of it, or a still from a scene. It may be a **film or a TV show**, and the card says which language the answer is in. Be the first to type the title and your house scores.\n\n",
+        "**🎬 What it is**\nThe bot puts ONE clue up {} — {} words about it, a line out of it, or a still from a scene. It may be a **film or a TV show**, and the card says which language the answer is in. Be the first to type the title and you score.\n\n",
         movie_where(m.channel),
         m.tags_shown
     );
@@ -1513,17 +1671,23 @@ pub fn movie_help_text(m: &MovieRules) -> String {
     t.push_str(&format!("• Between matches there's a break of about **{}**. Press **🎬 I'm ready** on the card; it starts once **{}** are ready and the break is up.\n", plural(m.break_minutes, "minute", "minutes"), m.min_players));
     t.push_str("• You can join a match that's already running — naming one IS joining, no button needed.\n\n");
 
-    t.push_str("**🏠 House points**\n");
-    t.push_str(&format!("• **{}** to the winner of a match, **{}** to the runner-up. A single round on its own pays no house points.\n", plural(m.win_points, "house point", "house points"), plural(m.second_points, "house point", "house points")));
-    t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
-    t.push_str(&format!("• {}\n", match m.cap {
-        Some(n) => format!("Up to **{}** a day from films.", plural(n, "house point", "house points")),
-        None => "No daily limit from films.".to_string(),
-    }));
-    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    if cup {
+        t.push_str("**🏠 House points**\n");
+        t.push_str(&format!("• **{}** to the winner of a match, **{}** to the runner-up. A single round on its own pays no house points.\n", plural(m.win_points, "house point", "house points"), plural(m.second_points, "house point", "house points")));
+        t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
+        t.push_str(&format!("• {}\n", match m.cap {
+            Some(n) => format!("Up to **{}** a day from films.", plural(n, "house point", "house points")),
+            None => "No daily limit from films.".to_string(),
+        }));
+        t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    }
 
     t.push_str("\n**🎬 Movie points**\n");
-    t.push_str("• Every film or show you name also scores **movie points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str(if cup {
+        "• Every film or show you name also scores **movie points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n"
+    } else {
+        "• Every film or show you name scores **movie points**: what the round was worth, hint taken off, with no daily limit. Everybody has them, mods included.\n"
+    });
     t.push_str("• `/movietop` shows the board for today or this month.\n");
     if m.no_repeat_days > 0 {
         t.push_str(&format!("• Neither the same title nor the same still comes round again for **{}**.\n", plural(m.no_repeat_days, "day", "days")));
@@ -1559,9 +1723,9 @@ fn geo_where(id: Option<u64>) -> String {
 /// What `/geohelp` says: the whole game in one card, from the settings as they
 /// are now. The photos are KartaView contributors', so the credit their licence
 /// asks for goes out with every telling of the rules.
-pub fn geo_help_text(g: &GeoRules) -> String {
+pub fn geo_help_text(g: &GeoRules, cup: bool) -> String {
     let mut t = format!(
-        "**🗺️ What it is**\nThe bot puts up ONE street photo {} and asks where it was taken — somewhere in India, or somewhere in the world. Say where first, and nearest, and your house scores.\n\n",
+        "**🗺️ What it is**\nThe bot puts up ONE street photo {} and asks where it was taken — somewhere in India, or somewhere in the world. Say where first, and nearest, and you score.\n\n",
         geo_where(g.channel)
     );
 
@@ -1606,21 +1770,30 @@ pub fn geo_help_text(g: &GeoRules) -> String {
     t.push_str("• You can join a match that's already running — placing a photo IS joining, no button needed.\n");
     t.push_str("• No two places in one match come from the same state, while there are states left to draw.\n\n");
 
-    t.push_str("**🏠 House points**\n");
-    t.push_str(&format!(
-        "• **{}** to the winner of a match, **{}** to the runner-up. A place on its own pays no house points.\n",
-        plural(g.win_points, "house point", "house points"),
-        plural(g.second_points, "house point", "house points")
-    ));
-    t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
-    t.push_str(&format!("• {}\n", match g.cap {
-        Some(n) => format!("Up to **{}** a day from Geo.", plural(n, "house point", "house points")),
-        None => "No daily limit from Geo.".to_string(),
-    }));
-    t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    if cup {
+        t.push_str("**🏠 House points**\n");
+        t.push_str(&format!(
+            "• **{}** to the winner of a match, **{}** to the runner-up. A place on its own pays no house points.\n",
+            plural(g.win_points, "house point", "house points"),
+            plural(g.second_points, "house point", "house points")
+        ));
+        t.push_str("• Joint winners **both** get the winner's share, and no runner-up is paid.\n");
+        t.push_str(&format!("• {}\n", match g.cap {
+            Some(n) => format!("Up to **{}** a day from Geo.", plural(n, "house point", "house points")),
+            None => "No daily limit from Geo.".to_string(),
+        }));
+        t.push_str("• Muggles and anyone not yet sorted earn no house points, here as everywhere — mods are welcome to play, they just can't score for a house.\n");
+    } else {
+        t.push_str("**🎮 Winning a match**\n");
+        t.push_str("• Joint winners **both** count as winners.\n");
+    }
 
     t.push_str("\n**🗺️ Geo points**\n");
-    t.push_str("• Every place you take also scores **geo points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n");
+    t.push_str(if cup {
+        "• Every place you take also scores **geo points**: what the round was worth, hint taken off, with no daily limit. They keep counting once your house points are capped, and everyone has them — mods and Muggles included.\n"
+    } else {
+        "• Every place you take scores **geo points**: what the round was worth, hint taken off, with no daily limit. Everybody has them, mods included.\n"
+    });
     t.push_str("• `/geotop` shows the board for today or this month.\n");
     if g.no_repeat_days > 0 {
         t.push_str(&format!("• The same photo does not come round again for **{}**.\n", plural(g.no_repeat_days, "day", "days")));
@@ -1653,7 +1826,7 @@ pub fn geo_help_text(g: &GeoRules) -> String {
 /// of answer is worth is the thing people need to see before they play.
 ///
 /// `None` while the game is off or has no channel, and the post comes down.
-pub fn geo_post_text(g: &GeoRules) -> Option<String> {
+pub fn geo_post_text(g: &GeoRules, cup: bool) -> Option<String> {
     let room = channel(g.channel)?;
     let mut t = format!("# 🗺️ Geo — GeoGuessr, India and the World\nA street photo is waiting in {}. Say where it was taken.\n\n", room);
 
@@ -1668,19 +1841,30 @@ pub fn geo_post_text(g: &GeoRules) -> Option<String> {
     t.push_str("A town in the **wrong state scores nothing**, however near it looks. Old names work — `Bombay`, `Gurgaon`.\n\n");
     t.push_str("**🌍 World** — name the **country** for **2**. `USA`, `UK`, `UAE` all work, and a town counts as its country.\n\n");
 
-    t.push_str("**🏠 House points**\n");
-    t.push_str(&format!(
-        "Come from **winning a match of {}**: **{}** to the winner, **{}** to the runner-up{}. One photo on its own pays none, and joint winners both take the winner's share.\n\n",
-        plural(g.match_rounds, "place", "places"),
-        plural(g.win_points, "house point", "house points"),
-        g.second_points,
-        match g.cap {
-            Some(n) => format!(", up to **{}** a day", n),
-            None => String::new(),
-        }
-    ));
+    if cup {
+        t.push_str("**🏠 House points**\n");
+        t.push_str(&format!(
+            "Come from **winning a match of {}**: **{}** to the winner, **{}** to the runner-up{}. One photo on its own pays none, and joint winners both take the winner's share.\n\n",
+            plural(g.match_rounds, "place", "places"),
+            plural(g.win_points, "house point", "house points"),
+            g.second_points,
+            match g.cap {
+                Some(n) => format!(", up to **{}** a day", n),
+                None => String::new(),
+            }
+        ));
+    } else {
+        t.push_str(&format!(
+            "**🏁 Winning a match**\nA match is **{}**, and the best score across them takes it. Joint winners both count as winners.\n\n",
+            plural(g.match_rounds, "place", "places")
+        ));
+    }
 
-    t.push_str("**🗺️ Geo points**\nThe game's own score: every place you take, at what the round was worth, with **no daily limit**. Mods and Muggles have them too. `/geotop` is that board.\n\n");
+    t.push_str(if cup {
+        "**🗺️ Geo points**\nThe game's own score: every place you take, at what the round was worth, with **no daily limit**. Mods and Muggles have them too. `/geotop` is that board.\n\n"
+    } else {
+        "**🗺️ Geo points**\nThe game's own score: every place you take, at what the round was worth, with **no daily limit**. Everybody has them, mods included. `/geotop` is that board.\n\n"
+    });
 
     t.push_str(&format!(
         "A match starts once **{}** have voted, and turning up late is fine. Stuck? **`!hint`** for the first letter, a point off; **`!skip`** after a hint.\n",
@@ -1710,6 +1894,7 @@ pub(crate) mod tests {
     /// The shipped defaults, with every channel set.
     pub(crate) fn defaults() -> Rules {
         Rules {
+            cup: true,
             scoreboard_on: true,
             housecup_on: true,
             house_channel: Some(1548371226890604665),
@@ -1882,12 +2067,14 @@ pub(crate) mod tests {
             prizes: [2, 1],
             cap: Some(6),
             min_scored: 3,
+            cup: true,
         }
     }
 
     /// Everything turned up as far as the panel allows.
     fn huge() -> Rules {
         Rules {
+            cup: true,
             house_channel: Some(u64::MAX),
             quiz_channel: Some(u64::MAX),
             fight_channel: Some(u64::MAX),
@@ -1933,6 +2120,7 @@ pub(crate) mod tests {
                 prizes: [100, 100],
                 cap: Some(99),
                 min_scored: 50,
+                cup: true,
             },
             sudoku: SudokuRules {
                 channel: Some(u64::MAX),
@@ -2108,7 +2296,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sudokuhelp_explains_the_game_from_the_settings_and_fits_one_message() {
-        let text = sudoku_help_text(&sudoku_defaults());
+        let text = sudoku_help_text(&sudoku_defaults(), true);
         for part in [
             "always waiting in <#1544347052090327040>",
             "**▶️ Play** on the puzzle card",
@@ -2135,19 +2323,19 @@ pub(crate) mod tests {
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
         // Every setting at its highest, and with no web page set up.
         let big = SudokuRules { has_page: false, ..huge().sudoku };
-        let text = sudoku_help_text(&big);
+        let text = sudoku_help_text(&big, true);
         assert!(text.contains("81 digits") && text.contains("isn't set up yet"), "{}", text);
         assert!(text.contains("720 hours") && text.contains("80 hints"));
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars at the maximum", text.chars().count());
         // No channel set at all still reads.
         let nowhere = SudokuRules { channel: None, hint_cost: 1, ..sudoku_defaults() };
-        let text = sudoku_help_text(&nowhere);
+        let text = sudoku_help_text(&nowhere, true);
         assert!(text.contains("in its own channel") && text.contains("nothing here is capped"), "{}", text);
     }
 
     #[test]
     fn anagramhelp_explains_a_game_played_by_typing_and_fits_one_card() {
-        let text = anagram_help_text(&anagram_defaults());
+        let text = anagram_help_text(&anagram_defaults(), true);
         for part in [
             "puts them up in <#1542764196901683231>",
             "type your answer in the channel",
@@ -2169,10 +2357,10 @@ pub(crate) mod tests {
         assert!(!text.contains("beast"), "the help never names a live word");
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
         // Every setting at its highest still fits an embed.
-        assert!(anagram_help_text(&huge().anagrams).chars().count() < DESCRIPTION_LIMIT);
+        assert!(anagram_help_text(&huge().anagrams, true).chars().count() < DESCRIPTION_LIMIT);
         // No channel, no limit, no bank read yet, and no no-repeat window.
         let bare = AnagramRules { channel: None, cap: None, words: None, no_repeat_days: 0, ..anagram_defaults() };
-        let text = anagram_help_text(&bare);
+        let text = anagram_help_text(&bare, true);
         assert!(text.contains("in its own channel") && text.contains("No daily limit"), "{}", text);
         assert!(!text.contains("in the bank") && !text.contains("come round again"), "{}", text);
         assert!(ANAGRAM_RULES_TITLE.contains("Anagrams"));
@@ -2180,7 +2368,7 @@ pub(crate) mod tests {
 
     #[test]
     fn guesshelp_explains_a_game_played_by_typing_and_credits_the_doodles() {
-        let text = guess_help_text(&guess_defaults());
+        let text = guess_help_text(&guess_defaults(), true);
         for part in [
             "doodle up in <#1518233664016617582>",
             "type your guess in the channel",
@@ -2204,10 +2392,10 @@ pub(crate) mod tests {
         }
         assert!(text.chars().count() < MESSAGE_LIMIT, "{} chars", text.chars().count());
         // Every setting at its highest still fits an embed.
-        assert!(guess_help_text(&huge().guess).chars().count() < DESCRIPTION_LIMIT);
+        assert!(guess_help_text(&huge().guess, true).chars().count() < DESCRIPTION_LIMIT);
         // No channel, no limit, no bank read yet, and no no-repeat window.
         let bare = GuessRules { channel: None, cap: None, words: None, no_repeat_days: 0, ..guess_defaults() };
-        let text = guess_help_text(&bare);
+        let text = guess_help_text(&bare, true);
         assert!(text.contains("in its own channel") && text.contains("No daily limit"), "{}", text);
         assert!(!text.contains("in the bank") && !text.contains("comes round again"), "{}", text);
         assert!(GUESS_RULES_TITLE.contains("Guess the Word"));
@@ -2241,18 +2429,18 @@ pub(crate) mod tests {
 
     #[test]
     fn the_sudoku_rules_post_adds_the_small_print_and_fits_an_embed() {
-        let text = sudoku_rules_text(&sudoku_defaults());
-        assert!(text.starts_with(&sudoku_help_text(&sudoku_defaults())), "the post is the help plus more");
+        let text = sudoku_rules_text(&sudoku_defaults(), true);
+        assert!(text.starts_with(&sudoku_help_text(&sudoku_defaults(), true)), "the post is the help plus more");
         assert!(text.contains("**10 tries** per puzzle"), "{}", text);
         assert!(text.contains("easy 40%, medium 40% and hard 20%"), "{}", text);
         assert!(text.contains("never which"));
         assert!(SUDOKU_RULES_TITLE.contains("Sudoku"));
         for r in [sudoku_defaults(), huge().sudoku] {
-            assert!(sudoku_rules_text(&r).chars().count() < DESCRIPTION_LIMIT);
+            assert!(sudoku_rules_text(&r, true).chars().count() < DESCRIPTION_LIMIT);
         }
         // A mix with only one level in it.
         let one = SudokuRules { mix: [0, 0, 5], ..sudoku_defaults() };
-        assert!(sudoku_rules_text(&one).contains("hard 100%"));
+        assert!(sudoku_rules_text(&one, true).contains("hard 100%"));
     }
 
     #[test]
@@ -2311,7 +2499,7 @@ pub(crate) mod tests {
     #[test]
     fn the_puzzle_help_card_reads_from_the_settings_and_always_credits_the_bank() {
         let p = puzzle_defaults();
-        let text = puzzle_help_text(&p);
+        let text = puzzle_help_text(&p, true);
         assert!(text.contains("🧩 Solve it"), "the button comes first: {}", text);
         assert!(text.contains("<#1549625408004165682>"), "it names the chess channel: {}", text);
         assert!(text.contains("*that's not it*") && text.contains("try again"), "a wrong move is refused gently: {}", text);
@@ -2336,13 +2524,13 @@ pub(crate) mod tests {
         assert!(text.contains("Puzzles pay **no house points** at the moment"), "{}", text);
         assert!(!text.contains("takes **1 house point**"), "{}", text);
         // With the limit turned up, the first solver's point is named.
-        let paying = puzzle_help_text(&PuzzleRules { cap: 10, ..p.clone() });
+        let paying = puzzle_help_text(&PuzzleRules { cap: 10, ..p.clone() }, true);
         assert!(paying.contains("The **first** person to crack each puzzle also takes **1 house point**, up to **10 house points** a day"), "{}", paying);
         assert!(!paying.contains("pay **no house points**"), "{}", paying);
         // A first-solver value of nought is the same as the limit being off.
-        assert!(puzzle_help_text(&PuzzleRules { cap: 10, first: 0, ..p.clone() }).contains("pay **no house points**"));
+        assert!(puzzle_help_text(&PuzzleRules { cap: 10, first: 0, ..p.clone() }, true).contains("pay **no house points**"));
         // No bank, no channel, no no-repeat rule: the lines simply go.
-        let bare = puzzle_help_text(&PuzzleRules { channel: None, puzzles: None, no_repeat_days: 0, ..p });
+        let bare = puzzle_help_text(&PuzzleRules { channel: None, puzzles: None, no_repeat_days: 0, ..p }, true);
         assert!(!bare.contains("<#") && !bare.contains("in the bank") && !bare.contains("come round again"), "{}", bare);
         assert!(bare.contains("in the chess channel"), "{}", bare);
     }
@@ -2350,7 +2538,7 @@ pub(crate) mod tests {
     #[test]
     fn the_chess_help_card_reads_from_the_settings() {
         let c = chess_defaults();
-        let text = chess_help_text(&c);
+        let text = chess_help_text(&c, true);
         assert!(text.contains("⚔️ Challenge someone"), "the button comes first: {}", text);
         assert!(text.find("⚔️ Challenge someone") < text.find("`/chess @member`"), "and is named before the command: {}", text);
         assert!(text.contains("<#1549625408004165682>"), "it names the channel: {}", text);
@@ -2367,15 +2555,15 @@ pub(crate) mod tests {
         assert!(text.contains("/chesshelp"), "{}", text);
         assert!(text.contains("👀 Watch"), "anyone can follow a game: {}", text);
         assert!(text.contains("kept for **30 days**"), "{}", text);
-        assert!(!chess_help_text(&ChessRules { replay_days: 0, ..c.clone() }).contains("replay"), "no replays, no promise of one");
+        assert!(!chess_help_text(&ChessRules { replay_days: 0, ..c.clone() }, true).contains("replay"), "no replays, no promise of one");
         assert!(text.chars().count() <= DESCRIPTION_LIMIT, "it has to fit an embed: {} characters", text.chars().count());
 
         // Turned off, or with the rules loosened, the words follow.
-        let off = chess_help_text(&ChessRules { channel: None, min_plies: 0, ..c.clone() });
+        let off = chess_help_text(&ChessRules { channel: None, min_plies: 0, ..c.clone() }, true);
         assert!(!off.contains("<#"), "no channel, no link: {}", off);
         assert!(!off.contains("Give up in the first"), "the quick-resign rule is off: {}", off);
         assert!(off.contains("no daily limit"), "{}", off);
-        let live_only = chess_help_text(&ChessRules { live_seconds: 45, casual_hours: 1, ..c });
+        let live_only = chess_help_text(&ChessRules { live_seconds: 45, casual_hours: 1, ..c }, true);
         assert!(live_only.contains("**45 seconds**") && live_only.contains("**1 hour**"), "{}", live_only);
     }
 

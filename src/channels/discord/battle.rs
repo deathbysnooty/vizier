@@ -534,8 +534,10 @@ async fn warrior_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Warri
         None => guild.member(&ctx.http, UserId::new(user)).await.ok()?,
     };
     let face = member.face().replace("size=1024", "size=256");
-    // Stepped-out members fight without a badge, as they asked to be left out.
-    let house = if super::house::opted_out(user) { None } else { super::house::house_of(user) };
+    // Stepped-out members fight without a badge, as they asked to be left out -
+    // and while the House Cup is paused NOBODY wears one, so the fight card, the
+    // bracket and the lobby lists carry no crest at all.
+    let house = if super::house::opted_out(user) || super::house_cup::paused() { None } else { super::house::house_of(user) };
     Some(Warrior { id: user, name: display(&member), avatar: None, house, face })
 }
 
@@ -1260,6 +1262,13 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
     let ends = Utc::now().timestamp() + minutes * 60;
     let (tag, mentions) = match ping {
         Ping::Warriors => {
+            let role = warrior_role(ctx, guild).await;
+            let tag = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
+            (tag, CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
+        }
+        // While the Cup is paused the four house roles are not tagged by a game:
+        // the Warrior role is the arena's own, and it says the same thing.
+        Ping::Houses if super::house_cup::paused() => {
             let role = warrior_role(ctx, guild).await;
             let tag = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
             (tag, CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))

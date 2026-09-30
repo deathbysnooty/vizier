@@ -212,6 +212,9 @@ pub struct Won {
     pub full_points: i64,
     /// Whether the winner is in a house at all.
     pub housed: bool,
+    /// Whether the House Cup is running. False takes the house out of the line
+    /// altogether: the guess points are said, and nothing else.
+    pub cup: bool,
     /// Their guess points today, this round included.
     pub tally: i64,
     pub hinted: bool,
@@ -225,14 +228,18 @@ pub fn won_text(w: &Won) -> String {
     // Nothing paid is never "no points": the round was won and the guess points
     // are the winner's either way. The aside says why the ledger sat it out —
     // the day's house points are full, or there is no house to pay.
-    let why = match (w.points, w.housed) {
-        (0, true) => Some("that's your house points for today, but the guess points still count"),
-        (0, false) => Some("no house to pay, but the guess points still count"),
+    let why = match (w.cup, w.points, w.housed) {
+        // Paused: there is no house to explain, so there is nothing to explain.
+        (false, ..) => None,
+        (true, 0, true) => Some("that's your house points for today, but the guess points still count"),
+        (true, 0, false) => Some("no house to pay, but the guess points still count"),
         _ => None,
     };
-    let (scored, today) = match why {
-        Some(_) => (plural(w.worth, "guess point", "guess points"), format!("{} today", w.tally)),
-        None => (w.points.to_string(), format!("{} guess points today", w.tally)),
+    // The guess points are the number shown whenever no house point was paid -
+    // capped, unhoused, or the whole Cup paused.
+    let (scored, today) = match why.is_some() || !w.cup {
+        true => (plural(w.worth, "guess point", "guess points"), format!("{} today", w.tally)),
+        false => (w.points.to_string(), format!("{} guess points today", w.tally)),
     };
     let mut text = format!("✅ <@{}>{} had it: **{}** · **+{}** · {}", w.winner, badge, w.word.to_uppercase(), scored, today);
     let mut notes = vec![format!("round #{} in {}", w.round, spent_words(w.seconds))];
@@ -355,7 +362,7 @@ const TOP_LIST: usize = 10;
 /// What `/guesstop` says. `rows` is the whole board, already ranked; only the
 /// first [`TOP_LIST`] are listed, and whoever asked gets their own line under
 /// them when they didn't make it.
-pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
+pub fn top_text(period: &str, rows: &[store::Tally], me: u64, cup: bool) -> String {
     let mut text = format!("🎨 **Guess points** · {}", period);
     if rows.is_empty() {
         text.push_str("\nNobody has named one yet. The card is waiting in the channel.");
@@ -376,7 +383,11 @@ pub fn top_text(period: &str, rows: &[store::Tally], me: u64) -> String {
             text.push_str(&format!("\n-# **You:** {}", mine));
         }
     }
-    text.push_str("\n-# Guess points count every solve at its full value — the daily house-points limit never takes one away.");
+    text.push_str(if cup {
+        "\n-# Guess points count every solve at its full value — the daily house-points limit never takes one away."
+    } else {
+        "\n-# Guess points count every solve at its full value, and nothing is capped."
+    });
     text
 }
 
@@ -549,6 +560,11 @@ fn meta_set(key: &str, value: &str) {
 
 /// The house crest and name of whoever won.
 fn badge_of(user: u64) -> String {
+    // Paused: nobody wears a crest in a game, Muggle or not. The round card is
+    // about the game's own points and says nothing about a house.
+    if super::house_cup::paused() {
+        return String::new();
+    }
     if super::house::opted_out(user) {
         return "🧙 Muggle".to_string();
     }
@@ -1044,6 +1060,7 @@ async fn announce_end(ctx: &Context, channel: u64, row: &store::Row) {
             worth,
             full_points: row.points,
             housed: super::house::house_of(winner).is_some(),
+            cup: super::house_cup::running(),
             tally: solves.iter().filter(|s| s.user == winner).map(|s| s.worth).sum(),
             hinted: row.hinted(),
             seconds: row.seconds.unwrap_or(0),
@@ -1241,7 +1258,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
     } else {
         (today_rows, "today".to_string())
     };
-    let text = top_text(&period, &rows, command.user.id.get());
+    let text = top_text(&period, &rows, command.user.id.get(), super::house_cup::running());
     reply(ctx, command, CreateInteractionResponseMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new())).await;
 }
 
@@ -1259,7 +1276,7 @@ pub fn month_label(day: &str) -> String {
 /// The rules as a card, the same words for the command and anything else that
 /// wants them.
 fn help_embed() -> CreateEmbed {
-    CreateEmbed::new().title(rules_text::GUESS_RULES_TITLE).description(rules_text::guess_help_text(&guess_rules())).colour(COLOUR)
+    CreateEmbed::new().title(rules_text::GUESS_RULES_TITLE).description(rules_text::guess_help_text(&guess_rules(), super::house_cup::running())).colour(COLOUR)
 }
 
 /// `/guesshelp` — everyone.
@@ -1383,6 +1400,7 @@ mod tests {
             worth: 2,
             full_points: 2,
             housed: true,
+            cup: true,
             tally: 2,
             hinted: false,
             seconds: 47,
@@ -1597,7 +1615,7 @@ mod tests {
     fn the_guess_points_board_lists_ten_and_finds_the_asker_below_them() {
         let mut rows: Vec<store::Tally> = (1..=12).map(|i| tally(i, (20 - i) as i64, 3, 100 + i as i64)).collect();
         store::rank(&mut rows);
-        let text = top_text("today", &rows, 12);
+        let text = top_text("today", &rows, 12, true);
         assert!(text.starts_with("🎨 **Guess points** · today"), "{}", text);
         assert!(text.contains("\n🥇 <@1> **19** · 3 rounds"), "{}", text);
         assert!(text.contains("\n🥈 <@2> **18**") && text.contains("\n🥉 <@3> **17**"), "{}", text);
@@ -1606,12 +1624,12 @@ mod tests {
         // Outside the ten: their own line, and where they stand.
         assert!(text.contains("-# **You:** 12th of 12 · **8 guess points** · 3 rounds"), "{}", text);
         // Inside the ten: marked in place, with no line of their own.
-        let inside = top_text("today", &rows, 3);
+        let inside = top_text("today", &rows, 3, true);
         assert!(inside.contains("🥉 <@3> **17** · 3 rounds ← you"), "{}", inside);
         assert!(!inside.contains("**You:**"), "{}", inside);
         // The board says what a guess point is, so nobody reads it as house points.
         assert!(text.contains("the daily house-points limit never takes one away"), "{}", text);
-        assert!(top_text("September so far", &[], 1).contains("Nobody has named one yet"));
+        assert!(top_text("September so far", &[], 1, true).contains("Nobody has named one yet"));
         // Ordering is the store's: points, then rounds, then who got there first.
         let mut close = vec![tally(1, 4, 1, 50), tally(2, 4, 2, 90), tally(3, 4, 2, 60)];
         store::rank(&mut close);

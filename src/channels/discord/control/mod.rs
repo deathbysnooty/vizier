@@ -144,6 +144,19 @@ pub fn on(key: &str, default: bool) -> bool {
     }
 }
 
+/// Puts a value straight into the read cache, without a store and without the
+/// audit trail - for tests that need a setting to read one way or the other.
+/// `None` clears it again. Safe where `std::env::set_var` is not: it is the same
+/// lock every read takes.
+#[cfg(test)]
+pub(crate) fn set_for_test(key: &str, value: Option<&str>) {
+    let mut values = VALUES.write();
+    match value {
+        Some(v) => values.insert(key.to_string(), v.to_string()),
+        None => values.remove(key),
+    };
+}
+
 // --- writing ----------------------------------------------------------------
 
 /// Saves a setting from the panel, or with `None` removes the panel's value so

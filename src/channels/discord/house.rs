@@ -530,6 +530,9 @@ async fn award_member(
     earned: &serenity::all::Message,
 ) -> Result<(), String> {
     let user = target.id.get();
+    if !super::house_cup::gate("a mod's reply award") {
+        return Err(super::house_cup::MOD_REFUSED.to_string());
+    }
     if target.bot {
         return Err("Bots aren't in a house.".into());
     }
@@ -1268,7 +1271,13 @@ fn totals(since: Option<i64>) -> HashMap<&'static str, i64> {
 }
 
 /// Records an award and gives back the house's new total for the month.
-fn award(house: &House, points: i64, reason: &str, by: u64) -> i64 {
+///
+/// Refuses while the House Cup is paused: `None`, and NOTHING is written - not
+/// even a nought - so the month the Cup was parked leaves no rows behind.
+fn award(house: &House, points: i64, reason: &str, by: u64) -> Option<i64> {
+    if !super::house_cup::gate("a mod's house award") {
+        return None;
+    }
     if let Some(db) = DB.get() {
         let entry = super::points::Entry {
             user: None,
@@ -1284,7 +1293,7 @@ fn award(house: &House, points: i64, reason: &str, by: u64) -> i64 {
             tracing::warn!("house: award to {} not recorded: {}", house.name, err);
         }
     }
-    totals(Some(month_start())).get(house.key).copied().unwrap_or(0)
+    Some(totals(Some(month_start())).get(house.key).copied().unwrap_or(0))
 }
 
 /// Awards points to a person's house through the ledger.
@@ -1337,6 +1346,13 @@ pub(super) fn award_person_at(
     scope: Option<String>,
     at: i64,
 ) -> Option<(&'static House, super::points::Outcome)> {
+    // The Cup is paused: no row at all, not even a nought, and no mod's pool
+    // either. Every game keeps its own score - that is the game's own store,
+    // written by the caller, and nothing here touches it. September's rows are
+    // left exactly as they are.
+    if !super::house_cup::gate(source.key()) {
+        return None;
+    }
     if opted_out(user) {
         return None;
     }
@@ -1355,9 +1371,35 @@ pub(super) fn award_person_at(
         }
         return None;
     };
+    award_into(&db.lock(), super::house_cup::running(), user, house, source, points, reason, by, dedupe, scope, at)
+        .map(|outcome| (house, outcome))
+}
+
+/// The award itself, with the store and the switch handed in.
+///
+/// Split out so a test can drive the whole decision against a real ledger: with
+/// `cup` false NOTHING is written - not a row, not a nought - and `None` comes
+/// back, which is what every caller reads as "no house was paid".
+#[allow(clippy::too_many_arguments)]
+pub(super) fn award_into(
+    conn: &Connection,
+    cup: bool,
+    user: u64,
+    house: &'static House,
+    source: super::points::Source,
+    points: i64,
+    reason: &str,
+    by: Option<u64>,
+    dedupe: Option<String>,
+    scope: Option<String>,
+    at: i64,
+) -> Option<super::points::Outcome> {
+    if !cup {
+        return None;
+    }
     let entry = super::points::Entry { user: Some(user), house, source, scope, points, reason, by, dedupe };
-    match super::points::write(&db.lock(), &entry, at) {
-        Ok(outcome) => Some((house, outcome)),
+    match super::points::write(conn, &entry, at) {
+        Ok(outcome) => Some(outcome),
         Err(err) => {
             tracing::warn!("house: {} points for {} not recorded: {}", source.key(), user, err);
             None
@@ -1390,7 +1432,9 @@ pub async fn pool_command(ctx: &Context, command: &CommandInteraction) {
     }
     let Some(db) = DB.get() else { return };
     let held = super::points::pool_balance(&db.lock(), user);
-    let text = if held > 0 {
+    let text = if super::house_cup::paused() {
+        pool_paused_text(held)
+    } else if held > 0 {
         format!(
             "🎒 You are holding **{} {}**, earned playing and not yet given to anyone.\n-# `/modgive <house>` hands them over. They count for that house the moment you do.",
             held,
@@ -1402,12 +1446,34 @@ pub async fn pool_command(ctx: &Context, command: &CommandInteraction) {
     let _ = command.create_response(&ctx.http, whisper(&text)).await;
 }
 
+/// What `/modpoints` says while the Cup is paused: what is banked stays banked,
+/// and nothing is being added to it.
+fn pool_paused_text(held: i64) -> String {
+    if held > 0 {
+        format!(
+            "🎒 You are holding **{} {}** from before. Nothing is being added to it and nothing can be given away: \
+             the House Cup is paused. It is all still here for whenever it comes back.\n{}",
+            held,
+            if held == 1 { "point" } else { "points" },
+            super::house_cup::NOTE
+        )
+    } else {
+        format!("🎒 You are holding nothing, and nothing is being banked: the House Cup is paused.\n{}", super::house_cup::NOTE)
+    }
+}
+
 /// Giving is answered in the open, not whispered: points arriving in a house
 /// from a mod is exactly the kind of thing the Cup should be able to see.
 pub async fn give_command(ctx: &Context, command: &CommandInteraction) {
     let user = command.user.id.get();
     if !super::admin_ids().contains(&user) {
         let _ = command.create_response(&ctx.http, whisper("Only mods hold points this way.")).await;
+        return;
+    }
+    // Paused: a mod may not move points into a house either. Whatever is in
+    // their pool stays in it, and is theirs to give when the Cup is back.
+    if !super::house_cup::gate("/modgive") {
+        let _ = command.create_response(&ctx.http, whisper(super::house_cup::MOD_REFUSED)).await;
         return;
     }
     let Some(db) = DB.get() else { return };
@@ -1495,7 +1561,10 @@ pub async fn points_command(ctx: &Context, command: &CommandInteraction) {
         let _ = command.create_response(&ctx.http, whisper(text)).await;
         return;
     }
-    let total = award(house, points, &reason, command.user.id.get());
+    let Some(total) = award(house, points, &reason, command.user.id.get()) else {
+        let _ = command.create_response(&ctx.http, whisper(super::house_cup::MOD_REFUSED)).await;
+        return;
+    };
     let headline = if points > 0 {
         format!("🏆 **+{}** to {} **{}**", points, house.crest, house.name)
     } else {
@@ -1517,7 +1586,13 @@ pub async fn points_command(ctx: &Context, command: &CommandInteraction) {
 /// `/houses` - who holds what, and the captains.
 pub async fn houses_command(ctx: &Context, command: &CommandInteraction) {
     let counts = counts();
-    let points = totals(Some(month_start()));
+    let cup = super::house_cup::running();
+    // Paused: the last month PLAYED, so its final table is what shows rather than
+    // a live one full of noughts.
+    let closed = (!cup)
+        .then(|| DB.get().and_then(|db| super::points::last_played_month(&db.lock())))
+        .flatten();
+    let points = totals(Some(closed.unwrap_or_else(month_start)));
     // The table reads as a table: whoever is ahead this month sits on top.
     let mut order: Vec<&House> = HOUSES.iter().collect();
     order.sort_by(|a, b| points.get(b.key).cmp(&points.get(a.key)).then(a.name.cmp(b.name)));
@@ -1541,14 +1616,34 @@ pub async fn houses_command(ctx: &Context, command: &CommandInteraction) {
         ));
     }
     let total: i64 = counts.values().sum();
-    text.push_str(&format!("\n-# {} members sorted · points counted from the 1st, India time", total));
+    let (title, footer) = match closed {
+        Some(since) => {
+            let month = super::points::ist_day(since);
+            text.insert_str(0, &format!("{}\n\n", super::house_cup::closed_heading(&month_words(&month))));
+            text.push_str(&format!("\n-# {} members sorted · these are {}'s final numbers", total, month_words(&month)));
+            ("🏰 The four houses · the Cup is paused", "The games all still run and still keep their own scores")
+        }
+        None if !cup => {
+            text.push_str(&format!("\n-# {} members sorted · the House Cup is paused", total));
+            ("🏰 The four houses · the Cup is paused", "The games all still run and still keep their own scores")
+        }
+        None => {
+            text.push_str(&format!("\n-# {} members sorted · points counted from the 1st, India time", total));
+            ("🏰 The four houses", "Every house starts from zero on the 1st of each month")
+        }
+    };
     let embed = CreateEmbed::new()
-        .title("🏰 The four houses")
+        .title(title)
         .description(text)
         .colour(0x9B1B1B)
-        .footer(CreateEmbedFooter::new("Every house starts from zero on the 1st of each month"));
+        .footer(CreateEmbedFooter::new(footer));
     let reply = CreateInteractionResponseMessage::new().embed(embed);
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
+}
+
+/// "2026-09-01" -> "September 2026", for a closed month's heading.
+fn month_words(day: &str) -> String {
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map(|d| d.format("%B %Y").to_string()).unwrap_or_else(|_| day.to_string())
 }
 
 /// Members per page in `/houselist`. Thirty mentions is a page you can read

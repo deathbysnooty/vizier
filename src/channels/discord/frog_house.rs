@@ -41,6 +41,13 @@ const CARD_CAP: usize = 8;
 
 /// Why a card may be somewhere unexpected, said once under every list.
 const FOOTER: &str = "Cards go with their owner: change house and your cards change house too";
+/// The House Cup is paused, but the cards are not: they stay with their owner
+/// and they carry over.
+const FOOTER_PAUSED: &str = "The House Cup is paused — the cards are still everyone's, and they carry over";
+
+fn footer() -> &'static str {
+    if super::house_cup::running() { FOOTER } else { FOOTER_PAUSED }
+}
 
 /// Which way round the list is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -423,7 +430,7 @@ pub async fn housecards_command(ctx: &Context, command: &CommandInteraction) {
         .title(format!("{} {} · Chocolate Frog cards", house.crest, house.name))
         .description(text)
         .colour(house.colour)
-        .footer(CreateEmbedFooter::new(FOOTER));
+        .footer(CreateEmbedFooter::new(footer()));
     // Ephemeral, and mentions switched off: a list of every collector in a house
     // must not ping a hundred people.
     let reply = CreateInteractionResponseMessage::new()

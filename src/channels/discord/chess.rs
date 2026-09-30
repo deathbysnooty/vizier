@@ -261,7 +261,13 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 }
 
 /// A house crest for a member, or a hat for someone in no house.
+///
+/// While the House Cup is paused everybody gets the hat: a board in a game says
+/// nothing about houses until the Cup is back.
 pub fn crest(user: u64) -> &'static str {
+    if super::house_cup::paused() {
+        return "🧙";
+    }
     super::house::house_of(user).map(|h| h.crest).unwrap_or("🧙")
 }
 
@@ -1476,7 +1482,7 @@ pub fn board_link(game_id: i64, user: u64) -> Option<String> {
 fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title("♟️ How chess works here")
-        .description(super::rules_text::chess_help_text(&live_rules()))
+        .description(super::rules_text::chess_help_text(&live_rules(), super::house_cup::running()))
         .colour(COLOUR)
 }
 

@@ -158,6 +158,12 @@ pub struct CardData {
     /// The hour's top sources across all houses, biggest first.
     pub sources: Vec<(Source, i64)>,
     pub next: Option<i64>,
+    /// Whether the House Cup is running. False makes the card a closed result:
+    /// the month that was actually played, with no hour or day movement, and a
+    /// line saying the Cup is paused while the games go on.
+    pub cup: bool,
+    /// While paused, the month the numbers belong to ("September 2026").
+    pub closed_month: Option<String>,
 }
 
 fn ranked(month: &HashMap<&'static str, i64>) -> Vec<&'static House> {
@@ -218,9 +224,18 @@ pub fn card(d: &CardData) -> CreateEmbed {
     };
     let next = d.next.map(|t| format!("<t:{}:R> (<t:{}:t>)", t, t)).unwrap_or_else(|| "Not scheduled".into());
     let spacer = ("\u{200b}", "\u{200b}", true);
+    let (title, head) = if d.cup {
+        (format!("🏆 House Cup · {}", month_name(d.end - 1)), lead)
+    } else {
+        let month = d.closed_month.clone().unwrap_or_else(|| "the last month played".to_string());
+        (
+            format!("🏆 House Cup · paused after {}", month),
+            format!("{}\n{}", super::house_cup::closed_heading(&month), super::house_cup::NOTE),
+        )
+    };
     CreateEmbed::new()
-        .title(format!("🏆 House Cup · {}", month_name(d.end - 1)))
-        .description(format!("{}\n\n{}", lead, lines.join("\n\n")))
+        .title(title)
+        .description(format!("{}\n\n{}", head, lines.join("\n\n")))
         .colour(rows.first().filter(|_| best > second).map(|h| h.colour).unwrap_or(0xD4A73C))
         .fields(vec![
             ("🔥 Hottest this hour", hottest(&rows, &d.hour), true),
@@ -245,7 +260,11 @@ pub fn buttons(end: i64) -> CreateActionRow {
 
 /// The card's figures, read in one go under the ledger lock.
 fn card_data(conn: &Connection, end: i64) -> CardData {
-    let month = ledger::house_totals(conn, ledger::month_start(end - 1)).unwrap_or_default();
+    let cup = super::house_cup::running();
+    // Paused: the last month the ledger holds anything for, so the table stays
+    // September's after the month turns rather than going to noughts.
+    let closed = (!cup).then(|| ledger::last_played_month(conn)).flatten();
+    let month = ledger::house_totals(conn, closed.unwrap_or_else(|| ledger::month_start(end - 1))).unwrap_or_default();
     let moved = ledger::by_source(conn, end - HOUR, end).unwrap_or_default();
     let mut hour: HashMap<&'static str, i64> = HashMap::new();
     for ((h, _), n) in &moved {
@@ -253,7 +272,16 @@ fn card_data(conn: &Connection, end: i64) -> CardData {
     }
     let day = ist_day_start(end - 1);
     let today = HOUSES.iter().map(|h| (h.key, ledger::house_total(conn, h.key, day, end).unwrap_or(0))).collect();
-    CardData { end, month, hour, today, sources: top_sources(&moved), next: None }
+    CardData {
+        end,
+        month,
+        hour: if cup { hour } else { HashMap::new() },
+        today: if cup { today } else { HashMap::new() },
+        sources: if cup { top_sources(&moved) } else { Vec::new() },
+        next: None,
+        cup,
+        closed_month: closed.map(|since| month_name(since + 1)),
+    }
 }
 
 fn schedule() -> (i64, i64, i64) {
@@ -388,6 +416,7 @@ fn my_house_text(
     members: &[(u64, i64)],
     captain: Option<u64>,
     presser: u64,
+    cup: bool,
 ) -> String {
     let pos = standings.iter().position(|(x, _)| x.key == h.key).unwrap_or(0);
     let mine = standings.get(pos).map_or(0, |s| s.1);
@@ -404,11 +433,21 @@ fn my_house_text(
             format!("level with {} {}", leader.crest, leader.name)
         }
     };
-    let mut lines = vec![
-        format!("{} **{}** · {} · {}", h.crest, h.name, ordinal(pos + 1), place),
-        format!("Today **{}** · this hour **{}**", signed(today), signed(hour)),
-        "**Top this month**".to_string(),
-    ];
+    let mut lines = if cup {
+        vec![
+            format!("{} **{}** · {} · {}", h.crest, h.name, ordinal(pos + 1), place),
+            format!("Today **{}** · this hour **{}**", signed(today), signed(hour)),
+            "**Top this month**".to_string(),
+        ]
+    } else {
+        // Paused: a closed result, not a live table. No "today", no "this hour" -
+        // nothing has moved and nothing will until the Cup is back.
+        vec![
+            "🏆 **The House Cup is paused** · these are the final numbers".to_string(),
+            format!("{} **{}** · {} · {}", h.crest, h.name, ordinal(pos + 1), place),
+            "**Top scorers**".to_string(),
+        ]
+    };
     if members.is_empty() {
         lines.push("Nobody has scored yet.".into());
     } else {
@@ -419,9 +458,11 @@ fn my_house_text(
             .collect();
         lines.push(top.join(" · "));
     }
-    lines.push(match members.iter().position(|(u, _)| *u == presser) {
-        Some(i) => format!("-# You: {} in {} with {} pts this month", ordinal(i + 1), h.name, members[i].1),
-        None => format!("-# You haven't scored for {} this month yet", h.name),
+    lines.push(match (members.iter().position(|(u, _)| *u == presser), cup) {
+        (Some(i), true) => format!("-# You: {} in {} with {} pts this month", ordinal(i + 1), h.name, members[i].1),
+        (Some(i), false) => format!("-# You: {} in {} with {} pts", ordinal(i + 1), h.name, members[i].1),
+        (None, true) => format!("-# You haven't scored for {} this month yet", h.name),
+        (None, false) => super::house_cup::NOTE.to_string(),
     });
     lines.join("\n")
 }
@@ -475,15 +516,19 @@ fn house_reply(presser: u64, now: i64) -> String {
         return "The scores couldn't be read.".into();
     };
     let conn = db.lock();
-    let month = ledger::house_totals(&conn, ledger::month_start(now)).unwrap_or_default();
+    let cup = super::house_cup::running();
+    // Paused: the last month PLAYED, so the table is September's closed result
+    // rather than a live one full of noughts once the month turns.
+    let since = (!cup).then(|| ledger::last_played_month(&conn)).flatten().unwrap_or_else(|| ledger::month_start(now));
+    let month = ledger::house_totals(&conn, since).unwrap_or_default();
     let standings: Vec<(&'static House, i64)> = ranked(&month).into_iter().map(|x| (x, month.get(x.key).copied().unwrap_or(0))).collect();
     let today = ledger::house_total(&conn, h.key, ist_day_start(now), now + 1).unwrap_or(0);
     let hour_end = ist_hour_floor(now);
     let hour = ledger::house_total(&conn, h.key, hour_end - HOUR, hour_end).unwrap_or(0);
     let members: Vec<(u64, i64)> =
-        ledger::top_members(&conn, h.key, ledger::month_start(now), i64::MAX).unwrap_or_default().into_iter().filter(|(u, _)| !out.contains(u)).collect();
+        ledger::top_members(&conn, h.key, since, i64::MAX).unwrap_or_default().into_iter().filter(|(u, _)| !out.contains(u)).collect();
     drop(conn);
-    my_house_text(h, &standings, today, hour, &members, captain, presser)
+    my_house_text(h, &standings, today, hour, &members, captain, presser, cup)
 }
 
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
@@ -591,7 +636,7 @@ fn contents(r: &Rules, welcome_on: bool, cards_on: bool, guide_on: bool, geo_on:
         cards.map(|t| content(text_body(t, 0xF1C40F), rules_text::snitch_cards_images(r))),
         guide_on.then(|| content(Body::Embeds(rules_text::guide(r, cards_above)), Vec::new())),
         // Nothing to say while the game is off, and the post comes down.
-        geo_on.then(|| rules_text::geo_post_text(&r.geo).map(|t| content(text_body(t, 0x1ABC9C), Vec::new()))).flatten(),
+        geo_on.then(|| rules_text::geo_post_text(&r.geo, r.cup).map(|t| content(text_body(t, 0x1ABC9C), Vec::new()))).flatten(),
     ]
 }
 
@@ -1065,6 +1110,8 @@ mod tests {
             today: [("ravenclaw", 84), ("gryffindor", 71), ("slytherin", 66), ("hufflepuff", 40)].into_iter().collect(),
             sources: vec![(Source::Quiz, 11), (Source::Frog, 8), (Source::Chat, 5)],
             next: Some(end + HOUR),
+            cup: true,
+            closed_month: None,
         }
     }
 
@@ -1207,13 +1254,13 @@ mod tests {
     fn my_house_shows_the_race_the_day_and_the_members() {
         let standings = vec![(h("ravenclaw"), 663), (h("gryffindor"), 593), (h("slytherin"), 321), (h("hufflepuff"), 310)];
         let members = vec![(11, 142), (12, 118), (13, 97), (14, 80), (15, 64), (16, 58)];
-        let text = my_house_text(h("gryffindor"), &standings, 71, 9, &members, Some(11), 16);
+        let text = my_house_text(h("gryffindor"), &standings, 71, 9, &members, Some(11), 16, true);
         assert!(text.starts_with("🦁 **Gryffindor** · 2nd · **70** behind 🦅 Ravenclaw\nToday **+71** · this hour **+9**\n**Top this month**"), "{}", text);
         assert!(text.contains("👑 <@11> 142 · <@12> 118 · <@13> 97 · <@14> 80 · <@15> 64"), "{}", text);
         assert!(!text.contains("<@16> 58"), "only the top five are listed: {}", text);
         assert!(text.ends_with("-# You: 6th in Gryffindor with 58 pts this month"), "{}", text);
 
-        let lead = my_house_text(h("ravenclaw"), &standings, 0, -2, &[], None, 1);
+        let lead = my_house_text(h("ravenclaw"), &standings, 0, -2, &[], None, 1, true);
         assert!(lead.contains("🦅 **Ravenclaw** · 1st · leading by **70**"), "{}", lead);
         assert!(lead.contains("Today **+0** · this hour **-2**") && lead.contains("Nobody has scored yet."), "{}", lead);
         assert!(lead.ends_with("-# You haven't scored for Ravenclaw this month yet"));

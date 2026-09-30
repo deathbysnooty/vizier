@@ -167,6 +167,18 @@ pub fn sections() -> Vec<Section> {
                     Mods stay out of the houses. Members can step out with /houseopt and become Muggles. A bot admin \
                     replying `points 10 for something` to a message gives that member's house the points.",
             settings: vec![
+                toggle(
+                    "VIZIER_HOUSE_CUP",
+                    "House Cup",
+                    "The whole Cup, in one switch. ON is normal. OFF pauses it: no house points are written by ANY source - the games, \
+                     chat, voice, the arena, the Snitch, a full frog set, /housepoints or /modgive - and nothing at all goes into the \
+                     ledger, not even a nought. Chocolate Frogs and Snitches stop dropping, and /frogdrop and /snitchdrop say so instead \
+                     of dropping. While it is off the games stop mentioning houses or house points altogether: a round says only what it \
+                     paid in its OWN points, and the cards drop the crest and the house colours. What is untouched: every game keeps \
+                     running and keeps paying its own score, whatever is already in the ledger stays readable as that month's final \
+                     result, everyone keeps their house, and the cards people own stay theirs - /frogs, /frogcard and trading all keep \
+                     working, so a collection carries into next month.",
+                ),
                 setting(
                     "VIZIER_HOUSE_CHANNEL",
                     "Houses channel",

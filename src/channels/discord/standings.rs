@@ -276,6 +276,18 @@ async fn post_hour(ctx: &Context, start: i64, end: i64) {
 /// How many names `/housetop` lists.
 const TOP_LIST: usize = 10;
 
+/// The window a paused house command shows: the last month the ledger has rows
+/// in, and its name. `None` when there is nothing at all to show.
+///
+/// This is what makes a paused `/housetop` or `/houses` a CLOSED result rather
+/// than a live table of noughts: after the month turns, "this month" would be
+/// empty, so the month that was actually played is the one to show.
+fn closed_window() -> Option<(i64, i64, String)> {
+    let since = house::db().and_then(|db| ledger::last_played_month(&db.lock()))?;
+    let until = ledger::month_start(since + 40 * 86_400).max(since + 1);
+    Some((since, until, month_label(&ledger::ist_day(since))))
+}
+
 pub fn housetop_builder() -> CreateCommand {
     CreateCommand::new("housetop")
         .description("a house's top 10 point scorers")
@@ -290,8 +302,12 @@ pub fn housetop_builder() -> CreateCommand {
 
 /// What `/housetop` says. `rows` is already ranked, trimmed and free of Muggles;
 /// each has the member, their points and where most of them came from.
-fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], captain: Option<u64>, total: i64) -> String {
-    let mut text = format!("{} **{}** · top scorers, {}", h.crest, h.name, period);
+fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], captain: Option<u64>, total: i64, cup: bool) -> String {
+    let mut text = if cup {
+        format!("{} **{}** · top scorers, {}", h.crest, h.name, period)
+    } else {
+        format!("{}\n{} **{}** · top scorers, {}", super::house_cup::closed_heading(period), h.crest, h.name, period)
+    };
     if rows.is_empty() {
         text.push_str("\nNobody has scored yet.");
         return text;
@@ -308,6 +324,10 @@ fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], c
         text.push_str(&format!("\n{} <@{}>{} **{}**{}", rank, user, crown, points, mostly));
     }
     text.push_str(&format!("\n-# {} house total: {} points", h.name, total));
+    if !cup {
+        text.push('\n');
+        text.push_str(super::house_cup::NOTE);
+    }
     text
 }
 
@@ -326,12 +346,20 @@ pub async fn housetop_command(ctx: &Context, command: &CommandInteraction) {
     };
     let now = Utc::now().timestamp();
     let this_month = ledger::month_start(now);
-    let (since, until, period) = match option("period").as_deref() {
-        Some("last") => {
+    let cup = super::house_cup::running();
+    // Paused, and no period asked for: the last month PLAYED, as a closed result.
+    let closed = (!cup).then(closed_window).flatten();
+    let (since, until, period) = match (option("period").as_deref(), closed) {
+        (Some("all"), _) => (0, i64::MAX, "all time".to_string()),
+        (None | Some("month"), Some((since, until, label))) => (since, until, label),
+        (Some("last"), _) | (_, None) if !cup => {
             let last = ledger::month_start(this_month - 1);
             (last, this_month, month_label(&ledger::ist_day(last)))
         }
-        Some("all") => (0, i64::MAX, "all time".to_string()),
+        (Some("last"), _) => {
+            let last = ledger::month_start(this_month - 1);
+            (last, this_month, month_label(&ledger::ist_day(last)))
+        }
         _ => (this_month, i64::MAX, format!("{} so far", month_label(&ledger::ist_day(this_month)))),
     };
     // Both read the house database; asked before the ledger is locked below,
@@ -357,7 +385,7 @@ pub async fn housetop_command(ctx: &Context, command: &CommandInteraction) {
             })
             .collect();
         let total = ledger::house_total(&conn, h.key, since, until).unwrap_or(0);
-        housetop_text(h, &period, &rows, captain, total)
+        housetop_text(h, &period, &rows, captain, total, cup)
     };
     let _ = command.create_response(&ctx.http, whisper(text)).await;
 }
@@ -375,6 +403,19 @@ pub fn housecup_builder() -> CreateCommand {
 /// What `/housecup` says. `link` is the page's address, `None` when the panel
 /// has no public one yet.
 fn housecup_text(link: Option<&str>) -> String {
+    housecup_words(link, super::house_cup::running(), closed_window().map(|(_, _, label)| label))
+}
+
+/// The wording, with the state handed in so it can be read either way.
+fn housecup_words(link: Option<&str>, cup: bool, closed: Option<String>) -> String {
+    if !cup {
+        let month = closed.unwrap_or_else(|| "the last month played".to_string());
+        let page = link.map(|l| format!("\nThe page is still there to read: {}", l)).unwrap_or_default();
+        return format!(
+            "🏆 **The House Cup is paused.** {} was the last month played, and its numbers are final - nothing is being added to them.{}\n{}",
+            month, page, super::house_cup::NOTE
+        );
+    }
     match link {
         Some(link) => format!(
             "🏆 **The House Cup, live** · {}\nEvery house's points this month, each house's top ten and the Chocolate \
@@ -411,8 +452,19 @@ pub fn mypoints_builder() -> CreateCommand {
 }
 
 /// What `/mypoints` says for someone in a house.
-fn mypoints_text(h: &House, breakdown: &[(Source, i64)]) -> String {
+fn mypoints_text(h: &House, breakdown: &[(Source, i64)], cup: bool, closed: Option<&str>) -> String {
     let total: i64 = breakdown.iter().map(|(_, n)| n).sum();
+    if !cup {
+        let month = closed.unwrap_or("the last month played");
+        let mut text = format!("🏆 **The House Cup is paused.** In {} you earned **{}** points, and that is final.", month, total);
+        if !breakdown.is_empty() {
+            let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
+            text.push_str(&format!("\n{}", parts.join(" · ")));
+        }
+        text.push('\n');
+        text.push_str(super::house_cup::NOTE);
+        return text;
+    }
     let mut text = format!("{} **{}** · this month you've earned **{}** points", h.crest, h.name, total);
     if !breakdown.is_empty() {
         let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
@@ -428,8 +480,15 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)]) -> String {
 }
 
 /// `/mypoints` for a mod: the month's earnings and what is still to give.
-fn mod_mypoints_text(breakdown: &[(Source, i64)], held: i64) -> String {
+fn mod_mypoints_text(breakdown: &[(Source, i64)], held: i64, cup: bool) -> String {
     let total: i64 = breakdown.iter().map(|(_, n)| n).sum();
+    if !cup {
+        return format!(
+            "🏆 **The House Cup is paused.** You are still holding **{}** from before, and nothing is being added to it.\n{}",
+            held,
+            super::house_cup::NOTE
+        );
+    }
     let mut text = format!("🛡️ **Mods** · this month you've earned **{}** point{}", total, if total == 1 { "" } else { "s" });
     if !breakdown.is_empty() {
         let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
@@ -456,6 +515,20 @@ pub fn today_builder() -> CreateCommand {
 /// their point, each capped game against its daily limit, and anything extra.
 fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64) -> String {
     today_lines(&format!("{} **{}**", h.crest, h.name), who, sources, messages, voice_secs)
+}
+
+/// `/today` while the House Cup is paused: no house, no crest, and no daily
+/// limits to report, because nothing is being paid into the ledger at all. Each
+/// game's own board is where the day's score lives now.
+fn today_paused_text(who: Option<&str>) -> String {
+    let subject = who.map(|name| format!("**{}** is", name)).unwrap_or_else(|| "You're".to_string());
+    format!(
+        "🏆 **The House Cup is paused**, so {} not earning house points today - nobody is, and the daily limits are not \
+         running.\nThe games all still keep their own scores: `/anagramtop`, `/guesstop`, `/movietop`, `/geotop`, `/sudokutop`, \
+         `/chesstop`, `/dueltop`, `/puzzletop` and `/quiztop` are each their own board.\n{}",
+        subject,
+        super::house_cup::NOTE
+    )
 }
 
 /// The same day, for a mod: they are in no house, so what they win waits in
@@ -589,6 +662,9 @@ pub async fn today_command(ctx: &Context, command: &CommandInteraction) {
 /// and stats locks one after the other, so call it holding neither.
 pub(super) fn today_for(user: u64, name: Option<&str>) -> String {
     let someone_else = name.is_some();
+    if super::house_cup::paused() {
+        return today_paused_text(name);
+    }
     // Both read the house database, before it is locked below.
     let stepped_out = house::opted_out(user);
     let home = house::house_of(user);
@@ -666,12 +742,19 @@ pub(super) fn today_for(user: u64, name: Option<&str>) -> String {
 /// `/mypoints` - private to whoever asks.
 pub async fn mypoints_command(ctx: &Context, command: &CommandInteraction) {
     let user = command.user.id.get();
-    let text = if house::opted_out(user) {
+    let cup = super::house_cup::running();
+    // Paused: the breakdown is the last month PLAYED, read as a closed result.
+    let closed = (!cup).then(closed_window).flatten().map(|(_, _, label)| label);
+    let text = if house::opted_out(user) && cup {
         "You've stepped out of the houses, so you're not earning points. Run `/houseopt` to step back in.".to_string()
     } else if let Some(h) = house::house_of(user) {
-        let since = ledger::month_start(Utc::now().timestamp());
+        // Paused: the last month PLAYED, so September's totals stay readable
+        // after the month turns instead of reading as a nought.
+        let since = closed.as_ref().and_then(|_| closed_window().map(|(s, _, _)| s)).unwrap_or_else(|| ledger::month_start(Utc::now().timestamp()));
         let breakdown = house::db().and_then(|db| ledger::breakdown(&db.lock(), user, since).ok()).unwrap_or_default();
-        mypoints_text(h, &breakdown)
+        mypoints_text(h, &breakdown, cup, closed.as_deref())
+    } else if !cup {
+        format!("🏆 **The House Cup is paused**, so there are no house points to show.\n{}", super::house_cup::NOTE)
     } else if super::admin_ids().contains(&user) {
         let since = ledger::month_start(Utc::now().timestamp());
         let (breakdown, held) = house::db()
@@ -680,11 +763,42 @@ pub async fn mypoints_command(ctx: &Context, command: &CommandInteraction) {
                 (ledger::pool_breakdown(&conn, user, since), ledger::pool_balance(&conn, user))
             })
             .unwrap_or_default();
-        mod_mypoints_text(&breakdown, held)
+        mod_mypoints_text(&breakdown, held, cup)
     } else {
         "You're not in a house yet.".to_string()
     };
     let _ = command.create_response(&ctx.http, whisper(text)).await;
+}
+
+// --- seams for the House Cup's own tests ------------------------------------
+// The copy is written by pure functions taking the state, so `house_cup`'s tests
+// can ask for either state without touching a process-wide setting.
+
+#[cfg(test)]
+pub(super) fn tests_housetop_text(
+    h: &House,
+    period: &str,
+    rows: &[(u64, i64, Option<Source>)],
+    captain: Option<u64>,
+    total: i64,
+    cup: bool,
+) -> String {
+    housetop_text(h, period, rows, captain, total, cup)
+}
+
+#[cfg(test)]
+pub(super) fn tests_mypoints_text(h: &House, breakdown: &[(Source, i64)], cup: bool, closed: Option<&str>) -> String {
+    mypoints_text(h, breakdown, cup, closed)
+}
+
+#[cfg(test)]
+pub(super) fn tests_housecup_words(link: Option<&str>, cup: bool, closed: Option<String>) -> String {
+    housecup_words(link, cup, closed)
+}
+
+#[cfg(test)]
+pub(super) fn tests_today_paused_text(who: Option<&str>) -> String {
+    today_paused_text(who)
 }
 
 pub fn draw_builder() -> CreateCommand {
@@ -858,12 +972,12 @@ mod tests {
 
     #[test]
     fn a_mods_month_is_the_pool_not_the_ledger() {
-        let text = mod_mypoints_text(&[(Source::Guess, 30), (Source::Voice, 12)], 42);
+        let text = mod_mypoints_text(&[(Source::Guess, 30), (Source::Voice, 12)], 42, true);
         assert!(text.contains("this month you've earned **42** points"), "{}", text);
         assert!(text.contains("🎨 Guess the Word 30"), "{}", text);
         assert!(text.contains("**42** left to give"), "{}", text);
         // Nothing earned yet reads plainly, with no empty line of sources.
-        let empty = mod_mypoints_text(&[], 0);
+        let empty = mod_mypoints_text(&[], 0, true);
         assert!(empty.contains("earned **0** points"), "{}", empty);
         assert!(!empty.contains(" · 0"), "{}", empty);
     }
@@ -872,12 +986,12 @@ mod tests {
     fn housetop_lists_medals_the_captain_and_the_house_total() {
         let h = &HOUSES[0];
         let rows = vec![(11, 30, Some(Source::Quiz)), (12, 20, None), (13, 9, Some(Source::Chat)), (14, 4, Some(Source::Cat))];
-        let text = housetop_text(h, "September 2026 so far", &rows, Some(12), 80);
+        let text = housetop_text(h, "September 2026 so far", &rows, Some(12), 80, true);
         assert!(text.contains(&format!("🥇 <@11> **30** · mostly {}", Source::Quiz.label())), "{}", text);
         assert!(text.contains("🥈 <@12> 👑 **20**"), "{}", text);
         assert!(text.contains("` 4.` <@14> **4**"), "{}", text);
         assert!(text.ends_with("house total: 80 points"), "{}", text);
-        assert!(housetop_text(h, "all time", &[], None, 0).contains("Nobody has scored yet."));
+        assert!(housetop_text(h, "all time", &[], None, 0, true).contains("Nobody has scored yet."));
     }
 
     #[test]
@@ -921,9 +1035,9 @@ mod tests {
     #[test]
     fn mypoints_says_how_far_off_the_draw_someone_is() {
         let h = &HOUSES[0];
-        let short = mypoints_text(h, &[(Source::Quiz, 4), (Source::Chat, 2)]);
+        let short = mypoints_text(h, &[(Source::Quiz, 4), (Source::Chat, 2)], true, None);
         assert!(short.contains("**6** points") && short.contains("4 more"), "{}", short);
-        let enough = mypoints_text(h, &[(Source::Koto, 12)]);
+        let enough = mypoints_text(h, &[(Source::Koto, 12)], true, None);
         assert!(enough.contains("in this month's Nitro draw"), "{}", enough);
     }
 

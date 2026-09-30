@@ -490,9 +490,12 @@ pub async fn trade_command(ctx: &Context, command: &CommandInteraction) {
     } else if command.data.resolved.users.get(&target).is_some_and(|u| u.bot) {
         Some("Bots don't collect cards.".to_string())
     } else if !house_member(me) {
-        Some("Only house members can trade cards.".to_string())
+        // Who may trade is unchanged; while the Cup is paused the reason given
+        // simply doesn't mention a house. Trading itself keeps working, as the
+        // owner promised - the cards carry into next month.
+        Some(if super::house_cup::running() { "Only house members can trade cards." } else { "You can't trade cards at the moment." }.to_string())
     } else if !house_member(target.get()) {
-        Some("They're not in a house, so they can't trade cards.".to_string())
+        Some(if super::house_cup::running() { "They're not in a house, so they can't trade cards." } else { "They can't trade cards at the moment." }.to_string())
     } else {
         None
     };

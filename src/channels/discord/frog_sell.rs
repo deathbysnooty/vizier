@@ -96,7 +96,7 @@ struct Draft {
 static DRAFTS: LazyLock<Mutex<HashMap<String, Draft>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn command() -> CreateCommand {
-    CreateCommand::new("sellset").description("hand in a full set of Chocolate Frog cards for house points")
+    CreateCommand::new("sellset").description("hand in a full set of Chocolate Frog cards for the set bonus")
 }
 
 fn house_member(user: u64) -> bool {
@@ -155,6 +155,20 @@ pub async fn sellset_command(ctx: &Context, command: &CommandInteraction) {
     };
     if !control::on("VIZIER_FROGS", false) {
         let _ = command.create_response(&ctx.http, refuse("Chocolate Frogs are switched off right now.")).await;
+        return;
+    }
+    // Paused: a set is worth nothing, so handing one in would destroy the cards
+    // for no gain. Refused rather than allowed to be a mistake.
+    if !super::house_cup::gate("/sellset") {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                refuse(
+                    "🏆 The House Cup is paused, so a full set is worth nothing at the moment — hold on to your cards. \
+                     They are all still yours and they carry over.",
+                ),
+            )
+            .await;
         return;
     }
     if !house_member(user) {

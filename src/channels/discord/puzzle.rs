@@ -85,9 +85,10 @@ pub fn daily_cap() -> i64 {
     control::number("VIZIER_CAP_PUZZLE", 0).min(100) as i64
 }
 
-/// Whether the puzzle pays house points at all right now.
+/// Whether the puzzle pays house points at all right now. Never while the House
+/// Cup is paused, which takes the house points out of the card's wording too.
 pub fn pays_house_points() -> bool {
-    daily_cap() > 0 && first_points() > 0
+    super::house_cup::running() && daily_cap() > 0 && first_points() > 0
 }
 
 /// How long a solved puzzle stays up so other people can still try it.
@@ -119,7 +120,7 @@ fn bump_seconds() -> i64 {
 pub fn puzzle_rules() -> super::rules_text::PuzzleRules {
     super::rules_text::PuzzleRules {
         channel: live_channel(),
-        first: first_points(),
+        first: if pays_house_points() { first_points() } else { 0 },
         cap: daily_cap(),
         band_points: BAND_POINTS,
         next_minutes: next_minutes(),
@@ -1325,7 +1326,7 @@ pub async fn top_command(ctx: &Context, command: &CommandInteraction) {
 fn help_embed() -> CreateEmbed {
     CreateEmbed::new()
         .title(super::rules_text::PUZZLE_RULES_TITLE)
-        .description(super::rules_text::puzzle_help_text(&puzzle_rules()))
+        .description(super::rules_text::puzzle_help_text(&puzzle_rules(), super::house_cup::running()))
         .colour(COLOUR)
 }
 
@@ -1443,7 +1444,7 @@ mod tests {
             solvers: 3,
             skipped: false,
         };
-        let help = super::super::rules_text::puzzle_help_text(&super::super::rules_text::tests::puzzle_defaults());
+        let help = super::super::rules_text::puzzle_help_text(&super::super::rules_text::tests::puzzle_defaults(), true);
         let solved = Attempt { ok: true, solved: true, first: true, san: "Qxh5#".into(), worth: 1, tally: 1, ..Default::default() };
         for text in [
             card_text(&off),
