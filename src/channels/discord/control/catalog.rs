@@ -2300,6 +2300,34 @@ pub fn sections() -> Vec<Section> {
             )],
         },
         Section {
+            id: "signups",
+            title: "Sign-ups",
+            icon: "✋",
+            about: "A sign-up message with two buttons under it: \"Yes, I'm in\" and \"No, I'm out\". A mod posts it with \
+                    /signup, in their own words, with up to three posters. Yes gives the member the role set below and \
+                    writes them down; No takes the role off again and is otherwise a quiet no. Only the member who \
+                    pressed sees the answer, and the message itself keeps a live count of how many are in. Who said \
+                    yes, who said no and when is on the Sign-ups page, with a copy-friendly list for handing rewards \
+                    out later. The buttons keep working on an old message after the bot restarts.",
+            settings: vec![setting(
+                "VIZIER_GAMES_ROLE",
+                "Server games role",
+                "The role given to everyone who presses Yes, and taken off again by No. It must sit BELOW the bot's own \
+                 highest role in Server Settings › Roles, or Discord refuses to hand it out. Empty means presses are \
+                 still written down and a mod gives the role out by hand - the log and the Sign-ups page say so.",
+                Kind::Role,
+                "",
+            )],
+            commands: vec![command(
+                "signup",
+                ADMINS,
+                "/signup channel: title: body: poster: poster2: poster3:",
+                "Posts a sign-up message with the two buttons under it. Type \\n in the body where you want a new line. \
+                 The posters are optional, up to three, and pictures only. Only you see the reply, which says where it \
+                 went and warns you if the role can't be handed out.",
+            )],
+        },
+        Section {
             id: "autoreplies",
             title: "Auto-responses",
             icon: "💬",

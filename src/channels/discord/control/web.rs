@@ -108,6 +108,12 @@ pub trait PanelData: Send + Sync + 'static {
     fn guild(&self) -> Option<GuildInfo>;
     fn channels(&self) -> Vec<ChannelInfo>;
     fn roles(&self) -> Vec<RoleInfo>;
+    /// Where the bot's own highest role sits in the role list. The sign-up
+    /// role has to be below it or Discord refuses to hand it out, so the
+    /// Sign-ups page needs the same number the startup check reads.
+    fn bot_top_role(&self) -> Option<i64> {
+        None
+    }
     async fn search_members(&self, query: &str, limit: usize) -> Vec<MemberInfo>;
     async fn member(&self, id: u64) -> Option<MemberInfo>;
     /// The four house common rooms as they stand in the guild now. They are
@@ -378,6 +384,7 @@ mod profiles;
 mod rules;
 mod scorers;
 mod search;
+mod signups;
 mod sudoku;
 mod topics;
 mod welcomes;
@@ -458,6 +465,14 @@ impl PanelData for LiveData {
                 managed: r.managed,
             })
             .collect()
+    }
+
+    fn bot_top_role(&self) -> Option<i64> {
+        let ctx = CTX.get()?;
+        let g = guild_id(ctx).and_then(|id| ctx.cache.guild(id))?;
+        let me = ctx.cache.current_user().id;
+        let member = g.members.get(&me)?;
+        member.roles.iter().filter_map(|id| g.roles.get(id)).map(|r| r.position as i64).max()
     }
 
     async fn search_members(&self, query: &str, limit: usize) -> Vec<MemberInfo> {
@@ -1218,6 +1233,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/deepdive", get(deepdive::dive))
         .route("/deepdive/summarise", post(deepdive::summarise))
         .route("/deepdives", get(deepdives::list))
+        .route("/signups", get(signups::list))
         .route("/topics", get(topics::member))
         .route("/topics/week", get(topics::week))
         .route("/members", get(members::search))
@@ -1993,6 +2009,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(deepdive::audit_entry(e));
             } else if e.key.starts_with("topics:") {
                 obj.extend(topics::audit_entry(e));
+            } else if e.key.starts_with("signups:") || e.key.starts_with("signup:") {
+                obj.extend(signups::audit_entry(e));
             } else if e.key.starts_with("invites:") {
                 obj.extend(invites::audit_entry(e));
             } else if e.key == "automod:flags" {

@@ -1507,6 +1507,11 @@ pub fn store() {
         if let Some(db) = super::super::super::invites_store::db() {
             super::invites::seed(&db.lock(), chrono::Utc::now().timestamp());
         }
+        // The sign-up sheet, with a few answers to draw the Sign-ups page.
+        super::super::super::signup_store::open(dir.path().to_str().unwrap()).expect("signup store");
+        if let Some(db) = super::super::super::signup_store::db() {
+            super::signups::seed(&db.lock(), chrono::Utc::now().timestamp());
+        }
         seed_automod();
         dir
     });
@@ -1703,6 +1708,8 @@ async fn everything_needs_a_session() {
         // The pages that say what members have been talking about and who has
         // been dived into are as private as anything else here.
         ("GET", "/api/deepdives"),
+        // Who signed up for next month is a moderators' list like any other.
+        ("GET", "/api/signups"),
         ("GET", "/api/topics?member=1"),
         ("GET", "/api/topics/week"),
     ] {
@@ -4703,6 +4710,67 @@ async fn the_moderation_page_is_admin_only_and_every_look_is_logged() {
     assert_eq!(mine.len(), 1, "{audit}");
     assert_eq!(mine[0]["label"], "Looked at the moderation flags");
     assert_eq!(mine[0]["change"], "last 7 days · possibly AI");
+}
+
+// --- sign-ups --------------------------------------------------------------------------
+
+/// The list next month's rewards are handed out from: both answers, the totals,
+/// the copy-friendly lines, and the warning about anybody on the list without
+/// the role. This is the page that has to be right, so it is checked whole.
+#[tokio::test]
+async fn the_signups_page_lists_both_answers_with_a_copy_list_and_its_warnings() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body, _) = call(&app, "GET", "/api/signups", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ins = body["in"].as_array().unwrap();
+    let outs = body["out"].as_array().unwrap();
+    assert_eq!(ins.len(), 3, "three said yes: {}", body["in"]);
+    assert_eq!(outs.len(), 1);
+    assert_eq!(body["totals"]["in"], 3);
+    assert_eq!(body["totals"]["out"], 1);
+    assert_eq!(body["totals"]["answered"], 4);
+    assert_eq!(body["totals"]["without_role"], 1, "Zoya is in without the role");
+
+    // Oldest first, and each one named rather than left as a number.
+    let names: Vec<&str> = ins.iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Kabir", "Rohan", "Zoya"]);
+    assert_eq!(ins[0]["id"], ADMIN.to_string());
+    assert_eq!(ins[2]["has_role"], false, "the one the role never reached says so");
+    assert_eq!(ins[0]["has_role"], true);
+    assert!(ins[0]["answered_ts"].as_i64().unwrap() > 0);
+    assert_eq!(outs[0]["name"], "Arjun");
+
+    // The copy list is what a mod pastes elsewhere: one member per line, id first.
+    let list = body["copy"]["list"].as_str().unwrap();
+    assert_eq!(list.lines().count(), 3, "{list}");
+    assert!(list.starts_with(&format!("{} Kabir", ADMIN)), "{list}");
+    assert_eq!(body["copy"]["ids"].as_str().unwrap().lines().count(), 3);
+    assert!(body["copy"]["out_list"].as_str().unwrap().contains("Arjun"));
+
+    // The fake server has no role list, so the setting has nothing to point at:
+    // the page must say that plainly rather than look healthy.
+    assert_eq!(body["role_key"], "VIZIER_GAMES_ROLE");
+    assert_eq!(body["role"]["state"], "unset");
+    let warnings: Vec<&str> = body["warnings"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+    assert_eq!(warnings.len(), 2, "the empty setting and the member without the role: {:?}", warnings);
+    assert!(warnings[0].contains("VIZIER_GAMES_ROLE"), "{:?}", warnings);
+    assert!(warnings[1].contains("without the role"), "{:?}", warnings);
+
+    // And the message it was all posted from is on the page, with its channel.
+    let post = &body["posts"][0];
+    assert_eq!(post["title"], "Next month");
+    assert_eq!(post["images"], 2);
+    assert_eq!(post["channel"]["id"], "21");
+    assert_eq!(post["posted_by"]["name"], "Kabir");
+
+    // A look is one line in the activity log, and never the list itself.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == "signups:list").collect();
+    assert_eq!(mine.len(), 1, "{audit}");
+    assert_eq!(mine[0]["label"], "Looked at the sign-ups");
+    assert!(mine[0]["new"].is_null() && mine[0]["old"].is_null());
 }
 
 // --- the demo ----------------------------------------------------------------------------

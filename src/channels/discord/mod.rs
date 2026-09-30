@@ -69,6 +69,9 @@ mod roast_card;
 mod roast_store;
 mod ship_score;
 mod ship_sheet;
+// The sign-up button: /signup, the two buttons, and the sheet they fill.
+mod signup;
+mod signup_store;
 mod topics;
 mod topics_store;
 mod topics_job;
@@ -262,6 +265,12 @@ impl VizierChannel for DiscordChannelReader {
         // Invite tracking: the invite snapshot and which invite each join used.
         if let Err(err) = invites_store::open(&self.deps.config.workspace) {
             tracing::warn!("invites: store not opened: {}", err);
+        }
+        // Who said yes and no to the sign-up button, and the messages it posted.
+        // Not opening means a press cannot be recorded, so the buttons refuse
+        // rather than swallow an answer.
+        if let Err(err) = signup_store::open(&self.deps.config.workspace) {
+            tracing::error!("signup: store not opened ({}) - the sign-up buttons will refuse every press", err);
         }
         // Automatic moderation: spam removals and AI flags. Not opening only
         // means the feature stays off, which is also what it defaults to.
@@ -1543,6 +1552,9 @@ impl EventHandler for Handler {
             house::resume_draft(&ctx, guild);
             // Anyone who stepped out before the Muggles role existed gets it.
             house::sync_muggles(&ctx, guild);
+            // Whether the sign-up role can be handed out at all: said now, in
+            // the log, rather than found out when the first member presses Yes.
+            signup::check_at_startup(&ctx, guild);
         }
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
@@ -1825,6 +1837,7 @@ impl EventHandler for Handler {
         commands.push(admin_command(standings::draw_builder()));
         commands.push(admin_command(scoreboard::refresh_builder()));
         commands.push(admin_command(announce::builder()));
+        commands.push(admin_command(signup::builder()));
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -2004,6 +2017,12 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if id.starts_with("notes:") {
                 notes::on_component(&ctx, component).await;
+                return;
+            }
+            // Dispatched by the custom id alone, so a sign-up message posted
+            // before a restart still answers after one.
+            if signup::owns_component(&id) {
+                signup::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
@@ -2723,6 +2742,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "announce" {
                 announce::command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "signup" {
+                signup::command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "houseopt" {

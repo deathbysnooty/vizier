@@ -572,6 +572,7 @@
       navItem('#/automod', icon('shield'), 'Moderation'),
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/invites', icon('userplus'), 'Invites'),
+      navItem('#/signups', icon('check'), 'Sign-ups'),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -626,6 +627,7 @@
       ['Edited messages', '#/deleted?tab=edited', 'edit', 'Messages members changed, before and after'],
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Invites', '#/invites', 'userplus', 'Which invite each new member joined through, who made it, and who each inviter brought in'],
+      ['Sign-ups', '#/signups', 'check', 'Who pressed Yes and who pressed No on a sign-up message, when, and a copy-friendly list of everybody who is in'],
       ['Moderation', '#/automod', 'shield', 'Spam the bot removed, and messages it has asked a moderator to look at'],
       ['Possibly AI flags', '#/automod?kind=ai', 'bot', 'Messages that might have been written by an AI — flagged only, never deleted'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
@@ -773,6 +775,7 @@
       case 'topics': renderTopics(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
       case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
+      case 'signups': renderSignups(page); break;
       case 'automod': renderAutomod(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
@@ -2481,6 +2484,96 @@
     }).catch((e) => {
       if (!holder.isConnected) return;
       clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the dives'), h('p', null, e.message)));
+    });
+  }
+
+  // --- sign-ups: who is in for next month ------------------------------------------------
+
+  /** Copies text to the clipboard, falling back to a hidden textarea where the
+      clipboard API is unavailable (an http:// panel, an old browser). */
+  function copyText(text, what) {
+    const done = () => toast('Copied ' + what, 'ok');
+    const fallback = () => {
+      const box = h('textarea', { style: 'position:fixed;left:-9999px;top:0' });
+      box.value = text;
+      document.body.appendChild(box);
+      box.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      box.remove();
+      if (ok) done(); else toast('Couldn’t copy — select the list and copy it by hand', 'error');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function signupRow(m, showRole) {
+    return h('div', { class: 'kalesh-row' },
+      avatar(m.avatar, m.name, 'xs'),
+      h('div', { class: 'kalesh-row-main' },
+        h('div', { class: 'kalesh-row-head' }, h('b', null, m.name),
+          m.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null,
+          showRole && m.has_role === false ? h('span', { class: 'badge warn', 'data-tip': 'On the list, but the role isn’t on them' }, 'no role') : null),
+        h('div', { class: 'kalesh-row-how' }, 'Answered ' + ago(m.answered_ts)
+          + (m.first_ts && m.first_ts !== m.answered_ts ? ' · first answered ' + ago(m.first_ts) : ''))),
+      h('span', { class: 'chip mono' }, m.id));
+  }
+
+  /** One list with a Copy button over it and the pasteable lines underneath. */
+  function signupList(id, title, sub, rows, showRole, copy, copyWhat) {
+    const body = h('div', { class: 'kalesh-rows' });
+    if (!rows.length) body.appendChild(h('p', { class: 'empty-small' }, 'Nobody yet.'));
+    rows.forEach((m) => body.appendChild(signupRow(m, showRole)));
+    const actions = copy
+      ? [h('button', { class: 'btn sm', type: 'button', onclick: () => copyText(copy, copyWhat) }, icon('table'), 'Copy list')]
+      : null;
+    return card(id, title, sub, body, { cls: 'kalesh-card', actions: actions });
+  }
+
+  function renderSignups(page) {
+    document.title = 'Sign-ups · Loduchand';
+    page.appendChild(pageHead('Sign-ups',
+      'Who pressed “Yes, I’m in” on a sign-up message and who pressed “No, I’m out”, with the day each of them answered. This is the list next month’s rewards are handed out from, so it can be copied straight out of here.'));
+
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the sheet…')));
+    page.appendChild(holder);
+    api('GET', '/signups').then((d) => {
+      if (!holder.isConnected) return;
+      clear(holder);
+      const t = d.totals || {};
+      holder.appendChild(h('div', { class: 'tiles' },
+        tile('In', 'check', numberFmt.format(t.in || 0), 'pressed yes'),
+        tile('Out', 'x', numberFmt.format(t.out || 0), 'pressed no'),
+        tile('Answered', 'users', numberFmt.format(t.answered || 0), 'one way or the other'),
+        tile('Without the role', 'alert', numberFmt.format(t.without_role || 0), t.without_role ? 'needs a hand' : 'all wearing it')));
+
+      // A sign-up that is quietly giving nobody a role has to say so here.
+      (d.warnings || []).forEach((why) => holder.appendChild(
+        h('div', { class: 'banner inline', role: 'alert' }, icon('alert'), h('p', null, h('b', null, 'The role: '), h('span', null, why)))));
+
+      holder.appendChild(signupList('signups-in', 'In for next month', 'Oldest answer first. The Copy list button gives one line per member, their id first.',
+        d.in || [], true, (d.copy || {}).list, plural((d.in || []).length, 'member')));
+      holder.appendChild(signupList('signups-out', 'Said no', 'Kept so a no is a no rather than a silence. Nothing else happens to them.',
+        d.out || [], false, (d.copy || {}).out_list, plural((d.out || []).length, 'member')));
+
+      const posts = d.posts || [];
+      if (posts.length) {
+        const rows = h('div', { class: 'kalesh-rows' });
+        posts.forEach((p) => rows.appendChild(h('div', { class: 'kalesh-row' },
+          h('div', { class: 'kalesh-row-main' },
+            h('div', { class: 'kalesh-row-head' }, h('b', null, p.title),
+              p.channel && p.channel.name ? h('span', { class: 'badge' }, '#' + p.channel.name) : null,
+              p.images ? h('span', { class: 'badge' }, plural(p.images, 'poster')) : null),
+            h('div', { class: 'kalesh-row-how' }, 'Posted by ' + ((p.posted_by && p.posted_by.name) || 'a mod') + ' ' + ago(p.posted_ts))))));
+        holder.appendChild(card('signups-posts', 'The messages', 'Every sign-up message the bot has posted. Their buttons keep working after a restart.', rows, { cls: 'kalesh-card' }));
+      }
+      refreshAudit();
+    }).catch((e) => {
+      if (!holder.isConnected) return;
+      clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the sheet'), h('p', null, e.message)));
     });
   }
 
