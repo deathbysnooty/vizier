@@ -34,7 +34,8 @@ pub const SCHEMA: &str = "
         hatch_ts INTEGER NOT NULL,
         house TEXT NOT NULL DEFAULT '',
         dragon TEXT NOT NULL DEFAULT '',
-        hatched_ts INTEGER);
+        hatched_ts INTEGER,
+        frozen_ts INTEGER);
     CREATE UNIQUE INDEX IF NOT EXISTS eggs_seat ON eggs (seat);
     CREATE UNIQUE INDEX IF NOT EXISTS eggs_dragon ON eggs (dragon) WHERE dragon != '';
     CREATE TABLE IF NOT EXISTS cravings (
@@ -42,12 +43,21 @@ pub const SCHEMA: &str = "
         PRIMARY KEY (user_id, slot));
     CREATE TABLE IF NOT EXISTS overrides (
         slot INTEGER PRIMARY KEY, games TEXT NOT NULL, by_user INTEGER NOT NULL, ts INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS toggles (user_id INTEGER PRIMARY KEY, ts INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);";
+
+/// Added after the first release. Run on every start and allowed to fail: the
+/// only way it fails is that the column is already there.
+const LATER: &[&str] = &["ALTER TABLE eggs ADD COLUMN frozen_ts INTEGER"];
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    for step in LATER {
+        let _ = conn.execute(step, []);
+    }
+    Ok(())
 }
 
 pub fn open(workspace: &str) -> anyhow::Result<()> {
@@ -98,6 +108,10 @@ pub struct Egg {
     pub house: String,
     pub dragon: String,
     pub hatched_ts: Option<i64>,
+    /// When they opted out, if they are out. Frozen, never deleted: the egg,
+    /// the dragon, the house, the warmth and the cards are all still here, and
+    /// opting back in resumes exactly where they left off.
+    pub frozen_ts: Option<i64>,
 }
 
 impl Egg {
@@ -106,13 +120,19 @@ impl Egg {
         self.hatched_ts.is_none() && now < self.hatch_ts
     }
 
+    /// True while they are opted out. Out means out: no pings, nothing on the
+    /// hall, no growth and no points towards the month - and nothing lost.
+    pub fn frozen(&self) -> bool {
+        self.frozen_ts.is_some()
+    }
+
     /// True once it has actually been opened by a hatch - not merely due.
     pub fn open(&self) -> bool {
         self.hatched_ts.is_some()
     }
 }
 
-const COLUMNS: &str = "user_id, seat, name, claimed_ts, hatch_ts, house, dragon, hatched_ts";
+const COLUMNS: &str = "user_id, seat, name, claimed_ts, hatch_ts, house, dragon, hatched_ts, frozen_ts";
 
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Egg> {
     Ok(Egg {
@@ -124,6 +144,7 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Egg> {
         house: row.get(5)?,
         dragon: row.get(6)?,
         hatched_ts: row.get(7)?,
+        frozen_ts: row.get(8)?,
     })
 }
 
@@ -160,6 +181,7 @@ pub fn claim(conn: &Connection, user: u64, name: &str, hatch_ts: i64, now: i64) 
         house: String::new(),
         dragon: String::new(),
         hatched_ts: None,
+        frozen_ts: None,
     })
 }
 
@@ -168,15 +190,53 @@ pub fn egg(conn: &Connection, user: u64) -> rusqlite::Result<Option<Egg>> {
 }
 
 /// Every egg, in seat order.
+/// Opting out: a date on the row and nothing else. Nothing is deleted, nothing
+/// is forgotten, and the house is not given up.
+pub fn freeze(conn: &Connection, user: u64, now: i64) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE eggs SET frozen_ts = ?2 WHERE user_id = ?1 AND frozen_ts IS NULL",
+        params![user as i64, now],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Opting back in: the date comes off and they resume. The house, the dragon,
+/// the warmth and the cards were never touched, so there is nothing to restore.
+pub fn thaw(conn: &Connection, user: u64) -> rusqlite::Result<bool> {
+    let changed =
+        conn.execute("UPDATE eggs SET frozen_ts = NULL WHERE user_id = ?1 AND frozen_ts IS NOT NULL", params![user as i64])?;
+    Ok(changed > 0)
+}
+
+/// When this member last pressed either button, if they ever have.
+pub fn toggled_at(conn: &Connection, user: u64) -> Option<i64> {
+    conn.query_row("SELECT ts FROM toggles WHERE user_id = ?1", params![user as i64], |r| r.get(0)).optional().ok().flatten()
+}
+
+pub fn note_toggle(conn: &Connection, user: u64, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO toggles (user_id, ts) VALUES (?1, ?2) ON CONFLICT(user_id) DO UPDATE SET ts = excluded.ts",
+        params![user as i64, now],
+    )
+    .map(|_| ())
+}
+
 pub fn all(conn: &Connection) -> Vec<Egg> {
     conn.prepare(&format!("SELECT {} FROM eggs ORDER BY seat", COLUMNS))
         .and_then(|mut s| s.query_map([], read)?.collect())
         .unwrap_or_default()
 }
 
-/// Everyone whose egg has not been opened yet.
+/// Everyone whose egg has not been opened yet. Somebody who is opted out is
+/// left out: the hatch does not deal a house to a member who is not playing.
 pub fn unhatched(conn: &Connection) -> Vec<Egg> {
-    all(conn).into_iter().filter(|e| !e.open()).collect()
+    all(conn).into_iter().filter(|e| !e.open() && !e.frozen()).collect()
+}
+
+/// Everybody in the month right now: an egg, and not opted out. What the hall,
+/// the leaderboard and the hourly post are drawn from.
+pub fn playing(conn: &Connection) -> Vec<Egg> {
+    all(conn).into_iter().filter(|e| !e.frozen()).collect()
 }
 
 /// Dragon names already taken, so a second hatch can't hand one out twice.
@@ -341,5 +401,64 @@ mod tests {
         assert_eq!(egg(&conn, 11).unwrap().map(|e| (e.seat, e.hatch_ts)), Some((0, 777)));
         assert_eq!(craving(&conn, 11, 3), Some(vec!["koto".into()]));
         assert_eq!(hatched_at(&conn), Some(777));
+    }
+}
+
+#[cfg(test)]
+mod freeze_tests {
+    use super::*;
+
+    #[test]
+    fn opting_out_freezes_everything_and_opting_back_in_resumes_it() {
+        let conn = memory();
+        claim(&conn, 1, "Zoya", 500, 100).unwrap();
+        hatch(&conn, 1, "gryffindor", "Vhagaryx", 500).unwrap();
+        let before = egg(&conn, 1).unwrap().unwrap();
+        assert!(!before.frozen());
+
+        assert!(freeze(&conn, 1, 900).unwrap());
+        let out = egg(&conn, 1).unwrap().unwrap();
+        assert!(out.frozen() && out.frozen_ts == Some(900));
+        // Nothing was given up: the egg, the house, the dragon and the seat are
+        // all exactly as they were.
+        assert_eq!(
+            (out.seat, out.house.as_str(), out.dragon.as_str(), out.hatched_ts, out.claimed_ts),
+            (before.seat, before.house.as_str(), before.dragon.as_str(), before.hatched_ts, before.claimed_ts)
+        );
+        assert!(!freeze(&conn, 1, 1_000).unwrap(), "freezing twice changes nothing");
+        assert_eq!(egg(&conn, 1).unwrap().unwrap().frozen_ts, Some(900), "and does not move the date");
+
+        // While out they are nobody the month counts.
+        assert!(playing(&conn).is_empty());
+        assert!(unhatched(&conn).is_empty());
+
+        assert!(thaw(&conn, 1).unwrap());
+        let back = egg(&conn, 1).unwrap().unwrap();
+        assert!(!back.frozen());
+        assert_eq!(back, before, "they resume exactly what they left - they do not restart");
+        assert!(!thaw(&conn, 1).unwrap(), "thawing twice changes nothing");
+        assert_eq!(playing(&conn).len(), 1);
+    }
+
+    #[test]
+    fn an_unhatched_member_who_is_out_is_not_dealt_a_house() {
+        let conn = memory();
+        claim(&conn, 1, "Zoya", 500, 100).unwrap();
+        claim(&conn, 2, "Kabir", 500, 100).unwrap();
+        freeze(&conn, 2, 200).unwrap();
+        assert_eq!(unhatched(&conn).iter().map(|e| e.user).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(playing(&conn).iter().map(|e| e.user).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(all(&conn).len(), 2, "but they are still on the books");
+    }
+
+    #[test]
+    fn the_last_press_is_remembered_so_the_toggle_can_be_slowed_down() {
+        let conn = memory();
+        assert_eq!(toggled_at(&conn, 7), None);
+        note_toggle(&conn, 7, 1_000).unwrap();
+        assert_eq!(toggled_at(&conn, 7), Some(1_000));
+        note_toggle(&conn, 7, 5_000).unwrap();
+        assert_eq!(toggled_at(&conn, 7), Some(5_000), "the newest press is the one that counts");
+        assert_eq!(toggled_at(&conn, 8), None, "and it is per member");
     }
 }

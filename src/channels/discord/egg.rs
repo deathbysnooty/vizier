@@ -49,6 +49,7 @@ use serenity::all::{
 use super::egg_store::{self as store, Egg};
 use super::month;
 use super::points::{self as ledger, Source};
+use super::raven;
 
 /// The seven games the month is played with, in the order the rotation walks
 /// them. The quick three and the thinking four, interleaved, so two games that
@@ -68,16 +69,28 @@ fn slot_secs() -> i64 {
     month::craving_hours() * 3600
 }
 
-/// Which slot a moment falls in. Counted from the India epoch rather than from
-/// the month's start, so a slot has the same number for everybody and a changed
-/// hatch date never shuffles the rotation underneath people.
+/// How far the slot boundaries are shifted so that one of them always falls on
+/// the anchor hour.
+///
+/// Without this the boundaries land wherever the epoch puts them, and the
+/// evening's double ends at some arbitrary minute. With the anchor at 8 pm and
+/// six-hour slots the boundaries are 2 am, 8 am, 2 pm and 8 pm India time, so
+/// "the double lasts until 8 pm" is a true sentence rather than a rounded one.
+fn anchor() -> i64 {
+    let period = slot_secs();
+    (month::double_hour() * 3600).rem_euclid(period)
+}
+
+/// Which slot a moment falls in. Counted from the India epoch, shifted to the
+/// anchor hour, so a slot has the same number for everybody and a changed hatch
+/// date never shuffles the rotation underneath people.
 pub fn slot_of(ts: i64) -> i64 {
-    (ts + month::IST_OFFSET).div_euclid(slot_secs())
+    (ts + month::IST_OFFSET - anchor()).div_euclid(slot_secs())
 }
 
 /// When a slot gives way to the next.
 pub fn slot_ends(slot: i64) -> i64 {
-    (slot + 1) * slot_secs() - month::IST_OFFSET
+    (slot + 1) * slot_secs() + anchor() - month::IST_OFFSET
 }
 
 /// How many slots there are in a watch.
@@ -157,16 +170,25 @@ impl Pay {
 
 /// The whole decision, with everything handed in so a test can ask it anything.
 ///
-/// Three deliberate exemptions. A mod's own award is not a game and is never
-/// held back. A member with no egg at all - somebody who never signed up, or
-/// anybody at all while the month is off - is paid exactly as they were before,
-/// because the month is something you are in, not something done to you. And a
-/// deduction is never multiplied, which is handled by the caller.
+/// Four deliberate rules. A mod's own award is not a game and is never held
+/// back. A member with no egg at all - anybody without the server games role,
+/// or anybody at all while the month is off - is paid exactly as they were
+/// before, because the month is something you join, not something done to you.
+/// A member who has opted out earns the month nothing at all until they come
+/// back. And a deduction is never multiplied, which is handled by the caller.
 pub fn decide(month_on: bool, egg: Option<&Egg>, hungry: &[Source], source: Source, now: i64) -> Pay {
     if !month_on || source == Source::Mod {
         return Pay::Once;
     }
     let Some(egg) = egg else { return Pay::Once };
+    // Opted out means out: nothing they do counts towards the month or towards
+    // any house while they are away, and their dragon does not grow. Their own
+    // game scores - chess points, duel points, every board - carry on as
+    // normal, because those are not the month. Nothing is lost: the moment they
+    // come back they resume exactly where they left off.
+    if egg.frozen() {
+        return Pay::Nothing;
+    }
     let wanted = hungry.contains(&source);
     if egg.waiting(now) {
         if wanted { Pay::Once } else { Pay::Nothing }
@@ -201,6 +223,16 @@ pub const STAGES: [(&str, &str); 5] = [
     ("🪺", "Shifting in the nest"),
     ("🔥", "Veined with fire"),
     ("🐣", "Cracking"),
+];
+
+/// What the dragon looks like, by how much it has grown. Same five steps as the
+/// egg's stages, so a member's number means the same thing all month.
+pub const SIZES: [(&str, &str); 5] = [
+    ("🐲", "Hatchling"),
+    ("🐲", "Fledgling"),
+    ("🐉", "Winged"),
+    ("🐉", "Great"),
+    ("🔥", "Dreadful"),
 ];
 
 /// The shipped thresholds: the points at which each stage begins.
@@ -248,6 +280,118 @@ fn games_words(games: &[Source]) -> String {
     games.iter().map(|g| g.label().to_string()).collect::<Vec<_>>().join(" and ")
 }
 
+/// Everything `/dragon` says, whichever half of the month it is asked in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Card {
+    pub name: String,
+    /// Empty before the hatch.
+    pub dragon: String,
+    /// The themed house name, empty before the hatch.
+    pub house: String,
+    /// Points this month: the egg's warmth, the dragon's size.
+    pub points: i64,
+    /// Where they stand on the server, if they have scored.
+    pub rank: Option<usize>,
+    pub hungry: Vec<Source>,
+    /// When the double on those games runs out.
+    pub double_until: i64,
+    pub hatch_at: i64,
+    pub hatched: bool,
+    /// Per shared limit: label, used today, the ceiling.
+    pub caps: Vec<(&'static str, i64, i64)>,
+    pub cards: usize,
+    pub cards_in_play: usize,
+    pub frozen: bool,
+}
+
+/// The one reply `/dragon` and `/egg` both give.
+///
+/// Before the hatch it is about the egg - its stage, its warmth, the days left.
+/// After it, the same numbers read as a dragon. Either way it ends with what
+/// they crave, how long the double lasts, what is left under today's limits,
+/// how many of the twelve cards they hold, and the live page.
+pub fn card_text(card: &Card, now: i64) -> String {
+    let mut text = if card.hatched {
+        let (at, _) = stage(card.points);
+        let (icon, size) = SIZES[at.min(SIZES.len() - 1)];
+        let crown = match card.rank {
+            Some(1) => " 👑",
+            Some(2) | Some(3) => " 🥈",
+            _ => "",
+        };
+        let dragon = if card.dragon.is_empty() { "an unnamed dragon" } else { card.dragon.as_str() };
+        format!(
+            "{} **{}**{} — {}'s dragon, of **{}**.\n*{}* · **{}** point{} this month{}",
+            icon,
+            dragon,
+            crown,
+            card.name,
+            if card.house.is_empty() { "no house yet" } else { card.house.as_str() },
+            size,
+            card.points,
+            if card.points == 1 { "" } else { "s" },
+            card.rank.map(|r| format!(" · **#{}** on the server", r)).unwrap_or_default()
+        )
+    } else {
+        let (at, next) = stage(card.points);
+        let (icon, label) = STAGES[at];
+        let days = ((card.hatch_at - now).max(0) + 86_399) / 86_400;
+        let mut head = format!(
+            "{} **{}'s egg** · *{}* (stage {} of {})\nWarmth **{}** point{}{} · hatches in **{}**",
+            icon,
+            card.name,
+            label,
+            at + 1,
+            STAGES.len(),
+            card.points,
+            if card.points == 1 { "" } else { "s" },
+            card.rank.map(|r| format!(" · **#{}** on the server", r)).unwrap_or_default(),
+            if days <= 1 { "less than a day".to_string() } else { format!("{} days", days) }
+        );
+        if let Some(more) = next {
+            head.push_str(&format!("\n-# {} more warmth to the next stage.", more));
+        }
+        head
+    };
+
+    text.push_str(&format!(
+        "\n**Craving** {} · double points until {}",
+        games_words(&card.hungry),
+        clock12(card.double_until)
+    ));
+    for (label, used, limit) in &card.caps {
+        let left = (limit - used).max(0);
+        text.push_str(&format!(
+            "\n{}: {}/{} today{}",
+            label,
+            used,
+            limit,
+            if left == 0 { " · maxed".to_string() } else { format!(" · {} left", left) }
+        ));
+    }
+    text.push_str(&format!("\n🃏 **{}** of {} cards", card.cards, card.cards_in_play));
+    if card.frozen {
+        text.push_str(
+            "\n-# You're opted out, so nothing you play is counting towards the month. Press **Join the games** to pick up \
+             exactly where you left off — same egg, same warmth, same house, same cards.",
+        );
+    }
+    month::with_live(text)
+}
+
+/// A time of day, India time, as "8 pm".
+fn clock12(ts: i64) -> String {
+    let hour = ledger::ist_hour(ts);
+    let minutes = ((ts + month::IST_OFFSET).rem_euclid(3600)) / 60;
+    let (h, suffix) = match hour {
+        0 => (12, "am"),
+        12 => (12, "pm"),
+        h if h < 12 => (h, "am"),
+        h => (h - 12, "pm"),
+    };
+    if minutes == 0 { format!("{} {}", h, suffix) } else { format!("{}:{:02} {}", h, minutes, suffix) }
+}
+
 /// What `/egg` says while the egg is still an egg.
 pub fn waiting_text(name: &str, points: i64, hungry: &[Source], changes_at: i64, hatch_at: i64, now: i64) -> String {
     let (at, next) = stage(points);
@@ -286,12 +430,21 @@ pub fn hatched_text(name: &str, dragon: &str, house: &str, points: i64, hungry: 
     month::with_live(text)
 }
 
-/// What `/egg` says to somebody who hasn't got one.
+/// The channel the Join button lives in, so the nudge can point at it.
+fn gate_channel() -> u64 {
+    super::control::id("VIZIER_GAMES_GATE_CHANNEL").unwrap_or(1_549_295_943_751_307_324)
+}
+
+/// What `/dragon` says to somebody who hasn't got one: a nudge towards the
+/// button, never an error. They have done nothing wrong - the month is
+/// something you join.
 pub fn no_egg_text() -> String {
-    month::with_live(
-        "🥚 You haven't got an egg. Press **I'm in** on the sign-up post and one is yours — it hatches a week later."
-            .to_string(),
-    )
+    month::with_live(format!(
+        "🥚 You haven't got an egg yet — the month belongs to the **server games** role.\nPress **Join the games** in <#{}> \
+         and an egg is yours on the spot. You can do it any day of the month; the button never closes.\n-# Every game still \
+         works for you in the meantime, and still keeps your own score on its own board.",
+        gate_channel()
+    ))
 }
 
 /// What `/egg` says while the month isn't running.
@@ -326,8 +479,17 @@ fn whisper(text: impl Into<String>) -> CreateInteractionResponse {
     CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
 }
 
+/// `/dragon` — the one command the whole month is read through.
+pub fn dragon_builder() -> CreateCommand {
+    CreateCommand::new("dragon")
+        .description("your egg, then your dragon: what it craves, its size, your rank and today's limits")
+}
+
+/// `/egg` — the same command under the name people will type in the first week.
+/// Registered as a command of its own rather than a Discord alias, because
+/// Discord has no aliases, and handled by the same function.
 pub fn egg_builder() -> CreateCommand {
-    CreateCommand::new("egg").description("your dragon egg: what it's hungry for, and how long it has left")
+    CreateCommand::new("egg").description("the same as /dragon: your egg while it is an egg, your dragon after")
 }
 
 /// Everything `/egg` needs, read in one pass so the reply is one lock each.
@@ -350,6 +512,8 @@ fn month_points(user: u64, since: i64) -> i64 {
     ledger_points + pool
 }
 
+/// `/dragon` and `/egg`, which are one command. Whispered, so a channel is
+/// never cluttered by fifty people checking their own egg.
 pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
     if !month::running() {
         let _ = command.create_response(&ctx.http, whisper(MONTH_OFF)).await;
@@ -364,14 +528,41 @@ pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
     };
     let since = egg.claimed_ts.max(ledger::month_start(now));
     let points = month_points(user, since);
-    let text = if egg.waiting(now) {
-        waiting_text(&name, points, &hungry, changes_at, egg.hatch_ts, now)
-    } else {
-        let house = super::house::house(&egg.house).map(month::name_of).unwrap_or_else(|| "no house yet".to_string());
-        let dragon = if egg.dragon.is_empty() { "an unnamed dragon" } else { egg.dragon.as_str() };
-        hatched_text(&name, dragon, &house, points, &hungry, changes_at, now)
+    let rank = super::house::db().and_then(|db| {
+        let conn = db.lock();
+        ledger::server_rank(&conn, user, ledger::month_start(now), i64::MAX).ok().flatten()
+    });
+    let caps: Vec<(&'static str, i64, i64)> = ledger::Group::ALL
+        .into_iter()
+        .map(|group| {
+            let used: i64 = group.sources().iter().map(|s| super::house::earned_on(user, *s, now)).sum();
+            (group.label(), used, group.limit())
+        })
+        .collect();
+    let (cards, in_play) = match super::frog_store::db() {
+        Some(db) => {
+            let conn = db.lock();
+            let mine = super::frog_store::cards_of(&conn, user).len();
+            (mine, super::frog_store::wizards(&conn).into_iter().filter(|w| w.enabled).count())
+        }
+        None => (0, 0),
     };
-    let _ = command.create_response(&ctx.http, whisper(text)).await;
+    let card = Card {
+        name,
+        dragon: egg.dragon.clone(),
+        house: super::house::house(&egg.house).map(month::name_of).unwrap_or_default(),
+        points,
+        rank,
+        hungry,
+        double_until: changes_at,
+        hatch_at: egg.hatch_ts,
+        hatched: !egg.waiting(now),
+        caps,
+        cards,
+        cards_in_play: in_play.max(raven::DECK.len()),
+        frozen: egg.frozen(),
+    };
+    let _ = command.create_response(&ctx.http, whisper(card_text(&card, now))).await;
 }
 
 pub fn craving_builder() -> CreateCommand {
@@ -530,52 +721,192 @@ pub fn hatch_for(now: i64, month_hatch: i64, watch_days: i64) -> i64 {
     if now < month_hatch { month_hatch } else { now + watch_days * 86_400 }
 }
 
-/// Gives an egg to everybody on the sign-up sheet who hasn't got one.
+/// Gives an egg to everybody who holds the server games role and hasn't got one.
 ///
-/// Returns how many eggs were new. Idempotent: claiming is a no-op for anybody
-/// who already has one, so this can run every few minutes forever.
-pub fn hand_out(now: i64) -> usize {
+/// THE ROLE IS THE WHOLE OF IT. An egg belongs to the role and nothing else: no
+/// role, no egg, no dragon, no house. A member without it plays every game
+/// exactly as before and keeps every one of their own game scores - they are
+/// simply not in the month. Which also means a member who already had the role
+/// from last month's sign-up already has an egg and is never asked to press
+/// anything again.
+///
+/// `holders` is (member, display name) for everybody wearing the role, read
+/// from the gateway cache by the caller. Returns how many eggs were new.
+/// Idempotent: claiming is a no-op for anybody who already has one, so this can
+/// run every few minutes forever.
+pub fn hand_out(holders: &[(u64, String)], now: i64) -> usize {
     if !month::running() {
         return 0;
     }
-    let (Some(signups), Some(eggs)) = (super::signup_store::db(), store::db()) else { return 0 };
-    let waiting: Vec<(u64, String)> = {
-        let conn = signups.lock();
-        super::signup_store::listed(&conn, super::signup_store::Answer::In)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| (e.user_id, e.name))
-            .collect()
-    };
+    let Some(eggs) = store::db() else { return 0 };
     let hatch_at = month::hatch_at();
     let days = month::watch_days();
     let conn = eggs.lock();
     let mut fresh = 0;
-    for (user, name) in waiting {
-        let had = store::egg(&conn, user).ok().flatten().is_some();
-        if store::claim(&conn, user, &name, hatch_for(now, hatch_at, days), now).is_ok() && !had {
+    for (user, name) in holders {
+        let had = store::egg(&conn, *user).ok().flatten().is_some();
+        if store::claim(&conn, *user, name, hatch_for(now, hatch_at, days), now).is_ok() && !had {
             fresh += 1;
         }
     }
     fresh
 }
 
+/// How long is left of the toggle's cooldown, in seconds, or 0 when they may
+/// press now. Pure, so the wording can be tested without a clock.
+pub fn cooldown_left(last: Option<i64>, now: i64, window: i64) -> i64 {
+    match last {
+        Some(at) => (at + window - now).clamp(0, window),
+        None => 0,
+    }
+}
+
+/// The lightest house by total activity: where a late arrival is put, so that
+/// joining on the 25th keeps the four level instead of tipping them.
+///
+/// `totals` is (house key, points, headcount). Ties go to the smaller house and
+/// then to the house's own order, never to chance.
+pub fn lightest(totals: &[(&'static str, i64, usize)]) -> Option<&'static str> {
+    totals
+        .iter()
+        .enumerate()
+        .min_by(|(i, a), (j, b)| a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(i.cmp(j)))
+        .map(|(_, one)| one.0)
+}
+
+/// The four houses as they stand this month: key, points, headcount.
+fn house_weights(now: i64) -> Vec<(&'static str, i64, usize)> {
+    let counts = super::house::counts();
+    let Some(db) = super::house::db() else {
+        return super::house::HOUSES.iter().map(|h| (h.key, 0, 0)).collect();
+    };
+    let conn = db.lock();
+    let since = ledger::month_start(now);
+    super::house::HOUSES
+        .iter()
+        .map(|h| {
+            let points = ledger::house_total(&conn, h.key, since, i64::MAX).unwrap_or(0);
+            (h.key, points, counts.get(h.key).copied().unwrap_or(0).max(0) as usize)
+        })
+        .collect()
+}
+
+/// What pressing "Join the games" does about the month, after the role itself
+/// has been given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Joined {
+    /// They already had an egg and are back in it, exactly as they left it.
+    Resumed { hatched: bool },
+    /// A fresh egg, hatching at this moment.
+    Egg { hatches_at: i64 },
+    /// Joined after the hatch, so their egg opened on the spot.
+    Hatched { house: &'static str, dragon: String },
+    /// The month isn't running, or the store isn't open: nothing to do.
+    Nothing,
+}
+
+/// Claims an egg for somebody who has just pressed Join, at any point in the
+/// month, and never closes.
+///
+/// Three cases, in the order they are decided.
+///
+/// 1. **They have been here before.** Their egg is thawed and nothing else is
+///    touched. If they had already hatched they go back to the SAME house -
+///    their house is theirs for the month, and re-sorting a returner would turn
+///    opting out into shopping for whichever house is winning.
+/// 2. **New, before the hatch.** A fresh egg on the shared hatch.
+/// 3. **New, after the hatch.** The egg opens on the spot and they are put in
+///    whichever house is lightest by activity, so a late arrival keeps the four
+///    level.
+pub fn join(user: u64, name: &str, now: i64) -> Joined {
+    if !month::running() {
+        return Joined::Nothing;
+    }
+    let Some(db) = store::db() else { return Joined::Nothing };
+    let existing = {
+        let conn = db.lock();
+        store::egg(&conn, user).ok().flatten()
+    };
+    if let Some(had) = existing {
+        {
+            let conn = db.lock();
+            let _ = store::thaw(&conn, user);
+        }
+        // Back to the house they left, by name, so a returner is never re-sorted.
+        if let Some(house) = super::house::house(&had.house) {
+            super::house::place(user, house, "rejoined");
+        }
+        return Joined::Resumed { hatched: had.open() };
+    }
+    let hatches_at = hatch_for(now, month::hatch_at(), month::watch_days());
+    let fresh = {
+        let conn = db.lock();
+        store::claim(&conn, user, name, hatches_at, now).ok()
+    };
+    if fresh.is_none() {
+        return Joined::Nothing;
+    }
+    // Before the hatch: an egg like everybody else's.
+    if now < month::hatch_at() {
+        return Joined::Egg { hatches_at };
+    }
+    // After it: there is no reveal left to wait for, so it opens now.
+    let weights = house_weights(now);
+    let Some(key) = lightest(&weights) else { return Joined::Egg { hatches_at } };
+    let taken = {
+        let conn = db.lock();
+        store::dragons(&conn)
+    };
+    let names = super::hatch::name_dragons(&[user], &taken);
+    let dragon = names.get(&user).cloned().unwrap_or_default();
+    {
+        let conn = db.lock();
+        let _ = store::hatch(&conn, user, key, &dragon, now);
+    }
+    if let Some(house) = super::house::house(key) {
+        super::house::place(user, house, "late hatch");
+    }
+    Joined::Hatched { house: key, dragon }
+}
+
+/// What opting out does about the month: freeze, never delete.
+pub fn leave(user: u64) -> bool {
+    let Some(db) = store::db() else { return false };
+    let conn = db.lock();
+    store::freeze(&conn, user, Utc::now().timestamp()).unwrap_or(false)
+}
+
 /// How often the job looks for somebody new to give an egg to.
 const HAND_OUT_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The job: eggs for the sheet, for as long as the month runs.
-pub fn spawn(_ctx: serenity::all::Context) {
+pub fn spawn(ctx: serenity::all::Context) {
     tokio::spawn(async move {
         loop {
             if month::running() {
-                let fresh = hand_out(Utc::now().timestamp());
+                let fresh = hand_out(&role_holders(&ctx), Utc::now().timestamp());
                 if fresh > 0 {
-                    tracing::info!("egg: {} new egg{} handed out", fresh, if fresh == 1 { "" } else { "s" });
+                    tracing::info!("egg: {} new egg{} handed out to the games role", fresh, if fresh == 1 { "" } else { "s" });
                 }
             }
             tokio::time::sleep(HAND_OUT_EVERY).await;
         }
     });
+}
+
+/// Everybody wearing the server games role, from the gateway cache. The role IS
+/// the membership, so this is read fresh rather than from any list of our own:
+/// a mod who hands the role out by hand has handed out an egg.
+fn role_holders(ctx: &serenity::all::Context) -> Vec<(u64, String)> {
+    let Some(role) = super::signup::role_id().map(serenity::all::RoleId::new) else { return Vec::new() };
+    let Some(guild) = ctx.cache.guilds().first().copied() else { return Vec::new() };
+    let Some(cached) = ctx.cache.guild(guild) else { return Vec::new() };
+    cached
+        .members
+        .values()
+        .filter(|m| !m.user.bot && m.roles.contains(&role))
+        .map(|m| (m.user.id.get(), m.display_name().to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -652,14 +983,25 @@ mod tests {
     fn slots_follow_the_india_clock_and_do_not_overlap() {
         let mut month = Month::on();
         month.set("VIZIER_MONTH_CRAVING_HOURS", "6");
+        month.set("VIZIER_MONTH_DOUBLE_HOUR", "20");
         // 2026-10-02 11:00 India time.
         let at = month::parse_ist("2026-10-02 11:00").unwrap();
         let slot = slot_of(at);
         assert_eq!(slot_of(at + 60), slot, "a minute later is the same slot");
         let ends = slot_ends(slot);
         assert_eq!(slot_of(ends), slot + 1, "the end of one slot is the start of the next");
-        assert_eq!(ends - (at - (at + month::IST_OFFSET).rem_euclid(6 * 3600)), 6 * 3600);
+        assert_eq!(ends - slot_ends(slot - 1), 6 * 3600, "a slot is as long as the setting says");
         assert_eq!(slots_in_watch(), 28, "a seven-day watch in six-hour slots");
+        // The anchor is the point of it: with the double set to 8 pm, one
+        // boundary lands on 8 pm, so "double points until 8 pm" is a true
+        // sentence rather than a rounded one.
+        assert_eq!(ends, month::parse_ist("2026-10-02 14:00").unwrap(), "11 am is in the 8 am - 2 pm slot");
+        let evening = slot_of(month::parse_ist("2026-10-02 19:30").unwrap());
+        assert_eq!(slot_ends(evening), month::parse_ist("2026-10-02 20:00").unwrap(), "the evening's double ends at 8 pm");
+        // Moving the anchor moves every boundary with it.
+        month.set("VIZIER_MONTH_DOUBLE_HOUR", "21");
+        let evening = slot_of(month::parse_ist("2026-10-02 19:30").unwrap());
+        assert_eq!(slot_ends(evening), month::parse_ist("2026-10-02 21:00").unwrap());
     }
 
     // --- what a point is worth --------------------------------------------------
@@ -674,6 +1016,7 @@ mod tests {
             house: String::new(),
             dragon: String::new(),
             hatched_ts: None,
+            frozen_ts: None,
         }
     }
 
@@ -718,6 +1061,60 @@ mod tests {
         assert_eq!(hatch_for(hatch - 1, hatch, 7), hatch, "before the hatch, everybody shares it");
         assert_eq!(hatch_for(hatch, hatch, 7), hatch + 7 * 86_400, "from the hatch on, a full week each");
         assert_eq!(hatch_for(hatch + 86_400, hatch, 7), hatch + 86_400 + 7 * 86_400);
+    }
+
+    /// Out means out: nothing they play counts towards the month or towards any
+    /// house - and nothing of theirs is lost by it.
+    #[test]
+    fn an_opted_out_member_earns_the_month_nothing_at_all() {
+        let out = Egg { frozen_ts: Some(900), ..an_egg(1_000) };
+        let hungry = vec![Source::Anagram, Source::Quiz];
+        // Not during the egg week...
+        for game in GAMES {
+            assert_eq!(decide(true, Some(&out), &hungry, game, 500), Pay::Nothing, "{} while out", game.key());
+        }
+        // ...and not after the hatch either, hungry or otherwise.
+        let hatched = Egg { hatched_ts: Some(1_000), ..out.clone() };
+        for game in GAMES {
+            assert_eq!(decide(true, Some(&hatched), &hungry, game, 2_000), Pay::Nothing, "{} while out", game.key());
+        }
+        for other in [Source::Chat, Source::Sudoku, Source::Frog] {
+            assert_eq!(decide(true, Some(&hatched), &hungry, other, 2_000), Pay::Nothing);
+        }
+        // A mod's own award is still not a game, so it still lands.
+        assert_eq!(decide(true, Some(&out), &hungry, Source::Mod, 500), Pay::Once);
+        // And the moment they come back the very same call pays again.
+        let back = Egg { frozen_ts: None, ..hatched };
+        assert_eq!(decide(true, Some(&back), &hungry, Source::Anagram, 2_000), Pay::Double);
+    }
+
+    #[test]
+    fn the_lightest_house_is_where_a_late_arrival_goes() {
+        let four = [("gryffindor", 900i64, 12usize), ("slytherin", 400, 9), ("ravenclaw", 870, 11), ("hufflepuff", 400, 7)];
+        // Level on points: the smaller house takes them, so joining late keeps
+        // the headcount sane as well as the totals.
+        assert_eq!(lightest(&four), Some("hufflepuff"));
+        let clear = [("gryffindor", 900i64, 12usize), ("slytherin", 10, 9), ("ravenclaw", 870, 11), ("hufflepuff", 400, 7)];
+        assert_eq!(lightest(&clear), Some("slytherin"));
+        // Level all round: the house order, never chance.
+        let level: Vec<(&'static str, i64, usize)> =
+            super::super::house::HOUSES.iter().map(|h| (h.key, 0i64, 0usize)).collect();
+        assert_eq!(lightest(&level), Some(super::super::house::HOUSES[0].key));
+        assert_eq!(lightest(&[]), None);
+    }
+
+    #[test]
+    fn the_toggle_has_an_hour_on_it_and_says_how_long_is_left() {
+        let hour = 3_600;
+        assert_eq!(cooldown_left(None, 1_000, hour), 0, "a first press is never refused");
+        assert_eq!(cooldown_left(Some(1_000), 1_000, hour), hour, "straight after, the whole hour");
+        assert_eq!(cooldown_left(Some(1_000), 1_000 + 600, hour), hour - 600);
+        assert_eq!(cooldown_left(Some(1_000), 1_000 + hour, hour), 0, "an hour later, free again");
+        assert_eq!(cooldown_left(Some(1_000), 1_000 + hour * 5, hour), 0);
+        // A clock that has gone backwards can never lock somebody out for longer
+        // than the window itself.
+        assert_eq!(cooldown_left(Some(10_000), 1_000, hour), hour);
+        assert_eq!(cooldown_left(Some(1_000), 2_000, 0), 0, "and no window means no wait");
     }
 
     #[test]
@@ -775,6 +1172,93 @@ mod tests {
         assert!(!after.contains("hatches in"), "nothing about hatching any more");
         assert!(after.contains("https://mlci.example/live"));
         assert!(no_egg_text().contains("https://mlci.example/live"));
+    }
+
+    fn a_card() -> Card {
+        Card {
+            name: "Zoya".into(),
+            dragon: String::new(),
+            house: String::new(),
+            points: 30,
+            rank: Some(4),
+            hungry: vec![Source::Anagram, Source::Quiz],
+            double_until: month::parse_ist("2026-10-02 20:00").unwrap(),
+            hatch_at: month::parse_ist("2026-10-08 12:00").unwrap(),
+            hatched: false,
+            caps: vec![("Quick games", 12, 20), ("Thinking games", 30, 30)],
+            cards: 3,
+            cards_in_play: 12,
+            frozen: false,
+        }
+    }
+
+    #[test]
+    fn dragon_shows_the_egg_first_and_the_dragon_after_and_always_the_same_tail() {
+        let mut month = Month::on();
+        month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
+        let now = month::parse_ist("2026-10-02 11:00").unwrap();
+        let egg = card_text(&a_card(), now);
+        assert!(egg.contains("Zoya's egg") && egg.contains("stage 2 of 5"), "{}", egg);
+        assert!(egg.contains("Warmth **30** points"), "{}", egg);
+        assert!(egg.contains("hatches in **7 days**"), "the days to the hatch: {}", egg);
+        assert!(egg.contains("#4 on the server") || egg.contains("**#4**"), "their rank: {}", egg);
+        assert!(!egg.contains("🐉"), "there is no dragon yet");
+
+        let dragon = card_text(
+            &Card { hatched: true, dragon: "Vhagaryx".into(), house: "Stark".into(), points: 420, rank: Some(2), ..a_card() },
+            now,
+        );
+        assert!(dragon.contains("Vhagaryx") && dragon.contains("Stark"), "{}", dragon);
+        assert!(dragon.contains("Great") || dragon.contains("Dreadful"), "the dragon's size: {}", dragon);
+        assert!(dragon.contains("🥈"), "second on the server wears something: {}", dragon);
+        assert!(card_text(&Card { hatched: true, rank: Some(1), ..a_card() }, now).contains("👑"), "first wears the crown");
+        assert!(!card_text(&Card { hatched: true, rank: Some(9), ..a_card() }, now).contains("👑"));
+        assert!(!dragon.contains("hatches in"), "nothing about hatching any more");
+
+        // The tail is the same either way, and it is most of the use of it.
+        for text in [&egg, &dragon] {
+            assert!(text.contains("Anagram") && text.contains("Quiz"), "what it craves: {}", text);
+            assert!(text.contains("double points until 8 pm"), "and how long the double lasts: {}", text);
+            assert!(text.contains("Quick games: 12/20") && text.contains("8 left"), "{}", text);
+            assert!(text.contains("Thinking games: 30/30") && text.contains("maxed"), "{}", text);
+            assert!(text.contains("**3** of 12 cards"), "the cards: {}", text);
+            assert!(text.contains("https://mlci.example/live"), "and the page, always: {}", text);
+        }
+    }
+
+    #[test]
+    fn a_member_who_is_out_is_told_so_and_told_nothing_is_lost() {
+        let _month = Month::on();
+        let now = month::parse_ist("2026-10-02 11:00").unwrap();
+        let text = card_text(&Card { frozen: true, ..a_card() }, now);
+        assert!(text.contains("opted out"), "{}", text);
+        assert!(text.contains("Join the games"), "and where to come back: {}", text);
+        assert!(text.contains("exactly where you left off"), "{}", text);
+        assert!(!card_text(&a_card(), now).contains("opted out"));
+    }
+
+    #[test]
+    fn somebody_without_an_egg_is_nudged_at_the_button_not_scolded() {
+        let mut month = Month::on();
+        month.set("VIZIER_GAMES_GATE_CHANNEL", "1549295943751307324");
+        let text = no_egg_text();
+        assert!(text.contains("<#1549295943751307324>"), "it points at the channel: {}", text);
+        assert!(text.contains("Join the games"));
+        assert!(text.contains("any day of the month") && text.contains("never closes"), "{}", text);
+        assert!(text.contains("server games"), "and says what the egg belongs to");
+        // Nothing in it reads as a telling-off.
+        for scold in ["error", "cannot", "not allowed", "too late"] {
+            assert!(!text.to_lowercase().contains(scold), "{:?} has no business in a nudge: {}", scold, text);
+        }
+    }
+
+    #[test]
+    fn a_time_of_day_reads_as_one() {
+        assert_eq!(clock12(month::parse_ist("2026-10-02 20:00").unwrap()), "8 pm");
+        assert_eq!(clock12(month::parse_ist("2026-10-02 08:00").unwrap()), "8 am");
+        assert_eq!(clock12(month::parse_ist("2026-10-02 00:00").unwrap()), "12 am");
+        assert_eq!(clock12(month::parse_ist("2026-10-02 12:30").unwrap()), "12:30 pm");
+        assert_eq!(clock12(month::parse_ist("2026-10-02 14:05").unwrap()), "2:05 pm");
     }
 
     #[test]

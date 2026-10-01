@@ -44,6 +44,7 @@ use serenity::all::{
     MessageId,
 };
 
+use super::egg;
 use super::egg_store as store;
 use super::month;
 use super::points::{self as ledger};
@@ -63,6 +64,13 @@ const STICKY_AFTER: u32 = 1;
 const GATE_TICK: Duration = Duration::from_secs(5);
 /// How far back a boot scan reads looking for a post to adopt.
 const SCAN: u8 = 50;
+/// How long between two presses by the same member, so the role cannot be
+/// flapped: `VIZIER_GAMES_GATE_COOLDOWN_MINUTES`.
+const COOLDOWN_MINUTES: u64 = 60;
+
+fn cooldown() -> i64 {
+    super::control::number("VIZIER_GAMES_GATE_COOLDOWN_MINUTES", COOLDOWN_MINUTES).min(24 * 60) as i64 * 60
+}
 
 // --- the custom ids -----------------------------------------------------------------
 //
@@ -173,8 +181,8 @@ pub fn gate_buttons() -> CreateActionRow {
 
 /// What one press is told. `changed` is false when they already matched, which
 /// is a polite note rather than an error. `worn` is false when the role could
-/// not actually be moved.
-pub fn gate_reply(pressed: Answer, changed: bool, worn: bool) -> String {
+/// not actually be moved. `joined` says what happened to their egg.
+pub fn gate_reply(pressed: Answer, changed: bool, worn: bool, joined: Option<&egg::Joined>) -> String {
     let mut text = match (pressed, changed) {
         (Answer::In, true) => "✅ You're in — you'll be pinged when a game opens.".to_string(),
         (Answer::In, false) => "✅ You're already in — you'll be pinged when a game opens. Nothing more to do.".to_string(),
@@ -184,7 +192,41 @@ pub fn gate_reply(pressed: Answer, changed: bool, worn: bool) -> String {
     if pressed == Answer::In && !worn {
         text.push_str(signup::NO_ROLE_NOTE);
     }
+    // The egg is the role's, so a yes is also an egg - whatever day of the month
+    // it is pressed on.
+    match joined {
+        Some(egg::Joined::Egg { .. }) => {
+            text.push_str("\n🥚 **An egg is yours.** Only the games it craves feed it until it hatches — `/dragon` shows which.")
+        }
+        Some(egg::Joined::Hatched { dragon, .. }) => text.push_str(&format!(
+            "\n🐉 **{}** hatched on the spot, and you've been put in the house that needed you most. `/dragon` has the rest.",
+            dragon
+        )),
+        Some(egg::Joined::Resumed { hatched }) => text.push_str(if *hatched {
+            "\n🐉 **Your dragon is exactly where you left it** — same size, same house, same cards. Nothing was lost."
+        } else {
+            "\n🥚 **Your egg is exactly as warm as you left it.** Nothing was lost."
+        }),
+        _ => {}
+    }
+    if pressed == Answer::Out {
+        text.push_str(
+            "\n-# Nothing has been taken away. Your egg, your dragon, your house, your points and your cards are all still \
+             there, frozen — press **Join the games** whenever you like and you pick up exactly where you left off. Your own \
+             game scores keep running either way.",
+        );
+    }
     text
+}
+
+/// What somebody inside the cooldown is told. Plainly, with the number.
+pub fn too_soon(left: i64) -> String {
+    let minutes = (left + 59) / 60;
+    format!(
+        "⏳ You changed this a moment ago — give it {} before changing it again. Nothing has been altered, and nothing has \
+         been lost either way.",
+        if minutes <= 1 { "a minute".to_string() } else { format!("{} minutes", minutes) }
+    )
 }
 
 // --- the press ------------------------------------------------------------------------
@@ -206,6 +248,19 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     };
     let user = component.user.id.get();
     let name = component.user.global_name.clone().unwrap_or_else(|| component.user.name.clone());
+    let now = Utc::now().timestamp();
+    // One press an hour, so the role cannot be flapped - and said plainly, with
+    // the number, rather than refused without a reason.
+    if let Some(eggs) = store::db() {
+        let left = {
+            let conn = eggs.lock();
+            egg::cooldown_left(store::toggled_at(&conn, user), now, cooldown())
+        };
+        if left > 0 {
+            let _ = component.create_response(&ctx.http, whisper(too_soon(left))).await;
+            return;
+        }
+    }
     // The same door the sign-up buttons use: one place decides what a yes and a
     // no do to the role and to the record, so the two can never drift apart -
     // and so there is only ever one games role, whichever message was pressed.
@@ -220,12 +275,25 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         None => None,
     };
     let wardrobe: Option<&dyn signup::Wardrobe> = holder.as_ref().map(|h| h as &dyn signup::Wardrobe);
-    let press = signup::press(db, wardrobe, user, &name, pressed, Utc::now().timestamp()).await;
+    let press = signup::press(db, wardrobe, user, &name, pressed, now).await;
     if let Some(note) = &press.note {
         tracing::warn!("gate: {}", note);
     }
+    // The egg follows the role: a yes claims one (or thaws the one they left),
+    // a no freezes it. Nothing is ever deleted by a no.
+    let joined = match pressed {
+        Answer::In => Some(egg::join(user, &name, now)),
+        Answer::Out => {
+            egg::leave(user);
+            None
+        }
+    };
+    if let Some(eggs) = store::db() {
+        let conn = eggs.lock();
+        let _ = store::note_toggle(&conn, user, now);
+    }
     let worn = press.role_moved || (pressed == Answer::Out);
-    let _ = component.create_response(&ctx.http, whisper(gate_reply(pressed, press.changed, worn))).await;
+    let _ = component.create_response(&ctx.http, whisper(gate_reply(pressed, press.changed, worn, joined.as_ref()))).await;
     // The count on the post follows, quietly and at most once in a while.
     if press.changed {
         refresh_gate(ctx.clone());
@@ -291,9 +359,25 @@ fn is_gate(msg: &Message) -> bool {
 /// The top five and, after the hatch, the four standings.
 fn hourly_rows(ctx: &Context, end: i64) -> (Vec<(String, i64, i64)>, Option<Vec<(String, String, i64)>>) {
     let Some(db) = super::house::db() else { return (Vec::new(), None) };
+    // Anybody opted out is nobody the post names: out means out, and that
+    // includes the leaderboard. Nothing of theirs is lost by being left off.
+    let out: std::collections::HashSet<u64> = match store::db() {
+        Some(eggs) => {
+            let conn = eggs.lock();
+            store::all(&conn).into_iter().filter(|e| e.frozen()).map(|e| e.user).collect()
+        }
+        None => std::collections::HashSet::new(),
+    };
     let month_start = ledger::month_start(end);
     let conn = db.lock();
-    let top = ledger::top_server(&conn, end - HOUR, end, TOP).unwrap_or_default();
+    // A few more than five are asked for, so skipping the opted-out still
+    // leaves five to name.
+    let top: Vec<(u64, i64)> = ledger::top_server(&conn, end - HOUR, end, TOP * 4)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(user, _)| !out.contains(user))
+        .take(TOP)
+        .collect();
     let rows: Vec<(String, i64, i64)> = top
         .into_iter()
         .map(|(user, hour)| {
@@ -593,19 +677,24 @@ mod tests {
 
     #[test]
     fn the_two_buttons_are_a_toggle_and_say_so_politely_either_way() {
-        assert_eq!(gate_reply(Answer::In, true, true), "✅ You're in — you'll be pinged when a game opens.");
-        assert_eq!(gate_reply(Answer::Out, true, true), "👋 You're out — no more pings.");
+        assert_eq!(gate_reply(Answer::In, true, true, None), "✅ You're in — you'll be pinged when a game opens.");
+        let out = gate_reply(Answer::Out, true, true, None);
+        assert!(out.starts_with("👋 You're out — no more pings."));
+        // A no must promise, in so many words, that nothing is lost by it.
+        assert!(out.contains("Nothing has been taken away"), "{}", out);
+        assert!(out.contains("frozen") && out.contains("exactly where you left off"), "{}", out);
+        assert!(out.contains("own game scores keep running"), "{}", out);
         // Pressing the one you already match is a note, never an error.
-        for (pressed, already) in [(Answer::In, gate_reply(Answer::In, false, true)), (Answer::Out, gate_reply(Answer::Out, false, true))] {
+        for (pressed, already) in [(Answer::In, gate_reply(Answer::In, false, true, None)), (Answer::Out, gate_reply(Answer::Out, false, true, None))] {
             assert!(already.contains("already"), "{:?} should say so: {}", pressed, already);
             assert!(already.contains("Nothing more to do"), "{}", already);
             assert!(!already.to_lowercase().contains("error") && !already.contains("wrong"));
         }
         // A yes the role couldn't be given for says the list has them anyway.
-        let stuck = gate_reply(Answer::In, true, false);
+        let stuck = gate_reply(Answer::In, true, false, None);
         assert!(stuck.contains(signup::NO_ROLE_NOTE.trim()), "{}", stuck);
         // A no never needs that note: there is nothing to take off.
-        assert!(!gate_reply(Answer::Out, true, false).contains(signup::NO_ROLE_NOTE.trim()));
+        assert!(!gate_reply(Answer::Out, true, false, None).contains(signup::NO_ROLE_NOTE.trim()));
     }
 
     #[test]

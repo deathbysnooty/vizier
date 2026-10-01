@@ -307,6 +307,33 @@ pub fn sections() -> Vec<Section> {
                     "1549295943751307324",
                 ),
                 setting(
+                    "VIZIER_MONTH_DOUBLE_HOUR",
+                    "Double ends at",
+                    "The hour, India time, the day's craving window is anchored to end at. The rotation's boundaries are \
+                     shifted so one of them always lands here, which is what makes \u{201c}double points until 8 pm\u{201d} a \
+                     true sentence a member can plan around. With the shipped six-hour rotation this puts them at 2 am, \
+                     8 am, 2 pm and 8 pm.",
+                    number(0, 23, "o'clock"),
+                    "20",
+                ),
+                setting(
+                    "VIZIER_GAMES_GATE_COOLDOWN_MINUTES",
+                    "Join / opt out cooldown",
+                    "How long between two presses by the same member, so the role cannot be flapped. Somebody inside it is \
+                     told plainly how long is left, and nothing is changed.",
+                    number(0, 1440, "minutes"),
+                    "60",
+                ),
+                setting(
+                    "VIZIER_MONTH_HOUSE_HEMS",
+                    "Houses: second colours",
+                    "One hex colour per house, in the same order as the names. A banner and a card each need two colours - a \
+                     field and a hem - so the month names both rather than letting each drawing invent its own. A slot left \
+                     empty keeps the house's own second colour.",
+                    Kind::Text,
+                    "C9D3DC,F0D98A,D96A6A,6E7681",
+                ),
+                setting(
                     "VIZIER_LIVE_URL",
                     "Live page",
                     "The address of the month's live page. Every Cup reply the bot sends ends with this link, the whispered \
@@ -324,7 +351,8 @@ pub fn sections() -> Vec<Section> {
                 ),
             ],
             commands: vec![
-                command("egg", EVERYONE, "/egg", "Your egg: its stage, what it is hungry for, when that changes, how much it has been fed and how long to the hatch. After the hatch it shows your dragon instead. Only you see it."),
+                command("dragon", EVERYONE, "/dragon", "Your egg while it is an egg and your dragon after: its stage or size, its warmth or points, your rank, what it craves and how long the double lasts, what is left under today's limits, and how many cards you hold. Only you see it."),
+                command("egg", EVERYONE, "/egg", "The same as /dragon, under the name people type in the first week."),
                 command("livepoints", EVERYONE, "/livepoints", "The live page's link, plus your points, your rank and what is left under today's limits. Only you see it."),
                 command("mycards", EVERYONE, "/mycards", "Every card you hold, with its serial number. Only you see it."),
                 command("hatch", ADMINS, "/hatch dry:", "Opens every egg, deals the four houses level on the week's activity, names every dragon and posts the reveal. `dry:true` shows the split without applying any of it. Refuses to run twice."),

@@ -377,6 +377,7 @@ mod live;
 mod media;
 mod members;
 mod memos;
+mod monthly;
 mod messages;
 mod msglog;
 mod notes;
@@ -1240,6 +1241,11 @@ pub fn router(panel: Panel) -> Router {
         .route("/deepdive/summarise", post(deepdive::summarise))
         .route("/deepdives", get(deepdives::list))
         .route("/signups", get(signups::list))
+        // The Month page: where the egg week stands, and the two writes a mod
+        // needs - the hatch (with a dry run) and the cravings.
+        .route("/month", get(monthly::overview))
+        .route("/month/hatch", post(monthly::run_hatch))
+        .route("/month/craving", put(monthly::set_craving))
         .route("/confessions", get(confessions::list))
         .route("/topics", get(topics::member))
         .route("/topics/week", get(topics::week))
@@ -2018,6 +2024,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(deepdive::audit_entry(e));
             } else if e.key.starts_with("topics:") {
                 obj.extend(topics::audit_entry(e));
+            } else if e.key.starts_with("month:") {
+                obj.extend(monthly::audit_entry(e));
             } else if e.key.starts_with("signups:") || e.key.starts_with("signup:") {
                 obj.extend(signups::audit_entry(e));
             } else if e.key.starts_with("confessions:") || e.key.starts_with("confess:") {

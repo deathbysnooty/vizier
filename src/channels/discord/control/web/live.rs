@@ -306,9 +306,12 @@ pub fn body(live: &Live, now: i64) -> Value {
 /// is the rule the rest of the panel's public pages follow.
 pub fn read_live(panel: &Panel, now: i64) -> Option<Live> {
     let since = ledger::month_start(now);
+    // Only members who are actually in the month: an egg, and not opted out.
+    // Somebody who has opted out is hidden from the hall entirely - out means
+    // out - and nothing of theirs is deleted by being hidden.
     let eggs = egg_store::db().map(|db| {
         let conn = db.lock();
-        (egg_store::all(&conn), egg_store::hatched_at(&conn))
+        (egg_store::playing(&conn), egg_store::hatched_at(&conn))
     });
     let (eggs, hatched) = eggs?;
     if eggs.is_empty() {

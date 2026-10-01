@@ -212,13 +212,18 @@ pub async fn get(State(panel): State<Panel>, Query(q): Query<CupQuery>) -> ApiRe
         .iter()
         .map(|s| {
             let meta = house::house(&s.key);
+            // The names, crests and colours come from the month, never from a
+            // table of this page's own: with the themed month on these are
+            // Stark, Lannister, Targaryen and the Night's Watch, and with it off
+            // they are the houses' own. One source for the paint.
+            let worn = meta.map(super::super::super::month::themed);
             let sources = |list: &[(String, i64)]| list.iter().map(|(k, n)| json!({ "source": k, "points": n })).collect::<Vec<_>>();
             json!({
                 "key": s.key,
-                "name": meta.map(|h| h.name).unwrap_or(&s.key),
-                "crest": meta.map(|h| h.crest).unwrap_or(""),
-                "colour": meta.map(|h| format!("#{:06x}", h.colour)),
-                "secondary": meta.map(|h| format!("#{:02x}{:02x}{:02x}", h.colours.1[0], h.colours.1[1], h.colours.1[2])),
+                "name": worn.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| s.key.to_string()),
+                "crest": worn.as_ref().map(|w| w.crest.clone()).unwrap_or_default(),
+                "colour": worn.as_ref().map(|w| format!("#{:06x}", w.colour)),
+                "secondary": worn.as_ref().map(|w| format!("#{:06x}", w.secondary)),
                 "total": s.total,
                 // Ties share a rank.
                 "rank": totals.iter().position(|t| *t == s.total).map(|i| i + 1).unwrap_or(1),

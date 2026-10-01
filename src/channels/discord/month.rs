@@ -93,6 +93,16 @@ pub fn cravings() -> usize {
     control::number("VIZIER_MONTH_CRAVINGS", 2).clamp(1, 6) as usize
 }
 
+/// The hour the day's craving window is anchored to end at, India time.
+///
+/// The rotation's boundaries are shifted so one of them always lands here, so
+/// "the double lasts until 8 pm" is a true sentence a member can plan around
+/// rather than a rounded one. With the shipped six-hour rotation that puts the
+/// boundaries at 2 am, 8 am, 2 pm and 8 pm.
+pub fn double_hour() -> i64 {
+    control::number("VIZIER_MONTH_DOUBLE_HOUR", 20).min(23) as i64
+}
+
 /// How long after the first right answer everybody else's right answer still
 /// pays. The first one in still gets their bonus; this is the difference
 /// between a game one fast person wins and a game everybody plays.
@@ -140,6 +150,10 @@ pub struct Themed {
     pub name: String,
     pub crest: String,
     pub colour: u32,
+    /// The second colour. A banner needs two - a field and a hem - and so does
+    /// a card, so the month names both rather than letting four callers each
+    /// invent a different way of lightening the first.
+    pub secondary: u32,
 }
 
 /// The shipped theme, in `HOUSES` order: Gryffindor's slot wears Stark,
@@ -148,6 +162,7 @@ pub struct Themed {
 pub const THEME_NAMES: &str = "Stark,Lannister,Targaryen,Night's Watch";
 pub const THEME_CRESTS: &str = "🐺,🦁,🐉,🗡️";
 pub const THEME_COLOURS: &str = "6E7B8B,A8882B,8C1C1C,2B2F36";
+pub const THEME_HEMS: &str = "C9D3DC,F0D98A,D96A6A,6E7681";
 
 fn listed(raw: Option<String>, fallback: &str) -> Vec<String> {
     let text = raw.filter(|r| !r.trim().is_empty()).unwrap_or_else(|| fallback.to_string());
@@ -162,8 +177,14 @@ fn hex(raw: &str) -> Option<u32> {
 /// How one house is named, crested and coloured right now. With the month off
 /// this is the house's own name, so every caller can use it unconditionally.
 pub fn themed(house: &House) -> Themed {
-    let plain =
-        Themed { key: house.key, name: house.name.to_string(), crest: house.crest.to_string(), colour: house.colour };
+    let second = |rgb: [u8; 3]| u32::from_be_bytes([0, rgb[0], rgb[1], rgb[2]]);
+    let plain = Themed {
+        key: house.key,
+        name: house.name.to_string(),
+        crest: house.crest.to_string(),
+        colour: house.colour,
+        secondary: second(house.colours.1),
+    };
     if !running() {
         return plain;
     }
@@ -171,11 +192,13 @@ pub fn themed(house: &House) -> Themed {
     let names = listed(control::var("VIZIER_MONTH_HOUSE_NAMES"), THEME_NAMES);
     let crests = listed(control::var("VIZIER_MONTH_HOUSE_CRESTS"), THEME_CRESTS);
     let colours = listed(control::var("VIZIER_MONTH_HOUSE_COLOURS"), THEME_COLOURS);
+    let hems = listed(control::var("VIZIER_MONTH_HOUSE_HEMS"), THEME_HEMS);
     Themed {
         key: house.key,
         name: names.get(slot).cloned().unwrap_or(plain.name),
         crest: crests.get(slot).cloned().unwrap_or(plain.crest),
         colour: colours.get(slot).and_then(|c| hex(c)).unwrap_or(plain.colour),
+        secondary: hems.get(slot).and_then(|c| hex(c)).unwrap_or(plain.secondary),
     }
 }
 
@@ -296,7 +319,11 @@ mod tests {
     fn the_houses_wear_the_months_names_and_keep_their_keys() {
         let month = Month::off();
         for h in HOUSES {
-            assert_eq!(themed(h).name, h.name, "with the month off a house is itself");
+            let worn = themed(h);
+            assert_eq!(worn.name, h.name, "with the month off a house is itself");
+            assert_eq!(worn.colour, h.colour);
+            let own = h.colours.1;
+            assert_eq!(worn.secondary, u32::from_be_bytes([0, own[0], own[1], own[2]]), "and keeps both its colours");
         }
         drop(month);
         let _on = Month::on();
@@ -312,6 +339,10 @@ mod tests {
         );
         assert_eq!(worn[0].crest, "🐺");
         assert_eq!(worn[2].colour, 0x8C1C1C);
+        // Two colours, always: a banner has a field and a hem, and a caller
+        // must never have to invent the second one for itself.
+        assert_eq!(worn[2].secondary, 0xD96A6A);
+        assert!(worn.iter().all(|t| t.colour != t.secondary));
         // Either name finds the same slot.
         assert_eq!(house_by_any_name("Stark").map(|h| h.key), Some("gryffindor"));
         assert_eq!(house_by_any_name("gryffindor").map(|h| h.key), Some("gryffindor"));
@@ -323,10 +354,18 @@ mod tests {
         let mut month = Month::on();
         month.set("VIZIER_MONTH_HOUSE_NAMES", "Stark, Lannister");
         month.set("VIZIER_MONTH_HOUSE_COLOURS", "#112233,zzz");
+        month.set("VIZIER_MONTH_HOUSE_HEMS", "445566");
         let worn = themed_all();
         assert_eq!(worn[1].name, "Lannister");
         assert_eq!(worn[2].name, HOUSES[2].name, "a slot the setting didn't reach keeps its own name");
         assert_eq!(worn[0].colour, 0x112233, "a # is allowed");
         assert_eq!(worn[1].colour, HOUSES[1].colour, "and an unreadable colour is ignored");
+        assert_eq!(worn[0].secondary, 0x445566);
+        let own = HOUSES[1].colours.1;
+        assert_eq!(
+            worn[1].secondary,
+            u32::from_be_bytes([0, own[0], own[1], own[2]]),
+            "a hem the setting didn't reach falls back to the house's own second colour"
+        );
     }
 }

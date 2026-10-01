@@ -1900,6 +1900,7 @@ impl EventHandler for Handler {
         // The themed month. All five are registered whatever the month's switch
         // says: with it off each one answers "there's no themed month running"
         // rather than vanishing, which is far easier to explain to a member.
+        commands.push(egg::dragon_builder());
         commands.push(egg::egg_builder());
         commands.push(egg::livepoints_builder());
         commands.push(egg::mycards_builder());
@@ -2860,7 +2861,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 confess::confess_command(&ctx, &command).await;
                 return;
             }
-            if command.data.name == "egg" {
+            // /dragon and /egg are one command under two names: Discord has no
+            // aliases, and people will type /egg all through the first week.
+            if command.data.name == "dragon" || command.data.name == "egg" {
                 egg::egg_command(&ctx, &command).await;
                 return;
             }
