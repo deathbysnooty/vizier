@@ -267,6 +267,45 @@ pub fn sections() -> Vec<Section> {
                     Kind::Text,
                     "6E7B8B,A8882B,8C1C1C,2B2F36",
                 ),
+                Setting {
+                    live: false,
+                    ..toggle(
+                        "VIZIER_MONTH_HOURLY",
+                        "Hourly post",
+                        "One post, edited in place every hour, in the channel below. During the egg week it shows the top five \
+                         MEMBERS by what they earned in the hour just gone, each with their month's total beside it, because \
+                         nobody has a house yet. From the hatch on, the four house standings sit above that list. A quiet hour \
+                         rewrites the post to say the hour was quiet rather than adding an empty one, and the post is edited \
+                         rather than reposted so the score never becomes the channel's permanent last message.",
+                    )
+                },
+                setting(
+                    "VIZIER_MONTH_HOURLY_CHANNEL",
+                    "Hourly post channel",
+                    "Where the hourly post lives. On a restart the bot finds its own post there and carries on editing that \
+                     one rather than adding another.",
+                    Kind::Channel,
+                    "1548371226890604665",
+                ),
+                Setting {
+                    live: false,
+                    ..toggle(
+                        "VIZIER_GAMES_GATE",
+                        "Join / opt out post",
+                        "A standing two-button post - Join the games, Opt out - that gives and takes the server games role. \
+                         It is a toggle: pressing the one you already match says so politely. It is kept as the LAST message \
+                         in its channel, deleted and reposted at the bottom when anything is said after it, and there is only \
+                         ever one of it. Opting out is the whole of opting out: every ping is a role mention, so somebody \
+                         without the role is not tagged.",
+                    )
+                },
+                setting(
+                    "VIZIER_GAMES_GATE_CHANNEL",
+                    "Join / opt out channel",
+                    "Where the two buttons live. The games announcement channel, so the month's posts and the way in sit together.",
+                    Kind::Channel,
+                    "1549295943751307324",
+                ),
                 setting(
                     "VIZIER_LIVE_URL",
                     "Live page",

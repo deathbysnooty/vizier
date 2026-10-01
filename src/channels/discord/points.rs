@@ -663,6 +663,24 @@ pub fn top_members(conn: &Connection, house_key: &str, since: i64, until: i64) -
     rows.collect()
 }
 
+/// The biggest scorers on the whole server in a window, biggest first, counting
+/// every house together. Ties go to whoever got there first. Anyone at nought or
+/// below is left out.
+///
+/// The egg week's hourly post is what this is for: before the hatch nobody has
+/// a house, so a per-house top ten would be four empty lists.
+pub fn top_server(conn: &Connection, since: i64, until: i64, limit: usize) -> rusqlite::Result<Vec<(u64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_id, SUM(points) AS total FROM ledger
+         WHERE user_id IS NOT NULL AND ts >= ?1 AND ts < ?2
+         GROUP BY user_id HAVING total > 0 ORDER BY total DESC, MAX(ts) ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![since, until, limit as i64], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?))
+    })?;
+    rows.collect()
+}
+
 /// Where one member stands on the whole server for a window, 1-based, counting
 /// every house together. Members level on points share a place, the same way
 /// the houses do. `None` when they have scored nothing at all.

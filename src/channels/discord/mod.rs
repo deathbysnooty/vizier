@@ -82,6 +82,9 @@ mod egg;
 mod egg_store;
 // The hatch: four houses dealt level on activity, and a dragon each.
 mod hatch;
+// The month's two standing posts: the hourly one, and the join/opt-out
+// buttons kept at the bottom of the games channel.
+mod gate;
 // Ravens: the one drop mechanic, and the twelve Westeros cards it carries.
 pub(crate) mod raven;
 // The one riddle bank and the one answer matcher, shared by every game that
@@ -1608,6 +1611,9 @@ impl EventHandler for Handler {
         // owner), and an egg for everybody on the sign-up sheet.
         raven::migrate();
         egg::spawn(ctx.clone());
+        // The hourly post, and the join/opt-out buttons kept last in their
+        // channel. Both adopt the post they already own rather than adding one.
+        gate::spawn(ctx.clone());
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
         // The House Cup channel: welcome, rules, and the scoreboard card kept last.
@@ -2112,6 +2118,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             // The same for the confessions panel and the review buttons: a
             // review embed from last week is still decidable after a restart.
+            if gate::owns_component(&id) {
+                gate::on_component(&ctx, component).await;
+                return;
+            }
             if confess::owns_component(&id) {
                 confess::on_component(&ctx, component).await;
                 return;
@@ -3623,6 +3633,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         // Anything new in the scoreboard channel - bots and announcements
         // included - moves the House Cup card back to the bottom.
         scoreboard::on_message(&ctx, &msg);
+        // Anything said in the games channel buries the join/opt-out buttons,
+        // which are then moved back to the bottom.
+        gate::on_message(&ctx, &msg);
         // Anything posted in the Name Place Animal Thing channel moves its card back down.
         npat::note_message(&ctx, &msg);
         // And anything in the sudoku channel moves the puzzle card back down.
