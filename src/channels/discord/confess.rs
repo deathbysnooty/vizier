@@ -144,6 +144,17 @@ pub fn log_channel() -> Option<u64> {
     Some(control::number("VIZIER_CONFESS_LOG_CHANNEL", DEFAULT_LOG)).filter(|id| *id != 0)
 }
 
+/// Whether a decided card is taken out of the review channel.
+///
+/// On: the moment a mod approves or rejects, the card they pressed is deleted,
+/// so that channel holds only what is still waiting on somebody. Nothing is
+/// lost by it going — the permanent record is the log channel's entry and the
+/// row behind the Confessions page, neither of which is in the review channel.
+/// Off: the decided card stays where it is with its buttons stripped.
+pub fn clear_review_on() -> bool {
+    control::on("VIZIER_CONFESS_CLEAR_REVIEW", true)
+}
+
 /// Where the series starts when the store is empty: the old bot had reached
 /// #458, so ours begins at #459 and runs alongside what is already there.
 pub fn first_number() -> i64 {
@@ -504,11 +515,19 @@ pub trait Poster: Send + Sync {
     /// Puts the two buttons on an existing card, or takes them off. The number
     /// is the confession's, so the reply button can carry it.
     ///
-    /// Only ever called with a message id this bot wrote into its own store.
-    /// There is no delete on this trait at all: the bot removes nothing from
-    /// the confessions channel, so the old bot's messages cannot be harmed
-    /// even by a bug.
+    /// Only ever called with a message id this bot wrote into its own store,
+    /// so the old bot's messages cannot be harmed even by a bug.
     async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()>;
+    /// Deletes one review card.
+    ///
+    /// The only delete on this trait, and the only one this feature has. It is
+    /// reached through [`clear_review_card`] and nowhere else, which calls it
+    /// with the review channel's id and a `review_message` out of this bot's
+    /// own store — never a channel the members can see, never an id matched on
+    /// author or on content. So the confessions channel, the old bot's
+    /// messages and the hundreds of confessions already in there stay out of
+    /// its reach.
+    async fn delete_review_card(&self, channel: u64, message: u64) -> anyhow::Result<()>;
 }
 
 /// Where an approved confession ended up.
@@ -690,6 +709,65 @@ pub async fn place_reply(
     out
 }
 
+// --- clearing a decided card out of review -----------------------------------
+
+/// What clearing the decided card out of the review channel did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Cleared {
+    /// The review card that went, when one did.
+    pub deleted: Option<u64>,
+    /// What the log should say, when something needs saying.
+    pub notes: Vec<String>,
+}
+
+/// Takes a decided card out of the review channel, so that channel holds only
+/// what is still waiting on a mod.
+///
+/// The last step of a decision and never a precondition for one: by the time
+/// this runs the row is already written, an approved confession is already
+/// public and the log entry is already up. So every way this can fail — the
+/// card was deleted by hand, the bot cannot delete there, two mods pressed at
+/// once and the first press already took it — is a note and nothing more. The
+/// decision stands either way.
+///
+/// `message` is the `review_message` off the row, which is an id this bot
+/// wrote down itself when it posted that card. Four things have to hold before
+/// anything is deleted, and each one is a refusal rather than a best guess:
+/// the setting is on, there is a review channel, the row has a review card
+/// recorded, and that channel is not the public confessions channel. The last
+/// of those is the one that matters most: whatever the settings are set to,
+/// this never deletes anything members can see.
+pub async fn clear_review_card(poster: &dyn Poster, review: Option<u64>, here: Option<u64>, c: &Confession, on: bool) -> Cleared {
+    let mut out = Cleared::default();
+    if !on {
+        return out;
+    }
+    // No review channel, or no card of ours recorded on the row: there is
+    // nothing this bot may touch, and it does not go looking for one.
+    let Some(review) = review else { return out };
+    if c.review_message == 0 {
+        return out;
+    }
+    // The review channel has been pointed at the public one. A confession card
+    // is not a review card and must outlive every decision, so this refuses
+    // rather than deletes — the misconfiguration is the thing to fix.
+    if here == Some(review) {
+        out.notes.push(format!(
+            "the review card for #{} was left alone: the review channel is the confessions channel, and nothing public is ever deleted",
+            c.number
+        ));
+        return out;
+    }
+    match poster.delete_review_card(review, c.review_message).await {
+        Ok(()) => out.deleted = Some(c.review_message),
+        Err(err) => out.notes.push(format!(
+            "the review card for #{} was not removed ({}) - the decision stands and the log entry is written anyway",
+            c.number, err
+        )),
+    }
+    out
+}
+
 /// The real Discord, behind the same trait.
 pub struct Live<'a> {
     pub http: &'a Http,
@@ -733,6 +811,11 @@ impl Poster for Live<'_> {
         // A components-only edit: the embed on the card is left exactly as it is.
         let rows = if on { vec![card_buttons(number)] } else { vec![] };
         ChannelId::new(channel).edit_message(self.http, MessageId::new(message), EditMessage::new().components(rows)).await?;
+        Ok(())
+    }
+
+    async fn delete_review_card(&self, channel: u64, message: u64) -> anyhow::Result<()> {
+        ChannelId::new(channel).delete_message(self.http, MessageId::new(message)).await?;
         Ok(())
     }
 }
@@ -1311,7 +1394,13 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         let _ = component
             .create_response(&ctx.http, whisper(format!("#{} was already {} by somebody.", number, c.status.key())))
             .await;
-        take_buttons_off(ctx, component).await;
+        // The second mod of two who pressed together gets that quiet answer and
+        // nothing else. When decided cards are being removed the card has
+        // normally gone already, so there is nothing left to strip and no edit
+        // worth attempting; only when they are being kept is there one.
+        if !clear_review_on() {
+            take_buttons_off(ctx, component).await;
+        }
         return;
     }
 
@@ -1329,8 +1418,10 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
 }
 
 /// Takes the Approve/Reject buttons off a review embed once it has been
-/// decided, so nobody presses a dead button. Failing is harmless: the decision
-/// is already in the store and a second press is refused there.
+/// decided, so nobody presses a dead button in the moment between the press
+/// and the card being removed — or for good, when decided cards are being
+/// kept. Failing is harmless: the decision is already in the store and a
+/// second press is refused there.
 async fn take_buttons_off(ctx: &Context, component: &ComponentInteraction) {
     let edit = EditMessage::new().components(vec![]);
     if let Err(err) = component.channel_id.edit_message(&ctx.http, component.message.id, edit).await {
@@ -1494,6 +1585,19 @@ async fn settle(ctx: &Context, number: i64, status: Status, mod_id: u64, mod_nam
         Some(&format!("#{}", number)),
         mod_id,
     );
+
+    // Last of all: the card this decision was made on comes out of the review
+    // channel, so what is left in there is only what is still waiting on a
+    // mod. Deliberately after the log entry — the record goes up before the
+    // only other copy of the text is taken down — and deliberately unable to
+    // affect anything above it.
+    let cleared = clear_review_card(&Live { http: &ctx.http }, review_channel(), here, &c, clear_review_on()).await;
+    for note in &cleared.notes {
+        tracing::warn!("confess: {}", note);
+    }
+    if let Some(message) = cleared.deleted {
+        tracing::info!("confess: the review card for #{} was removed now it is decided (message {})", number, message);
+    }
 }
 
 /// Makes sure the two buttons are on the newest confession card, once, at
@@ -1951,10 +2055,16 @@ mod tests {
         buttons: Mutex<Vec<(u64, i64, bool)>>,
         /// Message ids that are not there any more, so editing one fails.
         gone: Mutex<Vec<u64>>,
+        /// Every delete asked for: (channel, message). Everything this fake was
+        /// ever asked to remove is in here, so a test can prove what the bot
+        /// does and does not touch.
+        pub(super) deleted: Mutex<Vec<(u64, u64)>>,
         no_threads: bool,
         no_revive: bool,
         /// The channel refuses every post.
         no_channel: bool,
+        /// Every delete is refused — no permission, or the message has gone.
+        no_delete: bool,
         next_id: Mutex<u64>,
     }
 
@@ -2023,6 +2133,18 @@ mod tests {
             }
             self.buttons.lock().retain(|(id, _, _)| *id != message);
             self.buttons.lock().push((message, number, on));
+            Ok(())
+        }
+
+        async fn delete_review_card(&self, channel: u64, message: u64) -> anyhow::Result<()> {
+            // Written down before the refusal, so a test can tell "it asked and
+            // was refused" from "it never asked".
+            self.deleted.lock().push((channel, message));
+            if self.no_delete || self.gone.lock().contains(&message) {
+                return Err(anyhow::anyhow!("Unknown Message"));
+            }
+            self.gone.lock().push(message);
+            self.buttons.lock().retain(|(id, _, _)| *id != message);
             Ok(())
         }
     }
@@ -2760,6 +2882,232 @@ mod tests {
         let late = settle_with(&db, &fake, Some(21), 459, Status::Rejected, 9, "too late", true, 4320, 2200).await;
         assert!(!late.first);
         assert_eq!(super::store::get(&db.lock(), 459).unwrap().unwrap().status, Status::Approved);
+    }
+
+    // --- the review channel holds only what is still waiting -----------------
+
+    /// The review channel, the public channel, and a submission with its review
+    /// card written down — the three things every test below needs.
+    const REVIEW: u64 = 55;
+    const PUBLIC: u64 = 21;
+
+    /// One pending submission with a review card recorded against it, as
+    /// `on_modal` leaves things once the card has gone to the mods.
+    fn waiting(db: &Mutex<Connection>, body: &str, card: u64) -> Confession {
+        submit(db, &open_limits(), 11, "Zoya", false, Kind::Confession, "", body, 1000, 459).unwrap();
+        super::store::set_review_message(&db.lock(), 459, card).expect("the review card is written down");
+        super::store::get(&db.lock(), 459).unwrap().unwrap()
+    }
+
+    /// What the owner asked for, on the approve side: the card comes out of
+    /// review, and everything that is the actual record is untouched.
+    #[tokio::test]
+    async fn approving_removes_the_review_card_and_leaves_the_post_and_the_log_alone() {
+        let db = sheet();
+        let fake = Fake::new();
+        waiting(&db, "I cheated at Wordle", 5555);
+
+        let out = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let c = out.confession.clone().expect("the row");
+        let posted = out.posted.expect("it went up");
+
+        // The decision's own last step, exactly as `settle` runs it.
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &c, true).await;
+        assert_eq!(cleared.deleted, Some(5555), "the card the mod pressed is gone");
+        assert_eq!(cleared.notes, Vec::<String>::new(), "and nothing needed saying about it");
+        assert_eq!(*fake.deleted.lock(), vec![(REVIEW, 5555)], "one delete, in the review channel, and no other");
+
+        // The public post is still there and still says what it said.
+        let posts = fake.channel_posts.lock().clone();
+        assert_eq!(posts.len(), 1, "the confession is still in the channel");
+        assert_eq!(posts[0].0, PUBLIC);
+        assert_eq!(says(&posts[0].1), ("Anonymous Confession (#459)".into(), "I cheated at Wordle".into()));
+        assert_eq!(fake.pressable(), vec![posted], "and it is still the card with the buttons on it");
+
+        // The row is the record, and the log entry still draws off it.
+        let back = super::store::get(&db.lock(), 459).unwrap().unwrap();
+        assert_eq!((back.status, back.decided_by, back.posted_message), (Status::Approved, 7, posted));
+        assert_eq!(back.review_message, 5555, "what the card WAS is still on the row");
+        let log = serde_json::to_value(log_embed(&back, "Kabir", 900, None)).unwrap();
+        assert_eq!(log["title"], "Confession Approved (#459)");
+        assert!(log.to_string().contains("Zoya") && log.to_string().contains("Kabir"), "{log}");
+    }
+
+    /// And on the reject side: the card goes, and nothing has been posted
+    /// anywhere public — before the deletion or after it.
+    #[tokio::test]
+    async fn rejecting_removes_the_review_card_and_posts_nothing_publicly() {
+        let db = sheet();
+        let fake = Fake::new();
+        waiting(&db, "somebody's phone number", 5555);
+
+        let out = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Rejected, 7, "doxxing", true, 4320, 2000).await;
+        let c = out.confession.clone().expect("the row");
+        assert_eq!(out.posted, None);
+
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &c, true).await;
+        assert_eq!(cleared.deleted, Some(5555));
+        assert_eq!(*fake.deleted.lock(), vec![(REVIEW, 5555)]);
+        assert!(fake.channel_posts.lock().is_empty(), "nothing in the confessions channel");
+        assert!(fake.thread_posts.lock().is_empty(), "nothing in a thread");
+        assert!(fake.edits.lock().is_empty(), "and not one message was edited");
+
+        let back = super::store::get(&db.lock(), 459).unwrap().unwrap();
+        assert_eq!((back.status, back.reason.as_str(), back.posted_message), (Status::Rejected, "doxxing", 0));
+        let log = serde_json::to_value(log_embed(&back, "Kabir", 900, None)).unwrap();
+        assert_eq!(log["title"], "Confession Rejected (#459)");
+        assert!(log.to_string().contains("never posted"), "{log}");
+    }
+
+    /// "A confession or a reply", the owner said. A reply's card is reviewed on
+    /// the same queue and comes off it the same way: the clearing step knows
+    /// nothing about which kind it is holding.
+    #[tokio::test]
+    async fn a_decided_reply_comes_off_the_queue_just_as_a_confession_does() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the confession", 1000, 459).unwrap();
+        settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+
+        // The reply, with its own card on the queue.
+        submit(&db, &limits, 12, "Kabir", false, Kind::Reply, "459", "same here", 3000, 459).unwrap();
+        super::store::set_review_message(&db.lock(), 460, 6666).expect("the reply's review card");
+        let out = settle_with(&db, &fake, Some(PUBLIC), 460, Status::Approved, 7, "", true, 4320, 4000).await;
+        let reply = out.confession.clone().expect("the row");
+        assert_eq!((reply.kind, reply.answers), (Kind::Reply, Some(459)));
+        assert!(out.posted.is_some(), "it went into the thread");
+
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &reply, true).await;
+        assert_eq!(cleared.deleted, Some(6666), "the reply's card, by its own id");
+        assert_eq!(*fake.deleted.lock(), vec![(REVIEW, 6666)], "and the confession's card is not touched by it");
+        assert_eq!(fake.thread_posts.lock().len(), 1, "the reply is still in the thread");
+        assert_eq!(super::store::get(&db.lock(), 460).unwrap().unwrap().status, Status::Approved);
+    }
+
+    /// Deleting is the last step and never a precondition. A refused delete —
+    /// no permission, or somebody removed the card by hand — must leave the
+    /// decision, the public post and the log line exactly as they were.
+    #[tokio::test]
+    async fn a_delete_that_fails_undoes_nothing_and_loses_no_log_line() {
+        let db = sheet();
+        let fake = Fake { no_delete: true, ..Fake::new() };
+        waiting(&db, "the text of it", 5555);
+
+        let out = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let c = out.confession.clone().expect("the row");
+        let posted = out.posted.expect("it went up");
+
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &c, true).await;
+        assert_eq!(cleared.deleted, None, "nothing was removed");
+        assert_eq!(cleared.notes.len(), 1, "said once, plainly: {:?}", cleared.notes);
+        assert!(cleared.notes[0].contains("#459") && cleared.notes[0].contains("was not removed"), "{:?}", cleared.notes);
+        assert_eq!(*fake.deleted.lock(), vec![(REVIEW, 5555)], "it asked, and was refused");
+
+        // Everything that matters is untouched.
+        let back = super::store::get(&db.lock(), 459).unwrap().unwrap();
+        assert_eq!((back.status, back.decided_by, back.posted_message), (Status::Approved, 7, posted));
+        assert_eq!(fake.channel_posts.lock().len(), 1, "the public post still went up");
+        assert_eq!(fake.pressable(), vec![posted]);
+        let log = serde_json::to_value(log_embed(&back, "Kabir", 900, None)).unwrap();
+        assert_eq!(log["title"], "Confession Approved (#459)", "and the log line is still there to write");
+    }
+
+    /// Two mods pressing together. The first press decides and takes the card;
+    /// the second gets the same quiet "already decided" answer it always got,
+    /// with no second post, no second delete and nothing that reads as an error.
+    #[tokio::test]
+    async fn the_second_mod_gets_the_quiet_answer_with_the_card_already_gone() {
+        let db = sheet();
+        let fake = Fake::new();
+        let c = waiting(&db, "pressed by two at once", 5555);
+
+        let first = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        assert!(first.first);
+        let gone = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &first.confession.clone().unwrap(), true).await;
+        assert_eq!(gone.deleted, Some(5555));
+
+        // The second press, arriving a moment later. `settle_with` refuses it
+        // at the store, which is what stops a second post.
+        let second = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 8, "", true, 4320, 2100).await;
+        assert!(!second.first, "the store refused it");
+        assert_eq!(second.posted, None);
+        assert!(second.notes[0].contains("already been decided"), "{:?}", second.notes);
+        assert_eq!(fake.channel_posts.lock().len(), 1, "one post, not two");
+        assert_eq!(fake.pressable().len(), 1, "one pressable card, not two");
+
+        // And if the second press did reach the clearing step, the card having
+        // gone is a note and not a failure of anything.
+        let again = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &c, true).await;
+        assert_eq!(again.deleted, None);
+        assert_eq!(again.notes.len(), 1, "{:?}", again.notes);
+        assert_eq!(super::store::get(&db.lock(), 459).unwrap().unwrap().status, Status::Approved);
+    }
+
+    /// Off by setting: the card stays in the review channel, exactly as it was
+    /// before any of this. Nothing is even asked of Discord.
+    #[tokio::test]
+    async fn with_the_setting_off_the_decided_card_is_left_where_it_is() {
+        let db = sheet();
+        let fake = Fake::new();
+        waiting(&db, "left in the queue", 5555);
+
+        let out = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &out.confession.clone().unwrap(), false).await;
+        assert_eq!(cleared.deleted, None);
+        assert_eq!(cleared.notes, Vec::<String>::new(), "it is a setting, not a failure");
+        assert!(fake.deleted.lock().is_empty(), "nothing was asked of Discord at all");
+
+        // The setting is a toggle that defaults on, which is what the owner
+        // asked for, and reads off the one key the catalog describes.
+        control::set_for_test("VIZIER_CONFESS_CLEAR_REVIEW", None);
+        assert!(clear_review_on(), "on unless somebody turns it off");
+        control::set_for_test("VIZIER_CONFESS_CLEAR_REVIEW", Some("off"));
+        assert!(!clear_review_on());
+        control::set_for_test("VIZIER_CONFESS_CLEAR_REVIEW", Some("on"));
+        assert!(clear_review_on());
+        control::set_for_test("VIZIER_CONFESS_CLEAR_REVIEW", None);
+    }
+
+    /// The rule the whole feature is built on, kept through the one delete it
+    /// now has: only a message this bot posted itself, matched by an id out of
+    /// its own store, in the review channel and nowhere else.
+    #[tokio::test]
+    async fn nothing_is_ever_deleted_that_this_bot_did_not_post_itself() {
+        let db = sheet();
+        let fake = Fake::new();
+
+        // A submission whose review card was never written down — the send
+        // failed, or it predates this. There is no id of ours, so there is
+        // nothing to delete and the bot does not go hunting for one by author
+        // or by content.
+        submit(&db, &open_limits(), 11, "Zoya", false, Kind::Confession, "", "no card recorded", 1000, 459).unwrap();
+        let out = settle_with(&db, &fake, Some(PUBLIC), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let c = out.confession.clone().expect("the row");
+        assert_eq!(c.review_message, 0);
+        let cleared = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &c, true).await;
+        assert_eq!(cleared.deleted, None);
+        assert!(fake.deleted.lock().is_empty(), "no id of ours means no delete");
+
+        // No review channel set: same answer.
+        let carded = Confession { review_message: 5555, ..c.clone() };
+        assert_eq!(clear_review_card(&fake, None, Some(PUBLIC), &carded, true).await.deleted, None);
+        assert!(fake.deleted.lock().is_empty());
+
+        // And the one that matters: the review channel pointed at the public
+        // channel. A confession card is not a review card, so this refuses
+        // rather than deleting something the members can see.
+        let public = clear_review_card(&fake, Some(PUBLIC), Some(PUBLIC), &carded, true).await;
+        assert_eq!(public.deleted, None);
+        assert!(public.notes[0].contains("nothing public is ever deleted"), "{:?}", public.notes);
+        assert!(fake.deleted.lock().is_empty(), "not one delete in the confessions channel, ever");
+        assert_eq!(fake.channel_posts.lock().len(), 1, "and the card that is in there is still in there");
+
+        // When it does delete, the channel it names is the review channel and
+        // the id is the one off the row. Nothing else is reachable.
+        let real = clear_review_card(&fake, Some(REVIEW), Some(PUBLIC), &carded, true).await;
+        assert_eq!(real.deleted, Some(5555));
+        assert_eq!(*fake.deleted.lock(), vec![(REVIEW, 5555)]);
     }
 
     /// The reply flow the owner asked for, end to end: one post and one thread

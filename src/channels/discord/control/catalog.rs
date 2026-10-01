@@ -2363,10 +2363,13 @@ pub fn sections() -> Vec<Section> {
                     and no name on it anywhere. A confession gets no thread when it posts - a thread is opened on it only when its \
                     first approved reply arrives, and every later reply goes in that same thread, lettered so people \
                     can point at one. Most confessions are never answered and never get a thread. Every decision is \
-                    written to the log channel with the submitter and the mod who made it.\n\nThe bot deletes \
-                    nothing in that channel and only ever edits a card it posted itself, matched by a message id out \
-                    of its own record - so the old bot\u{2019}s messages and the confessions already in there are never \
-                    touched. If the card carrying the buttons is deleted, they move to the newest surviving \
+                    written to the log channel with the submitter and the mod who made it, and the card that was \
+                    decided on is then taken out of the review channel, so the queue in there holds only what is \
+                    still waiting on somebody. That is a setting, and it is the one delete this feature \
+                    has.\n\nThe bot deletes nothing in the confessions channel and only ever edits a card it \
+                    posted itself, matched by a message id out of its own record - so the old bot\u{2019}s messages and \
+                    the confessions already in there are never touched. If the card carrying the buttons is \
+                    deleted, they move to the newest surviving \
                     card.\n\nNothing said in any of these three channels reaches the AI: they are excluded from the \
                     message log exactly as #safe-corner is, so no confession is in the member notes, the daily \
                     topics, a deep dive, the Kalesh pages, the weekly scan or any summary. In public a confession \
@@ -2406,6 +2409,18 @@ pub fn sections() -> Vec<Section> {
                      the posted message and who approved or rejected it. Mods only.",
                     Kind::Channel,
                     "1527320955763036180",
+                ),
+                toggle(
+                    "VIZIER_CONFESS_CLEAR_REVIEW",
+                    "Clear a card out of review once it is decided",
+                    "On: the moment you approve or reject something, the card you pressed is deleted from the \
+                     review channel, so what is left in there is only what is still waiting on a mod. Nothing is \
+                     lost - the permanent record is the log channel's entry and the Confessions page, neither of \
+                     which is in that channel. If the card cannot be deleted it is said in the log and the \
+                     decision stands anyway: the post still goes up and the log entry is still written. Off: the \
+                     decided card stays where it is with its buttons taken off. Only ever the review card, \
+                     matched by a message id out of the bot's own record - nothing in the confessions channel is \
+                     ever deleted whatever this is set to.",
                 ),
                 setting(
                     "VIZIER_CONFESS_NEXT_NUMBER",
@@ -2497,7 +2512,9 @@ pub fn sections() -> Vec<Section> {
                     "The buttons under a card in the review channel",
                     "Approve posts it in the confessions channel as an anonymous numbered card, with the submit \
                      buttons on it and off the card before it. Reject asks for an optional reason and posts nothing anywhere \
-                     public. Either way the log channel gets a card naming the submitter and you. A submission from \
+                     public. Either way the log channel gets a card naming the submitter and you, and the card \
+                     you pressed comes out of the review channel so the queue is only what is still waiting. A \
+                     submission from \
                      a moderator is marked as one at the top of the card, so nobody waves their own through \
                      unnoticed.",
                 ),
