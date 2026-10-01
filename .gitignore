@@ -36,3 +36,6 @@ __pycache__/
 # something, and it goes to the server with scripts/push-live.sh rather than
 # through a release. See liveart/README.md.
 liveart/
+
+# Month art: big painted files, rsynced to the server like the banks.
+arenaart/
