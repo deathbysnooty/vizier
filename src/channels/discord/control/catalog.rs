@@ -96,6 +96,9 @@ const ADMINS: &str = "Bot admins";
 /// Captains and mods both - and not the word "admin", so /help still shows it
 /// to the members who are captains.
 const CAPTAINS: &str = "House captains and mods";
+/// The only thread auto-archive waits Discord accepts.
+const THREAD_WAITS: &[(&str, &str)] =
+    &[("60", "1 hour"), ("1440", "24 hours"), ("4320", "3 days"), ("10080", "7 days")];
 const ROUNDS: &[(&str, &str)] = &[("semi", "Semi-finals"), ("quarter", "Quarter-finals"), ("r16", "Round of 16")];
 const DAYS: &[(&str, &str)] = &[
     ("mon", "Monday"),
@@ -2338,6 +2341,149 @@ pub fn sections() -> Vec<Section> {
                  The posters are optional, up to three, and pictures only. Only you see the reply, which says where it \
                  went and warns you if the role can't be handed out.",
             )],
+        },
+        Section {
+            id: "confessions",
+            title: "Confessions",
+            icon: "🤫",
+            about: "Anonymous confessions, the way the server already uses them. A panel message sits at the bottom \
+                    of the confessions channel with two buttons - Submit a confession and Submit a reply - and \
+                    pressing either opens a box to type in. Nothing is posted by sending one: it goes to the review \
+                    channel first as a card showing the text and the submitter (name, mention, id, how old their \
+                    account is, when they joined, and how many of theirs have been approved and rejected before), \
+                    with Approve and Reject under it. Reject asks for an optional reason and posts nothing anywhere \
+                    public, ever. Approve posts it in the confessions channel as \u{201c}Anonymous Confession (#N)\u{201d} with no \
+                    name on it and opens a thread of the same name, where the conversation happens; an approved \
+                    reply goes inside that confession\u{2019}s thread, lettered so people can point at one. Every \
+                    decision is written to the log channel with the submitter and the mod who made it. The panel is \
+                    moved back to the bottom after each post so nobody ever has to scroll for it, and it is the only \
+                    message in that channel this bot ever deletes.\n\nNothing said in any of these three channels \
+                    reaches the AI: they are excluded from the message log exactly as #safe-corner is, so no \
+                    confession is in the member notes, the daily topics, a deep dive, the Kalesh pages, the weekly \
+                    scan or any summary. In public a confession carries a number and the words and nothing else - no \
+                    name, no mention, no footer. Moderators do see who submitted, in review and in the log, and a \
+                    mod looking up who sent one later is written to the activity log. The Confessions page lists \
+                    every one with its number, when it came, its state, who sent it, who decided and the text.",
+            settings: vec![
+                toggle(
+                    "VIZIER_CONFESS",
+                    "Confessions on",
+                    "Off stops the buttons answering and nothing new can be submitted. Anything already approved \
+                     stays where it is, and the record is kept.",
+                ),
+                setting(
+                    "VIZIER_CONFESS_CHANNEL",
+                    "Confessions channel",
+                    "Where approved confessions are posted and where the button panel lives. Everything here is \
+                     anonymous. Empty means an approved confession has nowhere to go, which is said in the log.",
+                    Kind::Channel,
+                    "1527318601126907924",
+                ),
+                setting(
+                    "VIZIER_CONFESS_REVIEW_CHANNEL",
+                    "Review channel",
+                    "Where every submission goes first, with the submitter on it and Approve/Reject under it. Mods \
+                     only - this channel shows who sent what. Empty means nothing can be reviewed, so nothing is \
+                     ever posted.",
+                    Kind::Channel,
+                    "1527321274064437528",
+                ),
+                setting(
+                    "VIZIER_CONFESS_LOG_CHANNEL",
+                    "Log channel",
+                    "The audit trail: one card per decision with the text, the submitter\u{2019}s name and id, a link to \
+                     the posted message and who approved or rejected it. Mods only.",
+                    Kind::Channel,
+                    "1527320955763036180",
+                ),
+                setting(
+                    "VIZIER_CONFESS_NEXT_NUMBER",
+                    "Where the numbering starts",
+                    "The number the next confession takes when nothing has been posted through this bot yet - the \
+                     old bot had reached #458, so ours starts at #459 and runs on from there alongside what is \
+                     already in the channel. Once the series has moved past this, the series wins: lowering it can \
+                     never hand the same number out twice. Raising it skips the series forward.",
+                    number(1, 1_000_000_000, "the next number"),
+                    "459",
+                ),
+                setting(
+                    "VIZIER_CONFESS_MIN_LENGTH",
+                    "Shortest confession",
+                    "The fewest characters a confession may be, counted after any pings in it have been taken out. \
+                     Stops the panel being used to post a single word over and over.",
+                    number(1, 1000, "characters"),
+                    "10",
+                ),
+                setting(
+                    "VIZIER_CONFESS_MAX_LENGTH",
+                    "Longest confession",
+                    "The most characters one may be. Discord takes about 1,800 in a message once the heading is on \
+                     it, so anything above that is refused in words rather than cut off.",
+                    number(1, 1800, "characters"),
+                    "1500",
+                ),
+                setting(
+                    "VIZIER_CONFESS_COOLDOWN_MINUTES",
+                    "Wait between confessions",
+                    "How long one member must wait after sending something before they may send another. The reply \
+                     tells them how much of the wait is left. 0 means no wait at all.",
+                    number(0, 10_080, "minutes"),
+                    "10",
+                ),
+                setting(
+                    "VIZIER_CONFESS_BLOCKED",
+                    "Members who may not submit",
+                    "Member ids, comma-separated. Anybody on this list is refused before anything else is checked, \
+                     and is told plainly to message a mod. For members who have abused it; it is not a mute and \
+                     nothing else changes for them.",
+                    Kind::Users,
+                    "",
+                ),
+                toggle(
+                    "VIZIER_CONFESS_THREADS",
+                    "Open a thread on each confession",
+                    "On: an approved confession gets a thread of the same name and the conversation happens in \
+                     there, which keeps the channel readable and is how the server already reads them. Off: no \
+                     threads, and an approved reply goes in the channel under its confession instead.",
+                ),
+                setting(
+                    "VIZIER_CONFESS_THREAD_ARCHIVE_MINUTES",
+                    "How long a quiet thread lasts",
+                    "How long a confession\u{2019}s thread may sit quiet before Discord archives it. Three days by \
+                     default, because these threads are still going days later and a shorter wait would close one \
+                     mid-conversation; a reply to an archived thread wakes it up again anyway. Discord only takes \
+                     these four.",
+                    Kind::Choice { options: THREAD_WAITS },
+                    "4320",
+                ),
+            ],
+            commands: vec![
+                command(
+                    "Submit a confession · Submit a reply",
+                    EVERYONE,
+                    "The buttons on the panel in the confessions channel",
+                    "Opens a box to type in. A confession is just the text; a reply asks which confession number it \
+                     answers as well. Nothing is posted until a mod approves it, and what gets posted never carries \
+                     your name. Only you see the reply telling you it was sent.",
+                ),
+                command(
+                    "Approve · Reject",
+                    ADMINS,
+                    "The buttons under a card in the review channel",
+                    "Approve posts it in the confessions channel, anonymous and numbered, and puts the panel back at \
+                     the bottom. Reject asks for an optional reason and posts nothing anywhere public. Either way \
+                     the log channel gets a card naming the submitter and you. A submission from a moderator is \
+                     marked as one at the top of the card, so nobody waves their own through unnoticed.",
+                ),
+                command(
+                    "Who sent it? (mods)",
+                    ADMINS,
+                    "The third button on the panel",
+                    "Asks for a number and tells you privately who sent that one, when, and what was decided about \
+                     it. Moderators only - anybody else is told so. Every look is written to the activity log with \
+                     your name on it, and the panel says plainly that mods can do this.",
+                ),
+            ],
         },
         Section {
             id: "autoreplies",

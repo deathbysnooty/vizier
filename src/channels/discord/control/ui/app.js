@@ -573,6 +573,7 @@
       navItem('#/left', icon('userminus'), 'Left the server', S.status && S.status.left_recently ? h('span', { class: 'nav-count', 'aria-label': plural(S.status.left_recently, 'member') + ' left recently', 'data-tip': 'Left in the last ' + ((S.status && S.status.left_days) || 30) + ' days' }, String(S.status.left_recently)) : null),
       navItem('#/invites', icon('userplus'), 'Invites'),
       navItem('#/signups', icon('check'), 'Sign-ups'),
+      navItem('#/confessions', icon('message'), 'Confessions'),
       navItem('#/insights', icon('spark'), 'Insights'),
       navItem('#/agent', icon('bot'), 'Bot behaviour'),
       navItem('#/activity', icon('activity'), 'Activity log'),
@@ -628,6 +629,8 @@
       ['Left the server', '#/left', 'userminus', 'Members the bot has seen leave, and what they did while they were here'],
       ['Invites', '#/invites', 'userplus', 'Which invite each new member joined through, who made it, and who each inviter brought in'],
       ['Sign-ups', '#/signups', 'check', 'Who pressed Yes and who pressed No on a sign-up message, when, and a copy-friendly list of everybody who is in'],
+      ['Confessions', '#/confessions', 'message', 'Every anonymous confession and reply: its number, when it came, whether it was approved or rejected, who sent it, who decided and the text'],
+      ['Confessions waiting', '#/confessions?status=pending', 'clock', 'Confessions nobody has approved or rejected yet'],
       ['Moderation', '#/automod', 'shield', 'Spam the bot removed, and messages it has asked a moderator to look at'],
       ['Possibly AI flags', '#/automod?kind=ai', 'bot', 'Messages that might have been written by an AI — flagged only, never deleted'],
       ['Insights', '#/insights', 'spark', 'Who replies to whom, duos, back-and-forths'],
@@ -776,6 +779,7 @@
       case 'left': renderLeft(page, r.q); break;
       case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
       case 'signups': renderSignups(page); break;
+      case 'confessions': renderConfessions(page, r.q); break;
       case 'automod': renderAutomod(page, r.q); break;
       case 'settings': renderSettings(page); break;
       default: renderOverview(page);
@@ -2575,6 +2579,80 @@
       if (!holder.isConnected) return;
       clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the sheet'), h('p', null, e.message)));
     });
+  }
+
+  // --- confessions ----------------------------------------------------------------------
+
+  const CONFESS_STATES = [['all', 'All'], ['pending', 'Waiting'], ['approved', 'Approved'], ['rejected', 'Rejected']];
+
+  function confessionRow(c) {
+    const title = c.kind === 'reply'
+      ? 'Reply #' + c.number + (c.answers ? ' to #' + c.answers : '')
+      : 'Confession #' + c.number;
+    const state = { pending: ['Waiting', 'warn'], approved: ['Approved', 'ok'], rejected: ['Rejected', 'bad'] }[c.status] || [c.status, ''];
+    const who = c.decided_by && c.decided_by.name ? c.decided_by.name : null;
+    return h('div', { class: 'kalesh-row' },
+      avatar(c.submitter && c.submitter.avatar, (c.submitter && c.submitter.name) || '?', 'xs'),
+      h('div', { class: 'kalesh-row-main' },
+        h('div', { class: 'kalesh-row-head' }, h('b', null, title),
+          h('span', { class: 'badge ' + state[1] }, state[0]),
+          c.by_mod ? h('span', { class: 'badge warn', 'data-tip': 'The submitter is a moderator' }, 'from a mod') : null,
+          c.submitter && c.submitter.in_server === false ? h('span', { class: 'tag-left' }, 'left') : null),
+        h('div', { class: 'kalesh-row-how' },
+          'Sent by ' + ((c.submitter && c.submitter.name) || 'unknown') + ' ' + ago(c.ts)
+          + (who ? ' · ' + (c.status === 'approved' ? 'approved' : 'rejected') + ' by ' + who + ' ' + ago(c.decided_ts) : '')),
+        h('p', { class: 'confess-text' }, c.text),
+        c.reason ? h('div', { class: 'kalesh-row-how' }, h('b', null, 'Reason: '), h('span', null, c.reason)) : null,
+        c.link ? h('a', { class: 'open-link', href: c.link, target: '_blank', rel: 'noreferrer noopener' }, 'Open the post', icon('right')) : null),
+      h('span', { class: 'chip mono' }, (c.submitter && c.submitter.id) || ''));
+  }
+
+  function renderConfessions(page, q) {
+    document.title = 'Confessions · Loduchand';
+    page.appendChild(pageHead('Confessions',
+      'Every anonymous confession and reply, newest first: its number, when it came, whether a mod approved or rejected it, who sent it, who decided, and the text. '
+      + 'The confessions channel never shows a name — this page is where moderation happens, and every look at it is written to the activity log.'));
+
+    let status = q.get('status') || 'all';
+    const input = h('input', { type: 'search', placeholder: 'Search the text, a name or a number', 'aria-label': 'Search the confessions', value: q.get('q') || '' });
+    const count = h('span', { class: 'count', 'aria-live': 'polite' });
+    const holder = h('div', null);
+    let timer = null;
+
+    const load = () => {
+      clear(holder).appendChild(h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the record…')));
+      const params = new URLSearchParams();
+      if (status !== 'all') params.set('status', status);
+      if (input.value.trim()) params.set('q', input.value.trim());
+      api('GET', '/confessions' + (params.toString() ? '?' + params.toString() : '')).then((d) => {
+        if (!holder.isConnected) return;
+        clear(holder);
+        const t = d.totals || {};
+        holder.appendChild(h('div', { class: 'tiles' },
+          tile('Waiting', 'clock', numberFmt.format(t.pending || 0), t.pending ? 'a mod has to decide' : 'nothing to decide'),
+          tile('Approved', 'check', numberFmt.format(t.approved || 0), 'posted anonymously'),
+          tile('Rejected', 'x', numberFmt.format(t.rejected || 0), 'never posted anywhere'),
+          tile('Next number', 'tag', '#' + (d.next_number || ''), 'what the next one takes')));
+        const rows = d.results || [];
+        count.textContent = plural(rows.length, 'confession');
+        const body = h('div', { class: 'kalesh-rows' });
+        if (!rows.length) body.appendChild(h('p', { class: 'empty-small' }, 'Nothing matches.'));
+        rows.forEach((c) => body.appendChild(confessionRow(c)));
+        holder.appendChild(card('confessions-list', 'The record', 'Newest first. Gaps in the numbers are the ones a mod rejected.', body, { cls: 'kalesh-card' }));
+        refreshAudit();
+      }).catch((e) => {
+        if (!holder.isConnected) return;
+        clear(holder).appendChild(h('div', { class: 'card empty' }, icon('alert'), h('h3', null, 'Couldn’t read the record'), h('p', null, e.message)));
+      });
+    };
+
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 250); });
+    page.appendChild(h('div', { class: 'toolbar' },
+      h('label', { class: 'search-box' }, icon('search'), input),
+      segmented(CONFESS_STATES, status, 'Which ones', (v) => { status = v; load(); }),
+      count));
+    page.appendChild(holder);
+    load();
   }
 
   // --- topics ---------------------------------------------------------------------------

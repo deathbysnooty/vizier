@@ -105,9 +105,17 @@ pub struct Seen {
     pub mentions: Vec<(u64, bool)>,
 }
 
-/// Channels whose messages are never counted.
+/// Channels whose messages are never counted, and never recorded: #safe-corner,
+/// and the three channels the confessions feature owns. `msglog::never_logged`
+/// reads this list, so nothing said in any of them is in the message log at all
+/// — which is what keeps a confession out of the member notes, the daily topic
+/// pass, the deep dive, the Kalesh pages and every summary.
 pub fn sensitive_channels() -> Vec<u64> {
-    vec![super::super::weekly::SAFE_CORNER]
+    let mut out = vec![super::super::weekly::SAFE_CORNER];
+    out.extend(super::super::confess::sensitive_channels());
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Whether messages in this channel may be counted at all.

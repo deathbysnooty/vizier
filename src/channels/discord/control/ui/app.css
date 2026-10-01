@@ -2641,6 +2641,17 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .dive-row .kalesh-row-head .badge { margin-left: 0; }
 .dive-why { display: flex; flex-wrap: wrap; gap: 4px 6px; }
 .badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.badge.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 9%, transparent); }
+
+/* A confession's own words, quoted on the Confessions page. Set apart from the
+   line about who sent it, so the two are never misread for one another. */
+.confess-text {
+  margin: 6px 0 2px; padding: 7px 10px;
+  border-left: 2px solid var(--line);
+  color: var(--text); font-size: 13.5px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .badge.nightly { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
 .dive-saved-wrap { padding: 0 var(--pad-card) 14px; }
 .dive-saved { display: grid; gap: 10px; justify-items: start; padding: 12px 14px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--line); }

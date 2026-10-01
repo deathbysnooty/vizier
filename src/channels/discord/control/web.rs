@@ -361,6 +361,7 @@ mod agent;
 mod arena;
 mod automod;
 mod chess;
+mod confessions;
 mod puzzle;
 mod duel;
 mod frogs;
@@ -1234,6 +1235,7 @@ pub fn router(panel: Panel) -> Router {
         .route("/deepdive/summarise", post(deepdive::summarise))
         .route("/deepdives", get(deepdives::list))
         .route("/signups", get(signups::list))
+        .route("/confessions", get(confessions::list))
         .route("/topics", get(topics::member))
         .route("/topics/week", get(topics::week))
         .route("/members", get(members::search))
@@ -2011,6 +2013,8 @@ async fn audit(State(panel): State<Panel>, Query(q): Query<AuditQuery>) -> ApiRe
                 obj.extend(topics::audit_entry(e));
             } else if e.key.starts_with("signups:") || e.key.starts_with("signup:") {
                 obj.extend(signups::audit_entry(e));
+            } else if e.key.starts_with("confessions:") || e.key.starts_with("confess:") {
+                obj.extend(confessions::audit_entry(e));
             } else if e.key.starts_with("invites:") {
                 obj.extend(invites::audit_entry(e));
             } else if e.key == "automod:flags" {

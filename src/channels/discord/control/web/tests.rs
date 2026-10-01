@@ -1512,6 +1512,11 @@ pub fn store() {
         if let Some(db) = super::super::super::signup_store::db() {
             super::signups::seed(&db.lock(), chrono::Utc::now().timestamp());
         }
+        // The confessions record, with a few to draw the Confessions page.
+        super::super::super::confess_store::open(dir.path().to_str().unwrap()).expect("confess store");
+        if let Some(db) = super::super::super::confess_store::db() {
+            super::confessions::seed(&mut db.lock(), chrono::Utc::now().timestamp());
+        }
         seed_automod();
         dir
     });
@@ -1710,6 +1715,11 @@ async fn everything_needs_a_session() {
         ("GET", "/api/deepdives"),
         // Who signed up for next month is a moderators' list like any other.
         ("GET", "/api/signups"),
+        // And the confessions are the most private list of the lot: there is no
+        // public corner of this page and no session-less way in.
+        ("GET", "/api/confessions"),
+        ("GET", "/api/confessions?q=wordle"),
+        ("GET", "/api/confessions?status=pending"),
         ("GET", "/api/topics?member=1"),
         ("GET", "/api/topics/week"),
     ] {
@@ -4771,6 +4781,115 @@ async fn the_signups_page_lists_both_answers_with_a_copy_list_and_its_warnings()
     assert_eq!(mine.len(), 1, "{audit}");
     assert_eq!(mine[0]["label"], "Looked at the sign-ups");
     assert!(mine[0]["new"].is_null() && mine[0]["old"].is_null());
+}
+
+// --- confessions -----------------------------------------------------------------------
+
+/// The mods' own view of the record: every submission with its number, state,
+/// submitter, who decided and the text, searchable. This page is the other half
+/// of the bargain the confessions channel makes, so it is checked whole — and
+/// so is the line it leaves in the activity log.
+#[tokio::test]
+async fn the_confessions_page_lists_the_record_and_can_be_searched() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body, _) = call(&app, "GET", "/api/confessions", Some(&session), None, true).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["totals"]["approved"], 2);
+    assert_eq!(body["totals"]["pending"], 1);
+    assert_eq!(body["totals"]["rejected"], 1);
+    assert_eq!(body["totals"]["all"], 4);
+    assert_eq!(body["next_number"], 463, "the series carries on from the seeded ones");
+
+    let rows = body["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{}", body["results"]);
+    let numbers: Vec<i64> = rows.iter().map(|r| r["number"].as_i64().unwrap()).collect();
+    assert_eq!(numbers, vec![462, 461, 460, 459], "newest first");
+
+    // The approved confession: its text, who sent it, who approved it, a link.
+    let first = rows.iter().find(|r| r["number"] == 459).unwrap();
+    assert_eq!(first["status"], "approved");
+    assert_eq!(first["kind"], "confession");
+    assert_eq!(first["submitter"]["name"], "Zoya");
+    assert_eq!(first["submitter"]["id"], "1004");
+    assert_eq!(first["decided_by"]["name"], "Kabir");
+    assert!(first["text"].as_str().unwrap().contains("Star Wars"));
+    assert!(first["link"].as_str().unwrap().contains("/990101"), "{}", first["link"]);
+    assert_eq!(first["in_thread"], "990102");
+
+    // The reply knows which confession it answers.
+    let reply = rows.iter().find(|r| r["number"] == 460).unwrap();
+    assert_eq!(reply["kind"], "reply");
+    assert_eq!(reply["answers"], 459);
+
+    // The rejected one has a reason and no link, because nothing was posted.
+    let rejected = rows.iter().find(|r| r["number"] == 462).unwrap();
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["reason"], "doxxing");
+    assert!(rejected["link"].is_null(), "a rejection has nothing public to link to");
+
+    // The one nobody has decided yet names nobody as having decided it.
+    let pending = rows.iter().find(|r| r["number"] == 461).unwrap();
+    assert_eq!(pending["status"], "pending");
+    assert!(pending["decided_by"].is_null() && pending["decided_ts"].is_null());
+
+    // Searching by state, by words and by number.
+    let (_, only_pending, _) = call(&app, "GET", "/api/confessions?status=pending", Some(&session), None, false).await;
+    assert_eq!(only_pending["results"].as_array().unwrap().len(), 1);
+    assert_eq!(only_pending["results"][0]["number"], 461);
+    let (_, found, _) = call(&app, "GET", "/api/confessions?q=Star%20Wars", Some(&session), None, false).await;
+    assert_eq!(found["results"].as_array().unwrap().len(), 1);
+    assert_eq!(found["results"][0]["number"], 459);
+    let (_, by_number, _) = call(&app, "GET", "/api/confessions?q=%23462", Some(&session), None, false).await;
+    assert_eq!(by_number["results"].as_array().unwrap().len(), 1);
+    assert_eq!(by_number["results"][0]["number"], 462);
+    let (_, by_name, _) = call(&app, "GET", "/api/confessions?q=Troll", Some(&session), None, false).await;
+    assert_eq!(by_name["results"][0]["number"], 462, "the submitter's name is searchable too");
+    // A state that is not one is refused in words rather than ignored.
+    let (status, why, _) = call(&app, "GET", "/api/confessions?status=posted", Some(&session), None, false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(why.to_string().contains("isn't a state"), "{why}");
+
+    // The log says who looked and what they searched for, and never a word of
+    // what came back.
+    let (_, audit, _) = call(&app, "GET", "/api/audit?limit=1000", Some(&session), None, false).await;
+    let mine: Vec<&Value> = audit.as_array().unwrap().iter().filter(|e| e["key"] == "confessions:list").collect();
+    assert!(!mine.is_empty(), "{audit}");
+    assert_eq!(mine[0]["label"], "Looked at the confessions");
+    assert!(mine[0]["new"].is_null() && mine[0]["old"].is_null());
+    let words = audit.to_string();
+    // What a mod typed into the box is logged; what came back never is.
+    assert!(!words.contains("crusts first"), "a confession's text is in the activity log: {words}");
+    assert!(!words.contains("phone number and address"), "a rejected confession's text is in the log: {words}");
+    assert!(!words.contains("never seen a single"), "the rest of a confession is in the log: {words}");
+    assert!(words.contains("searching for"), "but what was searched for is: {words}");
+}
+
+/// The page cannot decide anything: approving and rejecting happen on the
+/// buttons in Discord, where the mod who pressed is on the record. A stolen
+/// session must not be able to post a confession.
+#[tokio::test]
+async fn the_confessions_page_cannot_approve_reject_or_change_anything() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    for (method, path) in [
+        ("POST", "/api/confessions"),
+        ("PUT", "/api/confessions"),
+        ("DELETE", "/api/confessions"),
+        ("POST", "/api/confessions/459/approve"),
+        ("POST", "/api/confessions/459/reject"),
+    ] {
+        let (status, _, _) = call(&app, method, path, Some(&session), Some(json!({ "value": "x" })), true).await;
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {path} answered {status} - this page must be read-only"
+        );
+    }
+    // And an ordinary member with a session of their own is not a mod.
+    let theirs = session_for(MEMBER);
+    let (status, _, _) = call(&app, "GET", "/api/confessions", Some(&theirs), None, true).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only panel admins read this");
 }
 
 // --- the demo ----------------------------------------------------------------------------

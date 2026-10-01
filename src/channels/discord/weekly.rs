@@ -252,11 +252,21 @@ fn verify_prompt(channel: &str, safe: bool, t: &Transcript, proposals: &[Grounde
 
 // --- configuration ----------------------------------------------------------------------
 
-/// `VIZIER_WEEKLY_CHANNELS` (comma-separated ids), or the eight chosen by the owner.
-fn channels() -> Vec<u64> {
+/// `VIZIER_WEEKLY_CHANNELS` (comma-separated ids), or the eight chosen by the
+/// owner — less anything the confessions feature owns.
+///
+/// This scan is the one AI path that is pointed at channels by hand rather than
+/// reading the message log, so it is the one place the sensitive list cannot do
+/// the work for us. A confessions channel typed into the setting by mistake is
+/// dropped here rather than read.
+pub(super) fn channels() -> Vec<u64> {
+    let confessions = super::confess::sensitive_channels();
     Some(super::control::ids("VIZIER_WEEKLY_CHANNELS"))
         .filter(|ids| !ids.is_empty())
         .unwrap_or_else(|| DEFAULT_CHANNELS.to_vec())
+        .into_iter()
+        .filter(|id| !confessions.contains(id))
+        .collect()
 }
 
 /// Who gets the approval DM and may press its buttons: `VIZIER_WEEKLY_REVIEWERS`,

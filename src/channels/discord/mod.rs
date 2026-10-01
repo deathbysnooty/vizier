@@ -72,6 +72,9 @@ mod ship_sheet;
 // The sign-up button: /signup, the two buttons, and the sheet they fill.
 mod signup;
 mod signup_store;
+// Anonymous confessions: the panel, the review queue, and the numbered posts.
+pub(crate) mod confess;
+mod confess_store;
 mod topics;
 mod topics_store;
 mod topics_job;
@@ -274,6 +277,12 @@ impl VizierChannel for DiscordChannelReader {
         // rather than swallow an answer.
         if let Err(err) = signup_store::open(&self.deps.config.workspace) {
             tracing::error!("signup: store not opened ({}) - the sign-up buttons will refuse every press", err);
+        }
+        // Confessions: who sent what, what a mod decided, and the panel message
+        // to move. Not opening means every button refuses rather than losing
+        // somebody's confession into a channel nobody reviews.
+        if let Err(err) = confess_store::open(&self.deps.config.workspace) {
+            tracing::error!("confess: store not opened ({}) - the confession buttons will refuse every press", err);
         }
         // Automatic moderation: spam removals and AI flags. Not opening only
         // means the feature stays off, which is also what it defaults to.
@@ -1569,6 +1578,9 @@ impl EventHandler for Handler {
             // the log, rather than found out when the first member presses Yes.
             signup::check_at_startup(&ctx, guild);
         }
+        // The confessions panel: put back at the bottom of its channel, so a
+        // restart never leaves the channel without its buttons.
+        confess::spawn(ctx.clone());
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
         // The House Cup channel: welcome, rules, and the scoreboard card kept last.
@@ -2060,6 +2072,12 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 signup::on_component(&ctx, component).await;
                 return;
             }
+            // The same for the confessions panel and the review buttons: a
+            // review embed from last week is still decidable after a restart.
+            if confess::owns_component(&id) {
+                confess::on_component(&ctx, component).await;
+                return;
+            }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
                 quote::on_component(&ctx, &self.1.storage, component).await;
                 return;
@@ -2255,6 +2273,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if modal.data.custom_id.starts_with("chessmove:") {
                 chess::on_modal(&ctx, modal).await;
+                return;
+            }
+            if confess::owns_modal(&modal.data.custom_id) {
+                confess::on_modal(&ctx, modal).await;
                 return;
             }
             if let Some(orig_id) = modal.data.custom_id.strip_prefix("lrmodal:") {
@@ -3535,6 +3557,11 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         // Anything new in the scoreboard channel - bots and announcements
         // included - moves the House Cup card back to the bottom.
         scoreboard::on_message(&ctx, &msg);
+        // Anything new in the confessions channel - a confession, a reply that
+        // had to fall back there, somebody chatting, the old bot posting - puts
+        // the submit panel back at the bottom, so nobody has to scroll for it.
+        // Rate-limited, and it never touches a message this bot did not post.
+        confess::on_message(&ctx, &msg);
         // Anything posted in the Name Place Animal Thing channel moves its card back down.
         npat::note_message(&ctx, &msg);
         // And anything in the sudoku channel moves the puzzle card back down.
