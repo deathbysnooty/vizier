@@ -13,8 +13,8 @@ use tiny_skia::{FillRule, FilterQuality, LineCap, PathBuilder, Pixmap, PixmapPai
 
 use super::awards_card::{avatar_pixmap, fill_circle, paint, rrect};
 use super::battle_card::{
-    crown, dim, down, egg, fill_shaded, floor, glow, lift, look, spaced, vignette, HouseLook, Pen, Season, BG, GOLD,
-    INK, MUTED,
+    crown, dim, down, egg, fill_shaded, floor, glow, house_mark, lift, look, spaced, vignette, HouseLook, Pen, Season,
+    BG, GOLD, INK, MUTED,
 };
 
 /// Someone in the draw.
@@ -537,20 +537,10 @@ fn slot(pen: &mut Pen<'_>, art: &Art, b: &Bracket, v: &View, at: (f32, f32, f32)
     }
 }
 
-/// A small house mark at a slot's right: the house's initial on its own colour,
-/// painted, so a month that renames the four never shows somebody else's crest.
+/// A small house mark at a slot's right: the same painted crest the fight card
+/// wears, and the same initial when the paintings are not there.
 fn mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32, r: f32, dimmed: bool) {
-    let field = if dimmed { [56, 59, 68] } else { house.colours.0 };
-    fill_circle(&mut pen.px, cx, cy, r, field);
-    if let Some(edge) = PathBuilder::from_circle(cx, cy, r - 0.9) {
-        let keyline = if dimmed { [94, 99, 112] } else { lift(house.colours.1, 0.5) };
-        let stroke = Stroke { width: 1.6, ..Stroke::default() };
-        pen.px.stroke_path(&edge, &paint(keyline, 235), &stroke, Transform::identity(), None);
-    }
-    let letter: String = house.initial.chars().take(1).collect::<String>().to_uppercase();
-    let size = (r * 1.1).round().max(9.0);
-    let ink = if dimmed { LOSER_INK } else { lift(house.colours.1, 0.4) };
-    pen.centered(&letter, cx, cy + size * 0.36, size, Weight::EXTRA_BOLD, ink);
+    house_mark(pen, house, cx, cy, r, dimmed);
 }
 
 /// What stands at a slot's left: the member's own picture after the hatch, a
@@ -698,17 +688,18 @@ mod tests {
     /// The month's four, as `battle.rs` paints them: key, name, initial and
     /// the two banner colours. Held here rather than read off `house::HOUSES`
     /// so the bracket's tests never depend on what the four are called.
-    const PAINT: [(&str, &str, &str, ([u8; 3], [u8; 3])); 4] = [
-        ("gryffindor", "Stark", "S", ([110, 123, 139], [226, 232, 240])),
-        ("ravenclaw", "Targaryen", "T", ([44, 38, 44], [168, 34, 38])),
-        ("slytherin", "Lannister", "L", ([140, 28, 28], [200, 162, 60])),
-        ("hufflepuff", "Night's Watch", "W", ([46, 51, 60], [138, 190, 222])),
+    const PAINT: [(&str, &str, &str, &str, ([u8; 3], [u8; 3])); 4] = [
+        ("gryffindor", "stark", "Stark", "S", ([110, 123, 139], [226, 232, 240])),
+        ("ravenclaw", "targaryen", "Targaryen", "T", ([44, 38, 44], [168, 34, 38])),
+        ("slytherin", "lannister", "Lannister", "L", ([140, 28, 28], [200, 162, 60])),
+        ("hufflepuff", "watch", "Night's Watch", "W", ([46, 51, 60], [138, 190, 222])),
     ];
 
     fn house_look(i: usize) -> HouseLook {
-        let (key, name, initial, colours) = PAINT[i % PAINT.len()];
+        let (key, art, name, initial, colours) = PAINT[i % PAINT.len()];
         HouseLook {
             key,
+            art,
             name: name.to_string(),
             crest: "\u{1f6e1}\u{fe0f}".to_string(),
             initial: initial.to_string(),

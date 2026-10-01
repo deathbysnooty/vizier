@@ -43,6 +43,7 @@ use serenity::all::{
 
 use super::battle_card::{self, Champion, Fight, Fighter, HouseLook, Outcome, Season, EGG_STAGES};
 use super::battle_bracket::{self, Bracket, Entrant, Slot, round_title};
+use super::battle_art;
 use super::battle_lines::{Lines, lines};
 use super::battle_scroll;
 
@@ -177,6 +178,20 @@ fn season() -> Season {
     if hatched() { Season::Houses } else { Season::Eggs }
 }
 
+/// Which painted crest and dragon a house's slot wears. This is a file name,
+/// not paint: the month says what a house is CALLED and what colour it is, and
+/// this says which picture goes with the slot. A slot with no painting named
+/// draws its initial, as it always did.
+fn art_slug(key: &str) -> &'static str {
+    match key {
+        "gryffindor" => "stark",
+        "slytherin" => "lannister",
+        "ravenclaw" => "targaryen",
+        "hufflepuff" => "watch",
+        _ => "",
+    }
+}
+
 /// How a house is shown this month: the name, crest and colour come from the
 /// month's own paint, so a server that renames the four renames them here too.
 /// The banner's trim is the same colour lifted, because a banner needs two and
@@ -187,6 +202,7 @@ fn house_look(house: &'static super::house::House) -> HouseLook {
     let field = [(colour >> 16) as u8, (colour >> 8) as u8, colour as u8];
     HouseLook {
         key: house.key,
+        art: art_slug(house.key),
         initial: themed.name.chars().find(|c| c.is_alphabetic()).map(|c| c.to_uppercase().to_string()).unwrap_or_default(),
         name: themed.name,
         crest: themed.crest,
@@ -194,29 +210,28 @@ fn house_look(house: &'static super::house::House) -> HouseLook {
     }
 }
 
-/// How far along a member's egg is, 1..=[`EGG_STAGES`], by the points they have
-/// towards the month. Cold at nothing, splitting open once they have really
-/// played: the thresholds are wide, so an egg warms over a week rather than in
-/// an afternoon.
-fn egg_stage(points: i64) -> u8 {
-    match points {
-        p if p <= 0 => 1,
-        p if p < 10 => 2,
-        p if p < 30 => 3,
-        p if p < 70 => 4,
-        _ => EGG_STAGES,
+/// Which day of the egg week it is, 1 to 7, counting the last seven days before
+/// the hatch. This is the live page's own arithmetic, deliberately: an egg that
+/// is cracked on the website and smooth on a fight card is a bug somebody will
+/// report, and the only way it stays right is if both count the same days.
+fn egg_day(now: i64) -> i64 {
+    let hatch = super::month::hatch_at();
+    if hatch <= 0 {
+        return 1;
     }
+    let week = super::month::watch_days().max(1);
+    let from = hatch - week * 86_400;
+    let span = (hatch - from).max(86_400);
+    let through = (now - from) as f64 / span as f64;
+    ((through * 7.0).floor() as i64 + 1).clamp(1, 7)
 }
 
-/// Everything a member has earned towards the month, read from the house
-/// ledger. Read-only, and 0 when the store is not open.
-fn points_of(user: u64) -> i64 {
-    let Some(db) = super::house::db() else {
-        return 0;
-    };
-    db.lock()
-        .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE user_id = ?1", params![user as i64], |r| r.get(0))
-        .unwrap_or(0)
+/// Which egg everybody is showing today. Everybody's: the crack is the
+/// calendar's, and what a member's own points buy them is the month's double
+/// and a place on the board, not a better-looking egg. Nothing in a fight
+/// reads anybody's points.
+fn egg_now() -> u8 {
+    battle_art::egg_for_day(egg_day(Utc::now().timestamp()))
 }
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
@@ -428,6 +443,9 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     )?;
     // The scrolls a duel is fought over, written down as they are shown.
     conn.execute_batch(battle_scroll::SCHEMA)?;
+    // And the month's painted crests, eggs and halls, if they have been copied
+    // to the workspace. Without them every card draws its plain shapes.
+    battle_art::open(workspace);
     let _ = DB.set(Mutex::new(conn));
     Ok(())
 }
@@ -746,7 +764,7 @@ async fn contender_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Con
     } else {
         super::house::house_of(user).map(house_look)
     };
-    Some(Contender { id: user, name: display(&member), avatar: None, house, stage: egg_stage(points_of(user)), face })
+    Some(Contender { id: user, name: display(&member), avatar: None, house, stage: egg_now(), face })
 }
 
 async fn picture(face: &str) -> Option<Vec<u8>> {
@@ -2916,23 +2934,31 @@ mod tests {
         assert!(!Season::Eggs.houses() && Season::Houses.houses());
     }
 
-    /// The egg warms with the points behind it, and nothing outside the range
-    /// can make it a stage that does not exist. It is paint only: nothing in a
-    /// fight reads it.
+    /// The egg everybody is shown is the calendar's, not anybody's: the same
+    /// painting on the same day for the whole server, counted the same way the
+    /// live page counts it. A member's own points buy the month's double and a
+    /// place on the board - never a better-looking egg, and never an advantage
+    /// in a fight.
     #[test]
-    fn an_egg_warms_with_the_points_behind_it() {
-        assert_eq!(egg_stage(-50), 1);
-        assert_eq!(egg_stage(0), 1);
-        assert_eq!(egg_stage(1), 2);
-        assert_eq!(egg_stage(9), 2);
-        assert_eq!(egg_stage(10), 3);
-        assert_eq!(egg_stage(29), 3);
-        assert_eq!(egg_stage(30), 4);
-        assert_eq!(egg_stage(69), 4);
-        assert_eq!(egg_stage(70), EGG_STAGES);
-        assert_eq!(egg_stage(i64::MAX), EGG_STAGES);
-        for points in [-1_000i64, 0, 7, 44, 1_000_000] {
-            assert!((1..=EGG_STAGES).contains(&egg_stage(points)), "{}", points);
+    fn the_egg_of_the_day_is_the_calendars_and_nobodys_own() {
+        let hatch = super::super::month::hatch_at();
+        let week = super::super::month::watch_days().max(1);
+        let from = hatch - week * 86_400;
+        // Through the week, a day at a time.
+        let days: Vec<i64> = (0..7).map(|d| egg_day(from + d * 86_400 + 3_600)).collect();
+        assert_eq!(days, vec![1, 2, 3, 4, 5, 6, 7], "{:?}", days);
+        // Before it and after it, the week's own ends.
+        assert_eq!(egg_day(from - 86_400), 1);
+        assert_eq!(egg_day(hatch + 86_400), 7);
+        // And the painting each day shows is the live page's table.
+        let art: Vec<u8> = days.iter().map(|d| super::super::battle_art::egg_for_day(*d)).collect();
+        assert_eq!(art, vec![1, 1, 2, 3, 3, 4, 5], "the website and the cards must crack together");
+        // It only ever goes forward, and it stays inside the five paintings.
+        assert!(art.windows(2).all(|p| p[1] >= p[0]), "{:?}", art);
+        assert!(art.iter().all(|a| (1..=EGG_STAGES).contains(a)), "{:?}", art);
+        // Nothing in the arena reads a member's points to draw them.
+        for (name, text) in arena_sources() {
+            assert!(!text.contains("points_of"), "{} reads somebody's points to draw an egg", name);
         }
     }
 

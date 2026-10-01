@@ -29,6 +29,7 @@ use tiny_skia::{
 };
 
 use super::awards_card::{avatar_pixmap, blend_rect, fill_circle, paint, rrect};
+use super::battle_art::{self, Art};
 
 /// Which season the arena is in. The egg week comes first, and the hatch is
 /// what moves it on; `battle::hatched` is the one place that decides.
@@ -57,6 +58,9 @@ impl Season {
 pub struct HouseLook {
     /// The ledger key underneath, for looking up artwork.
     pub key: &'static str,
+    /// Which painted crest and dragon go with this slot - `stark`, `watch` -
+    /// or empty for a slot with no painting, which wears its initial instead.
+    pub art: &'static str,
     /// "Stark", as this month calls it.
     pub name: String,
     /// The crest as Discord shows it, for the rosters and lists in chat. Never
@@ -292,6 +296,12 @@ fn draw_fight(pen: &mut Pen<'_>, f: &Fight) {
     let (left, right) = sides(&f.outcome);
     let look = look();
     floor(&mut pen.px, FIGHT_W, FIGHT_H, look.floor);
+    // A fight that is over is a result card - the one people screenshot - so
+    // it gets the painted hall behind it and the painted border round it. One
+    // still being fought keeps the plain ground, so the two read apart at a
+    // glance in a channel.
+    let decided = matches!(f.outcome, Outcome::Won(_));
+    let painted = decided && hall(&mut pen.px, Art::Throne, FIGHT_W, FIGHT_H, 170);
     glow(&mut pen.px, LEFT_CX + 30.0, FIGHT_CY + 20.0, 430.0, look.left, 74);
     glow(&mut pen.px, RIGHT_CX - 30.0, FIGHT_CY + 20.0, 430.0, look.right, 74);
     // Widest band first: stacking them leaves the seam soft down both sides
@@ -311,7 +321,9 @@ fn draw_fight(pen: &mut Pen<'_>, f: &Fight) {
     mist(&mut pen.px, FIGHT_W, FIGHT_H);
     snow(&mut pen.px, FIGHT_W, PANEL_Y - 10.0, 70, f.season);
     vignette(&mut pen.px, FIGHT_W, FIGHT_H, 150);
-    frame(&mut pen.px, FIGHT_W, FIGHT_H);
+    if !(painted && painted_frame(&mut pen.px, Art::Frame("rare"), FIGHT_W, FIGHT_H, 38.0)) {
+        frame(&mut pen.px, FIGHT_W, FIGHT_H);
+    }
 
     stage_chip(pen, &stage_text(f.stage.trim()));
     fighter(pen, f.left, LEFT_CX, look.left, left, f.season);
@@ -556,22 +568,34 @@ fn draw_champion(pen: &mut Pen<'_>, c: &Champion) {
     let outer = CHAMP_AV / 2.0 + GAP + RING;
     let look = look();
     floor(&mut pen.px, CHAMP_W, CHAMP_H, look.floor);
-    glow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, 430.0, look.halo, 150);
-    rays(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer + 10.0, 760.0, look.rays);
-    banner(
-        pen,
-        CHAMP_W / 2.0,
-        CHAMP_BANNER_W,
-        (BANNER_TOP, CHAMP_BANNER_BODY, CHAMP_BANNER_TAIL),
-        cloth(c.who, c.season),
-    );
+    // The throne room behind them, or the old burst of rays when the month's
+    // paintings have not been copied in.
+    let painted = hall(&mut pen.px, Art::Throne, CHAMP_W, CHAMP_H, 150);
+    glow(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, 430.0, look.halo, if painted { 90 } else { 150 });
+    if !painted {
+        rays(&mut pen.px, CHAMP_W / 2.0, CHAMP_CY, outer + 10.0, 760.0, look.rays);
+    }
+    // Without a painted hall the banner is what the champion stands against;
+    // with one, the hall is, and a banner over it is a layer too many.
+    if !painted {
+        banner(
+            pen,
+            CHAMP_W / 2.0,
+            CHAMP_BANNER_W,
+            (BANNER_TOP, CHAMP_BANNER_BODY, CHAMP_BANNER_TAIL),
+            cloth(c.who, c.season),
+        );
+    }
     for lamp in [120.0, CHAMP_W - 120.0] {
         torch(&mut pen.px, lamp, (CHAMP_W / 2.0, CHAMP_H - 120.0), 210.0);
     }
     snow(&mut pen.px, CHAMP_W, CHAMP_H - 150.0, 90, c.season);
     confetti(&mut pen.px, CHAMP_W, CHAMP_H, (CHAMP_W / 2.0, CHAMP_CY, outer + 26.0), champion_specks(c.season, &look));
     vignette(&mut pen.px, CHAMP_W, CHAMP_H, 170);
-    frame(&mut pen.px, CHAMP_W, CHAMP_H);
+    // The painted border, or the iron rule when there is none.
+    if !painted_frame(&mut pen.px, Art::Frame("rare"), CHAMP_W, CHAMP_H, 46.0) {
+        frame(&mut pen.px, CHAMP_W, CHAMP_H);
+    }
     // A warm pool of light under the name, so the type sits in the glow.
     glow(&mut pen.px, CHAMP_W / 2.0, 462.0, 330.0, look.pool, 78);
 
@@ -794,6 +818,35 @@ fn mist(px: &mut Pixmap, w: f32, h: f32) {
     }
 }
 
+/// A painted hall behind the card, darkened well back so the type still reads.
+/// `strength` is how much black goes over it: a card with a lot of words on it
+/// wants more. Returns whether there was a painting at all.
+fn hall(px: &mut Pixmap, art: Art, w: f32, h: f32, strength: u8) -> bool {
+    let Some(painted) = battle_art::cover(art, w as u32, h as u32) else {
+        return false;
+    };
+    let how = PixmapPaint { quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+    px.draw_pixmap(0, 0, painted.as_ref().as_ref(), &how, Transform::identity(), None);
+    // Pulled down hard. These are the cards people screenshot and the words on
+    // them are the point; the hall is there to be felt, not read.
+    if let Some(area) = Rect::from_xywh(0.0, 0.0, w, h) {
+        px.fill_rect(area, &paint([6, 6, 9], strength), Transform::identity(), None);
+    }
+    true
+}
+
+/// A painted border round the card, fitted as a nine-slice so its corners keep
+/// their own shape. `None` when the art is not there, and the caller falls back
+/// to the iron rule.
+fn painted_frame(px: &mut Pixmap, art: Art, w: f32, h: f32, band: f32) -> bool {
+    let Some(border) = battle_art::nine_slice(art, w as u32, h as u32, 0.20, band.round() as u32) else {
+        return false;
+    };
+    let how = PixmapPaint { quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
+    px.draw_pixmap(0, 0, border.as_ref().as_ref(), &how, Transform::identity(), None);
+    true
+}
+
 /// The card's border: a double rule of cold iron with a stud in each corner. It
 /// sits inside the stage chip and under the crown.
 fn frame(px: &mut Pixmap, w: f32, h: f32) {
@@ -918,8 +971,10 @@ fn scroll_fighter(pen: &mut Pen<'_>, who: &Fighter, cx: f32, colour: [u8; 3], se
     fill_circle(&mut pen.px, cx, SCROLL_FACE_CY, SCROLL_AV / 2.0 + 4.0, [12, 13, 17]);
     subject(pen, who, cx, SCROLL_FACE_CY, SCROLL_AV, season, false);
     if let (true, Some(house)) = (season.houses(), who.house.as_ref()) {
+        // Inboard here, unlike the fight card: these discs sit in the corners
+        // of the card and the outer shoulder would hang off the edge.
         let d = outer * std::f32::consts::FRAC_1_SQRT_2;
-        let bx = if cx < SCROLL_W / 2.0 { cx - d } else { cx + d };
+        let bx = if cx < SCROLL_W / 2.0 { cx + d } else { cx - d };
         house_mark(pen, house, bx, SCROLL_FACE_CY + d, 22.0, false);
     }
     // The name and the bar sit inboard of the disc, where there is room.
@@ -963,33 +1018,89 @@ fn scoreline(pen: &mut Pen<'_>, s: &Scroll) {
     pen.centered(&spaced("SCROLLS WON"), cx, 136.0, 12.0, Weight::SEMIBOLD, MUTED);
 }
 
-/// The parchment: an aged sheet with a rolled edge top and bottom and a few
-/// stains, so the puzzle sits on something rather than in a box.
+/// The parchment: an aged sheet with real fibre and staining in it, hung
+/// between two turned rollers. Everything on it has to stay readable at a
+/// glance - that is the whole game - so the texture is quiet and the ink is
+/// dark.
 fn vellum(pen: &mut Pen<'_>) {
-    if let Some(sheet) = rrect(VELLUM_X, VELLUM_Y, VELLUM_W, VELLUM_H, 10.0) {
-        let shader = down(
-            VELLUM_Y,
-            VELLUM_Y + VELLUM_H,
-            &[(0.0, lift(VELLUM, 0.35)), (0.4, VELLUM), (1.0, dim(VELLUM, 0.88))],
-        );
-        fill_shaded(&mut pen.px, &sheet, shader, VELLUM);
-        let stroke = Stroke { width: 3.0, ..Stroke::default() };
-        pen.px.stroke_path(&sheet, &paint(VELLUM_EDGE, 220), &stroke, Transform::identity(), None);
+    let Some(sheet) = rrect(VELLUM_X, VELLUM_Y, VELLUM_W, VELLUM_H, 10.0) else { return };
+    let shader = down(
+        VELLUM_Y,
+        VELLUM_Y + VELLUM_H,
+        &[(0.0, lift(VELLUM, 0.35)), (0.4, VELLUM), (1.0, dim(VELLUM, 0.88))],
+    );
+    fill_shaded(&mut pen.px, &sheet, shader, VELLUM);
+    // Everything that follows is kept inside the sheet.
+    let Some(mut mask) = Mask::new(pen.px.width(), pen.px.height()) else { return };
+    mask.fill_path(&sheet, FillRule::Winding, true, Transform::identity());
+
+    // Westeros itself, so faint it is felt rather than seen. The map is the
+    // month's own painting; at this strength it never fights the puzzle.
+    if let Some(art) = battle_art::cover(Art::Map, VELLUM_W as u32, VELLUM_H as u32) {
+        let how = PixmapPaint { quality: FilterQuality::Bilinear, opacity: 0.10, ..PixmapPaint::default() };
+        let at = Transform::from_translate(VELLUM_X, VELLUM_Y);
+        pen.px.draw_pixmap(0, 0, art.as_ref().as_ref(), &how, at, None);
     }
-    // The rolled ends.
-    for y in [VELLUM_Y - 9.0, VELLUM_Y + VELLUM_H - 13.0] {
-        if let Some(roll) = rrect(VELLUM_X - 16.0, y, VELLUM_W + 32.0, 22.0, 11.0) {
-            let shader = down(y, y + 22.0, &[(0.0, lift(VELLUM, 0.5)), (0.55, dim(VELLUM, 0.84)), (1.0, dim(VELLUM, 0.6))]);
-            fill_shaded(&mut pen.px, &roll, shader, VELLUM);
-            let stroke = Stroke { width: 2.5, ..Stroke::default() };
-            pen.px.stroke_path(&roll, &paint(VELLUM_EDGE, 220), &stroke, Transform::identity(), None);
-        }
-    }
+
     let mut next = scatter(0x5BD1_2C77);
-    for _ in 0..18 {
+    // The fibres: long, nearly flat strokes lying the way the sheet was pressed.
+    let mut fibres = PathBuilder::new();
+    for _ in 0..70 {
         let x = VELLUM_X + (next() % VELLUM_W as u32) as f32;
         let y = VELLUM_Y + (next() % VELLUM_H as u32) as f32;
-        wash(&mut pen.px, x, y, 4.0 + (next() % 26) as f32 / 2.0, [168, 146, 110], 16);
+        let len = 30.0 + (next() % 150) as f32;
+        fibres.move_to(x, y);
+        fibres.quad_to(x + len / 2.0, y + ((next() % 5) as f32 - 2.0), x + len, y);
+    }
+    if let Some(path) = fibres.finish() {
+        let stroke = Stroke { width: 1.0, ..Stroke::default() };
+        pen.px.stroke_path(&path, &paint([150, 128, 92], 26), &stroke, Transform::identity(), Some(&mask));
+    }
+    // Age: broad soft stains, heavier towards the edges where a sheet is handled.
+    for _ in 0..26 {
+        let x = VELLUM_X + (next() % VELLUM_W as u32) as f32;
+        let y = VELLUM_Y + (next() % VELLUM_H as u32) as f32;
+        let r = 10.0 + (next() % 54) as f32;
+        glow(&mut pen.px, x, y, r, [148, 120, 76], 12 + (next() % 10) as u8);
+    }
+    // The sheet's own edge and the shadow it casts into its curl.
+    let stroke = Stroke { width: 3.0, ..Stroke::default() };
+    pen.px.stroke_path(&sheet, &paint(VELLUM_EDGE, 220), &stroke, Transform::identity(), None);
+    for (y, h) in [(VELLUM_Y, 16.0), (VELLUM_Y + VELLUM_H - 16.0, 16.0)] {
+        if let Some(area) = Rect::from_xywh(VELLUM_X, y, VELLUM_W, h) {
+            pen.px.fill_rect(area, &paint([92, 74, 48], 26), Transform::identity(), Some(&mask));
+        }
+    }
+    roller(pen, VELLUM_Y - 11.0);
+    roller(pen, VELLUM_Y + VELLUM_H - 13.0);
+}
+
+/// A turned wooden roller across the sheet, with a cap at each end: the thing
+/// a scroll is actually wound on, rather than a rounded bar.
+fn roller(pen: &mut Pen<'_>, y: f32) {
+    let (x, w, h) = (VELLUM_X - 26.0, VELLUM_W + 52.0, 24.0);
+    let wood = [(0.0, [122, 86, 52]), (0.34, [86, 58, 34]), (0.62, [58, 38, 22]), (1.0, [34, 22, 13])];
+    if let Some(barrel) = rrect(x, y, w, h, h / 2.0) {
+        let shader = down(y, y + h, &wood);
+        fill_shaded(&mut pen.px, &barrel, shader, [86, 58, 34]);
+        let stroke = Stroke { width: 2.0, ..Stroke::default() };
+        pen.px.stroke_path(&barrel, &paint([26, 17, 10], 215), &stroke, Transform::identity(), None);
+    }
+    // The grain along it, and the light down its top.
+    if let Some(sheen) = rrect(x + 10.0, y + 3.5, w - 20.0, 4.0, 2.0) {
+        pen.px.fill_path(&sheen, &paint([214, 176, 126], 60), FillRule::Winding, Transform::identity(), None);
+    }
+    // The turned caps, and the collar inside each one.
+    for (at, side) in [(x + 16.0, -1.0f32), (x + w - 16.0, 1.0)] {
+        if let Some(collar) = rrect(at - 5.0, y - 3.0, 10.0, h + 6.0, 4.0) {
+            let shader = down(y - 3.0, y + h + 3.0, &[(0.0, [150, 112, 62]), (1.0, [62, 42, 24])]);
+            fill_shaded(&mut pen.px, &collar, shader, [96, 68, 38]);
+        }
+        let cap = at + side * 12.0;
+        fill_circle(&mut pen.px, cap, y + h / 2.0, h * 0.62, [40, 27, 16]);
+        fill_circle(&mut pen.px, cap, y + h / 2.0, h * 0.50, [118, 84, 48]);
+        fill_circle(&mut pen.px, cap, y + h / 2.0, h * 0.30, [72, 50, 29]);
+        wash(&mut pen.px, cap - h * 0.14, y + h / 2.0 - h * 0.16, h * 0.12, [226, 194, 148], 90);
     }
 }
 
@@ -1328,6 +1439,23 @@ fn hosts(pen: &mut Pen<'_>, area: (f32, f32, f32, f32), left: usize, right: usiz
 pub(super) fn egg(pen: &mut Pen<'_>, cx: f32, cy: f32, d: f32, stage: u8, cold: bool) {
     let stage = stage.clamp(1, EGG_STAGES);
     let heat = if cold { 0 } else { stage };
+    // The painting, when the month's art has been copied in. It is a square
+    // picture with its own transparency, so it drops straight into the ring.
+    let side = d.round().max(8.0) as u32;
+    if let Some(art) = battle_art::round(Art::Egg(stage), side) {
+        let corner = |centre: f32| (centre - side as f32 / 2.0).round() as i32;
+        let how = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
+        if !cold {
+            // Warmer the further through the week it is: the crack is the
+            // calendar's, the fire behind it is the card's.
+            glow(&mut pen.px, cx, cy, d * 0.46, EMBER, 30 + stage * 14);
+        }
+        pen.px.draw_pixmap(corner(cx), corner(cy), art.as_ref().as_ref(), &how, Transform::identity(), None);
+        if cold {
+            wash(&mut pen.px, cx, cy, d / 2.0, [8, 9, 12], 120);
+        }
+        return;
+    }
     let (hw, hh) = (d * 0.32, d * 0.41);
     // The shell: narrower and rounded at the crown, full and round at the foot.
     let mut pb = PathBuilder::new();
@@ -1463,10 +1591,12 @@ fn egg_art(stage: u8) -> Option<&'static [u8]> {
 
 // --- house marks ------------------------------------------------------------
 
-/// A house's mark in a dark disc with a keyline in the house's second colour:
-/// the house's initial, painted, so a month that renames the four is never
-/// shown somebody else's crest. A beaten fighter's mark is dimmed with them.
-fn house_mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32, r: f32, dimmed: bool) {
+/// A house's mark: its painted crest in a dark disc with a keyline in the
+/// house's second colour. Without the painting - a checkout or a server that
+/// has not been given the art - it is the house's initial instead, which is
+/// what this drew before the paintings existed. A beaten fighter's mark is
+/// dimmed with them.
+pub(super) fn house_mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32, r: f32, dimmed: bool) {
     wash(&mut pen.px, cx, cy + 4.0, r + 6.0, [0, 0, 0], 110);
     fill_circle(&mut pen.px, cx, cy, r, [16, 16, 21]);
     let field = if dimmed { [48, 50, 58] } else { house.colours.0 };
@@ -1476,6 +1606,17 @@ fn house_mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32, r: f32, di
         let keyline = if dimmed { [86, 91, 104] } else { lift(house.colours.1, 0.55) };
         let stroke = Stroke { width: 2.5, ..Stroke::default() };
         pen.px.stroke_path(&edge, &paint(keyline, 235), &stroke, Transform::identity(), None);
+    }
+    // The painted crest, sized to sit inside the keyline.
+    let side = (r * 1.72).round().max(8.0) as u32;
+    if let Some(art) = (!house.art.is_empty()).then(|| battle_art::sized(Art::Crest(house.art), side, side)).flatten() {
+        let corner = |centre: f32| (centre - side as f32 / 2.0).round() as i32;
+        let how = PixmapPaint { quality: FilterQuality::Bicubic, opacity: if dimmed { 0.45 } else { 1.0 }, ..PixmapPaint::default() };
+        pen.px.draw_pixmap(corner(cx), corner(cy), art.as_ref().as_ref(), &how, Transform::identity(), None);
+        if dimmed {
+            wash(&mut pen.px, cx, cy, r - 5.0, [8, 9, 12], 90);
+        }
+        return;
     }
     let letter: String = house.initial.chars().take(2).collect::<String>().to_uppercase();
     let size = r * 0.95;
@@ -2144,8 +2285,17 @@ mod tests {
 
     /// The month's paint for a house, as `battle.rs` hands it over.
     pub(super) fn look_of(key: &'static str, name: &str, initial: &str, c: ([u8; 3], [u8; 3])) -> HouseLook {
+        // The art slug the real `house_look` derives, so a preview wears the
+        // right crest rather than everybody wearing the first one.
+        let art = match key {
+            "gryffindor" => "stark",
+            "slytherin" => "lannister",
+            "ravenclaw" => "targaryen",
+            _ => "watch",
+        };
         HouseLook {
             key,
+            art,
             name: name.to_string(),
             crest: "\u{1f6e1}\u{fe0f}".to_string(),
             initial: initial.to_string(),

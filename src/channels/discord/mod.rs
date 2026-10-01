@@ -34,6 +34,7 @@ mod awards;
 mod battle;
 mod battle_bracket;
 pub(crate) mod control;
+mod battle_art;
 mod battle_card;
 mod battle_lines;
 mod battle_prize;
