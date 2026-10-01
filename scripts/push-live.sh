@@ -18,8 +18,8 @@
 #   scripts/push-live.sh --host root@1.2.3.4 --runtime /srv/vizier/.runtime
 #
 # The page's own files live in the checkout at src/channels/discord/control/live
-# (index.html, which is the one built into the binary) and its art is wherever
-# you keep it - pass --art, or set LIVE_ART. The defaults are the MLCI server;
+# (index.html, which is the one built into the binary) and its art in liveart/,
+# which is not in git - see liveart/README.md. The defaults are the MLCI server;
 # anything can be overridden by an option or by the matching environment
 # variable: LIVE_HOST, LIVE_RUNTIME, LIVE_KEY, LIVE_SRC, LIVE_ART.
 #
@@ -33,7 +33,7 @@ RUNTIME="${LIVE_RUNTIME:-/root/vizier/.vizier/.runtime}"
 KEY="${LIVE_KEY:-$HOME/.ssh/hetzner_mlci}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${LIVE_SRC:-$ROOT/src/channels/discord/control/live}"
-ART="${LIVE_ART:-}"
+ART="${LIVE_ART:-$ROOT/liveart}"
 DRY=""
 
 FILES=()
@@ -68,8 +68,11 @@ for f in "${FILES[@]}"; do
   [ -f "$SRC/$f" ] || { echo "push-live: no such page file: $f" >&2; exit 1; }
   printf '  %-18s %8s bytes\n' "$f" "$(wc -c < "$SRC/$f" | tr -d ' ')"
 done
+if [ -n "$ART" ] && [ ! -d "$ART" ]; then
+  echo "push-live: no art at $ART; sending the page only (see liveart/README.md)" >&2
+  ART=""
+fi
 if [ -n "$ART" ]; then
-  [ -d "$ART" ] || { echo "push-live: no art directory at $ART" >&2; exit 1; }
   printf '  %-18s %8s\n' "(art)" "$(du -sh "$ART" | cut -f1)"
 fi
 
@@ -85,7 +88,8 @@ done
 # The art keeps its own subdirectories (eggs/, cards/, guide/), which is how the
 # page asks for it.
 if [ -n "$ART" ]; then
-  rsync -az --delete-excluded --exclude 'index.html' -e "ssh -i $KEY -o IdentitiesOnly=yes" "$ART/" "$HOST:$DEST/"
+  rsync -az --exclude 'index.html' --exclude '_src/' --exclude 'README.md' \
+    -e "ssh -i $KEY -o IdentitiesOnly=yes" "$ART/" "$HOST:$DEST/"
 fi
 
 echo "push-live: done. The page picks it up within a second or two; no restart."

@@ -29,3 +29,10 @@ moviebank/tools/source_quiz.sqlite
 quizbank/wikidata/.cache/
 quizbank/reviews/
 __pycache__/
+
+# the live page's art: the eggs, the cards, the crests, the baked textures and
+# the dragon's inlined geometry, twenty-odd megabytes of it. The page itself is
+# built into the binary and always works; this is what makes it look like
+# something, and it goes to the server with scripts/push-live.sh rather than
+# through a release. See liveart/README.md.
+liveart/
