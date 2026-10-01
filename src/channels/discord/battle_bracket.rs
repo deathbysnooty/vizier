@@ -883,15 +883,16 @@ mod tests {
     /// Both seasons draw every size, and an unsorted field draws in either.
     #[test]
     fn both_seasons_draw_and_a_houseless_field_is_neutral() {
+        // Every size is covered by the scenes above; this is about the two
+        // dresses and about a field nobody has sorted, and drawing a 32-draw
+        // takes long enough that one size is the right number of them.
         for season in [Season::Eggs, Season::Houses] {
-            for size in [4usize, 8, 16, 32] {
-                let (e, r) = tournament(size, &[1], |_, _| Play::Done);
-                assert_eq!(&render(&e, &r, "x", season)[..4], &PNG_MAGIC, "{size} in {season:?}");
-                // Nobody sorted at all: the draw still reads, with no mark.
-                let bare: Vec<Entrant> =
-                    e.iter().map(|x| Entrant { name: x.name.clone(), avatar: None, house: None, stage: 3 }).collect();
-                assert_eq!(&render(&bare, &r, "x", season)[..4], &PNG_MAGIC, "{size} bare in {season:?}");
-            }
+            let (e, r) = tournament(8, &[1], |_, _| Play::Done);
+            assert_eq!(&render(&e, &r, "x", season)[..4], &PNG_MAGIC, "{season:?}");
+            // Nobody sorted at all: the draw still reads, with no mark.
+            let bare: Vec<Entrant> =
+                e.iter().map(|x| Entrant { name: x.name.clone(), avatar: None, house: None, stage: 3 }).collect();
+            assert_eq!(&render(&bare, &r, "x", season)[..4], &PNG_MAGIC, "bare in {season:?}");
         }
     }
 

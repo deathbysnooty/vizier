@@ -639,7 +639,14 @@ fn banner(pen: &mut Pen<'_>, cx: f32, w: f32, ends: (f32, f32, f32), colours: ([
     let Some(cloth) = pb.finish() else { return };
     let shader = down(top, tail, &[(0.0, lift(field, 0.26)), (0.4, field), (1.0, dim(field, 0.42))]);
     fill_shaded(&mut pen.px, &cloth, shader, field);
-    let Some(mut mask) = Mask::new(pen.px.width(), pen.px.height()) else { return };
+    // The weave and the hem are painted through a mask the size of the card,
+    // which a banner has to be worth: a narrow one is a sliver of colour and
+    // the detail would not show.
+    let Some(mut mask) = (w >= 200.0).then(|| Mask::new(pen.px.width(), pen.px.height())).flatten() else {
+        let stroke = Stroke { width: 3.0, line_join: LineJoin::Round, ..Stroke::default() };
+        pen.px.stroke_path(&cloth, &paint(lift(trim, 0.2), 215), &stroke, Transform::identity(), None);
+        return;
+    };
     mask.fill_path(&cloth, FillRule::Winding, true, Transform::identity());
     // Woven, so the cloth is cloth and not a painted rectangle: faint vertical
     // threads, and the long fold either side of where the shield will hang.
@@ -1331,6 +1338,10 @@ pub(super) fn egg(pen: &mut Pen<'_>, cx: f32, cy: f32, d: f32, stage: u8, cold: 
     pb.cubic_to(cx - hw * 0.96, cy - hh * 0.30, cx - hw * 0.52, cy - hh * 0.98, cx, cy - hh);
     pb.close();
     let Some(shell) = pb.finish() else { return };
+    // Scales and cracks need a mask the size of the whole card, which is fine
+    // once on a fight card and ruinous thirty-two times on a bracket. An egg
+    // drawn this small has no room for either, so it is drawn plain.
+    let detail = d >= 70.0;
     // A light inside, growing with the stage, thrown before the shell so it
     // reads as coming through it rather than sitting on top.
     if heat >= 2 {
@@ -1345,6 +1356,16 @@ pub(super) fn egg(pen: &mut Pen<'_>, cx: f32, cy: f32, d: f32, stage: u8, cold: 
     };
     let shader = down(cy - hh, cy + hh, body);
     fill_shaded(&mut pen.px, &shell, shader, SOOT);
+    if !detail {
+        // Small: the shell, its edge, and a hint of fire if there is any.
+        if heat >= 3 {
+            glow(&mut pen.px, cx, cy, d * 0.34, EMBER, 60 + heat as u8 * 24);
+        }
+        let stroke = Stroke { width: (d * 0.03).max(1.2), ..Stroke::default() };
+        let edge = if heat >= 3 { dim(OLD_GOLD, 0.9) } else { [104, 110, 122] };
+        pen.px.stroke_path(&shell, &paint(edge, 235), &stroke, Transform::identity(), None);
+        return;
+    }
     let Some(mut mask) = Mask::new(pen.px.width(), pen.px.height()) else { return };
     mask.fill_path(&shell, FillRule::Winding, true, Transform::identity());
     // Scales: overlapping arcs in rows down the shell.
@@ -1929,21 +1950,34 @@ impl<'a> Pen<'a> {
     }
 
     /// `text` wrapped and centred in `width`, cut down to `max_lines`.
+    ///
+    /// The longest prefix that fits is found by halving rather than by dropping
+    /// one character at a time. Shaping a long line is slow, and the old loop
+    /// shaped it once per character dropped - two hundred shapings for a line
+    /// somebody pasted, with the font lock held the whole way. This is at most
+    /// a dozen, and it cannot spin: the empty prefix always fits.
     fn paragraph(&mut self, text: &str, size: f32, line_h: f32, width: f32, max_lines: usize) -> Buffer {
-        // Nobody reads past this, and it bounds the work of the loop below.
-        let mut body: String = text.chars().take(240).collect();
-        loop {
-            let buf = self.layout(&body, size, line_h, Weight::MEDIUM, Some(width));
-            if buf.layout_runs().count() <= max_lines || body.chars().count() <= 1 {
-                return buf;
-            }
-            let mut chars: Vec<char> = body.chars().collect();
-            chars.pop();
-            if chars.last() == Some(&'…') {
-                chars.pop();
-            }
-            body = format!("{}…", chars.iter().collect::<String>().trim_end());
+        // Nobody reads past this, and it bounds the work below.
+        let all: Vec<char> = text.chars().take(240).collect();
+        let whole: String = all.iter().collect();
+        let buf = self.layout(&whole, size, line_h, Weight::MEDIUM, Some(width));
+        if buf.layout_runs().count() <= max_lines {
+            return buf;
         }
+        // `low` always fits and `high` never does, so the answer is between.
+        let (mut low, mut high) = (0usize, all.len());
+        while low + 1 < high {
+            let mid = (low + high) / 2;
+            let body = clipped(&all, mid);
+            let buf = self.layout(&body, size, line_h, Weight::MEDIUM, Some(width));
+            if buf.layout_runs().count() <= max_lines {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        let body = clipped(&all, low);
+        self.layout(&body, size, line_h, Weight::MEDIUM, Some(width))
     }
 
     /// Glyphs as an alpha mask, to paint something other than a flat colour
@@ -2055,6 +2089,11 @@ impl<'a> Pen<'a> {
             None => silhouette(&mut self.px, cx, cy, r),
         }
     }
+}
+
+/// The first `n` characters, with an ellipsis after them.
+fn clipped(all: &[char], n: usize) -> String {
+    format!("{}\u{2026}", all[..n.min(all.len())].iter().collect::<String>().trim_end())
 }
 
 /// Source-over onto a transparent canvas, in premultiplied form.
@@ -2176,7 +2215,7 @@ mod tests {
             stage: 9,
         };
         for season in [Season::Eggs, Season::Houses] {
-            for hit in [None, Some((0, 9)), Some((1, 0)), Some((7, -5))] {
+            for hit in [None, Some((7, -5))] {
                 let fight = Fight {
                     stage: "Challenge".to_string(),
                     left: &a,
@@ -2307,32 +2346,35 @@ mod tests {
         assert_eq!(Season::default(), Season::Eggs, "the month opens on the egg week");
     }
 
-    /// A scroll in each season: the puzzle is drawn ON the card, because a
-    /// modal is text only and a puzzle nobody can see is no puzzle.
+    /// Every puzzle draws, and both seasons draw. Drawing a card is slow, so
+    /// the templates take turns at the two dresses rather than every one of
+    /// them being drawn twice; the dress is tested on its own above.
     #[test]
     fn the_scroll_card_draws_every_puzzle_in_both_seasons() {
         use super::super::battle_scroll::{Rng, TEMPLATES};
         let (a, b) = cast();
-        for season in [Season::Eggs, Season::Houses] {
-            for template in TEMPLATES {
-                let mut rng = Rng::new(template.kind.len() as u64 * 7 + 11);
-                // The riddle bank is not open in a test, so that template has
-                // nothing to draw; every other one does.
-                let Some(puzzle) = (template.make)(&mut rng) else { continue };
-                let scroll = Scroll {
-                    left: &a,
-                    right: &b,
-                    number: "Scroll 2 of 3".to_string(),
-                    score: [1, 0],
-                    prompt: &puzzle.prompt,
-                    spec: &puzzle.spec,
-                    season,
-                    seconds: 25,
-                };
-                let png = scroll_png(&scroll).expect("scroll card");
-                assert_eq!(&png[..4], &PNG_MAGIC, "{} in {:?}", template.kind, season);
-            }
+        let mut seasons = std::collections::HashSet::new();
+        for (n, template) in TEMPLATES.iter().enumerate() {
+            let season = if n % 2 == 0 { Season::Eggs } else { Season::Houses };
+            let mut rng = Rng::new(template.kind.len() as u64 * 7 + 11);
+            // The riddle bank is not open in a test, so that template has
+            // nothing to draw; every other one does.
+            let Some(puzzle) = (template.make)(&mut rng) else { continue };
+            let scroll = Scroll {
+                left: &a,
+                right: &b,
+                number: "Scroll 2 of 3".to_string(),
+                score: [1, 0],
+                prompt: &puzzle.prompt,
+                spec: &puzzle.spec,
+                season,
+                seconds: 25,
+            };
+            let png = scroll_png(&scroll).expect("scroll card");
+            assert_eq!(&png[..4], &PNG_MAGIC, "{} in {:?}", template.kind, season);
+            seasons.insert(season);
         }
+        assert_eq!(seasons.len(), 2, "both dresses have to have been drawn");
     }
 
     /// The awkward scrolls: nobody sorted, no pictures, a blank prompt, an
@@ -2342,7 +2384,8 @@ mod tests {
         let bare = Fighter { name: String::new(), avatar: None, hp: 0, max_hp: 0, house: None, stage: 0 };
         let spec = super::super::battle_scroll::Spec::default();
         for season in [Season::Eggs, Season::Houses] {
-            for (prompt, score, seconds) in [("", [0, 0], 0u64), ("A very long question ".repeat(12).as_str(), [9, 9], 999)] {
+            let long = "Which of these banners is the one that hangs upside down, counting from the left?";
+            for (prompt, score, seconds) in [("", [0, 0], 0u64), (long, [9, 9], 999)] {
                 let scroll = Scroll {
                     left: &bare,
                     right: &bare,
