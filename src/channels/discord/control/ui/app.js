@@ -2611,7 +2611,7 @@
     document.title = 'Confessions · Loduchand';
     page.appendChild(pageHead('Confessions',
       'Every anonymous confession and reply, newest first: its number, when it came, whether a mod approved or rejected it, who sent it, who decided, and the text. '
-      + 'The confessions channel never shows a name — this page is where moderation happens, and every look at it is written to the activity log.'));
+      + 'The confessions channel never shows a name — this page and /whosent are where moderation happens, and every look at either is written to the activity log.'));
 
     let status = q.get('status') || 'all';
     const input = h('input', { type: 'search', placeholder: 'Search the text, a name or a number', 'aria-label': 'Search the confessions', value: q.get('q') || '' });
@@ -2638,7 +2638,7 @@
         const body = h('div', { class: 'kalesh-rows' });
         if (!rows.length) body.appendChild(h('p', { class: 'empty-small' }, 'Nothing matches.'));
         rows.forEach((c) => body.appendChild(confessionRow(c)));
-        holder.appendChild(card('confessions-list', 'The record', 'Newest first. Gaps in the numbers are the ones a mod rejected.', body, { cls: 'kalesh-card' }));
+        holder.appendChild(card('confessions-list', 'The record', 'Newest first. Gaps in the numbers are the ones a mod rejected. Replies live in their confession\u2019s thread.', body, { cls: 'kalesh-card' }));
         refreshAudit();
       }).catch((e) => {
         if (!holder.isConnected) return;

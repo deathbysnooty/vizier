@@ -1472,6 +1472,10 @@ impl EventHandler for Handler {
         guess::on_delete(channel_id, deleted_message_id);
         movie::on_delete(channel_id, deleted_message_id);
         geo::on_delete(channel_id, deleted_message_id);
+        // A deleted confession card: if it was the one carrying the submit
+        // buttons, they move to the newest surviving card this bot posted.
+        // Only a message id out of this bot's own store is recognised.
+        confess::on_delete(&ctx, channel_id, deleted_message_id);
         // The panel's deleted-message log.
         msglog::on_delete(&ctx, channel_id, &[deleted_message_id], _guild_id, false);
     }
@@ -1578,8 +1582,8 @@ impl EventHandler for Handler {
             // the log, rather than found out when the first member presses Yes.
             signup::check_at_startup(&ctx, guild);
         }
-        // The confessions panel: put back at the bottom of its channel, so a
-        // restart never leaves the channel without its buttons.
+        // The confessions buttons: put on the newest confession card, so a
+        // restart never leaves the channel without a way in.
         confess::spawn(ctx.clone());
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
@@ -1863,6 +1867,7 @@ impl EventHandler for Handler {
         commands.push(admin_command(scoreboard::refresh_builder()));
         commands.push(admin_command(announce::builder()));
         commands.push(admin_command(signup::builder()));
+        commands.push(admin_command(confess::whosent_builder()));
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -2805,6 +2810,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 signup::command(&ctx, &command).await;
                 return;
             }
+            if command.data.name == "whosent" {
+                confess::whosent_command(&ctx, &command).await;
+                return;
+            }
             if command.data.name == "houseopt" {
                 house::opt_command(&ctx, &command).await;
             }
@@ -3557,11 +3566,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         // Anything new in the scoreboard channel - bots and announcements
         // included - moves the House Cup card back to the bottom.
         scoreboard::on_message(&ctx, &msg);
-        // Anything new in the confessions channel - a confession, a reply that
-        // had to fall back there, somebody chatting, the old bot posting - puts
-        // the submit panel back at the bottom, so nobody has to scroll for it.
-        // Rate-limited, and it never touches a message this bot did not post.
-        confess::on_message(&ctx, &msg);
         // Anything posted in the Name Place Animal Thing channel moves its card back down.
         npat::note_message(&ctx, &msg);
         // And anything in the sudoku channel moves the puzzle card back down.

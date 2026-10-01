@@ -5,11 +5,14 @@
 //!
 //! Two tables. One row per submission: its number in the public series, what it
 //! says, who sent it, whether a mod approved or rejected it and who that mod
-//! was, and where the approved copy was posted. And one row per button panel
-//! the bot has posted, which is the only way the repost ever learns which
-//! message to delete — never the author, never the text, so the third-party
-//! bot's old panels and the old confessions already in that channel are left
-//! exactly where they are.
+//! was, and where the approved copy was posted. And one row per channel saying
+//! which confession card is currently carrying the two buttons.
+//!
+//! That second table, with `posted_message` on the first, is the only way the
+//! bot ever learns which message it may edit. It is matched by a message id the
+//! bot wrote down itself — never by author, never by text — so the
+//! third-party bot's own messages and the hundreds of confessions already in
+//! that channel are invisible to it and cannot be touched.
 //!
 //! The record is the point: a mod has to be able to answer "who sent #457" a
 //! month later, and a rejected confession has to be provably never posted. Both
@@ -41,8 +44,9 @@ pub(crate) const SCHEMA: &str = "
         thread_id INTEGER NOT NULL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS confessions_by_user ON confessions (user_id, created_ts);
     CREATE INDEX IF NOT EXISTS confessions_by_status ON confessions (status, created_ts);
-    CREATE TABLE IF NOT EXISTS panels (
-        channel_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, posted_ts INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS buttons (
+        channel_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL,
+        number INTEGER NOT NULL DEFAULT 0, posted_ts INTEGER NOT NULL);
 ";
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
@@ -398,37 +402,79 @@ pub fn list(conn: &Connection, filter: &Filter) -> rusqlite::Result<Vec<Confessi
     rows.collect()
 }
 
-// --- the button panel --------------------------------------------------------
+// --- which card carries the buttons ------------------------------------------
 
-/// The panel message this bot posted in that channel, if it has posted one.
-/// This is the ONLY thing the repost deletes by: a message the bot wrote down
-/// here itself. The old bot's panels and every confession already in the
-/// channel are invisible to it.
-pub fn panel_message(conn: &Connection, channel: u64) -> Option<u64> {
-    conn.query_row("SELECT message_id FROM panels WHERE channel_id = ?1", params![channel as i64], |r| {
-        r.get::<_, i64>(0).map(|v| v as u64)
+/// The confession card currently carrying the two buttons in that channel, as
+/// (message id, confession number).
+///
+/// This, and `posted_message` on a confession, are the only message ids this
+/// bot will ever edit. Both are ids it wrote down itself when it posted the
+/// message. Nothing is matched on author or on content, so the bot this
+/// replaces — whose own cards and panels are still in that channel — is
+/// invisible here.
+pub fn buttons_holder(conn: &Connection, channel: u64) -> Option<(u64, i64)> {
+    conn.query_row("SELECT message_id, number FROM buttons WHERE channel_id = ?1", params![channel as i64], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?))
     })
     .optional()
     .ok()
     .flatten()
-    .filter(|id| *id != 0)
+    .filter(|(id, _)| *id != 0)
 }
 
-pub fn set_panel(conn: &Connection, channel: u64, message: u64, now: i64) -> rusqlite::Result<()> {
+pub fn set_buttons_holder(conn: &Connection, channel: u64, message: u64, number: i64, now: i64) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO panels (channel_id, message_id, posted_ts) VALUES (?1, ?2, ?3)
-         ON CONFLICT(channel_id) DO UPDATE SET message_id = excluded.message_id, posted_ts = excluded.posted_ts",
-        params![channel as i64, message as i64, now],
+        "INSERT INTO buttons (channel_id, message_id, number, posted_ts) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(channel_id) DO UPDATE SET message_id = excluded.message_id, number = excluded.number,
+         posted_ts = excluded.posted_ts",
+        params![channel as i64, message as i64, number, now],
     )?;
     Ok(())
 }
 
-/// Forgets the panel in that channel — after the message has gone, so the next
-/// pass posts a fresh one instead of trying to delete something that is not
-/// there.
-pub fn clear_panel(conn: &Connection, channel: u64) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM panels WHERE channel_id = ?1", params![channel as i64])?;
+/// Forgets which card carries the buttons — after the card has gone, so the
+/// next pass looks for the newest surviving one instead of editing a message
+/// that is not there.
+pub fn clear_buttons_holder(conn: &Connection, channel: u64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM buttons WHERE channel_id = ?1", params![channel as i64])?;
     Ok(())
+}
+
+/// The newest confession card this bot still believes is in that channel, as
+/// (number, message id). Replies are never cards: they live in threads.
+pub fn newest_card(conn: &Connection, channel: u64) -> Option<(i64, u64)> {
+    conn.query_row(
+        "SELECT number, posted_message FROM confessions
+         WHERE kind = 'confession' AND status = 'approved' AND posted_channel = ?1 AND posted_message != 0
+         ORDER BY number DESC LIMIT 1",
+        params![channel as i64],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// One confession's card has gone from the channel: somebody deleted it. The
+/// text and who sent it are kept — this only forgets where the copy was, so
+/// the card is no longer offered as somewhere to put the buttons.
+pub fn forget_posted(conn: &Connection, number: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE confessions SET posted_message = 0 WHERE number = ?1", params![number])?;
+    Ok(())
+}
+
+/// Which confession, if any, was posted as this message in this channel. How a
+/// deleted message is recognised as one of ours — by an id out of this table
+/// and nothing else.
+pub fn card_at(conn: &Connection, channel: u64, message: u64) -> Option<i64> {
+    conn.query_row(
+        "SELECT number FROM confessions WHERE posted_channel = ?1 AND posted_message = ?2",
+        params![channel as i64, message as i64],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
@@ -573,19 +619,56 @@ mod tests {
         assert_eq!(get(&conn, 459).unwrap().unwrap().thread_id, 7777);
     }
 
-    /// The repost's safety rail: it can only ever learn about a panel this bot
-    /// wrote down itself.
+    /// The safety rail: the bot can only ever learn about a message it wrote
+    /// down itself.
     #[test]
-    fn only_a_panel_this_bot_posted_is_ever_remembered() {
+    fn only_a_card_this_bot_posted_is_ever_remembered() {
         let conn = open_memory().unwrap();
-        assert_eq!(panel_message(&conn, 77), None, "nothing to delete in a channel we have never posted in");
-        set_panel(&conn, 77, 4242, 100).unwrap();
-        assert_eq!(panel_message(&conn, 77), Some(4242));
-        assert_eq!(panel_message(&conn, 78), None, "and nothing in any other channel");
-        set_panel(&conn, 77, 4243, 200).unwrap();
-        assert_eq!(panel_message(&conn, 77), Some(4243), "the newest panel replaces the old one");
-        clear_panel(&conn, 77).unwrap();
-        assert_eq!(panel_message(&conn, 77), None);
+        assert_eq!(buttons_holder(&conn, 77), None, "nothing to edit in a channel we have never posted in");
+        set_buttons_holder(&conn, 77, 4242, 459, 100).unwrap();
+        assert_eq!(buttons_holder(&conn, 77), Some((4242, 459)));
+        assert_eq!(buttons_holder(&conn, 78), None, "and nothing in any other channel");
+        set_buttons_holder(&conn, 77, 4243, 460, 200).unwrap();
+        assert_eq!(buttons_holder(&conn, 77), Some((4243, 460)), "the newest card takes them over");
+        clear_buttons_holder(&conn, 77).unwrap();
+        assert_eq!(buttons_holder(&conn, 77), None);
+        // A message id nothing wrote down is not one of ours, whoever posted it.
+        assert_eq!(card_at(&conn, 77, 4242), None, "a card has to be in the confessions table to be ours");
+    }
+
+    /// Where the buttons go when the newest card is lost: the newest surviving
+    /// card this bot posted, and never a reply or anything still pending.
+    #[test]
+    fn the_newest_surviving_card_is_the_one_the_buttons_can_move_to() {
+        let mut conn = open_memory().unwrap();
+        assert_eq!(newest_card(&conn, 21), None);
+        for (i, body) in ["one", "two", "three"].iter().enumerate() {
+            add(&mut conn, &new(11, body, 100 + i as i64), 459).unwrap();
+            let n = 459 + i as i64;
+            decide(&conn, n, Status::Approved, 7, 200, "").unwrap();
+            set_posted(&conn, n, 21, 9000 + n as u64);
+        }
+        assert_eq!(newest_card(&conn, 21), Some((461, 9461)), "the newest of the three");
+        assert_eq!(card_at(&conn, 21, 9461), Some(461));
+        assert_eq!(newest_card(&conn, 99), None, "and only in the channel asked about");
+
+        // A reply, approved and posted inside a thread, is not a card.
+        add(&mut conn, &New { kind: Kind::Reply, answers: Some(461), ..new(12, "an answer", 400) }, 459).unwrap();
+        decide(&conn, 462, Status::Approved, 7, 500, "").unwrap();
+        set_posted(&conn, 462, 7777, 9462);
+        assert_eq!(newest_card(&conn, 21), Some((461, 9461)), "a reply never carries the buttons");
+
+        // Somebody deletes the newest card: the buttons move down one.
+        forget_posted(&conn, 461).unwrap();
+        assert_eq!(newest_card(&conn, 21), Some((460, 9460)));
+        assert_eq!(card_at(&conn, 21, 9461), None, "the deleted card is not ours to edit any more");
+        // The text and who sent it are kept: only the copy is forgotten.
+        let c = get(&conn, 461).unwrap().unwrap();
+        assert_eq!((c.user_id, c.status, c.body.as_str()), (11, Status::Approved, "three"));
+        // All of them gone: nowhere for the buttons, and that is not an error.
+        forget_posted(&conn, 460).unwrap();
+        forget_posted(&conn, 459).unwrap();
+        assert_eq!(newest_card(&conn, 21), None);
     }
 
     /// A restart must lose neither the series nor the record of who sent what.
@@ -602,7 +685,7 @@ mod tests {
             decide(&conn, 459, Status::Approved, 7, 300, "").unwrap();
             set_posted(&conn, 459, 21, 9001).unwrap();
             set_thread(&conn, 459, 7777).unwrap();
-            set_panel(&conn, 21, 9002, 300).unwrap();
+            set_buttons_holder(&conn, 21, 9001, 459, 300).unwrap();
         }
         // A second process opening the same file.
         let conn = Connection::open(&path).unwrap();
@@ -612,6 +695,6 @@ mod tests {
         assert_eq!((c.user_id, c.status, c.posted_message), (11, Status::Approved, 9001));
         assert_eq!(c.link(900).as_deref(), Some("https://discord.com/channels/900/21/9001"));
         assert_eq!(c.thread_id, 7777, "and the thread its conversation is in");
-        assert_eq!(panel_message(&conn, 21), Some(9002), "and the panel it has to move is still known");
+        assert_eq!(buttons_holder(&conn, 21), Some((9001, 459)), "and the card carrying the buttons is still known");
     }
 }

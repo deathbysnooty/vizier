@@ -2346,24 +2346,29 @@ pub fn sections() -> Vec<Section> {
             id: "confessions",
             title: "Confessions",
             icon: "🤫",
-            about: "Anonymous confessions, the way the server already uses them. A panel message sits at the bottom \
-                    of the confessions channel with two buttons - Submit a confession and Submit a reply - and \
-                    pressing either opens a box to type in. Nothing is posted by sending one: it goes to the review \
+            about: "Anonymous confessions, the way the server already uses them. The two buttons - Submit a \
+                    confession and Submit a reply - ride on the confession cards themselves: the newest card in the \
+                    channel carries them, and the one before it has them taken off, so the way in is always the post \
+                    everybody is already looking at. There is no separate panel message to get buried. Pressing a \
+                    button opens a box to type in.\n\nNothing is posted by sending one: it goes to the review \
                     channel first as a card showing the text and the submitter (name, mention, id, how old their \
                     account is, when they joined, and how many of theirs have been approved and rejected before), \
                     with Approve and Reject under it. Reject asks for an optional reason and posts nothing anywhere \
                     public, ever. Approve posts it in the confessions channel as \u{201c}Anonymous Confession (#N)\u{201d} with no \
-                    name on it and opens a thread of the same name, where the conversation happens; an approved \
-                    reply goes inside that confession\u{2019}s thread, lettered so people can point at one. Every \
-                    decision is written to the log channel with the submitter and the mod who made it. The panel is \
-                    moved back to the bottom after each post so nobody ever has to scroll for it, and it is the only \
-                    message in that channel this bot ever deletes.\n\nNothing said in any of these three channels \
-                    reaches the AI: they are excluded from the message log exactly as #safe-corner is, so no \
-                    confession is in the member notes, the daily topics, a deep dive, the Kalesh pages, the weekly \
-                    scan or any summary. In public a confession carries a number and the words and nothing else - no \
-                    name, no mention, no footer. Moderators do see who submitted, in review and in the log, and a \
-                    mod looking up who sent one later is written to the activity log. The Confessions page lists \
-                    every one with its number, when it came, its state, who sent it, who decided and the text.",
+                    name on it. A confession gets no thread when it posts - a thread is opened on it only when its \
+                    first approved reply arrives, and every later reply goes in that same thread, lettered so people \
+                    can point at one. Most confessions are never answered and never get a thread. Every decision is \
+                    written to the log channel with the submitter and the mod who made it.\n\nThe bot deletes \
+                    nothing in that channel and only ever edits a card it posted itself, matched by a message id out \
+                    of its own record - so the old bot\u{2019}s messages and the confessions already in there are never \
+                    touched. If the card carrying the buttons is deleted, they move to the newest surviving \
+                    card.\n\nNothing said in any of these three channels reaches the AI: they are excluded from the \
+                    message log exactly as #safe-corner is, so no confession is in the member notes, the daily \
+                    topics, a deep dive, the Kalesh pages, the weekly scan or any summary. In public a confession \
+                    carries a number and the words and nothing else - no name, no mention, no footer. Moderators see \
+                    who submitted, in review and in the log, and /whosent answers it later; that look is written to \
+                    the activity log. The Confessions page lists every one with its number, when it came, its state, \
+                    who sent it, who decided and the text.",
             settings: vec![
                 toggle(
                     "VIZIER_CONFESS",
@@ -2374,8 +2379,9 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_CONFESS_CHANNEL",
                     "Confessions channel",
-                    "Where approved confessions are posted and where the button panel lives. Everything here is \
-                     anonymous. Empty means an approved confession has nowhere to go, which is said in the log.",
+                    "Where approved confessions are posted, and where the two submit buttons ride on the newest \
+                     card. Everything here is anonymous. Empty means an approved confession has nowhere to go, \
+                     which is said in the log.",
                     Kind::Channel,
                     "1527318601126907924",
                 ),
@@ -2441,10 +2447,11 @@ pub fn sections() -> Vec<Section> {
                 ),
                 toggle(
                     "VIZIER_CONFESS_THREADS",
-                    "Open a thread on each confession",
-                    "On: an approved confession gets a thread of the same name and the conversation happens in \
-                     there, which keeps the channel readable and is how the server already reads them. Off: no \
-                     threads, and an approved reply goes in the channel under its confession instead.",
+                    "Open a thread when a confession is answered",
+                    "On: the first approved reply to a confession opens a thread on it, named after it, and every \
+                     later reply goes in that same thread - so the conversation is in one place and a confession \
+                     nobody answers never gets an empty thread. Off: no threads at all, and an approved reply goes \
+                     in the channel under its confession instead.",
                 ),
                 setting(
                     "VIZIER_CONFESS_THREAD_ARCHIVE_MINUTES",
@@ -2461,27 +2468,29 @@ pub fn sections() -> Vec<Section> {
                 command(
                     "Submit a confession · Submit a reply",
                     EVERYONE,
-                    "The buttons on the panel in the confessions channel",
+                    "The two buttons on the newest confession in the confessions channel",
                     "Opens a box to type in. A confession is just the text; a reply asks which confession number it \
-                     answers as well. Nothing is posted until a mod approves it, and what gets posted never carries \
-                     your name. Only you see the reply telling you it was sent.",
+                     answers as well. The buttons are always on the newest confession, so there is nothing to \
+                     scroll for. Nothing is posted until a mod approves it, and what gets posted never carries your \
+                     name. Only you see the reply telling you it was sent.",
                 ),
                 command(
                     "Approve · Reject",
                     ADMINS,
                     "The buttons under a card in the review channel",
-                    "Approve posts it in the confessions channel, anonymous and numbered, and puts the panel back at \
-                     the bottom. Reject asks for an optional reason and posts nothing anywhere public. Either way \
-                     the log channel gets a card naming the submitter and you. A submission from a moderator is \
-                     marked as one at the top of the card, so nobody waves their own through unnoticed.",
+                    "Approve posts it in the confessions channel, anonymous and numbered, with the submit buttons on \
+                     it and off the card before it. Reject asks for an optional reason and posts nothing anywhere \
+                     public. Either way the log channel gets a card naming the submitter and you. A submission from \
+                     a moderator is marked as one at the top of the card, so nobody waves their own through \
+                     unnoticed.",
                 ),
                 command(
-                    "Who sent it? (mods)",
+                    "whosent",
                     ADMINS,
-                    "The third button on the panel",
-                    "Asks for a number and tells you privately who sent that one, when, and what was decided about \
-                     it. Moderators only - anybody else is told so. Every look is written to the activity log with \
-                     your name on it, and the panel says plainly that mods can do this.",
+                    "/whosent number:",
+                    "Tells you privately who sent that confession, when, and what was decided about it. Bot admins \
+                     and moderators only - anybody else is told so. Every look is written to the activity log with \
+                     your name on it. The same thing is on the Confessions page.",
                 ),
             ],
         },

@@ -1,26 +1,28 @@
-//! Anonymous confessions: the panel, the modals, a mod's decision, and the
-//! numbered post that comes out of it.
+//! Anonymous confessions: the two buttons on the newest card, the modals, a
+//! mod's decision, and the numbered post that comes out of it.
 //!
 //! This replaces a third-party bot the server had been using, and it is built
 //! to the flow the members already know:
 //!
-//! 1. A panel message sits in the confessions channel with **Submit a
-//!    confession** and **Submit a reply** under it. Pressing either opens a
-//!    modal: a confession is just the text, a reply is a confession number and
-//!    the text.
+//! 1. The two buttons — **Submit a confession** and **Submit a reply** — ride
+//!    on the confession cards themselves. Exactly one card carries them at any
+//!    time: the newest one, which is where everybody's eye already is. Pressing
+//!    either opens a modal: a confession is just the text, a reply is a
+//!    confession number and the text.
 //! 2. Nothing is posted publicly by submitting. The text goes to the review
 //!    channel as an embed with the submitter on it — name, mention, id, how old
 //!    the account is, when they joined, and how many of theirs have been
 //!    approved and rejected before — and two buttons, **Approve** and
 //!    **Reject**. Reject asks for an optional reason.
 //! 3. Approving posts it in the confessions channel, anonymous and numbered,
-//!    and opens a thread on that message with the same name, which is where the
-//!    conversation about it happens — the channel itself stays readable.
-//!    Rejecting posts nothing anywhere public, ever. Either way the log channel
-//!    gets an entry naming the submitter and the mod who decided.
-//! 4. The panel is moved back to the bottom after each post, because that is
-//!    the bug that killed the old bot: its panel ended up fourteen messages
-//!    deep and nobody could find it.
+//!    with the two buttons on it — and takes the buttons off the card before
+//!    it, so the newest card is always the one to press. Rejecting posts
+//!    nothing anywhere public, ever. Either way the log channel gets an entry
+//!    naming the submitter and the mod who decided.
+//! 4. A confession gets no thread when it is posted. A thread is opened on it
+//!    only when its first approved reply arrives, and every later reply to it
+//!    goes in the same thread. Most confessions never get a reply, and an
+//!    empty thread on each one would litter the channel.
 //!
 //! Four things this is careful about, all of them because of what the feature
 //! handles.
@@ -33,31 +35,31 @@
 //! hand, so it filters these out of its own list too.
 //!
 //! **Anonymity is absolute in public.** The posted message carries a number and
-//! the words and nothing else: no name, no mention, no avatar, no footer, no
-//! thread. Mods see the submitter in review and in the log, which is how they
-//! moderate, and the panel says plainly that they can.
+//! the words and nothing else: no name, no mention, no avatar, no footer. The
+//! thread, when a reply opens one, is named after the confession and nobody
+//! else. Mods see the submitter in review and in the log, which is how they
+//! moderate, and `/whosent` answers it later — admin-only, private, and written
+//! to the activity log every time.
 //!
-//! **The panel the repost deletes is only ever one this bot posted.** It is
-//! matched by a message id this bot wrote into its own store — never by author,
-//! never by content — so the old bot's panels, and every confession already in
-//! that channel, are left exactly where they are.
+//! **The only messages this bot edits are ones it posted itself.** A card is
+//! matched by a message id the bot wrote into its own store — never by author,
+//! never by content — so the old bot's own messages, and the hundreds of
+//! confessions already in that channel, are never touched. The bot deletes
+//! nothing in there at all.
 //!
 //! **The record is written before Discord is asked for anything.** A mod has to
 //! be able to answer "who sent #457" a month later, and a rejection has to be
 //! provably unposted.
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::Duration;
-
 use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use serenity::all::{
-    ActionRowComponent, AutoArchiveDuration, ButtonStyle, ChannelId, ComponentInteraction, Context, CreateActionRow,
-    CreateAllowedMentions, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
+    ActionRowComponent, AutoArchiveDuration, ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction,
+    CommandOptionType, ComponentInteraction, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
+    CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter, CreateInputText, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateThread, EditMessage, GuildId, Http,
-    InputTextStyle, Message, MessageId, ModalInteraction, UserId,
+    InputTextStyle, MessageId, ModalInteraction, UserId,
 };
 
 use super::confess_store::{self as store, Confession, Filter, Kind, New, Status};
@@ -65,16 +67,14 @@ use super::control;
 
 // --- the custom ids ----------------------------------------------------------
 //
-// Dispatch is by these strings and nothing else, so a panel posted before a
+// Dispatch is by these strings and nothing else, so a card posted before a
 // restart still answers afterwards and a review embed from last week can still
 // be approved.
 
 pub const ID_NEW: &str = "confess:new";
 pub const ID_REPLY: &str = "confess:reply";
-pub const ID_WHO: &str = "confess:who";
 pub const MODAL_NEW: &str = "confessform:new";
 pub const MODAL_REPLY: &str = "confessform:reply";
-pub const MODAL_WHO: &str = "confessform:who";
 /// `confess:ok:<number>` and `confess:no:<number>`.
 pub const ID_APPROVE: &str = "confess:ok:";
 pub const ID_REJECT: &str = "confess:no:";
@@ -86,21 +86,17 @@ const FIELD_TEXT: &str = "text";
 const FIELD_NUMBER: &str = "number";
 const FIELD_REASON: &str = "reason";
 
-/// At most one panel repost per channel per this long, so twenty confessions
-/// approved in a row is a handful of reposts rather than twenty.
-pub const PANEL_GAP: Duration = Duration::from_secs(15);
-
 /// Discord's own ceiling on a message, less room for the heading.
 pub const BODY_CEILING: usize = 1800;
 
 /// Whether a custom id belongs to this feature.
 pub fn owns_component(id: &str) -> bool {
-    id == ID_NEW || id == ID_REPLY || id == ID_WHO || id.starts_with(ID_APPROVE) || id.starts_with(ID_REJECT)
+    id == ID_NEW || id == ID_REPLY || id.starts_with(ID_APPROVE) || id.starts_with(ID_REJECT)
 }
 
 /// Whether a modal's custom id belongs to this feature.
 pub fn owns_modal(id: &str) -> bool {
-    id == MODAL_NEW || id == MODAL_REPLY || id == MODAL_WHO || id.starts_with(MODAL_REJECT)
+    id == MODAL_NEW || id == MODAL_REPLY || id.starts_with(MODAL_REJECT)
 }
 
 // --- settings ----------------------------------------------------------------
@@ -109,7 +105,8 @@ pub fn enabled() -> bool {
     control::on("VIZIER_CONFESS", true)
 }
 
-/// Where approved confessions are posted, and where the panel lives.
+/// Where approved confessions are posted, and where the two submit buttons
+/// ride on the newest card.
 pub fn channel() -> Option<u64> {
     Some(control::number("VIZIER_CONFESS_CHANNEL", DEFAULT_CHANNEL)).filter(|id| *id != 0)
 }
@@ -156,8 +153,9 @@ pub fn sensitive_channels() -> Vec<u64> {
     channels()
 }
 
-/// Whether an approved confession gets a thread of its own for the
-/// conversation. On: that is how the server already reads them.
+/// Whether a confession gets a thread when its first reply arrives. On: that
+/// is how the server already reads them. Off: an approved reply goes in the
+/// channel under its confession instead, and no threads are made.
 pub fn threads_on() -> bool {
     control::on("VIZIER_CONFESS_THREADS", true)
 }
@@ -216,8 +214,8 @@ pub struct Limits {
 ///
 /// The post also goes out with an empty allowed-mentions list, so even a form
 /// of ping this misses cannot notify anybody. This exists so the *text* is
-/// clean too — the review embed and the log quote it, and so does the panel
-/// page.
+/// clean too — the review embed and the log quote it, and so does the
+/// Confessions page.
 pub fn strip_pings(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes: Vec<char> = text.chars().collect();
@@ -442,12 +440,16 @@ pub trait Poster: Send + Sync {
     async fn revive(&self, thread: u64) -> anyhow::Result<()>;
     /// Opens a thread on a message in the main channel.
     async fn open_thread(&self, channel: u64, message: u64, name: &str, minutes: u16) -> anyhow::Result<u64>;
-    /// Deletes one message. Only ever called with a panel id this bot wrote
-    /// into its own store — see [`repost_panel`].
-    async fn delete(&self, channel: u64, message: u64) -> anyhow::Result<()>;
-    /// The panel message, with its buttons. Separate from `say_in_channel`
-    /// because only this one carries components.
-    async fn post_panel(&self, channel: u64, text: &str) -> anyhow::Result<u64>;
+    /// A confession card: the same message, with the two buttons on it.
+    /// Separate from `say_in_channel` because only this one carries components.
+    async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64>;
+    /// Puts the two buttons on an existing card, or takes them off.
+    ///
+    /// Only ever called with a message id this bot wrote into its own store.
+    /// There is no delete on this trait at all: the bot removes nothing from
+    /// the confessions channel, so the old bot's messages cannot be harmed
+    /// even by a bug.
+    async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()>;
 }
 
 /// Where an approved confession ended up.
@@ -455,33 +457,74 @@ pub trait Poster: Send + Sync {
 pub struct Posted {
     /// 0 when the post itself failed.
     pub message: u64,
-    /// The thread opened on it, when one could be.
-    pub thread: Option<u64>,
+    /// The card the buttons were taken off, when there was one.
+    pub buttons_off: Option<u64>,
     /// What the log should say, when something needs saying.
     pub notes: Vec<String>,
 }
 
-/// Posts a confession and opens its thread. The post comes first and stands on
-/// its own: a thread that cannot be opened costs a line in the log and never
-/// the confession.
-pub async fn post_confession(poster: &dyn Poster, channel: u64, c: &Confession, want_thread: bool, minutes: u16) -> Posted {
+/// Posts a confession as a card with the two buttons on it, and takes the
+/// buttons off whichever card had them before, so exactly one card in the
+/// channel is pressable: the newest.
+///
+/// No thread is opened here. Most confessions never get a reply, and a thread
+/// on every one would bury the channel — the thread is opened by the first
+/// reply instead (see [`place_reply`]).
+///
+/// The new card goes up BEFORE the old one is edited, so a failure in the
+/// middle leaves two pressable cards rather than none. `was_on` is the card
+/// that had the buttons, out of the store and nowhere else.
+pub async fn post_confession(poster: &dyn Poster, channel: u64, c: &Confession, was_on: Option<u64>) -> Posted {
     let mut out = Posted::default();
-    match poster.say_in_channel(channel, &confession_text(c), None).await {
+    match poster.post_card(channel, &confession_text(c)).await {
         Ok(id) => out.message = id,
         Err(err) => {
             out.notes.push(format!("#{} was approved but could not be posted: {}", c.number, err));
             return out;
         }
     }
-    if !want_thread {
-        return out;
+    if let Some(old) = was_on.filter(|id| *id != out.message) {
+        match poster.set_card_buttons(channel, old, false).await {
+            Ok(()) => out.buttons_off = Some(old),
+            // The old card has gone, or the bot cannot edit it. Harmless: two
+            // cards show buttons and both press through to the same place.
+            Err(err) => out.notes.push(format!(
+                "the buttons were not taken off the card before #{} ({}) - it may still show them",
+                c.number, err
+            )),
+        }
     }
-    match poster.open_thread(channel, out.message, &thread_name(c), minutes).await {
-        Ok(thread) => out.thread = Some(thread),
-        Err(err) => out.notes.push(format!(
-            "#{} is posted, but its thread could not be opened ({}) - the confession stands and the conversation will have to happen in the channel",
-            c.number, err
-        )),
+    out
+}
+
+/// What moving the buttons onto a card did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ButtonsMove {
+    /// The card they are on now, as (number, message id).
+    pub on: Option<(i64, u64)>,
+    /// True when the card they were meant to be on had gone.
+    pub was_lost: bool,
+    pub notes: Vec<String>,
+}
+
+/// Puts the buttons back on the newest surviving confession card.
+///
+/// Used when the card carrying them is deleted, and once at startup so a
+/// restart cannot leave the channel with no way in. `newest` is the newest card
+/// this bot has a message id for, out of its own store — so the buttons can
+/// only ever land on a message the bot posted itself.
+pub async fn move_buttons(poster: &dyn Poster, channel: u64, newest: Option<(i64, u64)>, lost: bool) -> ButtonsMove {
+    let mut out = ButtonsMove { was_lost: lost, ..ButtonsMove::default() };
+    let Some((number, message)) = newest else {
+        out.notes.push(
+            "there is no confession card left in the channel to put the buttons on - the next approved confession brings them back"
+                .to_string(),
+        );
+        return out;
+    };
+    match poster.set_card_buttons(channel, message, true).await {
+        Ok(()) => out.on = Some((number, message)),
+        Err(err) => out.notes.push(format!("the buttons could not be put on #{} ({})", number, err)),
     }
     out
 }
@@ -514,10 +557,11 @@ pub async fn place_reply(
     channel: u64,
     parent: &Confession,
     text: &str,
+    want_thread: bool,
     minutes: u16,
 ) -> Placed {
     let mut out = Placed::default();
-    if parent.thread_id != 0 {
+    if parent.thread_id != 0 && want_thread {
         match poster.say_in_thread(parent.thread_id, text).await {
             Ok(id) => {
                 out.message = id;
@@ -549,7 +593,9 @@ pub async fn place_reply(
         }
     }
 
-    if parent.posted_message != 0 {
+    // The first reply to this confession is what opens its thread: a confession
+    // nobody answers never gets one.
+    if parent.posted_message != 0 && want_thread {
         match poster.open_thread(channel, parent.posted_message, &thread_name(parent), minutes).await {
             Ok(thread) => match poster.say_in_thread(thread, text).await {
                 Ok(id) => {
@@ -615,38 +661,27 @@ impl Poster for Live<'_> {
         Ok(ChannelId::new(channel).create_thread_from_message(self.http, MessageId::new(message), thread).await?.id.get())
     }
 
-    async fn delete(&self, channel: u64, message: u64) -> anyhow::Result<()> {
-        ChannelId::new(channel).delete_message(self.http, MessageId::new(message)).await?;
-        Ok(())
-    }
-
-    async fn post_panel(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
+    async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
         let post = CreateMessage::new()
             .content(text)
-            .components(vec![panel_buttons()])
+            .components(vec![card_buttons()])
             .allowed_mentions(CreateAllowedMentions::new());
         Ok(ChannelId::new(channel).send_message(self.http, post).await?.id.get())
     }
+
+    async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()> {
+        let rows = if on { vec![card_buttons()] } else { vec![] };
+        ChannelId::new(channel).edit_message(self.http, MessageId::new(message), EditMessage::new().components(rows)).await?;
+        Ok(())
+    }
 }
 
-/// The panel's words. It says plainly that mods see who submitted, because a
-/// member deciding whether to trust this deserves to know that before they
-/// type, not after.
-pub const PANEL_TITLE: &str = "**Confessions**";
-pub const PANEL_BODY: &str = "Press a button below to send something in. Nothing is posted until a mod has read it, \
-    and what gets posted carries a number and your words — never your name.\n\n\
-    Moderators do see who submitted, for moderation only, and every time one looks it is written down.\n\n\
-    -# This panel is always the last message here, so you never have to scroll for it.";
-
-pub fn panel_text() -> String {
-    format!("{}\n\n{}", PANEL_TITLE, PANEL_BODY)
-}
-
-pub fn panel_buttons() -> CreateActionRow {
+/// The two buttons that ride on the newest confession card. There is no panel
+/// message: these are the whole of the way in.
+pub fn card_buttons() -> CreateActionRow {
     CreateActionRow::Buttons(vec![
         CreateButton::new(ID_NEW).label("Submit a confession").style(ButtonStyle::Primary),
         CreateButton::new(ID_REPLY).label("Submit a reply").style(ButtonStyle::Secondary),
-        CreateButton::new(ID_WHO).label("Who sent it? (mods)").style(ButtonStyle::Secondary),
     ])
 }
 
@@ -688,15 +723,6 @@ pub fn reject_modal(number: i64) -> CreateModal {
                 .required(false),
         ),
     ])
-}
-
-pub fn who_modal() -> CreateModal {
-    CreateModal::new(MODAL_WHO, "Who sent it?").components(vec![CreateActionRow::InputText(
-        CreateInputText::new(InputTextStyle::Short, "Which number?", FIELD_NUMBER)
-            .placeholder("457")
-            .max_length(12)
-            .required(true),
-    )])
 }
 
 /// One field out of a submitted modal.
@@ -832,177 +858,6 @@ pub fn log_embed(c: &Confession, decided_by_name: &str, guild: u64, link: Option
     embed
 }
 
-// --- moving the panel back to the bottom -------------------------------------
-
-/// What a post should do about the panel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Plan {
-    /// Move it now.
-    Now,
-    /// Move it in this many milliseconds.
-    After(i64),
-    /// Nothing: a move is already on its way and will do the work.
-    Nothing,
-}
-
-/// One channel's repost budget. Posts arriving inside the gap fold into the one
-/// repost already scheduled, so a burst of approvals is a handful of calls to
-/// Discord rather than one each.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ticker {
-    last_ms: i64,
-    pending: bool,
-}
-
-impl Ticker {
-    pub fn posted(&mut self, now_ms: i64, gap_ms: i64) -> Plan {
-        if self.pending {
-            return Plan::Nothing;
-        }
-        if now_ms.saturating_sub(self.last_ms) >= gap_ms {
-            self.last_ms = now_ms;
-            return Plan::Now;
-        }
-        self.pending = true;
-        Plan::After(gap_ms - (now_ms - self.last_ms))
-    }
-
-    /// The scheduled repost has gone out.
-    pub fn fired(&mut self, now_ms: i64) {
-        self.last_ms = now_ms;
-        self.pending = false;
-    }
-}
-
-static TICKERS: LazyLock<Mutex<HashMap<u64, Ticker>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
-}
-
-/// What one move of the panel did.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PanelMove {
-    /// The panel that is now at the bottom. 0 when it could not be posted.
-    pub posted: u64,
-    /// The message that was deleted, when one was. Only ever a panel this bot
-    /// wrote into its own store.
-    pub deleted: Option<u64>,
-    pub notes: Vec<String>,
-}
-
-/// Posts the panel at the bottom of the channel and takes the old one down.
-///
-/// **The old one is the message id this bot wrote into its own store for this
-/// channel, and nothing else.** Not the newest message by the bot, not a
-/// message that looks like a panel, not anything matched on author or content.
-/// The third-party bot this replaces left its own panels and hundreds of
-/// confessions in that channel, and none of them are visible here.
-///
-/// The new panel goes up BEFORE the old one comes down, so a failure in the
-/// middle leaves two panels rather than none — a duplicate is untidy, no panel
-/// at all is the bug that killed the old bot. A panel somebody deleted by hand
-/// simply fails to delete, which costs a line in the log and nothing else.
-pub async fn repost_panel(poster: &dyn Poster, db: &Mutex<Connection>, channel: u64, now: i64) -> PanelMove {
-    let mut out = PanelMove::default();
-    let old = {
-        let conn = db.lock();
-        store::panel_message(&conn, channel)
-    };
-    match poster.post_panel(channel, &panel_text()).await {
-        Ok(id) => out.posted = id,
-        Err(err) => {
-            out.notes.push(format!("the panel was not posted in {} ({}) - the old one is left alone", channel, err));
-            return out;
-        }
-    }
-    {
-        let conn = db.lock();
-        if let Err(err) = store::set_panel(&conn, channel, out.posted, now) {
-            out.notes.push(format!("the new panel {} was not written down: {}", out.posted, err));
-        }
-    }
-    if let Some(old) = old.filter(|id| *id != out.posted) {
-        match poster.delete(channel, old).await {
-            Ok(()) => out.deleted = Some(old),
-            Err(err) => out.notes.push(format!("the old panel {} was already gone ({})", old, err)),
-        }
-    }
-    out
-}
-
-/// The same, against the live store and the real Discord.
-async fn move_panel(http: &Http, channel: u64) {
-    let Some(db) = store::db() else { return };
-    let out = repost_panel(&Live { http }, db, channel, Utc::now().timestamp()).await;
-    for note in &out.notes {
-        tracing::warn!("confess: {}", note);
-    }
-}
-
-/// Asks for the panel to be moved to the bottom, now or shortly.
-pub fn bump_panel(ctx: &Context, channel: u64) {
-    let plan = TICKERS.lock().entry(channel).or_default().posted(now_ms(), PANEL_GAP.as_millis() as i64);
-    let http = ctx.http.clone();
-    match plan {
-        Plan::Nothing => {}
-        Plan::Now => {
-            tokio::spawn(async move { move_panel(&http, channel).await });
-        }
-        Plan::After(ms) => {
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(ms.max(0) as u64)).await;
-                TICKERS.lock().entry(channel).or_default().fired(now_ms());
-                move_panel(&http, channel).await;
-            });
-        }
-    }
-}
-
-/// Puts the panel up at startup if there isn't one, so a restart never leaves
-/// the channel without its buttons. An existing panel is moved to the bottom
-/// only if something has been said under it since.
-pub fn spawn(ctx: Context) {
-    tokio::spawn(async move {
-        if !enabled() {
-            return;
-        }
-        let Some(channel) = channel() else {
-            tracing::info!("confess: no confessions channel is set, so the panel was not posted");
-            return;
-        };
-        if store::db().is_none() {
-            tracing::error!("confess: the store is not open, so the buttons would refuse every press - no panel posted");
-            return;
-        }
-        move_panel(&ctx.http, channel).await;
-    });
-}
-
-/// Anything new in the confessions channel that isn't the panel itself puts the
-/// panel back at the bottom. This is what keeps it last between approvals —
-/// somebody chatting in there, or the old bot posting, moves it down too.
-pub fn on_message(ctx: &Context, msg: &Message) {
-    if !enabled() || store::db().is_none() {
-        return;
-    }
-    let Some(here) = channel() else { return };
-    if msg.channel_id.get() != here {
-        return;
-    }
-    // Our own panel landing must not start another repost, or it would never stop.
-    let ours = store::db()
-        .map(|db| {
-            let conn = db.lock();
-            store::panel_message(&conn, here) == Some(msg.id.get())
-        })
-        .unwrap_or(false);
-    if ours {
-        return;
-    }
-    bump_panel(ctx, here);
-}
-
 // --- who sent it -------------------------------------------------------------
 
 pub const WHO_NOT_MOD: &str = "Only moderators can look that up.";
@@ -1110,8 +965,10 @@ pub struct Settled {
     pub posted: Option<u64>,
     /// The thread it is in or was opened for it.
     pub thread: Option<u64>,
-    /// True when the panel should be moved back to the bottom.
-    pub bump: bool,
+    /// The card now carrying the two buttons, as (number, message id).
+    pub buttons_on: Option<(i64, u64)>,
+    /// The card the buttons were taken off.
+    pub buttons_off: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -1119,9 +976,10 @@ pub struct Settled {
 /// down first, so a rejection can never be posted by a retry and an approval
 /// can never be posted twice; then posts an approved one and nothing else.
 ///
-/// A confession gets its own main-channel post and a thread of the same name. A
-/// reply goes INSIDE that confession's thread — one post and one thread per
-/// confession, with the conversation in one place.
+/// A confession is posted as a card with the two buttons on it, and the card
+/// before it has them taken off. A reply goes INSIDE its confession's thread,
+/// opening that thread if this is the first reply — so one post and at most one
+/// thread per confession, with the conversation in one place.
 #[allow(clippy::too_many_arguments)]
 pub async fn settle_with(
     db: &Mutex<Connection>,
@@ -1157,7 +1015,9 @@ pub async fn settle_with(
             return out;
         };
         match c.answers {
-            // A reply: into its confession's thread.
+            // A reply: into its confession's thread, which the first reply is
+            // what opens. Nothing about the main channel changes, so the
+            // buttons stay where they are.
             Some(target) => {
                 let parent = {
                     let conn = db.lock();
@@ -1173,7 +1033,7 @@ pub async fn settle_with(
                             reply_letter(store::approved_replies_to(&conn, target).max(1))
                         };
                         let text = reply_text(target, &letter, &c.body);
-                        let placed = place_reply(poster, here, &parent, &text, minutes).await;
+                        let placed = place_reply(poster, here, &parent, &text, want_thread, minutes).await;
                         out.notes.extend(placed.notes.clone());
                         if let Some(thread) = placed.opened {
                             let conn = db.lock();
@@ -1188,30 +1048,28 @@ pub async fn settle_with(
                             out.posted = Some(placed.message);
                             out.thread = placed.thread;
                         }
-                        // Only a reply that had to fall back into the main
-                        // channel moves the panel: one inside a thread does not
-                        // touch the channel at all.
-                        out.bump = placed.fell_back;
                     }
                 }
             }
-            // A confession: its own post, and its own thread.
+            // A confession: its own card, with the buttons, and the buttons
+            // taken off the card before it. No thread until somebody replies.
             None => {
-                let posted = post_confession(poster, here, &c, want_thread, minutes).await;
+                let was_on = {
+                    let conn = db.lock();
+                    store::buttons_holder(&conn, here).map(|(message, _)| message)
+                };
+                let posted = post_confession(poster, here, &c, was_on).await;
                 out.notes.extend(posted.notes.clone());
+                out.buttons_off = posted.buttons_off;
                 if posted.message != 0 {
                     let conn = db.lock();
                     let _ = store::set_posted(&conn, number, here, posted.message);
+                    let _ = store::set_buttons_holder(&conn, here, posted.message, number, now);
                     c.posted_channel = here;
                     c.posted_message = posted.message;
                     out.posted = Some(posted.message);
-                    if let Some(thread) = posted.thread {
-                        let _ = store::set_thread(&conn, number, thread);
-                        c.thread_id = thread;
-                        out.thread = Some(thread);
-                    }
+                    out.buttons_on = Some((number, posted.message));
                 }
-                out.bump = true;
             }
         }
     }
@@ -1280,16 +1138,6 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         return;
     }
 
-    if id == ID_WHO {
-        let roles = component.member.as_ref().map(|m| m.roles.clone()).unwrap_or_default();
-        if !is_mod(ctx, component.guild_id, component.user.id.get(), &roles).await {
-            let _ = component.create_response(&ctx.http, whisper(WHO_NOT_MOD)).await;
-            return;
-        }
-        let _ = component.create_response(&ctx.http, CreateInteractionResponse::Modal(who_modal())).await;
-        return;
-    }
-
     // Approve or reject. Only a mod gets this far.
     let (approving, raw) = match (id.strip_prefix(ID_APPROVE), id.strip_prefix(ID_REJECT)) {
         (Some(n), _) => (true, n),
@@ -1347,30 +1195,6 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
         let _ = modal.create_response(&ctx.http, whisper("Confessions aren't available right now. Tell a mod.")).await;
         return;
     };
-
-    if id == MODAL_WHO {
-        let roles = modal.member.as_ref().map(|m| m.roles.clone()).unwrap_or_default();
-        if !is_mod(ctx, modal.guild_id, modal.user.id.get(), &roles).await {
-            let _ = modal.create_response(&ctx.http, whisper(WHO_NOT_MOD)).await;
-            return;
-        }
-        let asked = field(modal, FIELD_NUMBER);
-        let number = asked.trim().trim_start_matches('#').trim().parse::<i64>().unwrap_or(0);
-        let found = {
-            let conn = db.lock();
-            store::get(&conn, number).ok().flatten()
-        };
-        // Written down before the answer is shown, so a look is on the record
-        // even if the reply never reaches them.
-        let _ = control::log_change(
-            "confess:who",
-            None,
-            Some(&format!("Looked up who sent #{}", if number > 0 { number.to_string() } else { asked.trim().to_string() })),
-            modal.user.id.get(),
-        );
-        let _ = modal.create_response(&ctx.http, whisper(who_sent_words(number, found.as_ref()))).await;
-        return;
-    }
 
     if let Some(raw) = id.strip_prefix(MODAL_REJECT) {
         let Ok(number) = raw.parse::<i64>() else { return };
@@ -1489,11 +1313,6 @@ async fn settle(ctx: &Context, number: i64, status: Status, mod_id: u64, mod_nam
         return;
     }
     let Some(c) = out.confession else { return };
-    if out.bump {
-        if let Some(here) = here {
-            bump_panel(ctx, here);
-        }
-    }
 
     let guild = ctx.cache.guilds().first().map(|g| g.get()).unwrap_or(0);
     if let Some(log) = log_channel() {
@@ -1510,6 +1329,136 @@ async fn settle(ctx: &Context, number: i64, status: Status, mod_id: u64, mod_nam
         Some(&format!("#{}", number)),
         mod_id,
     );
+}
+
+/// Makes sure the two buttons are on the newest confession card, once, at
+/// startup — so a restart can never leave the channel with no way in. An
+/// ordinary boot with the newest card already carrying them is one edit that
+/// changes nothing.
+pub fn spawn(ctx: Context) {
+    tokio::spawn(async move {
+        if !enabled() {
+            return;
+        }
+        let Some(here) = channel() else {
+            tracing::info!("confess: no confessions channel is set, so the buttons were not placed");
+            return;
+        };
+        let Some(db) = store::db() else {
+            tracing::error!("confess: the store is not open, so the buttons would refuse every press");
+            return;
+        };
+        let newest = {
+            let conn = db.lock();
+            store::newest_card(&conn, here)
+        };
+        let out = move_buttons(&Live { http: &ctx.http }, here, newest, false).await;
+        for note in &out.notes {
+            tracing::warn!("confess: {}", note);
+        }
+        match out.on {
+            Some((number, _)) => tracing::info!("confess: the buttons are on #{}", number),
+            None => tracing::info!("confess: no confession card to put the buttons on yet"),
+        }
+        if let Some((number, message)) = out.on {
+            let conn = db.lock();
+            let _ = store::set_buttons_holder(&conn, here, message, number, Utc::now().timestamp());
+        }
+    });
+}
+
+/// A deleted message in the confessions channel.
+///
+/// Only a message id this bot wrote down itself is recognised; anything else —
+/// the old bot's cards, a member's message, one of the old confessions — is
+/// not ours and is ignored. When the card carrying the buttons goes, they move
+/// to the newest surviving card this bot posted.
+pub fn on_delete(ctx: &Context, channel_id: ChannelId, message: MessageId) {
+    if !enabled() {
+        return;
+    }
+    let Some(here) = channel() else { return };
+    if channel_id.get() != here {
+        return;
+    }
+    let Some(db) = store::db() else { return };
+    let (ours, carried) = {
+        let conn = db.lock();
+        let ours = store::card_at(&conn, here, message.get());
+        let carried = store::buttons_holder(&conn, here).is_some_and(|(id, _)| id == message.get());
+        (ours, carried)
+    };
+    let Some(number) = ours else { return };
+    {
+        let conn = db.lock();
+        let _ = store::forget_posted(&conn, number);
+        if carried {
+            let _ = store::clear_buttons_holder(&conn, here);
+        }
+    }
+    tracing::info!("confess: the card for #{} was deleted from the channel", number);
+    if !carried {
+        return;
+    }
+    // It was the pressable one, so the buttons have to move or there is no way
+    // to submit anything.
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let Some(db) = store::db() else { return };
+        let newest = {
+            let conn = db.lock();
+            store::newest_card(&conn, here)
+        };
+        let out = move_buttons(&Live { http: &ctx.http }, here, newest, true).await;
+        for note in &out.notes {
+            tracing::warn!("confess: {}", note);
+        }
+        if let Some((number, message)) = out.on {
+            tracing::info!("confess: the buttons moved to #{}", number);
+            let conn = db.lock();
+            let _ = store::set_buttons_holder(&conn, here, message, number, Utc::now().timestamp());
+        }
+    });
+}
+
+// --- /whosent ----------------------------------------------------------------
+
+/// `/whosent` — the mods' lookup, moved off the public card. Admin-only, the
+/// answer is private, and every look is written to the activity log.
+pub fn whosent_builder() -> CreateCommand {
+    CreateCommand::new("whosent")
+        .description("admin only: who sent a confession, privately - every look is logged")
+        .add_option(
+            CreateCommandOption::new(CommandOptionType::Integer, "number", "the confession's number")
+                .required(true)
+                .min_int_value(1),
+        )
+}
+
+pub async fn whosent_command(ctx: &Context, command: &CommandInteraction) {
+    let roles = command.member.as_ref().map(|m| m.roles.clone()).unwrap_or_default();
+    if !is_mod(ctx, command.guild_id, command.user.id.get(), &roles).await {
+        let _ = command.create_response(&ctx.http, whisper(WHO_NOT_MOD)).await;
+        return;
+    }
+    let number = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "number")
+        .and_then(|o| match o.value {
+            CommandDataOptionValue::Integer(n) => Some(n),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let found = store::db().and_then(|db| {
+        let conn = db.lock();
+        store::get(&conn, number).ok().flatten()
+    });
+    // Written down before the answer is shown, so a look is on the record even
+    // if the reply never reaches them.
+    let _ = control::log_change("confess:who", None, Some(&format!("Looked up who sent #{}", number)), command.user.id.get());
+    let _ = command.create_response(&ctx.http, whisper(who_sent_words(number, found.as_ref()))).await;
 }
 
 #[cfg(test)]
@@ -1729,8 +1678,8 @@ mod tests {
     /// A fake Discord that writes down every call and can be told to refuse
     /// whichever of them the test is about.
     #[derive(Default)]
-    struct Fake {
-        channel_posts: Mutex<Vec<(u64, String, Option<u64>)>>,
+    pub(super) struct Fake {
+        pub(super) channel_posts: Mutex<Vec<(u64, String, Option<u64>)>>,
         thread_posts: Mutex<Vec<(u64, String)>>,
         opened: Mutex<Vec<(u64, u64, String, u16)>>,
         revived: Mutex<Vec<u64>>,
@@ -1738,9 +1687,11 @@ mod tests {
         archived: Mutex<Vec<u64>>,
         /// Thread ids that refuse a post whatever happens.
         dead: Mutex<Vec<u64>>,
-        /// Every delete asked for: (channel, message).
-        deleted: Mutex<Vec<(u64, u64)>>,
-        /// Message ids that are not there any more, so a delete of one fails.
+        /// Every edit asked for: (channel, message, buttons on).
+        edits: Mutex<Vec<(u64, u64, bool)>>,
+        /// Which message ids are showing buttons: (message, on).
+        buttons: Mutex<Vec<(u64, bool)>>,
+        /// Message ids that are not there any more, so editing one fails.
         gone: Mutex<Vec<u64>>,
         no_threads: bool,
         no_revive: bool,
@@ -1750,7 +1701,7 @@ mod tests {
     }
 
     impl Fake {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Fake { next_id: Mutex::new(1000), ..Fake::default() }
         }
 
@@ -1796,56 +1747,73 @@ mod tests {
             Ok(self.id())
         }
 
-        async fn delete(&self, channel: u64, message: u64) -> anyhow::Result<()> {
-            self.deleted.lock().push((channel, message));
+        async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
+            if self.no_channel {
+                return Err(anyhow::anyhow!("Missing Permissions"));
+            }
+            let id = self.id();
+            self.channel_posts.lock().push((channel, text.to_string(), None));
+            self.buttons.lock().push((id, true));
+            self.edits.lock().push((channel, id, true));
+            Ok(id)
+        }
+
+        async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()> {
+            self.edits.lock().push((channel, message, on));
             if self.gone.lock().contains(&message) {
                 return Err(anyhow::anyhow!("Unknown Message"));
             }
+            self.buttons.lock().retain(|(id, _)| *id != message);
+            self.buttons.lock().push((message, on));
             Ok(())
         }
+    }
 
-        async fn post_panel(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
-            self.say_in_channel(channel, text, None).await
+    impl Fake {
+        /// Every message id that is showing the two buttons right now.
+        fn pressable(&self) -> Vec<u64> {
+            let mut out: Vec<u64> = self.buttons.lock().iter().filter(|(_, on)| *on).map(|(id, _)| *id).collect();
+            out.sort_unstable();
+            out
+        }
+
+        /// Somebody deleted that message in Discord: it is gone from the
+        /// channel, so it shows no buttons and cannot be edited again.
+        fn vanish(&self, message: u64) {
+            self.gone.lock().push(message);
+            self.buttons.lock().retain(|(id, _)| *id != message);
+        }
+
+        /// Message ids this fake was ever asked to edit.
+        fn edited(&self) -> Vec<u64> {
+            let mut out: Vec<u64> = self.edits.lock().iter().map(|(_, id, _)| *id).collect();
+            out.sort_unstable();
+            out.dedup();
+            out
         }
     }
 
     #[tokio::test]
-    async fn an_approved_confession_is_posted_and_gets_a_thread_of_the_same_name() {
+    async fn an_approved_confession_is_posted_as_a_card_with_the_buttons_on_it() {
         let fake = Fake::new();
         let c = confession(459, "I cheated at Wordle");
-        let out = post_confession(&fake, 21, &c, true, 4320).await;
+        let out = post_confession(&fake, 21, &c, None).await;
         assert_ne!(out.message, 0);
         assert_eq!(out.notes, Vec::<String>::new());
+        assert_eq!(out.buttons_off, None, "there was no card before it");
         let posts = fake.channel_posts.lock().clone();
         assert_eq!(posts.len(), 1, "one post in the channel and no more");
         assert_eq!(posts[0].0, 21);
         assert_eq!(posts[0].1, "**Anonymous Confession (#459)**\n\nI cheated at Wordle");
-        let opened = fake.opened.lock().clone();
-        assert_eq!(opened.len(), 1, "one thread");
-        assert_eq!((opened[0].0, opened[0].1), (21, out.message), "on the message that was just posted");
-        assert_eq!(opened[0].2, "Anonymous Confession (#459)", "named exactly as the message is titled");
-        assert_eq!(opened[0].3, 4320);
-        assert!(out.thread.is_some(), "and its id comes back to be written down");
-        // The text is not posted again inside the thread.
-        assert!(fake.thread_posts.lock().is_empty(), "nothing is said inside the thread");
-    }
+        assert_eq!(fake.pressable(), vec![out.message], "and it is the pressable one");
+        // No thread: that waits for the first reply.
+        assert!(fake.opened.lock().is_empty(), "a confession opens no thread");
+        assert!(fake.thread_posts.lock().is_empty());
 
-    /// A thread that cannot be opened must never cost the confession.
-    #[tokio::test]
-    async fn a_thread_that_cannot_be_opened_leaves_the_confession_standing() {
-        let fake = Fake { no_threads: true, ..Fake::new() };
-        let out = post_confession(&fake, 21, &confession(459, "the text"), true, 4320).await;
-        assert_ne!(out.message, 0, "the confession is posted");
-        assert_eq!(out.thread, None);
-        assert_eq!(out.notes.len(), 1);
-        assert!(out.notes[0].contains("the confession stands"), "{:?}", out.notes);
-        assert!(out.notes[0].contains("Max active threads"), "the reason is in the log: {:?}", out.notes);
-        assert_eq!(fake.channel_posts.lock().len(), 1);
-        // Threads switched off: the post goes up and nothing is attempted.
-        let fake = Fake::new();
-        let out = post_confession(&fake, 21, &confession(459, "the text"), false, 4320).await;
-        assert_ne!(out.message, 0);
-        assert!(fake.opened.lock().is_empty() && out.notes.is_empty());
+        // The next one takes the buttons off it.
+        let next = post_confession(&fake, 21, &confession(460, "me too"), Some(out.message)).await;
+        assert_eq!(next.buttons_off, Some(out.message));
+        assert_eq!(fake.pressable(), vec![next.message]);
     }
 
     /// The flow the owner asked for: one post and one thread per confession,
@@ -1855,7 +1823,7 @@ mod tests {
         let fake = Fake::new();
         let parent = Confession { thread_id: 7777, ..approved(457) };
         let text = reply_text(457, "A", "same here");
-        let out = place_reply(&fake, 21, &parent, &text, 4320).await;
+        let out = place_reply(&fake, 21, &parent, &text, true, 4320).await;
         assert_eq!(out.thread, Some(7777));
         assert!(!out.fell_back && !out.revived && out.opened.is_none());
         assert_eq!(out.notes, Vec::<String>::new());
@@ -1871,7 +1839,7 @@ mod tests {
         let fake = Fake::new();
         fake.archived.lock().push(7777);
         let parent = Confession { thread_id: 7777, ..approved(457) };
-        let out = place_reply(&fake, 21, &parent, "a reply", 4320).await;
+        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
         assert_eq!(out.thread, Some(7777));
         assert!(out.revived, "it had to be woken");
         assert!(!out.fell_back && out.opened.is_none());
@@ -1887,7 +1855,7 @@ mod tests {
         let fake = Fake::new();
         let parent = approved(457);
         assert_eq!(parent.thread_id, 0);
-        let out = place_reply(&fake, 21, &parent, "a reply", 4320).await;
+        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
         let thread = out.thread.expect("a thread");
         assert_eq!(out.opened, Some(thread), "the new thread is handed back to be written down");
         assert!(!out.fell_back);
@@ -1897,6 +1865,23 @@ mod tests {
         assert!(fake.channel_posts.lock().is_empty());
     }
 
+    /// Threads switched off in the settings: the reply goes in the channel
+    /// under its confession and no thread is made at all.
+    #[tokio::test]
+    async fn with_threads_off_a_reply_goes_in_the_channel_and_makes_no_thread() {
+        let fake = Fake::new();
+        let parent = approved(457);
+        let out = place_reply(&fake, 21, &parent, "a reply", false, 4320).await;
+        assert!(out.fell_back);
+        assert_eq!(out.thread, None);
+        assert_eq!(out.opened, None);
+        assert!(fake.opened.lock().is_empty(), "no thread was even attempted");
+        assert!(fake.thread_posts.lock().is_empty());
+        let posts = fake.channel_posts.lock().clone();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].2, Some(parent.posted_message), "hanging off the confession");
+    }
+
     /// Everything about threads failed. The reply still goes up, hanging off
     /// the confession, and the failure is in the log.
     #[tokio::test]
@@ -1904,7 +1889,7 @@ mod tests {
         let fake = Fake { no_threads: true, no_revive: true, ..Fake::new() };
         fake.dead.lock().push(7777);
         let parent = Confession { thread_id: 7777, ..approved(457) };
-        let out = place_reply(&fake, 21, &parent, "a reply", 4320).await;
+        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
         assert!(out.fell_back, "it had to go in the channel");
         assert_eq!(out.thread, None);
         assert_ne!(out.message, 0, "but it was posted");
@@ -1915,26 +1900,33 @@ mod tests {
         assert!(out.notes.iter().any(|n| n.contains("would not wake up")), "the reason is logged too: {:?}", out.notes);
     }
 
+    /// There is no panel message: the two buttons ride on the cards, and there
+    /// are only ever two of them.
     #[test]
-    fn the_panel_says_what_it_does_and_that_mods_can_look() {
-        let text = panel_text();
-        assert!(text.contains("never your name"), "{text}");
-        assert!(text.contains("Moderators do see who submitted"), "a member deserves to know that before typing: {text}");
-        assert!(text.contains("last message here"), "{text}");
-        let CreateActionRow::Buttons(row) = panel_buttons() else { panic!("a row of buttons") };
+    fn the_cards_carry_exactly_the_two_buttons() {
+        let CreateActionRow::Buttons(row) = card_buttons() else { panic!("a row of buttons") };
+        assert_eq!(row.len(), 2, "two buttons and nothing else");
         let drawn = serde_json::to_string(&row).unwrap();
         assert!(drawn.contains("Submit a confession") && drawn.contains("Submit a reply"), "{drawn}");
-        assert!(drawn.contains(ID_NEW) && drawn.contains(ID_REPLY) && drawn.contains(ID_WHO));
+        assert!(drawn.contains(ID_NEW) && drawn.contains(ID_REPLY));
+        // The mod lookup is a slash command now, never a button in public.
+        assert!(!drawn.to_lowercase().contains("who sent"), "the mod lookup is not on a public card: {drawn}");
+        assert!(!drawn.contains("confess:who"), "{drawn}");
+        // And the card itself is still only a number and the words.
+        let text = confession_text(&approved(459));
+        assert!(!text.contains("Submit") && !text.contains("Moderators"), "no panel words on a card: {text}");
     }
 
-    /// Dispatch is by the id alone, which is what makes a panel posted before a
+    /// Dispatch is by the id alone, which is what makes a card posted before a
     /// restart still work after one.
     #[test]
     fn the_buttons_and_modals_are_recognised_by_their_ids_alone() {
-        assert!(owns_component(ID_NEW) && owns_component(ID_REPLY) && owns_component(ID_WHO));
+        assert!(owns_component(ID_NEW) && owns_component(ID_REPLY));
+        assert!(!owns_component("confess:who"), "the mod lookup button is gone");
         assert!(owns_component("confess:ok:459") && owns_component("confess:no:459"));
         assert!(!owns_component("signup:in") && !owns_component("confess") && !owns_component(""));
-        assert!(owns_modal(MODAL_NEW) && owns_modal(MODAL_REPLY) && owns_modal(MODAL_WHO) && owns_modal("confessform:no:459"));
+        assert!(owns_modal(MODAL_NEW) && owns_modal(MODAL_REPLY) && owns_modal("confessform:no:459"));
+        assert!(!owns_modal("confessform:who"), "and so is its modal");
         assert!(!owns_modal("lrmodal:abc") && !owns_modal(ID_NEW));
         // The ids themselves, so a rename has to be deliberate.
         assert_eq!((ID_NEW, ID_REPLY), ("confess:new", "confess:reply"));
@@ -2063,132 +2055,170 @@ mod tests {
         assert_eq!(age_words(2000, 1000), "today", "a clock that went backwards is not a negative age");
     }
 
-    // --- the panel staying last ----------------------------------------------
+    // --- the buttons, and which card carries them ----------------------------
 
-    /// The bug that killed the old bot was a panel nobody could find. The bug
-    /// that would kill this one is hammering Discord instead, so a burst of
-    /// approvals becomes a handful of reposts.
-    #[test]
-    fn a_burst_of_confessions_becomes_a_handful_of_reposts() {
-        let gap = PANEL_GAP.as_millis() as i64;
-        let mut ticker = Ticker::default();
-        let mut reposts = 0;
-        let mut due: Option<i64> = None;
-        let start = 1_000_000;
-        // Twenty confessions approved over a minute, three seconds apart.
-        for step in 0..20 {
-            let now = start + step * 3_000;
-            if let Some(at) = due.filter(|at| *at <= now) {
-                ticker.fired(at);
-                reposts += 1;
-                due = None;
+    /// The whole of the new posting flow: three confessions approved in a row
+    /// leave three cards in the channel and exactly one of them pressable — the
+    /// newest. This is what replaced the panel the old bot buried.
+    #[tokio::test]
+    async fn only_the_newest_card_carries_the_buttons() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+        let mut cards = Vec::new();
+        for (i, body) in ["the first one", "the second one", "the third one"].iter().enumerate() {
+            let n = 459 + i as i64;
+            submit(&db, &limits, 11 + i as u64, "Zoya", false, Kind::Confession, "", body, 1000 + i as i64, 459).unwrap();
+            let out = settle_with(&db, &fake, Some(21), n, Status::Approved, 7, "", true, 4320, 2000 + i as i64).await;
+            let message = out.posted.expect("a card");
+            assert_eq!(out.buttons_on, Some((n, message)), "#{} takes the buttons", n);
+            if let Some(previous) = cards.last() {
+                assert_eq!(out.buttons_off, Some(*previous), "and they come off the card before it");
+            } else {
+                assert_eq!(out.buttons_off, None, "there was no card before the first");
             }
-            match ticker.posted(now, gap) {
-                Plan::Now => reposts += 1,
-                Plan::After(ms) => due = Some(now + ms),
-                Plan::Nothing => {}
-            }
+            assert_eq!(out.thread, None, "no thread is opened when a confession posts");
+            cards.push(message);
         }
-        if due.is_some() {
-            reposts += 1;
+
+        // Three cards in the channel, one pressable: the newest.
+        assert_eq!(fake.channel_posts.lock().len(), 3);
+        assert_eq!(fake.pressable(), vec![*cards.last().unwrap()]);
+        assert!(fake.opened.lock().is_empty(), "and not one thread for three confessions");
+        assert_eq!(
+            super::store::buttons_holder(&db.lock(), 21),
+            Some((*cards.last().unwrap(), 461)),
+            "the store knows which card to take them off next time"
+        );
+        // Nothing was deleted: the bot has no way to delete in that channel.
+        for id in fake.edited() {
+            assert!(cards.contains(&id), "{} was edited and this bot never posted it", id);
         }
-        assert!(reposts <= 5, "a minute of approvals cost {} reposts, more than one per {:?}", reposts, PANEL_GAP);
-        assert!(reposts >= 3, "but the panel must still reach the bottom: only {} reposts in a minute", reposts);
     }
 
-    /// The one rule about this channel: the only message this bot ever deletes
-    /// in it is its OWN panel, matched by a message id out of its own store.
-    /// The bot this replaces left its panels and hundreds of confessions in
-    /// there, and none of them may be touched.
+    /// The rule that protects the channel: the bot only ever edits a message id
+    /// out of its own store. The bot it replaces left its own cards and
+    /// hundreds of confessions in there and none of them may be touched — and
+    /// there is no delete on the trait at all.
     #[tokio::test]
-    async fn the_repost_only_ever_deletes_a_panel_this_bot_wrote_down() {
+    async fn the_bot_only_ever_edits_a_card_it_posted_itself() {
         let db = sheet();
         let fake = Fake::new();
-        // Nothing of ours in the channel yet, so nothing is deleted - however
-        // many of the old bot's messages are sitting in there.
-        let first = repost_panel(&fake, &db, 21, 1000).await;
-        assert_ne!(first.posted, 0);
-        assert_eq!(first.deleted, None, "not one message was deleted on the first pass");
-        assert!(fake.deleted.lock().is_empty());
-        assert_eq!(super::store::panel_message(&db.lock(), 21), Some(first.posted));
-
-        // The next pass deletes exactly the panel the first pass wrote down.
-        let second = repost_panel(&fake, &db, 21, 2000).await;
-        assert_ne!(second.posted, first.posted);
-        assert_eq!(second.deleted, Some(first.posted));
-        assert_eq!(*fake.deleted.lock(), vec![(21, first.posted)], "one delete, and it is ours");
-        assert_eq!(super::store::panel_message(&db.lock(), 21), Some(second.posted));
-        assert_eq!(second.notes, Vec::<String>::new());
-
-        // Ten more passes delete ten panels and nothing else: the count of
-        // deletes never exceeds the count of panels this bot has posted.
-        let mut posted = vec![first.posted, second.posted];
-        for step in 0..10 {
-            posted.push(repost_panel(&fake, &db, 21, 3000 + step).await.posted);
+        let limits = open_limits();
+        // The channel is full of the old bot's messages. None is in our store.
+        for stranger in [500_001_u64, 500_002, 500_003] {
+            assert_eq!(super::store::card_at(&db.lock(), 21, stranger), None);
         }
-        let deleted: Vec<u64> = fake.deleted.lock().iter().map(|(_, m)| *m).collect();
-        assert_eq!(deleted.len(), 11, "one delete per repost after the first, and no more");
-        for id in &deleted {
-            assert!(posted.contains(id), "{} was deleted and this bot never posted it", id);
+        let mut ours = Vec::new();
+        for i in 0..4 {
+            let n = 459 + i;
+            submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "a confession", 1000 + i, 459).unwrap();
+            ours.push(settle_with(&db, &fake, Some(21), n, Status::Approved, 7, "", true, 4320, 2000 + i).await.posted.unwrap());
         }
-        // And the one still at the bottom was never deleted.
-        assert!(!deleted.contains(posted.last().unwrap()));
+        let touched = fake.edited();
+        assert!(!touched.is_empty());
+        for id in &touched {
+            assert!(ours.contains(id), "{} was touched and this bot never posted it", id);
+            assert!(![500_001, 500_002, 500_003].contains(id));
+        }
+        // Four cards posted, three sets of buttons taken off: never more edits
+        // than cards this bot owns.
+        assert!(touched.len() <= ours.len());
     }
 
-    /// Somebody deleting the panel by hand must not stop the next one going up.
+    /// The card carrying the buttons is deleted. They must move to the newest
+    /// surviving card, or there is no way to submit anything.
     #[tokio::test]
-    async fn a_panel_deleted_by_hand_is_simply_replaced() {
+    async fn when_the_pressable_card_is_deleted_the_buttons_move_down_one() {
         let db = sheet();
         let fake = Fake::new();
-        let first = repost_panel(&fake, &db, 21, 1000).await;
-        // A mod deletes it in Discord. The store still remembers the id.
-        fake.gone.lock().push(first.posted);
-        let second = repost_panel(&fake, &db, 21, 2000).await;
-        assert_ne!(second.posted, 0, "a fresh panel went up anyway");
-        assert_eq!(second.deleted, None, "there was nothing left to delete");
-        assert!(second.notes[0].contains("already gone"), "{:?}", second.notes);
-        assert_eq!(super::store::panel_message(&db.lock(), 21), Some(second.posted));
-        // And the channel is not left panel-less: the next pass tidies up again.
-        let third = repost_panel(&fake, &db, 21, 3000).await;
-        assert_eq!(third.deleted, Some(second.posted));
+        let limits = open_limits();
+        let mut cards = Vec::new();
+        for i in 0..3 {
+            let n = 459 + i;
+            submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "a confession", 1000 + i, 459).unwrap();
+            cards.push(settle_with(&db, &fake, Some(21), n, Status::Approved, 7, "", true, 4320, 2000 + i).await.posted.unwrap());
+        }
+        // A mod deletes the newest card. The store is told, exactly as the
+        // delete handler tells it.
+        fake.vanish(cards[2]);
+        super::store::forget_posted(&db.lock(), 461).unwrap();
+        super::store::clear_buttons_holder(&db.lock(), 21).unwrap();
+        let newest = super::store::newest_card(&db.lock(), 21);
+        assert_eq!(newest, Some((460, cards[1])));
+
+        let moved = move_buttons(&fake, 21, newest, true).await;
+        assert_eq!(moved.on, Some((460, cards[1])));
+        assert!(moved.was_lost && moved.notes.is_empty());
+        assert_eq!(fake.pressable(), vec![cards[1]], "exactly one card is pressable again");
+
+        // And every card gone: that is not an error, and the next approved
+        // confession brings the buttons back.
+        fake.vanish(cards[1]);
+        fake.vanish(cards[0]);
+        super::store::forget_posted(&db.lock(), 460).unwrap();
+        super::store::forget_posted(&db.lock(), 459).unwrap();
+        assert!(fake.pressable().is_empty(), "nothing in the channel to press");
+        let nowhere = move_buttons(&fake, 21, super::store::newest_card(&db.lock(), 21), true).await;
+        assert_eq!(nowhere.on, None);
+        assert!(nowhere.notes[0].contains("next approved confession brings them back"), "{:?}", nowhere.notes);
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "a fresh one", 5000, 459).unwrap();
+        let back = settle_with(&db, &fake, Some(21), 462, Status::Approved, 7, "", true, 4320, 6000).await;
+        assert_eq!(back.buttons_on.map(|(n, _)| n), Some(462));
     }
 
-    /// A channel that will not take the panel leaves the old one where it is,
-    /// rather than deleting it and leaving the channel with none.
+    /// A card that cannot be edited any more — deleted in the moment between
+    /// the new one going up and the edit going out — costs a line in the log
+    /// and never the new card.
     #[tokio::test]
-    async fn a_panel_that_cannot_be_posted_leaves_the_old_one_alone() {
+    async fn a_card_that_vanished_mid_edit_does_not_cost_the_new_one() {
         let db = sheet();
         let fake = Fake::new();
-        let first = repost_panel(&fake, &db, 21, 1000).await;
+        let limits = open_limits();
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the first one", 1000, 459).unwrap();
+        let first = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await.posted.unwrap();
+        fake.vanish(first);
+
+        submit(&db, &limits, 12, "Kabir", false, Kind::Confession, "", "the second one", 3000, 459).unwrap();
+        let out = settle_with(&db, &fake, Some(21), 460, Status::Approved, 7, "", true, 4320, 4000).await;
+        let second = out.posted.expect("the new card went up anyway");
+        assert_eq!(out.buttons_on, Some((460, second)));
+        assert_eq!(out.buttons_off, None, "there was nothing left to edit");
+        assert!(out.notes[0].contains("may still show them"), "{:?}", out.notes);
+        assert_eq!(super::store::buttons_holder(&db.lock(), 21), Some((second, 460)));
+    }
+
+    /// A channel that will not take the card leaves everything as it was: the
+    /// card before it keeps its buttons, so there is still a way in.
+    #[tokio::test]
+    async fn a_card_that_cannot_be_posted_leaves_the_buttons_where_they_were() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the first one", 1000, 459).unwrap();
+        let first = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await.posted.unwrap();
+
         let blocked = Fake { no_channel: true, ..Fake::new() };
-        let out = repost_panel(&blocked, &db, 21, 2000).await;
-        assert_eq!(out.posted, 0);
-        assert_eq!(out.deleted, None, "the one that is there is not taken down");
-        assert!(blocked.deleted.lock().is_empty());
-        assert!(out.notes[0].contains("left alone"), "{:?}", out.notes);
-        assert_eq!(super::store::panel_message(&db.lock(), 21), Some(first.posted), "the store still points at it");
-    }
-
-    #[test]
-    fn the_first_post_moves_the_panel_at_once_and_the_next_one_waits() {
-        let mut ticker = Ticker::default();
-        assert_eq!(ticker.posted(100_000, 15_000), Plan::Now, "a quiet channel is tidied straight away");
-        assert_eq!(ticker.posted(101_000, 15_000), Plan::After(14_000), "the next one waits out the gap");
-        assert_eq!(ticker.posted(101_500, 15_000), Plan::Nothing, "and the ones after it fold into that move");
-        assert_eq!(ticker.posted(114_900, 15_000), Plan::Nothing);
-        ticker.fired(115_000);
-        assert_eq!(ticker.posted(115_100, 15_000), Plan::After(14_900), "the gap starts again from the move that went out");
+        submit(&db, &limits, 12, "Kabir", false, Kind::Confession, "", "the second one", 3000, 459).unwrap();
+        let out = settle_with(&db, &blocked, Some(21), 460, Status::Approved, 7, "", true, 4320, 4000).await;
+        assert_eq!(out.posted, None);
+        assert_eq!(out.buttons_on, None);
+        assert_eq!(out.buttons_off, None, "the card that works is not stripped of its buttons");
+        assert!(blocked.edits.lock().is_empty(), "nothing was edited at all");
+        assert!(out.notes[0].contains("could not be posted"), "{:?}", out.notes);
+        assert_eq!(super::store::buttons_holder(&db.lock(), 21), Some((first, 459)), "the store still points at the working card");
+        assert_eq!(fake.pressable(), vec![first]);
     }
 
     // --- the whole flow, with Discord faked ----------------------------------
 
-    fn sheet() -> Mutex<Connection> {
+    pub(super) fn sheet() -> Mutex<Connection> {
         Mutex::new(super::store::open_memory().expect("store"))
     }
 
     /// No cooldown, so a test can send two things in a row without the clock
     /// being part of what it is checking.
-    fn open_limits() -> Limits {
+    pub(super) fn open_limits() -> Limits {
         Limits { min: 5, max: 500, cooldown: 0, blocked: vec![] }
     }
 
@@ -2216,22 +2246,24 @@ mod tests {
 
         // A mod approves.
         let out = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
-        assert!(out.first && out.bump);
+        assert!(out.first);
         assert_eq!(out.notes, Vec::<String>::new());
         let posted = out.posted.expect("a posted message");
-        let thread = out.thread.expect("a thread");
+        assert_eq!(out.buttons_on, Some((459, posted)), "the card it posted is the pressable one");
+        assert_eq!(out.thread, None, "and no thread until somebody replies");
 
         let posts = fake.channel_posts.lock().clone();
         assert_eq!(posts.len(), 1, "exactly one message in the channel");
         assert_eq!(posts[0].1, "**Anonymous Confession (#459)**\n\nI cheated at Wordle");
         assert!(!posts[0].1.contains("Zoya") && !posts[0].1.contains("11"), "{}", posts[0].1);
-        assert_eq!(fake.opened.lock()[0].2, "Anonymous Confession (#459)");
+        assert_eq!(fake.pressable(), vec![posted], "the buttons ride on it");
+        assert!(fake.opened.lock().is_empty());
 
         // And the store knows where it all went.
         let c = out.confession.expect("the row");
-        assert_eq!((c.status, c.decided_by, c.posted_message, c.thread_id), (Status::Approved, 7, posted, thread));
+        assert_eq!((c.status, c.decided_by, c.posted_message, c.thread_id), (Status::Approved, 7, posted, 0));
         let back = super::store::get(&db.lock(), 459).unwrap().unwrap();
-        assert_eq!((back.posted_message, back.thread_id, back.posted_channel), (posted, thread, 21));
+        assert_eq!((back.posted_message, back.posted_channel), (posted, 21));
 
         // The log entry names the submitter and the mod. Mods only, by design.
         let log = serde_json::to_value(log_embed(&c, "Kabir", 900, None)).unwrap();
@@ -2251,10 +2283,12 @@ mod tests {
         assert!(out.first);
         assert_eq!(out.posted, None);
         assert_eq!(out.thread, None);
-        assert!(!out.bump, "there is nothing to move the panel for");
+        assert_eq!(out.buttons_on, None, "a rejection does not put a card in the channel");
+        assert_eq!(out.buttons_off, None, "nor take the buttons off the card that has them");
         assert!(fake.channel_posts.lock().is_empty(), "nothing in the confessions channel");
         assert!(fake.thread_posts.lock().is_empty(), "nothing in a thread");
         assert!(fake.opened.lock().is_empty(), "and no thread opened");
+        assert!(fake.edits.lock().is_empty(), "and not one message was touched");
 
         let c = out.confession.expect("the row");
         assert_eq!((c.status, c.decided_by, c.reason.as_str()), (Status::Rejected, 7, "doxxing"));
@@ -2280,7 +2314,7 @@ mod tests {
         assert!(!second.first);
         assert_eq!(second.posted, None);
         assert_eq!(fake.channel_posts.lock().len(), 1, "one post, not two");
-        assert_eq!(fake.opened.lock().len(), 1, "one thread, not two");
+        assert_eq!(fake.pressable().len(), 1, "one pressable card, not two");
         assert!(second.notes[0].contains("already been decided"), "{:?}", second.notes);
         // A late rejection cannot unpost it either.
         let late = settle_with(&db, &fake, Some(21), 459, Status::Rejected, 9, "too late", true, 4320, 2200).await;
@@ -2297,7 +2331,9 @@ mod tests {
         let limits = open_limits();
         submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the confession", 1000, 459).unwrap();
         let parent = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
-        let thread = parent.thread.expect("the confession's thread");
+        assert_eq!(parent.thread, None, "a confession nobody has answered has no thread");
+        assert!(fake.opened.lock().is_empty());
+        let card = parent.posted.expect("the card");
         let channel_posts_before = fake.channel_posts.lock().len();
 
         // Somebody replies to #459.
@@ -2307,21 +2343,28 @@ mod tests {
         assert!(sent_words(&reply, &clean).contains("in the thread on #459"), "{}", sent_words(&reply, &clean));
 
         let out = settle_with(&db, &fake, Some(21), 460, Status::Approved, 7, "", true, 4320, 4000).await;
-        assert_eq!(out.thread, Some(thread), "it went in the confession's own thread");
-        assert!(!out.bump, "a reply inside a thread never moves the panel");
+        let thread = out.thread.expect("the first reply is what opens the thread");
+        assert_eq!(fake.opened.lock().len(), 1, "one thread, opened by the reply and not by the confession");
+        assert_eq!(fake.opened.lock()[0].1, card, "on the confession's own card");
+        assert_eq!(fake.opened.lock()[0].2, "Anonymous Confession (#459)");
+        assert_eq!(out.buttons_on, None, "a reply never moves the buttons");
+        assert_eq!(out.buttons_off, None);
         assert_eq!(fake.channel_posts.lock().len(), channel_posts_before, "no second main-channel message");
-        assert_eq!(fake.opened.lock().len(), 1, "and no second thread");
+        assert_eq!(fake.pressable(), vec![card], "the confession's card is still the pressable one");
         let in_thread = fake.thread_posts.lock().clone();
         assert_eq!(in_thread.len(), 1);
         assert_eq!(in_thread[0].0, thread);
         assert_eq!(in_thread[0].1, "**Reply A to Confession (#459)**\n\nsame here");
         assert!(!in_thread[0].1.contains("Kabir") && !in_thread[0].1.contains("12"), "{}", in_thread[0].1);
 
-        // A second reply is lettered B, so the two can be told apart.
+        // A second reply is lettered B, goes in the same thread, and opens none.
         submit(&db, &limits, 13, "Ira", false, Kind::Reply, "#459", "and me", 5000, 459).unwrap();
-        settle_with(&db, &fake, Some(21), 461, Status::Approved, 7, "", true, 4320, 6000).await;
+        let second = settle_with(&db, &fake, Some(21), 461, Status::Approved, 7, "", true, 4320, 6000).await;
+        assert_eq!(second.thread, Some(thread));
+        assert_eq!(fake.opened.lock().len(), 1, "later replies open no further threads");
         let in_thread = fake.thread_posts.lock().clone();
         assert_eq!(in_thread.len(), 2);
+        assert_eq!(in_thread[1].0, thread);
         assert!(in_thread[1].1.starts_with("**Reply B to Confession (#459)**"), "{}", in_thread[1].1);
     }
 
@@ -2473,5 +2516,53 @@ mod tests {
         for id in [DEFAULT_CHANNEL, DEFAULT_REVIEW, DEFAULT_LOG] {
             assert!(everything.contains(&id), "{} must be excluded exactly as #safe-corner is: {:?}", id, everything);
         }
+    }
+}
+
+#[cfg(test)]
+mod emoji_tests {
+    use super::strip_pings;
+
+    /// Emoji are the whole vocabulary of a confession channel. Only real pings
+    /// are rewritten; a custom emoji is `<:name:id>` and must survive untouched.
+    #[test]
+    fn emoji_survive_the_ping_stripper() {
+        for kept in [
+            "i cried 😭😭 at 3am",
+            "<:awwhellnaww:1516710980204232895> this whole month",
+            "mixed 🥀 <:hehe:1516581530938511594> and <a:spin:123456789012345678>",
+            "math: 3 < 5 > 1",
+        ] {
+            assert_eq!(strip_pings(kept), kept, "nothing here is a ping");
+        }
+        // And a ping next to an emoji still goes.
+        assert_eq!(strip_pings("<@123> 😭"), "@member 😭");
+    }
+
+    /// The same, through the whole path a confession actually takes: the guards,
+    /// the row in the store, and the words that go up in public. Nothing along
+    /// the way may touch an emoji.
+    #[tokio::test]
+    async fn emoji_survive_all_the_way_to_the_posted_card() {
+        use super::tests::{open_limits, sheet};
+        use super::{Kind, confession_text, reply_text, settle_with, submit};
+        use crate::channels::discord::confess_store::Status;
+
+        let db = sheet();
+        let limits = open_limits();
+        let said = "i cried 😭😭 <:awwhellnaww:1516710980204232895> at 3am 🥀";
+        let (stored, clean) = submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", said, 1000, 459).unwrap();
+        assert_eq!(clean.body, said, "the guards left every emoji alone");
+        assert!(!clean.pings_stripped, "an emoji is not a ping");
+        assert_eq!(stored.body, said, "and so did the row in the store");
+        assert!(confession_text(&stored).ends_with(said), "{}", confession_text(&stored));
+
+        // Through an approval, into the card, and into a reply inside its thread.
+        let fake = super::tests::Fake::new();
+        let out = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        assert!(out.posted.is_some());
+        let posted = fake.channel_posts.lock()[0].1.clone();
+        assert!(posted.contains("😭😭") && posted.contains("<:awwhellnaww:1516710980204232895>") && posted.contains("🥀"), "{posted}");
+        assert_eq!(reply_text(459, "A", said), format!("**Reply A to Confession (#459)**\n\n{}", said));
     }
 }
