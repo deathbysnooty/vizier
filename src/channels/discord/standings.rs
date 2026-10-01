@@ -303,14 +303,15 @@ pub fn housetop_builder() -> CreateCommand {
 /// What `/housetop` says. `rows` is already ranked, trimmed and free of Muggles;
 /// each has the member, their points and where most of them came from.
 fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], captain: Option<u64>, total: i64, cup: bool) -> String {
+    let worn = super::month::themed(h);
     let mut text = if cup {
-        format!("{} **{}** · top scorers, {}", h.crest, h.name, period)
+        format!("{} **{}** · top scorers, {}", worn.crest, worn.name, period)
     } else {
-        format!("{}\n{} **{}** · top scorers, {}", super::house_cup::closed_heading(period), h.crest, h.name, period)
+        format!("{}\n{} **{}** · top scorers, {}", super::house_cup::closed_heading(period), worn.crest, worn.name, period)
     };
     if rows.is_empty() {
         text.push_str("\nNobody has scored yet.");
-        return text;
+        return super::month::with_live(text);
     }
     for (i, (user, points, mostly)) in rows.iter().enumerate() {
         let rank = match i {
@@ -328,7 +329,7 @@ fn housetop_text(h: &House, period: &str, rows: &[(u64, i64, Option<Source>)], c
         text.push('\n');
         text.push_str(super::house_cup::NOTE);
     }
-    text
+    super::month::with_live(text)
 }
 
 /// `/housetop [house] [period]` - private to whoever asks.
@@ -411,21 +412,21 @@ fn housecup_words(link: Option<&str>, cup: bool, closed: Option<String>) -> Stri
     if !cup {
         let month = closed.unwrap_or_else(|| "the last month played".to_string());
         let page = link.map(|l| format!("\nThe page is still there to read: {}", l)).unwrap_or_default();
-        return format!(
+        return super::month::with_live(format!(
             "🏆 **The House Cup is paused.** {} was the last month played, and its numbers are final - nothing is being added to them.{}\n{}",
             month, page, super::house_cup::NOTE
-        );
+        ));
     }
-    match link {
+    super::month::with_live(match link {
         Some(link) => format!(
-            "🏆 **The House Cup, live** · {}\nEvery house's points this month, each house's top ten and the Chocolate \
-             Frog cards they're holding. The page keeps itself up to date, so leave it open.",
+            "🏆 **The House Cup, live** · {}\nEvery house's points this month, each house's top ten and the cards \
+             they're holding. The page keeps itself up to date, so leave it open.",
             link
         ),
         None => "The scoreboard page isn't set up yet — a mod needs to set **VIZIER_PANEL_URL** in the panel. \
-                 Until then, `/housetop` shows a house's top ten and `/frogs` shows your cards."
+                 Until then, `/housetop` shows a house's top ten and `/mycards` shows your cards."
             .to_string(),
-    }
+    })
 }
 
 /// `/housecup` - the link, said out loud: everybody wants the same one, and a
@@ -463,9 +464,10 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)], cup: bool, closed: Opti
         }
         text.push('\n');
         text.push_str(super::house_cup::NOTE);
-        return text;
+        return super::month::with_live(text);
     }
-    let mut text = format!("{} **{}** · this month you've earned **{}** points", h.crest, h.name, total);
+    let worn = super::month::themed(h);
+    let mut text = format!("{} **{}** · this month you've earned **{}** points", worn.crest, worn.name, total);
     if !breakdown.is_empty() {
         let parts: Vec<String> = breakdown.iter().map(|(s, n)| format!("{} {}", s.label(), n)).collect();
         text.push_str(&format!("\n{}", parts.join(" · ")));
@@ -476,18 +478,18 @@ fn mypoints_text(h: &House, breakdown: &[(Source, i64)], cup: bool, closed: Opti
     } else {
         "\n-# You're in this month's Nitro draw if your house wins.".into()
     });
-    text
+    super::month::with_live(text)
 }
 
 /// `/mypoints` for a mod: the month's earnings and what is still to give.
 fn mod_mypoints_text(breakdown: &[(Source, i64)], held: i64, cup: bool) -> String {
     let total: i64 = breakdown.iter().map(|(_, n)| n).sum();
     if !cup {
-        return format!(
+        return super::month::with_live(format!(
             "🏆 **The House Cup is paused.** You are still holding **{}** from before, and nothing is being added to it.\n{}",
             held,
             super::house_cup::NOTE
-        );
+        ));
     }
     let mut text = format!("🛡️ **Mods** · this month you've earned **{}** point{}", total, if total == 1 { "" } else { "s" });
     if !breakdown.is_empty() {
@@ -498,7 +500,7 @@ fn mod_mypoints_text(breakdown: &[(Source, i64)], held: i64, cup: bool) -> Strin
         "\n-# You're in no house, so these are held for you: **{}** left to give. `/modgive` hands them to a house.",
         held
     ));
-    text
+    super::month::with_live(text)
 }
 
 pub fn today_builder() -> CreateCommand {
@@ -514,7 +516,8 @@ pub fn today_builder() -> CreateCommand {
 /// One line per activity for a member's day: chat and voice progress towards
 /// their point, each capped game against its daily limit, and anything extra.
 fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, messages: i64, voice_secs: i64) -> String {
-    today_lines(&format!("{} **{}**", h.crest, h.name), who, sources, messages, voice_secs)
+    let worn = super::month::themed(h);
+    today_lines(&format!("{} **{}**", worn.crest, worn.name), who, sources, messages, voice_secs)
 }
 
 /// `/today` while the House Cup is paused: no house, no crest, and no daily
@@ -522,13 +525,13 @@ fn today_text(h: &House, who: Option<&str>, sources: &HashMap<String, i64>, mess
 /// game's own board is where the day's score lives now.
 fn today_paused_text(who: Option<&str>) -> String {
     let subject = who.map(|name| format!("**{}** is", name)).unwrap_or_else(|| "You're".to_string());
-    format!(
+    super::month::with_live(format!(
         "🏆 **The House Cup is paused**, so {} not earning house points today - nobody is, and the daily limits are not \
          running.\nThe games all still keep their own scores: `/anagramtop`, `/guesstop`, `/movietop`, `/geotop`, `/sudokutop`, \
          `/chesstop`, `/dueltop`, `/puzzletop` and `/quiztop` are each their own board.\n{}",
         subject,
         super::house_cup::NOTE
-    )
+    ))
 }
 
 /// The same day, for a mod: they are in no house, so what they win waits in
@@ -626,7 +629,7 @@ fn today_lines(head: &str, who: Option<&str>, sources: &HashMap<String, i64>, me
     } else {
         "-# Every game limit maxed today 🔥 · limits reset at midnight India time".to_string()
     });
-    lines.join("\n")
+    super::month::with_live(lines.join("\n"))
 }
 
 /// `/today [member]` - private to whoever asks. Members can look at themselves

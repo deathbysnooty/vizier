@@ -75,6 +75,18 @@ mod signup_store;
 // Anonymous confessions: the panel, the review queue, and the numbered posts.
 pub(crate) mod confess;
 mod confess_store;
+// The themed month: the switch, the clock, the paint and the live link.
+pub(crate) mod month;
+// The egg week: who is hungry for what, and what that does to a point.
+mod egg;
+mod egg_store;
+// The hatch: four houses dealt level on activity, and a dragon each.
+mod hatch;
+// Ravens: the one drop mechanic, and the twelve Westeros cards it carries.
+pub(crate) mod raven;
+// The one riddle bank and the one answer matcher, shared by every game that
+// asks a riddle - the ravens and the arena's scroll duels alike.
+pub(crate) mod riddle;
 mod topics;
 mod topics_store;
 mod topics_job;
@@ -283,6 +295,13 @@ impl VizierChannel for DiscordChannelReader {
         // somebody's confession into a channel nobody reviews.
         if let Err(err) = confess_store::open(&self.deps.config.workspace) {
             tracing::error!("confess: store not opened ({}) - the confession buttons will refuse every press", err);
+        }
+        // The themed month's eggs: the seats, the hunger each slot was judged
+        // against, and the houses and dragons the hatch deals. Not opening
+        // means the month cannot run at all, so it is loud: every point would
+        // be paid as though there were no month, which is wrong but harmless.
+        if let Err(err) = egg_store::open(&self.deps.config.workspace) {
+            tracing::error!("egg: store not opened ({}) - the themed month will pay as though it were off", err);
         }
         // Automatic moderation: spam removals and AI flags. Not opening only
         // means the feature stays off, which is also what it defaults to.
@@ -1585,6 +1604,10 @@ impl EventHandler for Handler {
         // The confessions buttons: put on the newest confession card, so a
         // restart never leaves the channel without a way in.
         confess::spawn(ctx.clone());
+        // The themed month: the Westeros deck (once, keeping every serial and
+        // owner), and an egg for everybody on the sign-up sheet.
+        raven::migrate();
+        egg::spawn(ctx.clone());
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
         // The House Cup channel: welcome, rules, and the scoreboard card kept last.
@@ -1870,6 +1893,14 @@ impl EventHandler for Handler {
         commands.push(admin_command(confess::whosent_builder()));
         // Everyone's: the door that does not depend on a card existing.
         commands.push(confess::confess_builder());
+        // The themed month. All five are registered whatever the month's switch
+        // says: with it off each one answers "there's no themed month running"
+        // rather than vanishing, which is far easier to explain to a member.
+        commands.push(egg::egg_builder());
+        commands.push(egg::livepoints_builder());
+        commands.push(egg::mycards_builder());
+        commands.push(admin_command(hatch::builder()));
+        commands.push(admin_command(egg::craving_builder()));
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -2818,6 +2849,26 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "confess" {
                 confess::confess_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "egg" {
+                egg::egg_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "livepoints" {
+                egg::livepoints_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "mycards" {
+                egg::mycards_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "craving" {
+                egg::craving_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "hatch" {
+                hatch::command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "houseopt" {

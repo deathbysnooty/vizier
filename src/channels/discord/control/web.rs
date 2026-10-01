@@ -374,6 +374,7 @@ mod deepdive;
 mod deepdives;
 mod kalesh;
 mod left;
+mod live;
 mod media;
 mod members;
 mod memos;
@@ -1099,6 +1100,12 @@ impl Panel {
         self.data.cached_member(id).map(|m| m.name)
     }
 
+    /// A member's name and avatar url from the cache only. The live page draws
+    /// fifty-odd faces and must not call Discord once per member.
+    pub fn cached_face(&self, id: u64) -> Option<(String, String)> {
+        self.data.cached_member(id).map(|m| (m.name, m.avatar))
+    }
+
     /// True when the address may try another sign-in now.
     fn allow_login(&self, ip: &str) -> bool {
         let now = Instant::now();
@@ -1277,6 +1284,8 @@ pub fn router(panel: Panel) -> Router {
         .route("/assets/favicon.svg", get(|| async { asset("image/svg+xml", ui::file("favicon.svg", FAVICON)) }))
         .merge(puzzles)
         .merge(housecup::routes())
+        // The month's live page reads one public endpoint: /live.json.
+        .merge(live::routes())
         .merge(chess::routes())
         .merge(puzzle::routes())
         .merge(duel::routes())

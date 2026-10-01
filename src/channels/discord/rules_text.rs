@@ -78,7 +78,7 @@ pub struct Rules {
     pub frog_drops_max: i64,
     pub frog_open_minutes: i64,
     /// Common, uncommon, legendary.
-    pub frog_points: [i64; 3],
+    pub frog_points: [i64; 4],
     pub frog_cap: Option<i64>,
     /// Cards in play, when the card store could be read.
     pub cards: Option<usize>,
@@ -290,6 +290,9 @@ pub struct ChessRules {
 fn limit(cap: Cap) -> Option<i64> {
     match cap {
         Cap::PerDay(n) | Cap::PerWeekPerChannel(n) => Some(n),
+        // A shared limit belongs to a group of games, not to this one, so there
+        // is no single number to print beside one game's name.
+        Cap::PerDayShared(group) => Some(group.limit()),
         Cap::None => None,
     }
 }
@@ -384,7 +387,7 @@ impl Rules {
             frogs_on,
             frog_drops_max: control::number("VIZIER_FROG_DROPS_MIN", 5).max(control::number("VIZIER_FROG_DROPS_MAX", 7)) as i64,
             frog_open_minutes: control::number("VIZIER_FROG_OPEN_MINUTES", 5).clamp(1, 60) as i64,
-            frog_points: [Rarity::Common.points(), Rarity::Uncommon.points(), Rarity::Legendary.points()],
+            frog_points: [Rarity::Common.points(), Rarity::Uncommon.points(), Rarity::Rare.points(), Rarity::Legendary.points()],
             frog_cap: limit(Source::Frog.cap()),
             cards,
             set_bonus: control::number("VIZIER_FROG_SET_BONUS", 35).min(1000) as i64,
@@ -660,7 +663,7 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
     }
 
     if r.frogs_on {
-        let [common, uncommon, legendary] = r.frog_points;
+        let [common, uncommon, rare, legendary] = r.frog_points;
         text.push_str("\n**🐸 Chocolate Frogs**\n");
         text.push_str(&format!(
             "A frog hops into a busy chat **up to {} a day**, carrying a collectible wizard card.\n",
@@ -674,8 +677,8 @@ pub fn snitch_cards_text(r: &Rules) -> Option<String> {
             "• The **first correct answer** keeps the card:\n"
         });
         text.push_str(&format!(
-            "> 🥛 Common **{}**  ·  🍫 Uncommon **{}**  ·  🔥 The Eternal Phoenix **{}**\n",
-            common, uncommon, legendary
+            "> 🥛 Common **{}**  ·  🍫 Uncommon **{}**  ·  🥈 Rare **{}**  ·  🔥 Legendary **{}**\n",
+            common, uncommon, rare, legendary
         ));
         if let Some(n) = r.frog_cap {
             text.push_str(&format!("• Up to {} from frogs a day\n", plural(n, "point", "points")));
@@ -1935,7 +1938,7 @@ pub(crate) mod tests {
             frogs_on: true,
             frog_drops_max: 10,
             frog_open_minutes: 5,
-            frog_points: [2, 4, 10],
+            frog_points: [2, 5, 10, 25],
             frog_cap: None,
             cards: Some(10),
             set_bonus: 35,
@@ -2102,7 +2105,7 @@ pub(crate) mod tests {
             snitch_cap: Some(99),
             frog_drops_max: 30,
             frog_open_minutes: 60,
-            frog_points: [1000, 1000, 1000],
+            frog_points: [1000, 1000, 1000, 1000],
             frog_cap: Some(99),
             cards: Some(50),
             set_bonus: 1000,
@@ -2187,7 +2190,7 @@ pub(crate) mod tests {
             "comes back for a second chance 👀",
             "**up to 10 times a day**",
             "• You get **3 tries**, and small spelling slips are forgiven",
-            "> 🥛 Common **2**  ·  🍫 Uncommon **4**  ·  🔥 The Eternal Phoenix **10**",
+            "> 🥛 Common **2**  ·  🍫 Uncommon **5**  ·  🥈 Rare **10**  ·  🔥 Legendary **25**",
             "• Nobody gets it in 5 minutes? It hops away",
             "There are **10 cards** to collect",
             "• 🏆 `/sellset` hand in one of **all 10** for **+35** house points (you keep your catch points)",
@@ -2477,7 +2480,7 @@ pub(crate) mod tests {
         assert!(text.contains("🎙️ VC with others → 1·2·3·4/hour (max 4) · deafened time doesn't count"), "{}", text);
         assert!(!earn_text(&Rules { voice_ignore_deaf: false, ..defaults() }).contains("deafened"));
         assert!(text.contains("🧠 Quiz podium 2·1·1 · 🔤 Koto 3 · 🔡 Anagram 3 · 🐱 Cats 1–3"), "{}", text);
-        assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–10 (no limit)"), "{}", text);
+        assert!(text.contains("🪽 Snitch 1–6 · 🐸 Frogs 2–25 (no limit)"), "{}", text);
         assert!(text.contains("👑 Royale champion +8 · runner-up +3 · daily 3 pm & 8 pm"), "{}", text);
         assert!(text.contains("⚔️ 1v1 win 1 · 🔤 NPAT game 1st +2 · 2nd +1 (max 6)"), "{}", text);
         assert!(!earn_text(&Rules { npat: NpatRules { channel: None, ..npat_defaults() }, ..defaults() }).contains("NPAT"));

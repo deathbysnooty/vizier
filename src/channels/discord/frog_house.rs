@@ -73,7 +73,7 @@ fn number(serial: i64) -> String {
 
 /// Legendary first, which is the order a collector reads their own cards in.
 fn rarest_first(r: Rarity) -> usize {
-    2 - Rarity::ALL.iter().position(|x| *x == r).unwrap_or(0)
+    Rarity::ALL.len() - 1 - Rarity::ALL.iter().position(|x| *x == r).unwrap_or(0)
 }
 
 // --- shared shaping ---------------------------------------------------------

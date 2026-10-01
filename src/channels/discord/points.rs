@@ -60,9 +60,60 @@ pub enum Source {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cap {
     PerDay(i64),
+    /// One daily limit shared by a whole group of games (see [`Group`]). The
+    /// themed month replaces the per-game limits with two of these, so a bonus
+    /// that pays double arrives sooner but can never arrive higher.
+    PerDayShared(Group),
     /// The weekly scan: counted separately for each channel.
     PerWeekPerChannel(i64),
     None,
+}
+
+/// Games that share one daily limit between them.
+///
+/// Only the themed month uses these. With the month off every source keeps the
+/// limit of its own it always had, which is why [`Source::cap`] asks the month
+/// first and nothing else in the ledger knows a group exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Group {
+    /// The quick ones: a word, a cat, a doodle.
+    Quick,
+    /// The ones you have to sit down for.
+    Thinking,
+}
+
+impl Group {
+    pub const ALL: [Group; 2] = [Group::Quick, Group::Thinking];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Group::Quick => "quick",
+            Group::Thinking => "thinking",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Quick => "Quick games",
+            Group::Thinking => "Thinking games",
+        }
+    }
+
+    /// Which games share it.
+    pub fn sources(self) -> &'static [Source] {
+        match self {
+            Group::Quick => &[Source::Anagram, Source::Cat, Source::Guess],
+            Group::Thinking => &[Source::Quiz, Source::Koto, Source::Geo, Source::Movie],
+        }
+    }
+
+    /// The shared ceiling, read at the moment of writing.
+    pub fn limit(self) -> i64 {
+        match self {
+            Group::Quick => super::control::number("VIZIER_MONTH_CAP_QUICK", 20) as i64,
+            Group::Thinking => super::control::number("VIZIER_MONTH_CAP_THINK", 30) as i64,
+        }
+    }
 }
 
 /// A daily limit set this high or higher means the source has no limit.
@@ -125,6 +176,12 @@ impl Source {
         Self::ALL.into_iter().find(|source| source.key() == key)
     }
 
+    /// The shared-limit group this game is in, if it is in one. The seven games
+    /// the themed month is played with are exactly the ones that answer here.
+    pub fn group(self) -> Option<Group> {
+        Group::ALL.into_iter().find(|g| g.sources().contains(&self))
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Source::Chat => "💬 Chat",
@@ -157,6 +214,15 @@ impl Source {
     pub fn cap(self) -> Cap {
         // A limit of NO_LIMIT or more reads as no limit at all.
         let day = |limit: u64| if limit >= NO_LIMIT { Cap::None } else { Cap::PerDay(limit as i64) };
+        // The themed month runs the seven games it is played with on two shared
+        // limits instead of seven separate ones, so everybody's ceiling is the
+        // same whatever their egg happens to be hungry for. Month off: nothing
+        // here changes at all.
+        if super::month::running() {
+            if let Some(group) = self.group() {
+                return Cap::PerDayShared(group);
+            }
+        }
         match self {
             Source::Chat => day(super::control::number("VIZIER_CAP_CHAT", 3)),
             Source::Voice => day(super::control::number("VIZIER_CAP_VOICE", 20)),
@@ -165,7 +231,7 @@ impl Source {
             Source::Snitch => day(super::control::number("VIZIER_CAP_SNITCH", 6)),
             Source::Koto => day(super::control::number("VIZIER_CAP_KOTO", 4)),
             Source::Cat => day(super::control::number("VIZIER_CAP_CAT", 3)),
-            Source::Arena => day(super::control::number("VIZIER_CAP_ARENA", 3)),
+            Source::Arena => day(super::control::number("VIZIER_CAP_ARENA", 9)),
             // No limit unless the owner sets one: a frog is a riddle won outright.
             Source::Frog => day(super::control::number("VIZIER_CAP_FROG", NO_LIMIT)),
             Source::Npat => day(super::control::number("VIZIER_CAP_NPAT", 6)),
@@ -186,6 +252,33 @@ impl Source {
             // Wordle is once a day by nature: each person is paid once per results post.
             Source::Royale | Source::GoldenSnitch | Source::Mod | Source::Wordle => Cap::None,
         }
+    }
+}
+
+/// What one person has already earned today across a whole shared-limit group.
+///
+/// `table` is `ledger` or `pool` - the two are shaped alike on purpose, so a mod
+/// meets exactly the limit a member does - and is a constant in this file, never
+/// anything that came in from outside.
+fn group_used(conn: &Connection, table: &str, user: u64, group: Group, day: &str) -> rusqlite::Result<i64> {
+    let keys: Vec<&'static str> = group.sources().iter().map(|s| s.key()).collect();
+    let marks = vec!["?"; keys.len()].join(", ");
+    let sql = format!(
+        "SELECT COALESCE(SUM(points), 0) FROM {} WHERE user_id = ?1 AND day = ?2 AND points > 0 AND source IN ({})",
+        table, marks
+    );
+    // `?1` and `?2` are numbered, so the bare marks in the IN list carry on from
+    // 3 - the user id bound as a number, the day and the keys as text.
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.raw_bind_parameter(1, user as i64)?;
+    stmt.raw_bind_parameter(2, day)?;
+    for (i, key) in keys.iter().enumerate() {
+        stmt.raw_bind_parameter(i + 3, *key)?;
+    }
+    let mut rows = stmt.raw_query();
+    match rows.next()? {
+        Some(row) => row.get(0),
+        None => Ok(0),
     }
 }
 
@@ -261,6 +354,7 @@ pub fn pool_write(conn: &Connection, user: u64, source: Source, scope: Option<St
                 params![user as i64, source.key(), ist_day(ts)],
                 |r| r.get(0),
             )?,
+            Cap::PerDayShared(group) => group_used(conn, "pool", user, group, &ist_day(ts))?,
             Cap::PerWeekPerChannel(_) => conn.query_row(
                 "SELECT COALESCE(SUM(points), 0) FROM pool
                  WHERE user_id = ?1 AND source = ?2 AND scope IS ?3 AND day >= ?4 AND points > 0",
@@ -271,6 +365,7 @@ pub fn pool_write(conn: &Connection, user: u64, source: Source, scope: Option<St
         };
         match source.cap() {
             Cap::PerDay(limit) | Cap::PerWeekPerChannel(limit) => points.min(limit - used).max(0),
+            Cap::PerDayShared(group) => points.min(group.limit() - used).max(0),
             Cap::None => points,
         }
     } else {
@@ -442,6 +537,7 @@ pub fn write(conn: &Connection, entry: &Entry, ts: i64) -> rusqlite::Result<Outc
                     params![user as i64, entry.source.key(), ist_day(ts)],
                     |r| r.get(0),
                 )?,
+                Cap::PerDayShared(group) => group_used(conn, "ledger", user, group, &ist_day(ts))?,
                 Cap::PerWeekPerChannel(_) => conn.query_row(
                     "SELECT COALESCE(SUM(points), 0) FROM ledger
                      WHERE user_id = ?1 AND source = ?2 AND scope IS ?3 AND day >= ?4 AND points > 0",
@@ -452,6 +548,7 @@ pub fn write(conn: &Connection, entry: &Entry, ts: i64) -> rusqlite::Result<Outc
             };
             match cap {
                 Cap::PerDay(limit) | Cap::PerWeekPerChannel(limit) => entry.points.min(limit - used).max(0),
+                Cap::PerDayShared(group) => entry.points.min(group.limit() - used).max(0),
                 Cap::None => entry.points,
             }
         }
@@ -564,6 +661,21 @@ pub fn top_members(conn: &Connection, house_key: &str, since: i64, until: i64) -
     )?;
     let rows = stmt.query_map(params![house_key, since, until], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))?;
     rows.collect()
+}
+
+/// Where one member stands on the whole server for a window, 1-based, counting
+/// every house together. Members level on points share a place, the same way
+/// the houses do. `None` when they have scored nothing at all.
+pub fn server_rank(conn: &Connection, user: u64, since: i64, until: i64) -> rusqlite::Result<Option<usize>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_id, SUM(points) AS total FROM ledger
+         WHERE user_id IS NOT NULL AND ts >= ?1 AND ts < ?2
+         GROUP BY user_id HAVING total > 0 ORDER BY total DESC, MAX(ts) ASC",
+    )?;
+    let rows: Vec<(u64, i64)> =
+        stmt.query_map(params![since, until], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))?.flatten().collect();
+    let Some(mine) = rows.iter().find(|(u, _)| *u == user).map(|(_, n)| *n) else { return Ok(None) };
+    Ok(Some(rows.iter().filter(|(_, n)| *n > mine).count() + 1))
 }
 
 /// The monthly result.

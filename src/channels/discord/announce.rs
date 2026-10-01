@@ -308,12 +308,20 @@ const FIELDS: &[Field] = &[
     },
     Field {
         key: "frog_points",
-        read: |r| vec![num(r.frog_points[0]), num(r.frog_points[1]), num(r.frog_points[2]), cap(r.frog_cap)],
+        read: |r| {
+            vec![
+                num(r.frog_points[0]),
+                num(r.frog_points[1]),
+                num(r.frog_points[2]),
+                num(r.frog_points[3]),
+                cap(r.frog_cap),
+            ]
+        },
         say: |o, n| {
             format!(
-                "🐸 **Frog cards** now pay {} for a common · uncommon · legendary card{}",
-                shift(row(n, 0, 3), row(o, 0, 3)),
-                cap_clause(cap_at(n, 3), cap_at(o, 3))
+                "🃏 **Cards** now pay {} for a common · uncommon · rare · legendary card{}",
+                shift(row(n, 0, 4), row(o, 0, 4)),
+                cap_clause(cap_at(n, 4), cap_at(o, 4))
             )
         },
         under: Some("frogs"),
@@ -1093,7 +1101,7 @@ mod tests {
     fn limits_coming_and_going_read_as_sentences() {
         assert!(one(|r| r.anagram_cap = None).contains("**no daily limit** any more (it was 6 a day)"));
         assert!(one(|r| r.snitch_cap = Some(5)).contains("up to **5 a day** (there was no limit)"));
-        assert!(one(|r| r.frog_points = [3, 4, 10]).ends_with("· no daily limit"));
+        assert!(one(|r| r.frog_points = [3, 4, 10, 25]).ends_with("· no daily limit"));
     }
 
     #[test]
@@ -1153,7 +1161,7 @@ mod tests {
             r.trades_on = false;
             r.daily_top_cards = false;
             r.royale_cards = false;
-            r.frog_points = [0, 0, 0];
+            r.frog_points = [0, 0, 0, 0];
         });
         assert_eq!(said, vec!["🐸 **Chocolate Frogs** are now **OFF**"]);
     }

@@ -155,7 +155,7 @@ fn yes() -> bool {
 
 fn check_wizard(body: &[u8]) -> Result<(String, Rarity, String, bool), ApiError> {
     let b: WizardBody = serde_json::from_slice(body).map_err(|_| ApiError::bad("That isn't a card."))?;
-    let rarity = Rarity::from_key(&b.rarity).ok_or_else(|| ApiError::bad("Pick Common, Uncommon or Legendary."))?;
+    let rarity = Rarity::from_key(&b.rarity).ok_or_else(|| ApiError::bad("Pick Common, Uncommon, Rare or Legendary."))?;
     let image = b.image.trim().to_string();
     if !image.is_empty() && super::super::media::info(&image).is_none() {
         return Err(ApiError::bad("That picture isn't in the library any more. Pick another."));

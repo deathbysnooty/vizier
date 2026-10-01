@@ -3562,7 +3562,7 @@ async fn chocolate_frogs_round_trip() {
     let (status, _, _) = call(&app, "GET", "/api/frogs", Some(&session_for(MEMBER)), None, false).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // The overview: twelve wizards, four rarities, the bank.
+    // The overview: the wizards, the four rarities, the bank.
     let (status, page, _) = call(&app, "GET", "/api/frogs", Some(&session), None, false).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["enabled"], false, "off until the owner switches it on");
@@ -3570,14 +3570,21 @@ async fn chocolate_frogs_round_trip() {
     assert_eq!((page["wizards"][1]["name"].as_str(), page["wizards"][1]["slug"].as_str()), (Some("Luna Lovegood"), Some("luna")));
     assert_eq!(page["wizards"][1]["image_url"], Value::Null);
     let rarities = page["rarities"].as_array().unwrap();
-    assert_eq!(rarities.iter().map(|r| r["chance"].as_f64().unwrap()).collect::<Vec<_>>(), vec![58.0, 35.0, 7.0]);
-    assert_eq!((rarities[2]["emoji"].as_str(), rarities[2]["points"].as_i64(), rarities[2]["colour"].as_str()), (Some("🔥"), Some(10), Some("#e8572a")));
+    // Only rarities some card actually has are listed, and this store still
+    // holds the ten starter wizards, so the deck's Rare tier is not among them
+    // yet and the three that are share the weight between them.
+    assert_eq!(
+        rarities.iter().map(|r| r["key"].as_str().unwrap()).collect::<Vec<_>>(),
+        vec!["common", "uncommon", "legendary"]
+    );
+    assert_eq!(rarities.iter().map(|r| r["chance"].as_f64().unwrap()).collect::<Vec<_>>(), vec![63.7, 33.0, 3.3]);
+    assert_eq!((rarities[2]["emoji"].as_str(), rarities[2]["points"].as_i64(), rarities[2]["colour"].as_str()), (Some("🔥"), Some(25), Some("#e8572a")));
     assert_eq!(page["bank"][0], json!({ "difficulty": "easy", "playable": 3, "unused": 3, "retired": 0 }));
     assert_eq!(page["modal_mode"], "text block");
 
     // Wizards: checked, made, edited, pictured.
     for (body, says) in [
-        (json!({ "name": "Dobby", "rarity": "rare" }), "Pick Common, Uncommon or Legendary"),
+        (json!({ "name": "Dobby", "rarity": "mythic" }), "Pick Common, Uncommon, Rare or Legendary"),
         (json!({ "name": "", "rarity": "common" }), "Give the card a name"),
         (json!({ "name": "x".repeat(39), "rarity": "common" }), "at most 38"),
         (json!({ "name": "Merlin", "rarity": "common" }), "already a card"),

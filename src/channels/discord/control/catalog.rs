@@ -159,6 +159,140 @@ pub fn sections() -> Vec<Section> {
             ],
         },
         Section {
+            id: "month",
+            title: "Themed month",
+            icon: "\u{1F409}",
+            about: "One month, one story. The month opens with an EGG WEEK: everybody on the sign-up sheet wakes up with a \
+                    dragon egg that is hungry for exactly two of the seven games at a time, rotating every few hours and \
+                    balanced so every game has a crowd and everybody covers every game. During that week only a hungry game \
+                    pays a member anything towards the month - every other game still runs, is still fun and still keeps its \
+                    OWN score, it just doesn't feed the egg. At the hatch the eggs all open at once: everybody is dealt a \
+                    house so the four come out level on ACTIVITY rather than headcount, and everybody gets a dragon name \
+                    nobody else has. After that every game pays everybody again and the hungry ones pay double - towards the \
+                    same daily ceiling, so the bonus buys speed and never a bigger number. The four houses keep their roles, \
+                    their channels and every row of their history: the names, crests and colours below are paint, and come \
+                    off with the switch.",
+            settings: vec![
+                Setting {
+                    live: false,
+                    ..toggle(
+                        "VIZIER_MONTH",
+                        "Themed month",
+                        "The whole month, in one switch. OFF is a normal month: every game pays what it always paid, the \
+                         houses wear their own names, and no eggs exist. ON starts the egg week. Turning it off mid-month \
+                         pays everybody normally again at once and takes the paint off; nothing in the ledger moves, and \
+                         the eggs, houses and dragons already dealt are all still there if it goes back on.",
+                    )
+                },
+                setting("VIZIER_MONTH_NAME", "Month's name", "What the month is called on the live page and in the reveal.", Kind::Text, "Fire & Blood"),
+                setting(
+                    "VIZIER_MONTH_HATCH",
+                    "Hatch time",
+                    "When every egg that has been waiting since the start opens, as `YYYY-MM-DD HH:MM` in India time. \
+                     Nothing happens on its own at that moment: a mod runs /hatch, and the eggs stop holding points back \
+                     from this time whether or not they have. Anything unreadable falls back to 2026-10-08 12:00.",
+                    Kind::Text,
+                    "2026-10-08 12:00",
+                ),
+                setting(
+                    "VIZIER_MONTH_WATCH_DAYS",
+                    "A late egg's watch",
+                    "How long an egg claimed AFTER the hatch waits before it opens. Everybody who was on the sheet at the \
+                     start shares the one hatch above; this is so somebody who turns up on the 20th still plays an egg week.",
+                    number(1, 60, "days"),
+                    "7",
+                ),
+                setting(
+                    "VIZIER_MONTH_CRAVING_HOURS",
+                    "Hunger rotates every",
+                    "How long one egg wants the same games for. Six hours means four changes a day, which is what makes \
+                     every member cover all seven games inside the first day.",
+                    number(1, 24, "hours"),
+                    "6",
+                ),
+                setting(
+                    "VIZIER_MONTH_CRAVINGS",
+                    "Games hungry for at once",
+                    "How many games an egg wants at a time. Two is the shipped number: enough that there is always \
+                     something to play, few enough that it means something.",
+                    number(1, 6, "games"),
+                    "2",
+                ),
+                setting(
+                    "VIZIER_MONTH_CAP_QUICK",
+                    "Quick games: shared daily limit",
+                    "One daily limit shared by the anagram, the cat bot and Guess the Word together, instead of one each. \
+                     A hungry game's double counts towards this, so everybody's ceiling is the same whatever their egg wants.",
+                    number(0, 500, "points"),
+                    "20",
+                ),
+                setting(
+                    "VIZIER_MONTH_CAP_THINK",
+                    "Thinking games: shared daily limit",
+                    "The same, shared by the quiz, Koto, Geo and Guess the Movie.",
+                    number(0, 500, "points"),
+                    "30",
+                ),
+                setting(
+                    "VIZIER_MONTH_WINDOW_SECONDS",
+                    "Everybody-answers window",
+                    "How long after the first right answer everybody else's right answer still pays. The first one in keeps \
+                     their bonus; this is the difference between a game one fast person wins and a game everybody plays.",
+                    number(0, 900, "seconds"),
+                    "90",
+                ),
+                setting(
+                    "VIZIER_MONTH_EGG_STAGES",
+                    "Egg stages",
+                    "The five points at which an egg moves to its next stage, smallest first, comma-separated. Anything that \
+                     isn't five numbers falls back to 0,25,60,120,200.",
+                    Kind::Text,
+                    "0,25,60,120,200",
+                ),
+                setting(
+                    "VIZIER_MONTH_HOUSE_NAMES",
+                    "Houses: names",
+                    "What the four houses are called this month, comma-separated, in the order Gryffindor, Slytherin, \
+                     Ravenclaw, Hufflepuff. The roles, the channels and every row of history keep their own keys underneath, \
+                     so this is safe to change mid-month. A slot left empty keeps the house's own name.",
+                    Kind::Text,
+                    "Stark,Lannister,Targaryen,Night's Watch",
+                ),
+                setting("VIZIER_MONTH_HOUSE_CRESTS", "Houses: crests", "One emoji per house, in the same order.", Kind::Text, "\u{1F43A},\u{1F981},\u{1F409},\u{1F5E1}\u{FE0F}"),
+                setting(
+                    "VIZIER_MONTH_HOUSE_COLOURS",
+                    "Houses: colours",
+                    "One hex colour per house, in the same order, with or without a leading #. Used for the role colour, the \
+                     cards and the live page.",
+                    Kind::Text,
+                    "6E7B8B,A8882B,8C1C1C,2B2F36",
+                ),
+                setting(
+                    "VIZIER_LIVE_URL",
+                    "Live page",
+                    "The address of the month's live page. Every Cup reply the bot sends ends with this link, the whispered \
+                     ones included. Empty means no link is added anywhere. It must start with http:// or https://.",
+                    Kind::Text,
+                    "",
+                ),
+                setting(
+                    "VIZIER_LIVE_CACHE_SECS",
+                    "Live page cache",
+                    "How long one computed /live.json is served for. A hundred people with the page open cost one pass over \
+                     the stores per window between them, not a hundred.",
+                    number(5, 600, "seconds"),
+                    "60",
+                ),
+            ],
+            commands: vec![
+                command("egg", EVERYONE, "/egg", "Your egg: its stage, what it is hungry for, when that changes, how much it has been fed and how long to the hatch. After the hatch it shows your dragon instead. Only you see it."),
+                command("livepoints", EVERYONE, "/livepoints", "The live page's link, plus your points, your rank and what is left under today's limits. Only you see it."),
+                command("mycards", EVERYONE, "/mycards", "Every card you hold, with its serial number. Only you see it."),
+                command("hatch", ADMINS, "/hatch dry:", "Opens every egg, deals the four houses level on the week's activity, names every dragon and posts the reveal. `dry:true` shows the split without applying any of it. Refuses to run twice."),
+                command("craving", ADMINS, "/craving games:", "What the eggs are hungry for right now, and how many want each game. `games:anagram,quiz` makes every egg want those two for this slot; `games:clear` puts the rotation back."),
+            ],
+        },
+        Section {
             id: "houses",
             title: "Houses",
             icon: "🏰",
@@ -456,12 +590,14 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_FROG_POPUP_TEXT_BLOCK", "Riddle as a text block", "Show the riddle as plain text above the answer box. Off by default because that newer pop-up block crashes the Discord iPhone app; off puts the riddle in a read-only-style box instead.", Kind::Toggle, "off"),
                 setting("VIZIER_FROG_OPEN_MINUTES", "Time to catch", "How long a frog stays open before it hops away. A frog already in chat keeps its own time.", number(1, 60, "minutes"), "5"),
                 setting("VIZIER_FROG_QUIET_MINUTES", "Quiet after", "A channel counts as busy if someone spoke in it this recently; frogs only drop into busy channels.", number(1, 120, "minutes"), "5"),
-                setting("VIZIER_FROG_WEIGHT_COMMON", "Common: how often", "How often a drop is Common (easy riddle), weighed against the other rarities. With the defaults 58, 35 and 7 that's 58 drops in 100. 0 means never.", number(0, 1000, "weight"), "58"),
-                setting("VIZIER_FROG_WEIGHT_UNCOMMON", "Uncommon: how often", "How often a drop is Uncommon (medium riddle).", number(0, 1000, "weight"), "35"),
+                setting("VIZIER_FROG_WEIGHT_COMMON", "Common: how often", "How often a drop is Common (easy riddle), weighed against the other rarities. With the defaults 58, 30, 9 and 3 that's 58 drops in 100. 0 means never.", number(0, 1000, "weight"), "58"),
+                setting("VIZIER_FROG_WEIGHT_UNCOMMON", "Uncommon: how often", "How often a drop is Uncommon (medium riddle).", number(0, 1000, "weight"), "30"),
+                setting("VIZIER_FROG_WEIGHT_RARE", "Rare: how often", "How often a drop is Rare (hard riddle): House Tully and House Arryn.", number(0, 1000, "weight"), "9"),
                 setting("VIZIER_FROG_WEIGHT_LEGENDARY", "Legendary: how often", "How often a drop is Legendary (hard riddle): the Eternal Phoenix. 7 in 100 is about three a week at six drops a day.", number(0, 1000, "weight"), "7"),
                 setting("VIZIER_POINTS_FROG_COMMON", "Common points", "Points for catching a Common frog.", number(0, 100, "points"), "2"),
-                setting("VIZIER_POINTS_FROG_UNCOMMON", "Uncommon points", "Points for catching an Uncommon frog.", number(0, 100, "points"), "4"),
-                setting("VIZIER_POINTS_FROG_LEGENDARY", "Legendary points", "Points for catching a Legendary frog.", number(0, 100, "points"), "10"),
+                setting("VIZIER_POINTS_FROG_UNCOMMON", "Uncommon points", "Points for catching an Uncommon frog.", number(0, 100, "points"), "5"),
+                setting("VIZIER_POINTS_FROG_RARE", "Rare points", "Points for capturing a Rare card.", number(0, 100, "points"), "10"),
+                setting("VIZIER_POINTS_FROG_LEGENDARY", "Legendary points", "Points for capturing a Legendary card.", number(0, 100, "points"), "25"),
                 toggle("VIZIER_FROG_DAILY_TOP", "Top of the day cards", "Each morning, give the day before's top scorer in every game (chat, voice, quiz, Koto, anagram, cats, Wordle, arena, Snitch, frogs, Name Place Animal Thing game wins) a random Common or Uncommon card (no house points: only catching frogs pays those). Only while scheduled frog drops are on."),
                 setting("VIZIER_FROG_DAILY_TOP_TIME", "Top of the day time", "India time the top of the day cards go out, for the day before. After Wordle's morning results is best. Missed while the bot was down, they go out when it's back.", Kind::Time, "10:00"),
                 setting("VIZIER_FROG_DAILY_TOP_CHANNEL", "Top of the day channel", "Where the morning summary of who won which card is posted. Empty uses the houses channel.", Kind::Channel, ""),

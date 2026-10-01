@@ -246,6 +246,19 @@ fn remember(user: u64, house: &House, sorted_by: &str) {
     }
 }
 
+/// Puts a member in a house and writes it down - the hatch's door into the
+/// house store, so a dealt member is in a house everywhere the bot looks.
+pub(super) fn place(user: u64, house: &'static House, sorted_by: &str) {
+    remember(user, house, sorted_by);
+}
+
+/// Gives a member the house role and takes the other three off them. The hatch
+/// needs it for everybody at once; `wear_house` is otherwise private to the
+/// sorting paths.
+pub(super) async fn wear(ctx: &Context, guild: GuildId, user: u64, house: &'static House) {
+    wear_house(ctx, guild, user, house).await;
+}
+
 /// How many members each house holds.
 pub fn counts() -> HashMap<&'static str, i64> {
     let mut counts: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
@@ -1356,6 +1369,16 @@ pub(super) fn award_person_at(
     if opted_out(user) {
         return None;
     }
+    // The themed month. An egg that is not hungry for this game pays the month
+    // nothing at all; after the hatch, a game it IS hungry for pays double -
+    // and the double goes through the ledger's cap like everything else, so the
+    // ceiling is the same for everybody. A deduction is never multiplied.
+    // Month off, or no egg: `times` is 1 and this line does nothing.
+    let points = match super::egg::multiplier(user, source, at) {
+        None => return None,
+        Some(times) if points > 0 => points.saturating_mul(times.max(1)),
+        Some(_) => points,
+    };
     let db = DB.get()?;
     let Some(house) = house_of(user) else {
         // A mod has no house, so the ledger has nowhere to put this. It waits in
@@ -1565,20 +1588,21 @@ pub async fn points_command(ctx: &Context, command: &CommandInteraction) {
         let _ = command.create_response(&ctx.http, whisper(super::house_cup::MOD_REFUSED)).await;
         return;
     };
+    let worn = super::month::themed(house);
     let headline = if points > 0 {
-        format!("🏆 **+{}** to {} **{}**", points, house.crest, house.name)
+        format!("🏆 **+{}** to {} **{}**", points, worn.crest, worn.name)
     } else {
-        format!("📉 **{}** from {} **{}**", points, house.crest, house.name)
+        format!("📉 **{}** from {} **{}**", points, worn.crest, worn.name)
     };
     let because = if reason.is_empty() { String::new() } else { format!("\n> {}", reason) };
-    let text = format!(
+    let text = super::month::with_live(format!(
         "{}{}\n-# {} now on **{}** points this month · awarded by <@{}>",
         headline,
         because,
-        house.name,
+        worn.name,
         total,
         command.user.id.get()
-    );
+    ));
     let reply = CreateInteractionResponseMessage::new().content(text);
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }

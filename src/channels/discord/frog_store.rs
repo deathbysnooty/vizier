@@ -33,16 +33,20 @@ pub const MAX_NAME: usize = 38;
 pub enum Rarity {
     Common,
     Uncommon,
+    /// Added with the Westeros deck: the step between uncommon and legendary,
+    /// so twelve cards can be worth four different things.
+    Rare,
     Legendary,
 }
 
 impl Rarity {
-    pub const ALL: [Rarity; 3] = [Rarity::Common, Rarity::Uncommon, Rarity::Legendary];
+    pub const ALL: [Rarity; 4] = [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::Legendary];
 
     pub fn key(self) -> &'static str {
         match self {
             Rarity::Common => "common",
             Rarity::Uncommon => "uncommon",
+            Rarity::Rare => "rare",
             Rarity::Legendary => "legendary",
         }
     }
@@ -55,24 +59,27 @@ impl Rarity {
         match self {
             Rarity::Common => "Common",
             Rarity::Uncommon => "Uncommon",
+            Rarity::Rare => "Rare",
             Rarity::Legendary => "Legendary",
         }
     }
 
-    /// Milk chocolate, dark chocolate, and the phoenix.
+    /// Milk chocolate, dark chocolate, silver, and the phoenix.
     pub fn emoji(self) -> &'static str {
         match self {
             Rarity::Common => "🥛",
             Rarity::Uncommon => "🍫",
+            Rarity::Rare => "🥈",
             Rarity::Legendary => "🔥",
         }
     }
 
     pub fn colour(self) -> u32 {
         match self {
-            // Caramel, cocoa, phoenix red-gold.
+            // Caramel, cocoa, Valyrian steel, phoenix red-gold.
             Rarity::Common => 0xC68E54,
             Rarity::Uncommon => 0x7B4A2D,
+            Rarity::Rare => 0x8E9BA8,
             Rarity::Legendary => 0xE8572A,
         }
     }
@@ -82,7 +89,8 @@ impl Rarity {
         match self {
             Rarity::Common => "easy",
             Rarity::Uncommon => "medium",
-            Rarity::Legendary => "hard",
+            // The rarer the card, the harder the riddle guarding it.
+            Rarity::Rare | Rarity::Legendary => "hard",
         }
     }
 
@@ -90,8 +98,9 @@ impl Rarity {
     pub fn points(self) -> i64 {
         let points = match self {
             Rarity::Common => control::number("VIZIER_POINTS_FROG_COMMON", 2),
-            Rarity::Uncommon => control::number("VIZIER_POINTS_FROG_UNCOMMON", 4),
-            Rarity::Legendary => control::number("VIZIER_POINTS_FROG_LEGENDARY", 10),
+            Rarity::Uncommon => control::number("VIZIER_POINTS_FROG_UNCOMMON", 5),
+            Rarity::Rare => control::number("VIZIER_POINTS_FROG_RARE", 10),
+            Rarity::Legendary => control::number("VIZIER_POINTS_FROG_LEGENDARY", 25),
         };
         points.min(1000) as i64
     }
@@ -100,8 +109,9 @@ impl Rarity {
     pub fn weight(self) -> u64 {
         match self {
             Rarity::Common => control::number("VIZIER_FROG_WEIGHT_COMMON", 58),
-            Rarity::Uncommon => control::number("VIZIER_FROG_WEIGHT_UNCOMMON", 35),
-            Rarity::Legendary => control::number("VIZIER_FROG_WEIGHT_LEGENDARY", 7),
+            Rarity::Uncommon => control::number("VIZIER_FROG_WEIGHT_UNCOMMON", 30),
+            Rarity::Rare => control::number("VIZIER_FROG_WEIGHT_RARE", 9),
+            Rarity::Legendary => control::number("VIZIER_FROG_WEIGHT_LEGENDARY", 3),
         }
     }
 }
@@ -399,7 +409,7 @@ const WIZARD_COLUMNS: &str = "id, slug, name, rarity, image, enabled";
 /// Every wizard: rarest last, then in the order they were added.
 pub fn wizards(conn: &Connection) -> Vec<Wizard> {
     let sql = format!(
-        "SELECT {} FROM wizards ORDER BY CASE rarity WHEN 'common' THEN 0 WHEN 'uncommon' THEN 1 ELSE 2 END, position, id",
+        "SELECT {} FROM wizards ORDER BY CASE rarity WHEN 'common' THEN 0 WHEN 'uncommon' THEN 1 WHEN 'rare' THEN 2 ELSE 3 END, position, id",
         WIZARD_COLUMNS
     );
     conn.prepare(&sql).and_then(|mut s| s.query_map([], wizard_row)?.collect()).unwrap_or_default()
@@ -1390,25 +1400,32 @@ pub(crate) mod tests {
         conn.execute("DELETE FROM wizards WHERE slug = 'merlin'", []).unwrap();
         init(&conn).unwrap();
         assert_eq!(wizards(&conn).len(), 9);
-        assert_eq!([Rarity::Common.points(), Rarity::Uncommon.points(), Rarity::Legendary.points()], [2, 4, 10]);
-        assert_eq!([Rarity::Common.difficulty(), Rarity::Uncommon.difficulty(), Rarity::Legendary.difficulty()], ["easy", "medium", "hard"]);
-        assert_eq!([Rarity::Common.emoji(), Rarity::Uncommon.emoji(), Rarity::Legendary.emoji()], ["🥛", "🍫", "🔥"]);
+        // The month's deck: four tiers, 2 · 5 · 10 · 25.
+        assert_eq!(Rarity::ALL.map(|r| r.points()), [2, 5, 10, 25]);
+        assert_eq!(Rarity::ALL.map(|r| r.difficulty()), ["easy", "medium", "hard", "hard"]);
+        assert_eq!(Rarity::ALL.map(|r| r.emoji()), ["🥛", "🍫", "🥈", "🔥"]);
     }
 
     #[test]
     fn rarity_follows_the_weights() {
         let weights: Vec<(Rarity, u64)> = Rarity::ALL.into_iter().map(|r| (r, r.weight())).collect();
-        assert_eq!(weights.iter().map(|w| w.1).collect::<Vec<_>>(), vec![58, 35, 7]);
+        assert_eq!(weights.iter().map(|w| w.1).collect::<Vec<_>>(), vec![58, 30, 9, 3]);
         let mut counts: HashMap<Rarity, usize> = HashMap::new();
         for i in 0..10_000 {
             *counts.entry(choose_rarity(i as f64 / 10_000.0, &weights).unwrap()).or_default() += 1;
         }
         let near = |got: usize, want: usize| got.abs_diff(want) <= 2;
-        assert!(near(counts[&Rarity::Common], 5800) && near(counts[&Rarity::Uncommon], 3500) && near(counts[&Rarity::Legendary], 700), "{counts:?}");
+        assert!(
+            near(counts[&Rarity::Common], 5800)
+                && near(counts[&Rarity::Uncommon], 3000)
+                && near(counts[&Rarity::Rare], 900)
+                && near(counts[&Rarity::Legendary], 300),
+            "{counts:?}"
+        );
         assert_eq!(choose_rarity(1.0, &weights), Some(Rarity::Legendary));
         assert_eq!(choose_rarity(0.0, &weights), Some(Rarity::Common));
         // A zero weight never comes up; all zero is nothing.
-        let no_uncommon = [(Rarity::Common, 1), (Rarity::Uncommon, 0), (Rarity::Legendary, 1)];
+        let no_uncommon = [(Rarity::Common, 1), (Rarity::Uncommon, 0), (Rarity::Rare, 0), (Rarity::Legendary, 1)];
         for i in 0..100 {
             assert_ne!(choose_rarity(i as f64 / 100.0, &no_uncommon), Some(Rarity::Uncommon));
         }
