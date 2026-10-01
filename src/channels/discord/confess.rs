@@ -5,21 +5,22 @@
 //! to the flow the members already know:
 //!
 //! 1. **`/confess`** opens the form from anywhere, for anybody, and answers
-//!    only the person who ran it. The two buttons — **Submit a confession**
-//!    and **Submit a reply** — ride on the confession cards as well, on the
-//!    newest card at any one time, where everybody's eye already is. Both
-//!    doors open the same form through [`open_form`] and hand back a modal
-//!    with the same custom id, so everything past the form is one path.
-//!    `/confess` is the door that is always there: the buttons cannot exist
-//!    until a confession does, and nothing else could have gone first.
+//!    only the person who ran it. Two buttons ride on the newest confession
+//!    card as well — **Submit a confession** and **Reply to #N**, where N is
+//!    the card's own number, baked into the button, so pressing it answers
+//!    that confession and nobody is asked for a number they should never have
+//!    had to know. Both doors go through [`open_form`], so everything past the
+//!    form is one path. `/confess` is the door that is always there: a button
+//!    cannot exist until a confession does.
 //! 2. Nothing is posted publicly by submitting. The text goes to the review
 //!    channel as an embed with the submitter on it — name, mention, id, how old
 //!    the account is, when they joined, and how many of theirs have been
 //!    approved and rejected before — and two buttons, **Approve** and
 //!    **Reject**. Reject asks for an optional reason.
-//! 3. Approving posts it in the confessions channel, anonymous and numbered,
-//!    with the two buttons on it — and takes the buttons off the card before
-//!    it, so the newest card is always the one to press. Rejecting posts
+//! 3. Approving posts it in the confessions channel as a card — an embed with
+//!    its number as the title, the words as the body and a quiet footer —
+//!    anonymous, with the two buttons under it, and takes the buttons off the
+//!    card before it so the newest is always the one to press. Rejecting posts
 //!    nothing anywhere public, ever. Either way the log channel gets an entry
 //!    naming the submitter and the mod who decided.
 //! 4. A confession gets no thread when it is posted. A thread is opened on it
@@ -37,8 +38,9 @@
 //! read the message log. The weekly scan can also be pointed at channels by
 //! hand, so it filters these out of its own list too.
 //!
-//! **Anonymity is absolute in public.** The posted message carries a number and
-//! the words and nothing else: no name, no mention, no avatar, no footer. The
+//! **Anonymity is absolute in public.** The card carries a number and the words
+//! and nothing else: no name, no mention, no avatar, no author line, nothing in
+//! the footer but the number and the time it went up. The
 //! thread, when a reply opens one, is named after the confession and nobody
 //! else. Mods see the submitter in review and in the log, which is how they
 //! moderate, and `/whosent` answers it later — admin-only, private, and written
@@ -75,9 +77,17 @@ use super::control;
 // be approved.
 
 pub const ID_NEW: &str = "confess:new";
-pub const ID_REPLY: &str = "confess:reply";
+/// `confess:reply:<number>` — the reply button on a card carries the number of
+/// the confession it sits on, so pressing it answers THAT one and nobody has to
+/// type a number they should never have had to know.
+pub const ID_REPLY: &str = "confess:reply:";
 pub const MODAL_NEW: &str = "confessform:new";
+/// The reply form WITH a number box, for `/confess number:` — somewhere there
+/// is no card to read the number off.
 pub const MODAL_REPLY: &str = "confessform:reply";
+/// `confessform:reply:<number>` — the reply form with no number box at all,
+/// because the button that opened it already said which confession.
+pub const MODAL_REPLY_TO: &str = "confessform:reply:";
 /// `confess:ok:<number>` and `confess:no:<number>`.
 pub const ID_APPROVE: &str = "confess:ok:";
 pub const ID_REJECT: &str = "confess:no:";
@@ -89,17 +99,26 @@ const FIELD_TEXT: &str = "text";
 const FIELD_NUMBER: &str = "number";
 const FIELD_REASON: &str = "reason";
 
-/// Discord's own ceiling on a message, less room for the heading.
-pub const BODY_CEILING: usize = 1800;
+/// The longest a confession may ever be set to.
+///
+/// A confession is the description of an embed, and Discord takes 4,096 there —
+/// but the box people type it into is a modal text input, and Discord takes
+/// only 4,000 in one of those. The smaller number is therefore the real
+/// ceiling, and the length range is checked against it so a confession is
+/// always refused in words rather than posted cut in half.
+pub const BODY_CEILING: usize = 4000;
 
 /// Whether a custom id belongs to this feature.
 pub fn owns_component(id: &str) -> bool {
-    id == ID_NEW || id == ID_REPLY || id.starts_with(ID_APPROVE) || id.starts_with(ID_REJECT)
+    // A bare "confess:reply" is a card this bot posted before the number was
+    // baked into the button. It still works: the number is read off the card
+    // the press came from instead.
+    id == ID_NEW || id == "confess:reply" || id.starts_with(ID_REPLY) || id.starts_with(ID_APPROVE) || id.starts_with(ID_REJECT)
 }
 
 /// Whether a modal's custom id belongs to this feature.
 pub fn owns_modal(id: &str) -> bool {
-    id == MODAL_NEW || id == MODAL_REPLY || id.starts_with(MODAL_REJECT)
+    id == MODAL_NEW || id == MODAL_REPLY || id.starts_with(MODAL_REPLY_TO) || id.starts_with(MODAL_REJECT)
 }
 
 // --- settings ----------------------------------------------------------------
@@ -381,10 +400,34 @@ pub fn thread_name(c: &Confession) -> String {
     title(c).chars().take(100).collect()
 }
 
-/// The whole public message for a confession: the title in bold, then the
-/// words. Nothing about who sent it — not a name, not a mention, not a footer.
-pub fn confession_text(c: &Confession) -> String {
-    format!("**{}**\n\n{}", title(c), c.body)
+/// The muted indigo a confession card is drawn in — present enough to read as
+/// a card, quiet enough not to shout in a channel full of them.
+const CARD_COLOUR: u32 = 0x4E5D94;
+/// A shade lighter, so a reply reads as an answer at a glance.
+const REPLY_COLOUR: u32 = 0x6E79A8;
+
+/// A timestamp, when the number is one Discord will take.
+fn at(ts: i64) -> Option<serenity::all::Timestamp> {
+    serenity::all::Timestamp::from_unix_timestamp(ts).ok()
+}
+
+/// The card a confession is posted as: the title, the words, and a footer with
+/// its number and the time it went up.
+///
+/// Nothing about who sent it — no name, no mention, no avatar, no author line.
+/// The description is the words exactly as they were written: the length range
+/// (see [`BODY_CEILING`]) keeps them inside what an embed will take, so nothing
+/// is ever cut off.
+pub fn confession_embed(c: &Confession, now: i64) -> CreateEmbed {
+    let mut embed = CreateEmbed::new()
+        .title(title(c))
+        .description(c.body.clone())
+        .colour(CARD_COLOUR)
+        .footer(CreateEmbedFooter::new(format!("#{}", c.number)));
+    if let Some(ts) = at(if c.decided_ts != 0 { c.decided_ts } else { now }) {
+        embed = embed.timestamp(ts);
+    }
+    embed
 }
 
 /// A, B, ... Z, AA, AB — a reply's label inside its confession's thread, so one
@@ -403,22 +446,33 @@ pub fn reply_letter(index: i64) -> String {
     out.iter().rev().collect()
 }
 
-/// An approved reply, as it reads inside the confession's thread: labelled so
-/// members can point at it, and anonymous like everything else here. One post
-/// per confession and one thread, with the replies inside it — not a second
-/// main-channel message.
-pub fn reply_text(target: i64, letter: &str, body: &str) -> String {
-    format!("**Reply {} to Confession (#{})**\n\n{}", letter, target, body)
+/// The title a reply carries inside its confession's thread.
+pub fn reply_title(target: i64, letter: &str) -> String {
+    format!("Reply {} to Confession (#{})", letter, target)
 }
 
-/// The public text for either kind, given a reply's letter when it is one.
-pub fn public_text(c: &Confession, letter: Option<&str>) -> String {
+/// An approved reply, as a card inside its confession's thread: labelled so
+/// members can point at it, and as anonymous as everything else here.
+pub fn reply_embed(target: i64, letter: &str, body: &str, now: i64) -> CreateEmbed {
+    let mut embed = CreateEmbed::new()
+        .title(reply_title(target, letter))
+        .description(body.to_string())
+        .colour(REPLY_COLOUR)
+        .footer(CreateEmbedFooter::new(format!("reply {} to #{}", letter, target)));
+    if let Some(ts) = at(now) {
+        embed = embed.timestamp(ts);
+    }
+    embed
+}
+
+/// The card for either kind, given a reply's letter when it is one.
+pub fn public_embed(c: &Confession, letter: Option<&str>, now: i64) -> CreateEmbed {
     match (c.kind, c.answers) {
-        (Kind::Reply, Some(n)) => reply_text(n, letter.unwrap_or("A"), &c.body),
+        (Kind::Reply, Some(n)) => reply_embed(n, letter.unwrap_or("A"), &c.body, now),
         // A reply whose target went missing is never posted (see `vet`); if one
         // ever got this far it reads as its own confession rather than lying
         // about which number it answers.
-        (Kind::Reply, None) | (Kind::Confession, _) => confession_text(c),
+        (Kind::Reply, None) | (Kind::Confession, _) => confession_embed(c, now),
     }
 }
 
@@ -435,24 +489,26 @@ pub fn needs_thread(c: &Confession) -> bool {
 /// confession that predates this bot — is tested rather than tried live.
 #[async_trait::async_trait]
 pub trait Poster: Send + Sync {
-    /// A message in the main channel, optionally as a Discord reply to another.
-    async fn say_in_channel(&self, channel: u64, text: &str, reply_to: Option<u64>) -> anyhow::Result<u64>;
-    /// A message inside a thread. An error means the thread could not be used.
-    async fn say_in_thread(&self, thread: u64, text: &str) -> anyhow::Result<u64>;
+    /// A card in the main channel, optionally as a Discord reply to another
+    /// message. No buttons: that is [`Poster::post_card`].
+    async fn say_in_channel(&self, channel: u64, card: CreateEmbed, reply_to: Option<u64>) -> anyhow::Result<u64>;
+    /// A card inside a thread. An error means the thread could not be used.
+    async fn say_in_thread(&self, thread: u64, card: CreateEmbed) -> anyhow::Result<u64>;
     /// Unarchives a thread so it can be posted in again.
     async fn revive(&self, thread: u64) -> anyhow::Result<()>;
     /// Opens a thread on a message in the main channel.
     async fn open_thread(&self, channel: u64, message: u64, name: &str, minutes: u16) -> anyhow::Result<u64>;
-    /// A confession card: the same message, with the two buttons on it.
-    /// Separate from `say_in_channel` because only this one carries components.
-    async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64>;
-    /// Puts the two buttons on an existing card, or takes them off.
+    /// A confession card with the two buttons under it. Separate from
+    /// `say_in_channel` because only this one carries components.
+    async fn post_card(&self, channel: u64, card: CreateEmbed, number: i64) -> anyhow::Result<u64>;
+    /// Puts the two buttons on an existing card, or takes them off. The number
+    /// is the confession's, so the reply button can carry it.
     ///
     /// Only ever called with a message id this bot wrote into its own store.
     /// There is no delete on this trait at all: the bot removes nothing from
     /// the confessions channel, so the old bot's messages cannot be harmed
     /// even by a bug.
-    async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()>;
+    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()>;
 }
 
 /// Where an approved confession ended up.
@@ -477,17 +533,17 @@ pub struct Posted {
 /// The new card goes up BEFORE the old one is edited, so a failure in the
 /// middle leaves two pressable cards rather than none. `was_on` is the card
 /// that had the buttons, out of the store and nowhere else.
-pub async fn post_confession(poster: &dyn Poster, channel: u64, c: &Confession, was_on: Option<u64>) -> Posted {
+pub async fn post_confession(poster: &dyn Poster, channel: u64, c: &Confession, was_on: Option<(u64, i64)>, now: i64) -> Posted {
     let mut out = Posted::default();
-    match poster.post_card(channel, &confession_text(c)).await {
+    match poster.post_card(channel, confession_embed(c, now), c.number).await {
         Ok(id) => out.message = id,
         Err(err) => {
             out.notes.push(format!("#{} was approved but could not be posted: {}", c.number, err));
             return out;
         }
     }
-    if let Some(old) = was_on.filter(|id| *id != out.message) {
-        match poster.set_card_buttons(channel, old, false).await {
+    if let Some((old, old_number)) = was_on.filter(|(id, _)| *id != out.message) {
+        match poster.set_card_buttons(channel, old, old_number, false).await {
             Ok(()) => out.buttons_off = Some(old),
             // The old card has gone, or the bot cannot edit it. Harmless: two
             // cards show buttons and both press through to the same place.
@@ -525,7 +581,7 @@ pub async fn move_buttons(poster: &dyn Poster, channel: u64, newest: Option<(i64
         );
         return out;
     };
-    match poster.set_card_buttons(channel, message, true).await {
+    match poster.set_card_buttons(channel, message, number, true).await {
         Ok(()) => out.on = Some((number, message)),
         Err(err) => out.notes.push(format!("the buttons could not be put on #{} ({})", number, err)),
     }
@@ -555,17 +611,18 @@ pub struct Placed {
 /// bot or whose thread was deleted; and failing all of that, the main channel,
 /// hanging off the confession so the pair is still obvious. Only the last one
 /// is a failure, and it is logged as one.
+#[allow(clippy::too_many_arguments)]
 pub async fn place_reply(
     poster: &dyn Poster,
     channel: u64,
     parent: &Confession,
-    text: &str,
+    card: &CreateEmbed,
     want_thread: bool,
     minutes: u16,
 ) -> Placed {
     let mut out = Placed::default();
     if parent.thread_id != 0 && want_thread {
-        match poster.say_in_thread(parent.thread_id, text).await {
+        match poster.say_in_thread(parent.thread_id, card.clone()).await {
             Ok(id) => {
                 out.message = id;
                 out.thread = Some(parent.thread_id);
@@ -576,7 +633,7 @@ pub async fn place_reply(
                 // archived it. Waking it up is cheap and keeps the conversation
                 // in one place.
                 match poster.revive(parent.thread_id).await {
-                    Ok(()) => match poster.say_in_thread(parent.thread_id, text).await {
+                    Ok(()) => match poster.say_in_thread(parent.thread_id, card.clone()).await {
                         Ok(id) => {
                             out.message = id;
                             out.thread = Some(parent.thread_id);
@@ -600,7 +657,7 @@ pub async fn place_reply(
     // nobody answers never gets one.
     if parent.posted_message != 0 && want_thread {
         match poster.open_thread(channel, parent.posted_message, &thread_name(parent), minutes).await {
-            Ok(thread) => match poster.say_in_thread(thread, text).await {
+            Ok(thread) => match poster.say_in_thread(thread, card.clone()).await {
                 Ok(id) => {
                     out.message = id;
                     out.thread = Some(thread);
@@ -619,7 +676,7 @@ pub async fn place_reply(
     // The fallback: in the channel, as a Discord reply to the confession, so a
     // reader can still see what it answers.
     let reply_to = (parent.posted_message != 0).then_some(parent.posted_message);
-    match poster.say_in_channel(channel, text, reply_to).await {
+    match poster.say_in_channel(channel, card.clone(), reply_to).await {
         Ok(id) => {
             out.message = id;
             out.fell_back = true;
@@ -640,16 +697,16 @@ pub struct Live<'a> {
 
 #[async_trait::async_trait]
 impl Poster for Live<'_> {
-    async fn say_in_channel(&self, channel: u64, text: &str, reply_to: Option<u64>) -> anyhow::Result<u64> {
-        let mut post = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+    async fn say_in_channel(&self, channel: u64, card: CreateEmbed, reply_to: Option<u64>) -> anyhow::Result<u64> {
+        let mut post = CreateMessage::new().embed(card).allowed_mentions(CreateAllowedMentions::new());
         if let Some(id) = reply_to {
             post = post.reference_message((ChannelId::new(channel), MessageId::new(id)));
         }
         Ok(ChannelId::new(channel).send_message(self.http, post).await?.id.get())
     }
 
-    async fn say_in_thread(&self, thread: u64, text: &str) -> anyhow::Result<u64> {
-        let post = CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new());
+    async fn say_in_thread(&self, thread: u64, card: CreateEmbed) -> anyhow::Result<u64> {
+        let post = CreateMessage::new().embed(card).allowed_mentions(CreateAllowedMentions::new());
         Ok(ChannelId::new(thread).send_message(self.http, post).await?.id.get())
     }
 
@@ -664,27 +721,34 @@ impl Poster for Live<'_> {
         Ok(ChannelId::new(channel).create_thread_from_message(self.http, MessageId::new(message), thread).await?.id.get())
     }
 
-    async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
+    async fn post_card(&self, channel: u64, card: CreateEmbed, number: i64) -> anyhow::Result<u64> {
         let post = CreateMessage::new()
-            .content(text)
-            .components(vec![card_buttons()])
+            .embed(card)
+            .components(vec![card_buttons(number)])
             .allowed_mentions(CreateAllowedMentions::new());
         Ok(ChannelId::new(channel).send_message(self.http, post).await?.id.get())
     }
 
-    async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()> {
-        let rows = if on { vec![card_buttons()] } else { vec![] };
+    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()> {
+        // A components-only edit: the embed on the card is left exactly as it is.
+        let rows = if on { vec![card_buttons(number)] } else { vec![] };
         ChannelId::new(channel).edit_message(self.http, MessageId::new(message), EditMessage::new().components(rows)).await?;
         Ok(())
     }
 }
 
 /// The two buttons that ride on the newest confession card. There is no panel
-/// message: these are the whole of the way in.
-pub fn card_buttons() -> CreateActionRow {
+/// message: these, and `/confess`, are the whole of the way in.
+///
+/// The reply button carries `number` — the confession the card is — so pressing
+/// it answers that one. A button on a card cannot sensibly ask which confession
+/// it is about.
+pub fn card_buttons(number: i64) -> CreateActionRow {
     CreateActionRow::Buttons(vec![
         CreateButton::new(ID_NEW).label("Submit a confession").style(ButtonStyle::Primary),
-        CreateButton::new(ID_REPLY).label("Submit a reply").style(ButtonStyle::Secondary),
+        CreateButton::new(format!("{}{}", ID_REPLY, number))
+            .label(format!("Reply to #{}", number))
+            .style(ButtonStyle::Secondary),
     ])
 }
 
@@ -698,6 +762,22 @@ pub fn new_modal(limits: &Limits) -> CreateModal {
             .max_length(limits.max.min(4000) as u16)
             .required(true),
     )])
+}
+
+/// The reply form a card's button opens: the text box and nothing else, titled
+/// with the confession it answers so they can see what they are replying to.
+/// The number rides in the custom id, so there is nothing to type and nothing
+/// to get wrong.
+pub fn reply_modal_to(limits: &Limits, target: i64) -> CreateModal {
+    CreateModal::new(format!("{}{}", MODAL_REPLY_TO, target), format!("Reply to Confession #{}", target)).components(vec![
+        CreateActionRow::InputText(
+            CreateInputText::new(InputTextStyle::Paragraph, format!("Your reply to #{}", target), FIELD_TEXT)
+                .placeholder("Nobody but the mods will ever know this was you.")
+                .min_length(limits.min.min(1024) as u16)
+                .max_length(limits.max.min(4000) as u16)
+                .required(true),
+        ),
+    ])
 }
 
 /// The reply form. `prefill` fills the number box in for somebody who already
@@ -734,14 +814,20 @@ pub const BROKEN_SAID: &str = "Confessions aren't available right now. Tell a mo
 /// Everything past the form is one path too: both doors open a modal with the
 /// same custom id, so the same handler, the same guards, the same numbering and
 /// the same review queue serve both. There is no second implementation.
-pub fn open_form(
-    kind: Kind,
-    user: u64,
-    limits: &Limits,
-    on: bool,
-    store_open: bool,
-    prefill: Option<i64>,
-) -> Result<CreateModal, String> {
+/// Which form to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Form {
+    /// A confession.
+    New,
+    /// A reply to a known confession: no number box, because the button that
+    /// opened it already said which one.
+    ReplyTo(i64),
+    /// A reply with a number box, optionally pre-typed. For `/confess number:`,
+    /// where there is no card to read the number off.
+    ReplyAsking(Option<i64>),
+}
+
+pub fn open_form(form: Form, user: u64, limits: &Limits, on: bool, store_open: bool) -> Result<CreateModal, String> {
     if !on {
         return Err(OFF_SAID.to_string());
     }
@@ -751,9 +837,10 @@ pub fn open_form(
     if limits.blocked.contains(&user) {
         return Err(BLOCKED_SAID.to_string());
     }
-    Ok(match kind {
-        Kind::Confession => new_modal(limits),
-        Kind::Reply => reply_modal(limits, prefill),
+    Ok(match form {
+        Form::New => new_modal(limits),
+        Form::ReplyTo(target) => reply_modal_to(limits, target),
+        Form::ReplyAsking(prefill) => reply_modal(limits, prefill),
     })
 }
 
@@ -1075,8 +1162,8 @@ pub async fn settle_with(
                             // count: its own letter IS that count.
                             reply_letter(store::approved_replies_to(&conn, target).max(1))
                         };
-                        let text = reply_text(target, &letter, &c.body);
-                        let placed = place_reply(poster, here, &parent, &text, want_thread, minutes).await;
+                        let card = reply_embed(target, &letter, &c.body, now);
+                        let placed = place_reply(poster, here, &parent, &card, want_thread, minutes).await;
                         out.notes.extend(placed.notes.clone());
                         if let Some(thread) = placed.opened {
                             let conn = db.lock();
@@ -1099,9 +1186,9 @@ pub async fn settle_with(
             None => {
                 let was_on = {
                     let conn = db.lock();
-                    store::buttons_holder(&conn, here).map(|(message, _)| message)
+                    store::buttons_holder(&conn, here)
                 };
-                let posted = post_confession(poster, here, &c, was_on).await;
+                let posted = post_confession(poster, here, &c, was_on, now).await;
                 out.notes.extend(posted.notes.clone());
                 out.buttons_off = posted.buttons_off;
                 if posted.message != 0 {
@@ -1163,9 +1250,27 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let id = component.data.custom_id.clone();
 
     // The two submit buttons, through the same gate `/confess` goes through.
-    if id == ID_NEW || id == ID_REPLY {
-        let kind = if id == ID_NEW { Kind::Confession } else { Kind::Reply };
-        let reply = match open_form(kind, component.user.id.get(), &limits(), enabled(), store::db().is_some(), None) {
+    if id == ID_NEW || id == "confess:reply" || id.starts_with(ID_REPLY) {
+        let form = if id == ID_NEW {
+            Form::New
+        } else {
+            // The number in the button, or — for a card posted before the
+            // number was baked in — the number of the card the press came
+            // from, out of this bot's own store. Only if neither is there does
+            // anybody get asked to type one.
+            let from_id = id.strip_prefix(ID_REPLY).and_then(|n| n.parse::<i64>().ok());
+            let from_card = from_id.is_none().then(|| {
+                store::db().and_then(|db| {
+                    let conn = db.lock();
+                    store::card_at(&conn, component.channel_id.get(), component.message.id.get())
+                })
+            });
+            match from_id.or(from_card.flatten()) {
+                Some(target) => Form::ReplyTo(target),
+                None => Form::ReplyAsking(None),
+            }
+        };
+        let reply = match open_form(form, component.user.id.get(), &limits(), enabled(), store::db().is_some()) {
             Ok(modal) => CreateInteractionResponse::Modal(modal),
             Err(why) => whisper(why),
         };
@@ -1262,7 +1367,10 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
         return;
     }
 
-    if id != MODAL_NEW && id != MODAL_REPLY {
+    // Which form came back. The one a card's button opened carries the
+    // confession's number in its id, so there is no box to read it out of.
+    let from_card = id.strip_prefix(MODAL_REPLY_TO).and_then(|n| n.parse::<i64>().ok());
+    if id != MODAL_NEW && id != MODAL_REPLY && from_card.is_none() {
         return;
     }
     if !enabled() {
@@ -1270,7 +1378,12 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
         return;
     }
     let kind = if id == MODAL_NEW { Kind::Confession } else { Kind::Reply };
-    let number_raw = field(modal, FIELD_NUMBER);
+    // The number the button said, or the one they typed. Either way it goes
+    // through exactly the same check in `vet`.
+    let number_raw = match from_card {
+        Some(target) => target.to_string(),
+        None => field(modal, FIELD_NUMBER),
+    };
     let body_raw = field(modal, FIELD_TEXT);
     let user = modal.user.id.get();
     let name = modal.member.as_ref().map(|m| m.display_name().to_string()).unwrap_or_else(|| modal.user.name.clone());
@@ -1357,6 +1470,14 @@ async fn settle(ctx: &Context, number: i64, status: Status, mod_id: u64, mod_nam
         return;
     }
     let Some(c) = out.confession else { return };
+    // Said plainly at approval time, not only at boot: "which card has the
+    // buttons" is the question this feature gets asked most.
+    if let Some((on, _)) = out.buttons_on {
+        match out.buttons_off {
+            Some(off) => tracing::info!("confess: the buttons are now on #{} (taken off message {})", on, off),
+            None => tracing::info!("confess: the buttons are now on #{}", on),
+        }
+    }
 
     let guild = ctx.cache.guilds().first().map(|g| g.get()).unwrap_or(0);
     if let Some(log) = log_channel() {
@@ -1498,11 +1619,14 @@ pub async fn confess_command(ctx: &Context, command: &CommandInteraction) {
             _ => None,
         })
         .filter(|n| *n > 0);
-    let kind = if wanted.is_some() { Kind::Reply } else { Kind::Confession };
+    let form = match wanted {
+        Some(n) => Form::ReplyAsking(Some(n)),
+        None => Form::New,
+    };
     // Exactly the gate the buttons go through, and the modal it hands back
     // carries the same custom id — so the form, the guards, the cooldown, the
     // numbering and the review queue are all the one path from here on.
-    let reply = match open_form(kind, command.user.id.get(), &limits(), enabled(), store::db().is_some(), wanted) {
+    let reply = match open_form(form, command.user.id.get(), &limits(), enabled(), store::db().is_some()) {
         Ok(modal) => CreateInteractionResponse::Modal(modal),
         Err(why) => whisper(why),
     };
@@ -1693,29 +1817,62 @@ mod tests {
 
     // --- what the public sees ------------------------------------------------
 
-    /// The one thing that must never go wrong: nothing about the submitter in
-    /// the posted message.
+    /// The one thing that must never go wrong: nothing about the submitter on
+    /// the card. And it IS a card — an embed with a title, the words and a
+    /// footer — not a line of plain text.
     #[test]
-    fn the_posted_message_is_a_number_and_the_words_and_nothing_else() {
-        let c = Confession { user_name: "Zoya".into(), user_id: 1234, ..approved(459) };
-        let text = confession_text(&c);
-        assert_eq!(text, "**Anonymous Confession (#459)**\n\nthe original");
-        assert!(!text.contains("Zoya") && !text.contains("1234") && !text.contains('@'), "{text}");
-        assert_eq!(public_text(&c, None), text);
+    fn the_card_is_an_embed_of_a_number_and_the_words_and_nothing_else() {
+        let c = Confession { user_name: "Zoya".into(), user_id: 1234, decided_ts: 1_700_000_000, ..approved(459) };
+        let card = drawn(&confession_embed(&c, 9_999));
+        assert_eq!(says(&card), ("Anonymous Confession (#459)".into(), "the original".into()));
+        assert_eq!(card["footer"]["text"], "#459");
+        assert!(card["color"].as_u64().is_some_and(|n| n > 0), "a card has a colour: {card}");
+        assert!(card["timestamp"].as_str().is_some(), "and the time it went up: {card}");
+
+        // Nothing about who sent it, anywhere in the whole embed.
+        let whole = card.to_string();
+        assert!(!whole.contains("Zoya") && !whole.contains("1234"), "{whole}");
+        assert!(card["author"].is_null() && card["thumbnail"].is_null() && card["image"].is_null(), "{card}");
+        assert!(!card["footer"].to_string().contains("Zoya"), "{card}");
+        assert_eq!(drawn(&public_embed(&c, None, 9_999)), card);
+
         // And the thread takes the same name, so there is no name there either.
         assert_eq!(thread_name(&c), "Anonymous Confession (#459)");
         assert!(!thread_name(&c).contains("Zoya"));
     }
 
-    /// A reply lives inside its confession's thread, labelled so members can
-    /// point at it, and with nothing about who sent it.
+    /// A reply is a card too, inside its confession's thread, labelled so
+    /// members can point at it, and with nothing about who sent it.
     #[test]
-    fn a_reply_reads_as_a_labelled_anonymous_message_in_the_thread() {
+    fn a_reply_is_a_labelled_anonymous_card_in_the_thread() {
         let reply = Confession { kind: Kind::Reply, answers: Some(457), user_name: "Zoya".into(), ..approved(460) };
-        let text = public_text(&reply, Some("B"));
-        assert_eq!(text, "**Reply B to Confession (#457)**\n\nthe original");
-        assert!(!text.contains("Zoya") && !text.contains("460"), "its own number is for mods only: {text}");
-        assert_eq!(reply_text(457, "A", "hello"), "**Reply A to Confession (#457)**\n\nhello");
+        let card = drawn(&public_embed(&reply, Some("B"), 1_700_000_000));
+        assert_eq!(says(&card), ("Reply B to Confession (#457)".into(), "the original".into()));
+        let whole = card.to_string();
+        assert!(!whole.contains("Zoya"), "{whole}");
+        assert!(!whole.contains("460"), "its own number is for mods only: {whole}");
+        assert_eq!(reply_title(457, "A"), "Reply A to Confession (#457)");
+        assert_eq!(says(&drawn(&reply_embed(457, "A", "hello", 1_700_000_000))).1, "hello");
+    }
+
+    /// The words go up exactly as they were written: the length range is set
+    /// below what an embed will take, so nothing is ever cut off.
+    #[test]
+    fn the_longest_confession_allowed_still_fits_an_embed_whole() {
+        /// Discord's own cap on an embed description.
+        const EMBED_DESCRIPTION_CAP: usize = 4096;
+        assert!(BODY_CEILING <= EMBED_DESCRIPTION_CAP, "a confession could be too long to show: {}", BODY_CEILING);
+        // And the modal people type into cannot take more than Discord's 4000.
+        assert!(BODY_CEILING <= 4000, "the box could not accept the longest allowed confession");
+        let long = "x".repeat(BODY_CEILING);
+        let c = Confession { body: long.clone(), ..approved(459) };
+        let card = drawn(&confession_embed(&c, 1000));
+        assert_eq!(card["description"].as_str().unwrap().chars().count(), BODY_CEILING, "not truncated");
+        assert_eq!(card["description"], long);
+        // The default is well inside it, and the setting cannot be set past it.
+        let limits = Limits { max: BODY_CEILING + 1000, ..open_limits() };
+        assert!(vet(&limits, 11, None, 0, Kind::Confession, "", &"x".repeat(BODY_CEILING + 500), None).is_ok());
+        assert!(super::limits().max <= BODY_CEILING, "the setting is clamped to what fits");
     }
 
     #[test]
@@ -1763,12 +1920,25 @@ mod tests {
 
     // --- posting, and the thread it lives in ---------------------------------
 
+    /// One embed as JSON, so a test can read its title and words.
+    fn drawn(card: &CreateEmbed) -> serde_json::Value {
+        serde_json::to_value(card).expect("an embed serialises")
+    }
+
+    /// An embed's title and description, the two things that are public.
+    pub(super) fn says(card: &serde_json::Value) -> (String, String) {
+        (
+            card["title"].as_str().unwrap_or_default().to_string(),
+            card["description"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
     /// A fake Discord that writes down every call and can be told to refuse
     /// whichever of them the test is about.
     #[derive(Default)]
     pub(super) struct Fake {
-        pub(super) channel_posts: Mutex<Vec<(u64, String, Option<u64>)>>,
-        thread_posts: Mutex<Vec<(u64, String)>>,
+        pub(super) channel_posts: Mutex<Vec<(u64, serde_json::Value, Option<u64>)>>,
+        thread_posts: Mutex<Vec<(u64, serde_json::Value)>>,
         opened: Mutex<Vec<(u64, u64, String, u16)>>,
         revived: Mutex<Vec<u64>>,
         /// Thread ids that refuse a post until they have been revived.
@@ -1777,8 +1947,8 @@ mod tests {
         dead: Mutex<Vec<u64>>,
         /// Every edit asked for: (channel, message, buttons on).
         edits: Mutex<Vec<(u64, u64, bool)>>,
-        /// Which message ids are showing buttons: (message, on).
-        buttons: Mutex<Vec<(u64, bool)>>,
+        /// Which message ids are showing buttons: (message, confession number, on).
+        buttons: Mutex<Vec<(u64, i64, bool)>>,
         /// Message ids that are not there any more, so editing one fails.
         gone: Mutex<Vec<u64>>,
         no_threads: bool,
@@ -1802,19 +1972,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Poster for Fake {
-        async fn say_in_channel(&self, channel: u64, text: &str, reply_to: Option<u64>) -> anyhow::Result<u64> {
+        async fn say_in_channel(&self, channel: u64, card: CreateEmbed, reply_to: Option<u64>) -> anyhow::Result<u64> {
             if self.no_channel {
                 return Err(anyhow::anyhow!("Missing Permissions"));
             }
-            self.channel_posts.lock().push((channel, text.to_string(), reply_to));
+            self.channel_posts.lock().push((channel, drawn(&card), reply_to));
             Ok(self.id())
         }
 
-        async fn say_in_thread(&self, thread: u64, text: &str) -> anyhow::Result<u64> {
+        async fn say_in_thread(&self, thread: u64, card: CreateEmbed) -> anyhow::Result<u64> {
             if self.dead.lock().contains(&thread) || self.archived.lock().contains(&thread) {
                 return Err(anyhow::anyhow!("Thread is archived"));
             }
-            self.thread_posts.lock().push((thread, text.to_string()));
+            self.thread_posts.lock().push((thread, drawn(&card)));
             Ok(self.id())
         }
 
@@ -1835,24 +2005,24 @@ mod tests {
             Ok(self.id())
         }
 
-        async fn post_card(&self, channel: u64, text: &str) -> anyhow::Result<u64> {
+        async fn post_card(&self, channel: u64, card: CreateEmbed, number: i64) -> anyhow::Result<u64> {
             if self.no_channel {
                 return Err(anyhow::anyhow!("Missing Permissions"));
             }
             let id = self.id();
-            self.channel_posts.lock().push((channel, text.to_string(), None));
-            self.buttons.lock().push((id, true));
+            self.channel_posts.lock().push((channel, drawn(&card), None));
+            self.buttons.lock().push((id, number, true));
             self.edits.lock().push((channel, id, true));
             Ok(id)
         }
 
-        async fn set_card_buttons(&self, channel: u64, message: u64, on: bool) -> anyhow::Result<()> {
+        async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()> {
             self.edits.lock().push((channel, message, on));
             if self.gone.lock().contains(&message) {
                 return Err(anyhow::anyhow!("Unknown Message"));
             }
-            self.buttons.lock().retain(|(id, _)| *id != message);
-            self.buttons.lock().push((message, on));
+            self.buttons.lock().retain(|(id, _, _)| *id != message);
+            self.buttons.lock().push((message, number, on));
             Ok(())
         }
     }
@@ -1860,16 +2030,21 @@ mod tests {
     impl Fake {
         /// Every message id that is showing the two buttons right now.
         fn pressable(&self) -> Vec<u64> {
-            let mut out: Vec<u64> = self.buttons.lock().iter().filter(|(_, on)| *on).map(|(id, _)| *id).collect();
+            let mut out: Vec<u64> = self.buttons.lock().iter().filter(|(_, _, on)| *on).map(|(id, _, _)| *id).collect();
             out.sort_unstable();
             out
+        }
+
+        /// The confession number the pressable card's reply button carries.
+        fn reply_button_points_at(&self) -> Option<i64> {
+            self.buttons.lock().iter().find(|(_, _, on)| *on).map(|(_, number, _)| *number)
         }
 
         /// Somebody deleted that message in Discord: it is gone from the
         /// channel, so it shows no buttons and cannot be edited again.
         fn vanish(&self, message: u64) {
             self.gone.lock().push(message);
-            self.buttons.lock().retain(|(id, _)| *id != message);
+            self.buttons.lock().retain(|(id, _, _)| *id != message);
         }
 
         /// Message ids this fake was ever asked to edit.
@@ -1885,23 +2060,26 @@ mod tests {
     async fn an_approved_confession_is_posted_as_a_card_with_the_buttons_on_it() {
         let fake = Fake::new();
         let c = confession(459, "I cheated at Wordle");
-        let out = post_confession(&fake, 21, &c, None).await;
+        let out = post_confession(&fake, 21, &c, None, 1000).await;
         assert_ne!(out.message, 0);
         assert_eq!(out.notes, Vec::<String>::new());
         assert_eq!(out.buttons_off, None, "there was no card before it");
         let posts = fake.channel_posts.lock().clone();
         assert_eq!(posts.len(), 1, "one post in the channel and no more");
         assert_eq!(posts[0].0, 21);
-        assert_eq!(posts[0].1, "**Anonymous Confession (#459)**\n\nI cheated at Wordle");
+        assert_eq!(says(&posts[0].1), ("Anonymous Confession (#459)".into(), "I cheated at Wordle".into()));
         assert_eq!(fake.pressable(), vec![out.message], "and it is the pressable one");
+        assert_eq!(fake.reply_button_points_at(), Some(459), "its reply button answers itself");
         // No thread: that waits for the first reply.
         assert!(fake.opened.lock().is_empty(), "a confession opens no thread");
         assert!(fake.thread_posts.lock().is_empty());
 
-        // The next one takes the buttons off it.
-        let next = post_confession(&fake, 21, &confession(460, "me too"), Some(out.message)).await;
+        // The next one takes the buttons off it, and its reply button points at
+        // itself rather than at the one before.
+        let next = post_confession(&fake, 21, &confession(460, "me too"), Some((out.message, 459)), 2000).await;
         assert_eq!(next.buttons_off, Some(out.message));
         assert_eq!(fake.pressable(), vec![next.message]);
+        assert_eq!(fake.reply_button_points_at(), Some(460));
     }
 
     /// The flow the owner asked for: one post and one thread per confession,
@@ -1910,12 +2088,15 @@ mod tests {
     async fn a_reply_lands_in_its_confessions_thread_and_makes_no_second_post() {
         let fake = Fake::new();
         let parent = Confession { thread_id: 7777, ..approved(457) };
-        let text = reply_text(457, "A", "same here");
-        let out = place_reply(&fake, 21, &parent, &text, true, 4320).await;
+        let card = reply_embed(457, "A", "same here", 1000);
+        let out = place_reply(&fake, 21, &parent, &card, true, 4320).await;
         assert_eq!(out.thread, Some(7777));
         assert!(!out.fell_back && !out.revived && out.opened.is_none());
         assert_eq!(out.notes, Vec::<String>::new());
-        assert_eq!(*fake.thread_posts.lock(), vec![(7777, text.clone())]);
+        let inside = fake.thread_posts.lock().clone();
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].0, 7777);
+        assert_eq!(says(&inside[0].1), ("Reply A to Confession (#457)".into(), "same here".into()));
         assert!(fake.channel_posts.lock().is_empty(), "no second main-channel message for a reply");
         assert!(fake.opened.lock().is_empty(), "and no second thread");
     }
@@ -1927,7 +2108,7 @@ mod tests {
         let fake = Fake::new();
         fake.archived.lock().push(7777);
         let parent = Confession { thread_id: 7777, ..approved(457) };
-        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
+        let out = place_reply(&fake, 21, &parent, &reply_embed(457, "A", "a reply", 1000), true, 4320).await;
         assert_eq!(out.thread, Some(7777));
         assert!(out.revived, "it had to be woken");
         assert!(!out.fell_back && out.opened.is_none());
@@ -1943,13 +2124,15 @@ mod tests {
         let fake = Fake::new();
         let parent = approved(457);
         assert_eq!(parent.thread_id, 0);
-        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
+        let out = place_reply(&fake, 21, &parent, &reply_embed(457, "A", "a reply", 1000), true, 4320).await;
         let thread = out.thread.expect("a thread");
         assert_eq!(out.opened, Some(thread), "the new thread is handed back to be written down");
         assert!(!out.fell_back);
         let opened = fake.opened.lock().clone();
         assert_eq!((opened[0].0, opened[0].1, opened[0].2.as_str()), (21, parent.posted_message, "Anonymous Confession (#457)"));
-        assert_eq!(*fake.thread_posts.lock(), vec![(thread, "a reply".to_string())]);
+        let inside = fake.thread_posts.lock().clone();
+        assert_eq!(inside.len(), 1);
+        assert_eq!((inside[0].0, says(&inside[0].1).1.as_str()), (thread, "a reply"));
         assert!(fake.channel_posts.lock().is_empty());
     }
 
@@ -1959,7 +2142,7 @@ mod tests {
     async fn with_threads_off_a_reply_goes_in_the_channel_and_makes_no_thread() {
         let fake = Fake::new();
         let parent = approved(457);
-        let out = place_reply(&fake, 21, &parent, "a reply", false, 4320).await;
+        let out = place_reply(&fake, 21, &parent, &reply_embed(457, "A", "a reply", 1000), false, 4320).await;
         assert!(out.fell_back);
         assert_eq!(out.thread, None);
         assert_eq!(out.opened, None);
@@ -1977,7 +2160,7 @@ mod tests {
         let fake = Fake { no_threads: true, no_revive: true, ..Fake::new() };
         fake.dead.lock().push(7777);
         let parent = Confession { thread_id: 7777, ..approved(457) };
-        let out = place_reply(&fake, 21, &parent, "a reply", true, 4320).await;
+        let out = place_reply(&fake, 21, &parent, &reply_embed(457, "A", "a reply", 1000), true, 4320).await;
         assert!(out.fell_back, "it had to go in the channel");
         assert_eq!(out.thread, None);
         assert_ne!(out.message, 0, "but it was posted");
@@ -1992,32 +2175,44 @@ mod tests {
     /// are only ever two of them.
     #[test]
     fn the_cards_carry_exactly_the_two_buttons() {
-        let CreateActionRow::Buttons(row) = card_buttons() else { panic!("a row of buttons") };
+        let CreateActionRow::Buttons(row) = card_buttons(462) else { panic!("a row of buttons") };
         assert_eq!(row.len(), 2, "two buttons and nothing else");
-        let drawn = serde_json::to_string(&row).unwrap();
-        assert!(drawn.contains("Submit a confession") && drawn.contains("Submit a reply"), "{drawn}");
-        assert!(drawn.contains(ID_NEW) && drawn.contains(ID_REPLY));
+        let shown = serde_json::to_string(&row).unwrap();
+        assert!(shown.contains("Submit a confession"), "{shown}");
+        // The reply button says, and carries, which confession it answers.
+        assert!(shown.contains("Reply to #462"), "{shown}");
+        assert!(shown.contains("confess:reply:462"), "{shown}");
+        assert!(shown.contains(ID_NEW));
         // The mod lookup is a slash command now, never a button in public.
-        assert!(!drawn.to_lowercase().contains("who sent"), "the mod lookup is not on a public card: {drawn}");
-        assert!(!drawn.contains("confess:who"), "{drawn}");
+        assert!(!shown.to_lowercase().contains("who sent"), "the mod lookup is not on a public card: {shown}");
+        assert!(!shown.contains("confess:who"), "{shown}");
+        // A different card's buttons answer a different confession.
+        let CreateActionRow::Buttons(other) = card_buttons(459) else { panic!("a row") };
+        let other = serde_json::to_string(&other).unwrap();
+        assert!(other.contains("confess:reply:459") && !other.contains("confess:reply:462"), "{other}");
         // And the card itself is still only a number and the words.
-        let text = confession_text(&approved(459));
-        assert!(!text.contains("Submit") && !text.contains("Moderators"), "no panel words on a card: {text}");
+        let card = drawn(&confession_embed(&approved(459), 1000)).to_string();
+        assert!(!card.contains("Submit") && !card.contains("Moderators"), "no panel words on a card: {card}");
     }
 
     /// Dispatch is by the id alone, which is what makes a card posted before a
     /// restart still work after one.
     #[test]
     fn the_buttons_and_modals_are_recognised_by_their_ids_alone() {
-        assert!(owns_component(ID_NEW) && owns_component(ID_REPLY));
+        assert!(owns_component(ID_NEW) && owns_component("confess:reply:462"));
         assert!(!owns_component("confess:who"), "the mod lookup button is gone");
         assert!(owns_component("confess:ok:459") && owns_component("confess:no:459"));
         assert!(!owns_component("signup:in") && !owns_component("confess") && !owns_component(""));
         assert!(owns_modal(MODAL_NEW) && owns_modal(MODAL_REPLY) && owns_modal("confessform:no:459"));
-        assert!(!owns_modal("confessform:who"), "and so is its modal");
+        assert!(owns_modal("confessform:reply:462"), "the form a card's button opens");
+        assert!(!owns_modal("confessform:who"), "the mod lookup modal is gone");
         assert!(!owns_modal("lrmodal:abc") && !owns_modal(ID_NEW));
         // The ids themselves, so a rename has to be deliberate.
-        assert_eq!((ID_NEW, ID_REPLY), ("confess:new", "confess:reply"));
+        assert_eq!((ID_NEW, ID_REPLY), ("confess:new", "confess:reply:"));
+        assert_eq!((MODAL_REPLY, MODAL_REPLY_TO), ("confessform:reply", "confessform:reply:"));
+        // A card posted before the number was baked into the button still
+        // answers: the number is read off the card instead.
+        assert!(owns_component("confess:reply"), "yesterday's cards keep working");
         let CreateActionRow::Buttons(row) = review_buttons(459) else { panic!("a row of buttons") };
         let drawn = serde_json::to_string(&row).unwrap();
         assert!(drawn.contains("confess:ok:459") && drawn.contains("confess:no:459"), "{drawn}");
@@ -2152,8 +2347,8 @@ mod tests {
     #[test]
     fn the_command_opens_exactly_the_box_the_button_does() {
         let limits = open_limits();
-        let from_button = open_form(Kind::Confession, 11, &limits, true, true, None).unwrap();
-        let from_command = open_form(Kind::Confession, 11, &limits, true, true, None).unwrap();
+        let from_button = open_form(Form::New, 11, &limits, true, true).unwrap();
+        let from_command = open_form(Form::New, 11, &limits, true, true).unwrap();
         let drawn = serde_json::to_value(&from_button).unwrap();
         assert_eq!(drawn, serde_json::to_value(&from_command).unwrap(), "the same box, down to the field ids");
         assert_eq!(drawn["custom_id"], MODAL_NEW);
@@ -2161,7 +2356,7 @@ mod tests {
         // Against the hand-built form, so a change to one cannot drift.
         assert_eq!(drawn, serde_json::to_value(new_modal(&limits)).unwrap());
 
-        let reply = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, None).unwrap()).unwrap();
+        let reply = serde_json::to_value(open_form(Form::ReplyAsking(None), 11, &limits, true, true).unwrap()).unwrap();
         assert_eq!(reply["custom_id"], MODAL_REPLY);
         assert!(owns_modal(reply["custom_id"].as_str().unwrap()));
         assert_eq!(reply, serde_json::to_value(reply_modal(&limits, None)).unwrap());
@@ -2172,15 +2367,15 @@ mod tests {
     #[test]
     fn the_command_can_fill_the_confession_number_in() {
         let limits = open_limits();
-        let prefilled = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, Some(457)).unwrap()).unwrap();
+        let prefilled = serde_json::to_value(open_form(Form::ReplyAsking(Some(457)), 11, &limits, true, true).unwrap()).unwrap();
         let text = prefilled.to_string();
         assert!(text.contains("\"value\":\"457\""), "{text}");
         assert_eq!(prefilled["custom_id"], MODAL_REPLY, "still the same form, so still the same handler");
         // Without one, nothing is pre-typed.
-        let blank = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, None).unwrap()).unwrap();
+        let blank = serde_json::to_value(open_form(Form::ReplyAsking(None), 11, &limits, true, true).unwrap()).unwrap();
         assert!(!blank.to_string().contains("\"value\""), "{blank}");
         // A nonsense number is not written into the box.
-        let silly = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, Some(0)).unwrap()).unwrap();
+        let silly = serde_json::to_value(open_form(Form::ReplyAsking(Some(0)), 11, &limits, true, true).unwrap()).unwrap();
         assert!(!silly.to_string().contains("\"value\""));
     }
 
@@ -2189,15 +2384,15 @@ mod tests {
     #[test]
     fn the_same_refusals_guard_both_doors() {
         let limits = Limits { blocked: vec![66], ..open_limits() };
-        assert_eq!(open_form(Kind::Confession, 11, &limits, false, true, None).unwrap_err(), OFF_SAID);
-        assert_eq!(open_form(Kind::Reply, 11, &limits, false, true, None).unwrap_err(), OFF_SAID);
-        assert_eq!(open_form(Kind::Confession, 11, &limits, true, false, None).unwrap_err(), BROKEN_SAID);
-        assert_eq!(open_form(Kind::Confession, 66, &limits, true, true, None).unwrap_err(), BLOCKED_SAID);
-        assert_eq!(open_form(Kind::Reply, 66, &limits, true, true, Some(457)).unwrap_err(), BLOCKED_SAID);
+        assert_eq!(open_form(Form::New, 11, &limits, false, true).unwrap_err(), OFF_SAID);
+        assert_eq!(open_form(Form::ReplyAsking(None), 11, &limits, false, true).unwrap_err(), OFF_SAID);
+        assert_eq!(open_form(Form::New, 11, &limits, true, false).unwrap_err(), BROKEN_SAID);
+        assert_eq!(open_form(Form::New, 66, &limits, true, true).unwrap_err(), BLOCKED_SAID);
+        assert_eq!(open_form(Form::ReplyAsking(Some(457)), 66, &limits, true, true).unwrap_err(), BLOCKED_SAID);
         // Switched off beats blocked: nobody is told they are on a list by a
         // feature that is not even running.
-        assert_eq!(open_form(Kind::Confession, 66, &limits, false, true, None).unwrap_err(), OFF_SAID);
-        assert!(open_form(Kind::Confession, 11, &limits, true, true, None).is_ok());
+        assert_eq!(open_form(Form::New, 66, &limits, false, true).unwrap_err(), OFF_SAID);
+        assert!(open_form(Form::New, 11, &limits, true, true).is_ok());
     }
 
     /// The cold start, which is why this command exists: an empty channel, no
@@ -2218,7 +2413,7 @@ mod tests {
         assert!(fake.pressable().is_empty());
 
         // `/confess` opens the box anyway.
-        let modal = open_form(Kind::Confession, 11, &limits, true, true, None).expect("the command still opens the form");
+        let modal = open_form(Form::New, 11, &limits, true, true).expect("the command still opens the form");
         assert_eq!(serde_json::to_value(&modal).unwrap()["custom_id"], MODAL_NEW);
 
         // And the submission goes through the one path, as if a button had been
@@ -2250,7 +2445,7 @@ mod tests {
         // Pre-typed or not, the form is the same and #459 is not public yet.
         for prefill in [None, Some(459)] {
             assert_eq!(
-                serde_json::to_value(open_form(Kind::Reply, 12, &limits, true, true, prefill).unwrap()).unwrap()["custom_id"],
+                serde_json::to_value(open_form(Form::ReplyAsking(prefill), 12, &limits, true, true).unwrap()).unwrap()["custom_id"],
                 MODAL_REPLY
             );
         }
@@ -2498,8 +2693,9 @@ mod tests {
 
         let posts = fake.channel_posts.lock().clone();
         assert_eq!(posts.len(), 1, "exactly one message in the channel");
-        assert_eq!(posts[0].1, "**Anonymous Confession (#459)**\n\nI cheated at Wordle");
-        assert!(!posts[0].1.contains("Zoya") && !posts[0].1.contains("11"), "{}", posts[0].1);
+        assert_eq!(says(&posts[0].1), ("Anonymous Confession (#459)".into(), "I cheated at Wordle".into()));
+        let whole = posts[0].1.to_string();
+        assert!(!whole.contains("Zoya") && !whole.contains("11"), "{whole}");
         assert_eq!(fake.pressable(), vec![posted], "the buttons ride on it");
         assert!(fake.opened.lock().is_empty());
 
@@ -2598,8 +2794,9 @@ mod tests {
         let in_thread = fake.thread_posts.lock().clone();
         assert_eq!(in_thread.len(), 1);
         assert_eq!(in_thread[0].0, thread);
-        assert_eq!(in_thread[0].1, "**Reply A to Confession (#459)**\n\nsame here");
-        assert!(!in_thread[0].1.contains("Kabir") && !in_thread[0].1.contains("12"), "{}", in_thread[0].1);
+        assert_eq!(says(&in_thread[0].1), ("Reply A to Confession (#459)".into(), "same here".into()));
+        let whole = in_thread[0].1.to_string();
+        assert!(!whole.contains("Kabir") && !whole.contains("12"), "{whole}");
 
         // A second reply is lettered B, goes in the same thread, and opens none.
         submit(&db, &limits, 13, "Ira", false, Kind::Reply, "#459", "and me", 5000, 459).unwrap();
@@ -2609,7 +2806,7 @@ mod tests {
         let in_thread = fake.thread_posts.lock().clone();
         assert_eq!(in_thread.len(), 2);
         assert_eq!(in_thread[1].0, thread);
-        assert!(in_thread[1].1.starts_with("**Reply B to Confession (#459)**"), "{}", in_thread[1].1);
+        assert_eq!(says(&in_thread[1].1).0, "Reply B to Confession (#459)");
     }
 
     /// The series has to carry on where it stopped, not restart at the seed.
@@ -2658,6 +2855,143 @@ mod tests {
         assert_eq!(submit(&db, &limits, 66, "Troll", false, Kind::Confession, "", "the text", 1000, 459).unwrap_err(), BLOCKED_SAID);
         assert_eq!(super::store::counts(&db.lock()), (0, 0, 0));
         assert_eq!(super::store::next_number(&db.lock(), 459), 459, "and no number was burned");
+    }
+
+    // --- the reply path, whole ------------------------------------------------
+
+    /// The reply path from the button to the message inside the thread, in one
+    /// test, because the live run produced four confessions and no replies at
+    /// all. Every step: the button carries the confession's number, the form it
+    /// opens has no number box, the submission is a reply to that confession,
+    /// the mods see it as one, approving opens the thread on that confession,
+    /// and the reply lands inside it.
+    #[tokio::test]
+    async fn the_whole_reply_path_from_the_button_to_the_thread() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+
+        // A confession is up, with the buttons on it.
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "I have never seen Star Wars", 1000, 459).unwrap();
+        let parent = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let card = parent.posted.expect("the card");
+        assert_eq!(parent.thread, None, "and no thread, because nobody has answered it");
+
+        // The reply button on that card says which confession it answers, so
+        // the form it opens has nothing to type but the reply itself.
+        let CreateActionRow::Buttons(row) = card_buttons(459) else { panic!("a row") };
+        let pressed = serde_json::to_value(&row).unwrap()[1]["custom_id"].as_str().unwrap().to_string();
+        assert_eq!(pressed, "confess:reply:459");
+        let target: i64 = pressed.strip_prefix(ID_REPLY).unwrap().parse().unwrap();
+        let form = open_form(Form::ReplyTo(target), 12, &limits, true, true).expect("the form opens");
+        let form = serde_json::to_value(&form).unwrap();
+        assert_eq!(form["custom_id"], "confessform:reply:459", "the number rides in the id");
+        assert_eq!(form["title"], "Reply to Confession #459", "so they can see what they are answering");
+        let boxes = form["components"].as_array().unwrap();
+        assert_eq!(boxes.len(), 1, "one box, and it is not a number: {form}");
+        assert_eq!(boxes[0]["components"][0]["custom_id"], "text");
+        assert!(!form.to_string().contains("\"number\""), "nobody is asked for a number: {form}");
+
+        // It comes back. The handler reads the number out of the id, not a box,
+        // and hands it to the very same guard a typed number goes through.
+        let from_id: i64 = form["custom_id"].as_str().unwrap().strip_prefix(MODAL_REPLY_TO).unwrap().parse().unwrap();
+        let (reply, clean) = submit(&db, &limits, 12, "Kabir", false, Kind::Reply, &from_id.to_string(), "neither have I", 3000, 459)
+            .expect("the reply got past the guards");
+        assert_eq!((reply.number, reply.answers, reply.status), (460, Some(459), Status::Pending));
+        assert!(sent_words(&reply, &clean).contains("in the thread on #459"));
+
+        // The mods see it as a reply to #459, with the submitter on it.
+        let review = serde_json::to_value(review_embed(&reply, &Submitter { id: 12, name: "Kabir".into(), ..submitter() }, 3000)).unwrap();
+        assert_eq!(review["title"], "Confession Reply (#460) · answering #459");
+        assert!(review.to_string().contains("Kabir"), "the mods see who: {review}");
+        assert!(fake.thread_posts.lock().is_empty(), "and nothing is public yet");
+
+        // A mod approves it. THIS is where the thread on #459 is made.
+        let out = settle_with(&db, &fake, Some(21), 460, Status::Approved, 7, "", true, 4320, 4000).await;
+        assert_eq!(out.notes, Vec::<String>::new());
+        let thread = out.thread.expect("the reply opened the thread");
+        let opened = fake.opened.lock().clone();
+        assert_eq!(opened.len(), 1, "exactly one thread, made now and not at post time");
+        assert_eq!((opened[0].0, opened[0].1), (21, card), "on #459's own card");
+        assert_eq!(opened[0].2, "Anonymous Confession (#459)");
+        assert_eq!(opened[0].3, 4320);
+
+        // And the reply is inside it, as an anonymous card.
+        let inside = fake.thread_posts.lock().clone();
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].0, thread);
+        assert_eq!(says(&inside[0].1), ("Reply A to Confession (#459)".into(), "neither have I".into()));
+        assert!(!inside[0].1.to_string().contains("Kabir"), "{}", inside[0].1);
+
+        // Nothing else moved: one card in the channel, still the pressable one,
+        // and the thread is written down against #459 so the next reply reuses it.
+        assert_eq!(fake.channel_posts.lock().len(), 1, "no second main-channel message");
+        assert_eq!(fake.pressable(), vec![card]);
+        assert_eq!(super::store::get(&db.lock(), 459).unwrap().unwrap().thread_id, thread);
+        assert_eq!(super::store::get(&db.lock(), 460).unwrap().unwrap().posted_channel, thread);
+    }
+
+    /// The live channel has rows of both shapes: #459-#461 were posted by a
+    /// build that made the thread at post time, so their `thread_id` is already
+    /// a real thread, and #462 onwards have 0. A reply has to cope with either.
+    #[tokio::test]
+    async fn a_reply_copes_with_a_confession_that_already_has_a_thread_and_one_that_has_none() {
+        // The old shape: a thread already exists, and in Discord a thread made
+        // from a message carries that message's own id — which is exactly what
+        // those rows hold. The reply goes straight in and opens nothing.
+        let fake = Fake::new();
+        let old = Confession { thread_id: 9457, posted_message: 9457, ..approved(457) };
+        let out = place_reply(&fake, 21, &old, &reply_embed(457, "A", "an answer", 1000), true, 4320).await;
+        assert_eq!(out.thread, Some(9457), "the thread it already has");
+        assert_eq!(out.opened, None, "nothing new was made");
+        assert!(fake.opened.lock().is_empty());
+        assert_eq!(fake.thread_posts.lock()[0].0, 9457);
+
+        // The new shape: no thread yet, so this reply makes it.
+        let fake = Fake::new();
+        let fresh = Confession { thread_id: 0, ..approved(462) };
+        let out = place_reply(&fake, 21, &fresh, &reply_embed(462, "A", "an answer", 1000), true, 4320).await;
+        let thread = out.thread.expect("a thread");
+        assert_eq!(out.opened, Some(thread), "and it is handed back to be written down");
+        assert_eq!(fake.opened.lock().len(), 1);
+        assert_eq!(fake.opened.lock()[0].1, fresh.posted_message);
+
+        // And an old row whose thread was deleted since: it cannot be posted in,
+        // cannot be woken, so a new one is opened on the card.
+        let fake = Fake::new();
+        fake.dead.lock().push(9457);
+        let out = place_reply(&fake, 21, &old, &reply_embed(457, "A", "an answer", 1000), true, 4320).await;
+        let thread = out.thread.expect("a replacement thread");
+        assert_eq!(out.opened, Some(thread));
+        assert!(!out.fell_back, "it did not have to give up and use the channel");
+        assert_eq!(*fake.revived.lock(), vec![9457], "waking it was tried first");
+    }
+
+    /// The buttons move when a mod approves, not only when the bot boots. No
+    /// `spawn`, no `move_buttons` — just three approvals.
+    #[tokio::test]
+    async fn the_buttons_move_at_approval_without_any_restart() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+        let mut cards = Vec::new();
+        for i in 0..3 {
+            let n = 459 + i;
+            submit(&db, &limits, 11 + i as u64, "Zoya", false, Kind::Confession, "", "a confession", 1000 + i, 459).unwrap();
+            let out = settle_with(&db, &fake, Some(21), n, Status::Approved, 7, "", true, 4320, 2000 + i).await;
+            cards.push(out.posted.unwrap());
+            // Checked after every single approval, so a move that only happened
+            // at boot would fail here rather than looking right at the end.
+            assert_eq!(fake.pressable(), vec![*cards.last().unwrap()], "after approving #{}", n);
+            assert_eq!(fake.reply_button_points_at(), Some(n), "and its reply button answers #{}", n);
+            assert_eq!(super::store::buttons_holder(&db.lock(), 21), Some((*cards.last().unwrap(), n)));
+        }
+        assert_eq!(cards.len(), 3);
+        // A rejection in the middle moves nothing.
+        submit(&db, &limits, 99, "Troll", false, Kind::Confession, "", "a bad one", 5000, 459).unwrap();
+        settle_with(&db, &fake, Some(21), 462, Status::Rejected, 7, "no", true, 4320, 6000).await;
+        assert_eq!(fake.pressable(), vec![cards[2]], "a rejection leaves the buttons alone");
+        assert_eq!(fake.reply_button_points_at(), Some(461));
     }
 
     // --- who sent it ---------------------------------------------------------
@@ -2788,8 +3122,8 @@ mod emoji_tests {
     /// the way may touch an emoji.
     #[tokio::test]
     async fn emoji_survive_all_the_way_to_the_posted_card() {
-        use super::tests::{open_limits, sheet};
-        use super::{Kind, confession_text, reply_text, settle_with, submit};
+        use super::tests::{open_limits, says, sheet};
+        use super::{Kind, confession_embed, reply_embed, settle_with, submit};
         use crate::channels::discord::confess_store::Status;
 
         let db = sheet();
@@ -2799,14 +3133,16 @@ mod emoji_tests {
         assert_eq!(clean.body, said, "the guards left every emoji alone");
         assert!(!clean.pings_stripped, "an emoji is not a ping");
         assert_eq!(stored.body, said, "and so did the row in the store");
-        assert!(confession_text(&stored).ends_with(said), "{}", confession_text(&stored));
+        let card = serde_json::to_value(confession_embed(&stored, 1000)).unwrap();
+        assert_eq!(card["description"], said, "and so did the card that goes up");
 
         // Through an approval, into the card, and into a reply inside its thread.
         let fake = super::tests::Fake::new();
         let out = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
         assert!(out.posted.is_some());
-        let posted = fake.channel_posts.lock()[0].1.clone();
-        assert!(posted.contains("😭😭") && posted.contains("<:awwhellnaww:1516710980204232895>") && posted.contains("🥀"), "{posted}");
-        assert_eq!(reply_text(459, "A", said), format!("**Reply A to Confession (#459)**\n\n{}", said));
+        let posted = says(&fake.channel_posts.lock()[0].1).1;
+        assert_eq!(posted, said, "every emoji, in the card in the channel");
+        let reply = serde_json::to_value(reply_embed(459, "A", said, 1000)).unwrap();
+        assert_eq!(reply["description"], said, "and in a reply inside the thread");
     }
 }

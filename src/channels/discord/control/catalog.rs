@@ -2349,17 +2349,18 @@ pub fn sections() -> Vec<Section> {
             about: "Anonymous confessions, the way the server already uses them. There are two doors into the same \
                     form. /confess works for anybody, from any channel, and answers only you - so nobody has to be \
                     seen typing in the confessions channel, and it is how the very first confession gets sent before \
-                    any button exists. /confess number: opens the reply form with that number already filled in. The \
-                    two buttons - Submit a confession and Submit a reply - ride on the confession cards as well: the \
-                    newest card in the channel carries them, and the one before it has them taken off, so the way in \
-                    is always the post everybody is already looking at. There is no separate panel message to get \
-                    buried. Both doors lead to the same box, the same guards and the same review \
-                    queue.\n\nNothing is posted by sending one: it goes to the review \
+                    any button exists. /confess number: opens the reply form with that number already filled in. Two \
+                    buttons ride on the newest confession card as well - Submit a confession, and Reply to #N where \
+                    N is that card\u{2019}s own number, so pressing it answers that confession and nobody is asked to type \
+                    a number. The card before it has the buttons taken off, so the way in is always the post \
+                    everybody is already looking at, and there is no separate panel message to get buried. Both \
+                    doors lead to the same box, the same guards and the same review queue.\n\nNothing is posted by sending one: it goes to the review \
                     channel first as a card showing the text and the submitter (name, mention, id, how old their \
                     account is, when they joined, and how many of theirs have been approved and rejected before), \
                     with Approve and Reject under it. Reject asks for an optional reason and posts nothing anywhere \
-                    public, ever. Approve posts it in the confessions channel as \u{201c}Anonymous Confession (#N)\u{201d} with no \
-                    name on it. A confession gets no thread when it posts - a thread is opened on it only when its \
+                    public, ever. Approve posts it in the confessions channel as a card - a panel titled \
+                    \u{201c}Anonymous Confession (#N)\u{201d} with the words inside it and the number and time along the bottom - \
+                    and no name on it anywhere. A confession gets no thread when it posts - a thread is opened on it only when its \
                     first approved reply arrives, and every later reply goes in that same thread, lettered so people \
                     can point at one. Most confessions are never answered and never get a thread. Every decision is \
                     written to the log channel with the submitter and the mod who made it.\n\nThe bot deletes \
@@ -2427,9 +2428,10 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_CONFESS_MAX_LENGTH",
                     "Longest confession",
-                    "The most characters one may be. Discord takes about 1,800 in a message once the heading is on \
-                     it, so anything above that is refused in words rather than cut off.",
-                    number(1, 1800, "characters"),
+                    "The most characters one may be. A confession is posted as a card, and Discord takes 4,000 in \
+                     the box people type it into, so anything longer is refused in words rather than posted cut in \
+                     half. 1,500 is plenty for a confession and keeps the channel readable.",
+                    number(1, 4000, "characters"),
                     "1500",
                 ),
                 setting(
@@ -2479,20 +2481,22 @@ pub fn sections() -> Vec<Section> {
                      before the first confession has been posted.",
                 ),
                 command(
-                    "Submit a confession · Submit a reply",
+                    "Submit a confession · Reply to #N",
                     EVERYONE,
                     "The two buttons on the newest confession in the confessions channel",
-                    "The same box /confess opens, on the card itself. A confession is just the text; a reply asks \
-                     which confession number it answers as well. The buttons are always on the newest confession, \
-                     so there is nothing to scroll for. Nothing is posted until a mod approves it, and what gets \
-                     posted never carries your name. Only you see the reply telling you it was sent.",
+                    "The same box /confess opens, on the card itself. Submit a confession takes just the text. \
+                     Reply to #N answers the confession the buttons are sitting on - it says which number that is \
+                     and asks only for the reply, so there is no number to type or get wrong. The buttons are \
+                     always on the newest confession, so there is nothing to scroll for. Nothing is posted until a \
+                     mod approves it, and what gets posted never carries your name. Only you see the reply telling \
+                     you it was sent.",
                 ),
                 command(
                     "Approve · Reject",
                     ADMINS,
                     "The buttons under a card in the review channel",
-                    "Approve posts it in the confessions channel, anonymous and numbered, with the submit buttons on \
-                     it and off the card before it. Reject asks for an optional reason and posts nothing anywhere \
+                    "Approve posts it in the confessions channel as an anonymous numbered card, with the submit \
+                     buttons on it and off the card before it. Reject asks for an optional reason and posts nothing anywhere \
                      public. Either way the log channel gets a card naming the submitter and you. A submission from \
                      a moderator is marked as one at the top of the card, so nobody waves their own through \
                      unnoticed.",
