@@ -1607,9 +1607,13 @@ pub(super) fn house_mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32,
         let stroke = Stroke { width: 2.5, ..Stroke::default() };
         pen.px.stroke_path(&edge, &paint(keyline, 235), &stroke, Transform::identity(), None);
     }
-    // The painted crest, sized to sit inside the keyline.
+    // The painted crest, sized to sit inside the keyline - but only where
+    // there is room to read one. In a bracket slot the mark is the size of a
+    // fingernail, and a painting that small is a dark smudge where the letter
+    // is still a letter.
     let side = (r * 1.72).round().max(8.0) as u32;
-    if let Some(art) = (!house.art.is_empty()).then(|| battle_art::sized(Art::Crest(house.art), side, side)).flatten() {
+    let big = r >= 15.0;
+    if let Some(art) = (big && !house.art.is_empty()).then(|| battle_art::sized(Art::Crest(house.art), side, side)).flatten() {
         let corner = |centre: f32| (centre - side as f32 / 2.0).round() as i32;
         let how = PixmapPaint { quality: FilterQuality::Bicubic, opacity: if dimmed { 0.45 } else { 1.0 }, ..PixmapPaint::default() };
         pen.px.draw_pixmap(corner(cx), corner(cy), art.as_ref().as_ref(), &how, Transform::identity(), None);
