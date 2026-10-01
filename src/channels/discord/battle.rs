@@ -471,13 +471,21 @@ fn record(kind: &str, winner: u64, loser: Option<u64>) {
 /// two friends cannot farm the Cup between them.
 const PAID_DUELS_A_DAY: i64 = 2;
 
-/// What a duel's win paid, and why, so the result can say so.
+/// What a duel's win paid, and why, so the result can say so. It is read from
+/// what the ledger actually DID, never from what was asked for: with the Cup
+/// paused, or a winner stepped out, nothing is written and the card must not
+/// claim otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Paid {
+    /// This many points really landed - after the day's cap, not before it.
     Points(i64),
     /// This pair has already had their two paying duels today.
     Enough,
-    /// The setting is at zero, so a duel pays nothing to anybody.
+    /// The winner is at the day's arena limit.
+    Capped,
+    /// Nothing was written and there is nothing to explain: the points are
+    /// switched off, the Cup is paused, the winner has stepped out, or this
+    /// exact win was already counted.
     Nothing,
 }
 
@@ -487,7 +495,19 @@ impl Paid {
         match self {
             Paid::Points(n) => format!(" (+{} house points)", n),
             Paid::Enough => " — no points, you two have fought enough today".to_string(),
+            Paid::Capped => " — no points, you're at today's arena limit".to_string(),
             Paid::Nothing => String::new(),
+        }
+    }
+
+    /// What the ledger did, in the words the card uses.
+    fn from_ledger(outcome: Option<super::points::Outcome>) -> Paid {
+        match outcome {
+            Some(super::points::Outcome::Granted(n)) if n > 0 => Paid::Points(n),
+            Some(super::points::Outcome::Granted(_)) | Some(super::points::Outcome::Capped) => Paid::Capped,
+            // Already counted, or the Cup is not paying at all: either way
+            // there is nothing to say and nothing to apologise for.
+            Some(super::points::Outcome::Duplicate) | None => Paid::Nothing,
         }
     }
 }
@@ -528,8 +548,8 @@ fn pay_duel(winner: u64, loser: u64, now: i64) -> Paid {
         return Paid::Enough;
     }
     let key = format!("arena:{}:{}:{}:{}", super::points::ist_day(now), low, high, so_far);
-    super::house::award_person(winner, super::points::Source::Arena, points, "won a duel", None, Some(key), None);
-    Paid::Points(points)
+    let done = super::house::award_person(winner, super::points::Source::Arena, points, "won a duel", None, Some(key), None);
+    Paid::from_ledger(done.map(|(_, outcome)| outcome))
 }
 
 /// House points for a battle royale: 8 to the champion, 3 to the runner-up.
@@ -3102,12 +3122,29 @@ mod tests {
 
     // --- what a duel pays -----------------------------------------------------
 
+    /// The result says what the win really paid, which is what the ledger did
+    /// rather than what was asked for.
     #[test]
     fn the_result_says_what_the_win_paid_and_why_it_did_not() {
+        use super::super::points::Outcome;
         assert_eq!(Paid::Points(3).said(), " (+3 house points)");
         let enough = Paid::Enough.said();
         assert!(enough.contains("no points") && enough.contains("fought enough today"), "{}", enough);
-        assert_eq!(Paid::Nothing.said(), "", "points switched off is not worth a sentence");
+        let capped = Paid::Capped.said();
+        assert!(capped.contains("no points") && capped.contains("limit"), "{}", capped);
+        assert_eq!(Paid::Nothing.said(), "", "nothing written is not worth a sentence");
+
+        // The number on the card is the number the ledger wrote, so a win that
+        // the day's cap trimmed says what landed and not what was asked for.
+        assert_eq!(Paid::from_ledger(Some(Outcome::Granted(3))), Paid::Points(3));
+        assert_eq!(Paid::from_ledger(Some(Outcome::Granted(1))), Paid::Points(1), "a trimmed win says what landed");
+        assert_eq!(Paid::from_ledger(Some(Outcome::Granted(0))), Paid::Capped);
+        assert_eq!(Paid::from_ledger(Some(Outcome::Capped)), Paid::Capped);
+        assert_eq!(Paid::from_ledger(Some(Outcome::Duplicate)), Paid::Nothing);
+        // And the one this is really for: with the House Cup paused the ledger
+        // writes nothing at all, and the card must not claim three points.
+        assert_eq!(Paid::from_ledger(None), Paid::Nothing);
+        assert!(!Paid::from_ledger(None).said().contains("points"), "a paused Cup never claims a payment");
     }
 
     #[test]
