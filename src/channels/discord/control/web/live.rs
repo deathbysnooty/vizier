@@ -442,7 +442,7 @@ fn deck_json(live: &Live) -> Value {
                 // The picture's name, not a path: where the page keeps its art
                 // is the page's business, and the owner's instruction was that
                 // the cards are referenced by name.
-                "art": format!("card-{}.png", card.slug),
+                "art": format!("{}.png", card.slug),
             })
         })
         .collect()
@@ -1195,8 +1195,8 @@ mod tests {
         let _month = Month::on();
         let mut live = assemble(a_server(), Some(1_000), AFTER);
         live.deck = vec![
-            Kind { name: "House Stark".into(), slug: "stark".into(), rarity: Rarity::Common },
-            Kind { name: "The Faceless Man".into(), slug: "faceless".into(), rarity: Rarity::Legendary },
+            Kind { name: "House Stark".into(), slug: "card-stark".into(), rarity: Rarity::Common },
+            Kind { name: "The Faceless Man".into(), slug: "card-faceless".into(), rarity: Rarity::Legendary },
         ];
         for body in [hall(&live, AFTER), one(&live, FIRST_ID, AFTER).expect("a page")] {
             let deck = body["deck"].as_array().expect("the deck").clone();
@@ -1204,7 +1204,11 @@ mod tests {
             for key in ["name", "slug", "rarity", "rarity_name", "worth"] {
                 assert!(deck[0].get(key).is_some(), "a card in play needs `{}`", key);
             }
-            assert_eq!(deck[1]["slug"], "faceless");
+            assert_eq!(deck[1]["slug"], "card-faceless");
+            // The deck's own slugs already carry the `card-` the pictures are
+            // filed under (raven.rs: the file is `frogcards/<slug>.png`), so
+            // the name is the slug with .png on it and nothing prepended -
+            // building it twice gave the page `card-card-faceless.png`.
             assert_eq!(deck[1]["art"], "card-faceless.png", "the page is told the picture's name, not left to build it");
             assert_eq!(deck[1]["worth"], 25, "what catching one pays, as the settings have it");
         }
