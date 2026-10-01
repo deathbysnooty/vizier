@@ -14,6 +14,7 @@ pub mod autoreplies;
 pub mod catalog;
 pub mod help;
 pub mod insights;
+pub mod live_ui;
 // Richer scheduled posts: the picture library and how a post is put together.
 pub mod media;
 pub mod posts;
@@ -66,6 +67,9 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     // The panel's pages can come from `<runtime>/ui`, so a change to them needs
     // no release; this only decides where to look and says so in the log.
     ui::open(workspace);
+    // And the public live page's own files, art and models included, from
+    // `<runtime>/live` — see [`live_ui`].
+    live_ui::open(workspace);
     let conn = Connection::open(dir.join("control.db"))?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
     conn.execute_batch(SCHEMA)?;

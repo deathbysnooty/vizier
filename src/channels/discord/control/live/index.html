@@ -1,0 +1,2036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Every picture, model and texture on this page is asked for relative to
+     this, so the page works at /live and at /live/u/<id> alike. A server that
+     puts the page somewhere else changes this one line in its own copy. -->
+<base href="/live/">
+<title>The Hall of Dragons</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Jost:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ink:#f6ead2; --dim:#a08d6d; --gold:#d3a625; --deep:#07050a;
+    --card:rgba(20,14,26,.92); --edge:#3a2b22;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html { height:100%; background:var(--deep); }
+  body { height:100%; overflow:hidden; background:transparent; }
+  body::before {
+    content:''; position:fixed; inset:0; z-index:-1;
+    background:
+      radial-gradient(90% 70% at 50% 15%, rgba(96,128,180,.10), rgba(0,0,0,0) 70%),
+      linear-gradient(180deg, #0e1420 0%, #0a0d14 55%, #06080c 100%);
+  }
+  body { font-family:Jost, system-ui, sans-serif; color:var(--ink); }
+  canvas { display:block; touch-action:none; }
+
+  /* The top bar sits over the scene; everything here is shorter than it looks. */
+  header {
+    position:fixed; inset:0 0 auto 0; z-index:5; padding:16px 20px;
+    display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
+    background:linear-gradient(180deg, rgba(7,5,10,.9), rgba(7,5,10,0));
+    pointer-events:none;
+  }
+  h1 { font-family:Cinzel, serif; font-size:26px; font-weight:800; letter-spacing:.04em; }
+  header .sub { font-size:17px; color:var(--dim); }
+
+  /* Each dragon's label is an HTML element parked over its head every frame. */
+  .find { position:relative; margin-left:auto; pointer-events:auto; }
+  #q {
+    font:inherit; font-size:16px; color:var(--ink); background:rgba(20,14,26,.85);
+    border:1px solid var(--edge); border-radius:999px; padding:9px 18px; width:220px; outline:none;
+  }
+  #q:focus { border-color:var(--gold); }
+  #hits {
+    position:absolute; right:0; top:44px; width:260px; background:var(--card);
+    border:1px solid var(--edge); border-radius:14px; overflow:hidden; display:none;
+  }
+  #hits.open { display:block; }
+  #hits button {
+    display:flex; width:100%; justify-content:space-between; gap:10px; align-items:baseline;
+    background:none; border:0; border-radius:0; border-bottom:1px solid #1d1726;
+    padding:11px 16px; font-size:16px; text-align:left; cursor:pointer;
+  }
+  #hits button:hover { background:rgba(211,166,37,.12); }
+  #hits button span { color:var(--dim); font-size:14px; font-variant-numeric:tabular-nums; }
+  @media (max-width:640px) { .find { margin-left:0; width:100%; } #q { width:100%; } #hits { width:100%; } }
+  #labels { position:fixed; inset:0; z-index:3; pointer-events:none; }
+  .label {
+    position:absolute; transform:translate(-50%,-100%); white-space:nowrap;
+    font-size:13px; letter-spacing:.02em; text-shadow:0 2px 6px #000, 0 0 2px #000;
+    display:flex; align-items:center; gap:5px; opacity:.92;
+  }
+  .label img { width:14px; height:14px; }
+  .label b { font-weight:600; }
+  .label span { color:var(--dim); font-variant-numeric:tabular-nums; }
+  .label.big { font-size:16px; }
+  .guide {
+    position:absolute; left:14px; transform:translateY(-50%); font-size:12px; color:#6d80a0;
+    letter-spacing:.08em; font-variant-numeric:tabular-nums; pointer-events:none;
+  }
+  .guide::after { content:' pts'; opacity:.6; }
+
+  /* Controls */
+  #pick { display:none; font:inherit; font-size:16px; color:var(--ink); background:var(--card);
+    border:1px solid var(--edge); border-radius:999px; padding:10px 16px; }
+  /* The whole server at a glance: one bar per dragon, height to scale. On a
+     phone this is the only way to see a 100-to-1 spread at once. */
+  #strip {
+    position:fixed; left:0; right:0; bottom:74px; height:84px; z-index:6;
+    width:100%; cursor:pointer;
+  }
+  @media (max-width:640px) { #strip { bottom:120px; height:66px; } }
+  .controls { position:fixed; left:0; right:0; bottom:0; z-index:6; padding:14px 18px 18px;
+    display:flex; gap:10px; justify-content:center; flex-wrap:wrap;
+    background:linear-gradient(0deg, rgba(7,5,10,.92), rgba(7,5,10,0)); }
+  button {
+    font:inherit; font-size:15px; color:var(--ink); background:var(--card);
+    border:1px solid var(--edge); border-radius:999px; padding:9px 18px; cursor:pointer;
+  }
+  button:hover { border-color:var(--gold); }
+  button.on { background:rgba(211,166,37,.18); border-color:var(--gold); }
+
+  /* The detail card, shown when a dragon is clicked. */
+  #who {
+    position:fixed; right:18px; top:74px; z-index:7; width:290px; display:none;
+    background:var(--card); border:1px solid var(--edge); border-radius:16px; padding:18px 20px;
+    backdrop-filter:blur(8px);
+  }
+  #who.open { display:block; }
+  #who .name { font-family:Cinzel, serif; font-size:24px; font-weight:600; }
+  #who .dragon { font-size:17px; color:var(--gold); margin-bottom:10px; }
+  #who .row { display:flex; justify-content:space-between; font-size:16px; padding:5px 0; border-top:1px solid #241a2e; }
+  #who .row span:last-child { font-variant-numeric:tabular-nums; }
+  #who .close { position:absolute; top:12px; right:14px; font-size:20px; color:var(--dim); cursor:pointer; }
+  #who canvas { margin-top:4px; border-radius:8px; width:100%; }
+  #who .chart-title { font-size:13px; color:var(--dim); letter-spacing:.1em; text-transform:uppercase; margin-top:12px; }
+  #who .chart-foot { font-size:13px; color:var(--dim); display:flex; justify-content:space-between; }
+
+  /* The solo page: one dragon, lit properly, with everything they have earned. */
+  #solo { position:fixed; inset:0; z-index:20; display:none; isolation:isolate; }
+  /* The banner of your house, hung behind the dragon and dimmed until it is
+     atmosphere rather than wallpaper. */
+  #solo::before {
+    content:''; position:absolute; inset:0; z-index:0;
+    background:
+      linear-gradient(180deg, rgba(8,6,12,.42) 0%, rgba(8,6,12,.68) 52%, rgba(4,3,8,.93) 100%),
+      var(--house-bg, url('bg-throne.png')) center/cover no-repeat;
+    filter:blur(1px) saturate(1.05);
+    transform:scale(1.04);
+  }
+  #solo::after {
+    content:''; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background:radial-gradient(62% 52% at 32% 46%, var(--house-glow, rgba(211,166,37,.22)), rgba(0,0,0,0) 70%);
+  }
+  #solo > * { position:relative; z-index:1; }
+  /* Egg week has no house yet, so it keeps the throne room. */
+  #solo.egg::before { background:#05040a; filter:none; }
+  #solo.egg::after { background:radial-gradient(58% 48% at 50% 46%, rgba(255,150,60,.16), rgba(0,0,0,0) 72%); }
+  #solo.open { display:block; }
+  #solo-canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #solo-zoom { position:absolute; right:396px; bottom:22px; z-index:3; display:flex; gap:6px; }
+  #solo-zoom button { width:44px; padding:10px 0; font-size:18px; text-align:center; }
+  @media (max-width:760px) { #solo-zoom { right:auto; left:10px; bottom:auto; top:58px; } }
+  #go { position:absolute; top:16px; left:16px; z-index:3; display:flex; gap:6px;
+    background:var(--card); border:1px solid var(--edge); border-radius:999px; padding:4px; }
+  #go button { border:0; background:none; padding:8px 15px; font-size:15px; border-radius:999px; }
+  #go button.on { background:rgba(211,166,37,.2); color:var(--gold); }
+  #go-hall { position:fixed; top:14px; left:16px; z-index:7; display:flex; gap:8px; }
+  @media (max-width:640px) {
+    #go { top:10px; left:10px; padding:3px; }
+    #go button { padding:7px 11px; font-size:13px; }
+    #go-hall { top:auto; bottom:128px; left:10px; }
+    #go-hall button { padding:8px 13px; font-size:14px; }
+  }
+  #solo-card {
+    position:absolute; right:0; top:0; bottom:0; width:380px; padding:46px 34px;
+    background:linear-gradient(270deg, rgba(14,10,18,.94), rgba(14,10,18,.78) 70%, rgba(14,10,18,0));
+    overflow:auto;
+  }
+  .whoami { display:flex; gap:14px; align-items:center; margin-bottom:2px; }
+  #solo-face {
+    width:58px; height:58px; border-radius:50%; object-fit:cover; flex:none;
+    border:2px solid var(--ring, var(--gold)); box-shadow:0 0 18px rgba(0,0,0,.6);
+  }
+  @media (max-width:640px) { #solo-face { width:46px; height:46px; } }
+  #solo-card .eyebrow { font-size:16px; letter-spacing:.3em; text-transform:uppercase; color:var(--dim); }
+  #solo-card h2 { font-family:Cinzel,serif; font-size:40px; font-weight:800; margin:4px 0 0; }
+  #solo-card .dragon-name { font-size:21px; color:var(--gold); margin-bottom:18px; }
+  #solo-card .big { display:flex; align-items:baseline; gap:10px; margin-bottom:20px; }
+  #solo-card .big span { font-family:Cinzel,serif; font-size:60px; font-weight:800; color:var(--gold); font-variant-numeric:tabular-nums; }
+  #solo-card .big small { font-size:17px; color:var(--dim); letter-spacing:.14em; text-transform:uppercase; }
+  #solo-card .facts { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:8px; }
+  #solo-card .facts div { background:rgba(255,255,255,.04); border:1px solid var(--edge); border-radius:12px; padding:12px 10px; text-align:center; }
+  #solo-card .facts b { display:block; font-size:21px; font-variant-numeric:tabular-nums; }
+  #solo-card .facts span { font-size:13px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; }
+  #solo-card .chart-title { font-size:13px; color:var(--dim); letter-spacing:.14em; text-transform:uppercase; margin:20px 0 8px; }
+  .byrow { display:grid; grid-template-columns:1fr 54px; gap:10px; align-items:center; font-size:16px; margin-bottom:7px; }
+  .byrow .bar { height:8px; border-radius:4px; background:#241c30; overflow:hidden; }
+  .byrow .bar i { display:block; height:100%; background:linear-gradient(90deg,#8a6a12,var(--gold)); }
+  .byrow .n { text-align:right; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .byrow .g { grid-column:1 / -1; color:var(--ink); }
+  @media (max-width:760px) {
+    #solo-card { left:0; width:auto; top:auto; height:52%; padding:22px 20px 30px;
+      background:linear-gradient(0deg, rgba(14,10,18,.96), rgba(14,10,18,.86) 70%, rgba(14,10,18,0)); }
+    #solo-card h2 { font-size:30px; }
+    #solo-card .big span { font-size:44px; }
+  }
+  /* The card viewer: one card, big, with the numbers that make it yours. */
+  #viewer { position:fixed; inset:0; z-index:40; display:none; background:rgba(5,4,8,.93); backdrop-filter:blur(6px);
+    padding:60px 18px 90px; overflow:auto; }
+  #viewer.open { display:flex; flex-direction:column; align-items:center; justify-content:flex-start; }
+  #viewer .frame { display:flex; gap:26px; align-items:flex-start; max-width:760px; width:100%; }
+  #viewer img { width:300px; border-radius:12px; border:1px solid var(--edge); }
+  #viewer .meta { padding-top:6px; }
+  #viewer .rar { font-size:14px; letter-spacing:.24em; text-transform:uppercase; color:var(--gold); }
+  #viewer h3 { font-family:Cinzel,serif; font-size:34px; font-weight:800; margin:4px 0 2px; }
+  #viewer .worth { font-size:17px; color:var(--dim); margin-bottom:16px; }
+  #viewer-close { position:fixed; top:16px; right:18px; font-size:22px; line-height:1; padding:6px 14px; }
+  #viewer .nav { display:flex; gap:10px; margin-top:22px; }
+  .copy { display:flex; justify-content:space-between; gap:16px; font-size:16px;
+    border:1px solid var(--edge); border-radius:10px; padding:10px 14px; margin-bottom:8px; min-width:230px; }
+  .copy b { font-variant-numeric:tabular-nums; }
+  .copy span { color:var(--dim); }
+  @media (max-width:640px) {
+    #viewer { padding:54px 14px 80px; }
+    #viewer .frame { flex-direction:column; gap:14px; align-items:center; }
+    #viewer img { width:min(74vw, 260px); }
+    #viewer .meta { text-align:center; }
+    .copy { min-width:0; width:min(74vw, 260px); }
+  }
+  /* The house page: numbers only. No dragons, nothing moving - this is the page
+     people open to ask "how many have I got left today". */
+  #houses { position:fixed; inset:0; z-index:30; display:none; overflow:auto;
+    background:linear-gradient(180deg,#120d16,#07060c); padding:66px 18px 40px; }
+  #houses.open { display:block; }
+  #houses h2 { font-family:Cinzel,serif; font-size:34px; font-weight:800; margin:0 auto 16px; max-width:760px; }
+  #houses-back { position:fixed; top:16px; left:16px; z-index:2; }
+  #houses-standings, .hpick, #houses-table, #houses .note { max-width:760px; margin:0 auto; }
+  .hrow { display:grid; grid-template-columns:140px 1fr 110px; gap:12px; align-items:center; margin-bottom:10px; }
+  .hrow .hn { font-family:Cinzel,serif; font-size:21px; display:flex; align-items:center; gap:8px; }
+  .hrow .hn img { width:17px; }
+  .hrow .track { height:24px; border-radius:7px; background:#171120; border:1px solid var(--edge); overflow:hidden; }
+  .hrow .track i { display:block; height:100%; }
+  .hrow .hp { text-align:right; font-size:20px; font-variant-numeric:tabular-nums; color:var(--gold); }
+  .hpick { display:flex; gap:8px; flex-wrap:wrap; margin:22px auto 10px; }
+  .hpick button.on { background:rgba(211,166,37,.2); border-color:var(--gold); color:var(--gold); }
+  #houses .note { font-size:16px; color:var(--dim); margin-bottom:12px; }
+  .trow { display:grid; grid-template-columns:34px 1fr 120px 92px 92px; gap:10px; align-items:center;
+    padding:10px 12px; border-bottom:1px solid #1d1726; font-size:16px; }
+  .trow.head { color:var(--dim); font-size:13px; letter-spacing:.1em; text-transform:uppercase; border-bottom-color:#2e2236; }
+  .trow.me { background:rgba(211,166,37,.12); border-radius:10px; }
+  .trow .r { color:var(--dim); text-align:right; }
+  .trow .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .trow .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .trow .cap { text-align:right; font-variant-numeric:tabular-nums; color:var(--dim); }
+  .trow .cap.full { color:#73b35e; }
+  @media (max-width:640px) {
+    #houses { padding:58px 10px 30px; }
+    .trow { grid-template-columns:26px 1fr 78px 64px; font-size:15px; padding:9px 8px; }
+    .trow .month { display:none; }
+    .hrow { grid-template-columns:104px 1fr 74px; }
+    .hrow .hn { font-size:17px; }
+  }
+  /* The guide: the rules, written out, for anyone who missed the posts. */
+  #guide { position:fixed; inset:0; z-index:30; display:none; overflow:auto;
+    background:linear-gradient(180deg,#120d16,#07060c); padding:66px 18px 50px; }
+  #guide.open { display:block; }
+  #guide-back { position:fixed; top:16px; left:16px; z-index:2; }
+  #guide article { max-width:680px; margin:0 auto; }
+  #guide .eyebrow { font-size:15px; letter-spacing:.3em; text-transform:uppercase; color:var(--dim); }
+  #guide h2 { font-family:Cinzel,serif; font-size:40px; font-weight:800; margin:6px 0 4px; }
+  #guide .lede { font-size:19px; color:var(--dim); margin-bottom:26px; }
+  #guide h3 { font-family:Cinzel,serif; font-size:26px; font-weight:600; margin:30px 0 10px; }
+  #guide p { font-size:17px; line-height:1.62; margin-bottom:12px; color:#e4d9c2; }
+  #guide ul { margin:0 0 12px 20px; font-size:17px; line-height:1.7; color:#e4d9c2; }
+  #guide code { background:rgba(211,166,37,.13); color:var(--gold); border-radius:5px; padding:2px 7px; font-size:16px; }
+  #guide figure { margin:18px 0; }
+  #guide figure img { width:100%; border-radius:14px; border:1px solid var(--edge); display:block; }
+  #guide .four { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:16px 0 4px; }
+  #guide .four figure { margin:0; text-align:center; }
+  #guide .four img { border-radius:12px; }
+  #guide .four b { display:block; font-family:Cinzel,serif; font-size:17px; margin-top:7px; }
+  #guide .four span { font-size:13px; color:var(--dim); letter-spacing:.06em; }
+  #guide .tiers { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:14px 0; }
+  #guide .tiers div { border:1px solid var(--edge); border-radius:12px; padding:13px 15px; }
+  #guide .tiers b { font-family:Cinzel,serif; font-size:18px; color:var(--gold); }
+  #guide .tiers span { font-size:15px; color:var(--dim); margin-left:8px; }
+  #guide .tiers p { font-size:15px; margin:5px 0 0; }
+  #guide .deck { display:grid; grid-template-columns:repeat(6,1fr); gap:7px; margin:12px 0 4px; }
+  #guide .deck img { width:100%; border-radius:7px; border:1px solid var(--edge); display:block; }
+  #guide .cmds div { display:flex; gap:12px; align-items:baseline; padding:9px 0; border-bottom:1px solid #1d1726; }
+  #guide .cmds span { font-size:16px; color:var(--dim); }
+  #guide .end { font-size:19px; color:var(--gold); margin-top:26px; }
+  @media (max-width:640px) {
+    #guide { padding:58px 14px 40px; }
+    #guide h2 { font-size:30px; } #guide h3 { font-size:21px; }
+    #guide .four { grid-template-columns:repeat(2,1fr); }
+    #guide .tiers { grid-template-columns:1fr; }
+    #guide .deck { grid-template-columns:repeat(4,1fr); }
+  }
+  #board { position:fixed; inset:0; z-index:30; display:none; overflow:auto;
+    background:linear-gradient(180deg,#120d16,#07060c); padding:68px 18px 40px; }
+  #board.open { display:block; }
+  #board h2 { font-family:Cinzel,serif; font-size:34px; font-weight:800; margin:0 auto 18px; max-width:620px; }
+  #board-back { position:fixed; top:16px; left:16px; z-index:2; }
+  #board-list { max-width:620px; margin:0 auto; }
+  .brow { display:grid; grid-template-columns:38px 1fr 90px; gap:10px; align-items:center;
+    padding:11px 14px; border-radius:12px; border-bottom:1px solid #1d1726; font-size:17px; }
+  .brow.me { background:rgba(211,166,37,.13); border:1px solid rgba(211,166,37,.4); }
+  .brow .r { color:var(--dim); font-family:Cinzel,serif; text-align:right; }
+  .brow .p { text-align:right; font-variant-numeric:tabular-nums; color:var(--gold); }
+  .brow .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .brow img { width:13px; vertical-align:-1px; margin-right:5px; }
+  /* Egg week: the dragon has not hatched, so the page shows the egg instead -
+     breathing, glowing, and warmer the more its owner has played. */
+  /* Most people will not know a direwolf from a trout, so the house says its
+     own name. */
+  #house-banner {
+    position:absolute; top:62px; left:0; right:380px; z-index:1;
+    display:flex; align-items:center; justify-content:center; gap:16px; pointer-events:none;
+  }
+  #solo.egg #house-banner { display:none; }
+  #house-crest { width:54px; height:54px; filter:drop-shadow(0 4px 12px rgba(0,0,0,.8)); }
+  #house-name {
+    font-family:Cinzel,serif; font-size:40px; font-weight:800; letter-spacing:.06em; line-height:1;
+    text-shadow:0 4px 18px rgba(0,0,0,.9);
+  }
+  #house-words { font-size:17px; color:var(--dim); letter-spacing:.22em; text-transform:uppercase; margin-top:5px; }
+  @media (max-width:760px) {
+    #house-banner { right:0; top:54px; gap:11px; }
+    #house-crest { width:38px; height:38px; }
+    #house-name { font-size:27px; }
+    #house-words { font-size:13px; letter-spacing:.16em; }
+  }
+  #egg-layer { position:absolute; inset:0; display:none; align-items:center; justify-content:center; pointer-events:none; }
+  #solo.egg #egg-layer { display:flex; }
+  #solo.egg #egg-layer { padding-right:380px; }     /* clear of the card, as the dragon is */
+  @media (max-width:760px) { #solo.egg #egg-layer { padding-right:0; padding-bottom:52%; } }
+  #egg-img {
+    width:min(52vh, 420px); position:relative; z-index:2; mix-blend-mode:screen;
+    animation:breathe 5.5s ease-in-out infinite;
+    filter:drop-shadow(0 18px 36px rgba(0,0,0,.65));
+  }
+  #egg-layer .halo {
+    position:absolute; width:min(74vh, 620px); aspect-ratio:1; border-radius:50%;
+    background:radial-gradient(circle, rgba(255,150,60,.42), rgba(255,120,40,0) 62%);
+    opacity:var(--heat, 1);
+    animation:glow 4s ease-in-out infinite; z-index:1;
+  }
+  #egg-layer .shadow {
+    position:absolute; bottom:18%; width:min(34vh, 260px); height:26px; border-radius:50%;
+    background:radial-gradient(ellipse, rgba(0,0,0,.6), rgba(0,0,0,0) 70%); z-index:0;
+  }
+  @keyframes breathe {
+    0%, 100% { transform:translateY(0) scale(1); }
+    50% { transform:translateY(-10px) scale(1.022); }
+  }
+  @keyframes glow {
+    0%, 100% { opacity:.55; transform:scale(.97); }
+    50% { opacity:1; transform:scale(1.06); }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    #egg-img, #egg-layer .halo { animation:none; }
+  }
+  /* The week switch and the day stepper were the preview's and are gone with
+     it, and so are their rules. The day LINE stays: it says the day it really
+     is, and only while the egg does. */
+  #egg-when { display:none; }
+  #solo.egg #egg-when {
+    display:block; position:absolute; top:64px; left:0; right:380px; z-index:3; text-align:center;
+    font-size:15px; letter-spacing:.2em; text-transform:uppercase; color:var(--dim);
+  }
+  @media (max-width:760px) {
+    #solo.egg #egg-when { right:0; top:58px; font-size:13px; }
+  }
+  .crave {
+    border:1px solid rgba(211,166,37,.45); background:rgba(211,166,37,.10);
+    border-radius:14px; padding:12px 14px; font-size:16px; line-height:1.45; margin-bottom:4px;
+  }
+  .crave b { color:var(--gold); }
+  .quota { margin-bottom:12px; }
+  .quota .top { display:flex; justify-content:space-between; font-size:16px; }
+  .quota .sub { font-size:13px; color:var(--dim); margin-bottom:5px; }
+  .quota .bar { height:9px; border-radius:5px; background:#241c30; overflow:hidden; }
+  .quota .bar i { display:block; height:100%; background:linear-gradient(90deg,#8a6a12,var(--gold)); }
+  .quota .bar i.full { background:linear-gradient(90deg,#3f6b3a,#73b35e); }
+  .sub-count { font-size:13px; color:var(--dim); margin:-4px 0 6px; }
+  .deck { display:grid; grid-template-columns:repeat(4,1fr); gap:7px; }
+  .deck figure { margin:0; position:relative; border-radius:7px; overflow:hidden; border:1px solid var(--edge); }
+  .deck img { width:100%; display:block; }
+  .deck .none img { filter:grayscale(1) brightness(.33); }
+  .deck b { position:absolute; right:3px; bottom:2px; font-size:12px; color:#fff; text-shadow:0 1px 3px #000; }
+  .ach { display:flex; gap:10px; align-items:baseline; font-size:16px; padding:7px 0; border-bottom:1px solid #1d1726; }
+  .ach span { color:var(--dim); font-size:14px; }
+  .wide-btn { width:100%; margin-top:18px; text-align:center; justify-content:center; }
+  .credit { position:fixed; right:14px; bottom:76px; z-index:4; font-size:12px; color:#6b5c45; }
+  .hint { position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:8;
+    font-size:18px; color:var(--dim); }
+  @media (max-width:640px) {
+    header { padding:10px 14px; gap:8px; }
+    h1 { font-size:19px; }
+    header .sub { display:none; }                 /* the hint belongs on a desktop */
+    .find { margin-left:auto; width:52%; }
+    #q { width:100%; padding:7px 14px; font-size:15px; }
+    #hits { width:72vw; }
+    #who { right:8px; left:8px; width:auto; top:auto; bottom:64px; }
+    .controls { padding:8px 10px 12px; gap:8px; }
+    .controls button { padding:10px 14px; font-size:15px; min-width:44px; }
+    #fit, #all, #me, #top, .house { display:none; }   /* folded into the dropdown */
+    #pick { display:block; flex:1; max-width:210px; }
+    .credit { bottom:62px; right:10px; font-size:11px; }
+    .guide { font-size:11px; left:8px; }
+    .label { font-size:12px; }
+  }
+</style>
+</head>
+<body>
+<nav id="go-hall">
+  <button id="back-mine">← My dragon</button>
+  <button id="hall-houses">Houses</button>
+  <button id="hall-guide">How it works</button>
+  <button id="hall-board">Leaderboard</button>
+</nav>
+<header>
+  <h1>The Hall of Dragons</h1>
+  <span class="sub" id="count">—</span>
+  <div class="find">
+    <input id="q" type="search" placeholder="Search a name…" autocomplete="off" spellcheck="false">
+    <div id="hits"></div>
+  </div>
+</header>
+<div id="labels"></div>
+<canvas id="strip" title="Every dragon, to scale. Tap one."></canvas>
+<div class="controls">
+  <button id="left" title="Left">←</button>
+  <button id="right" title="Right">→</button>
+  <button id="zin" title="Zoom in">+</button>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="fit">Tallest</button>
+  <button id="all">All of them</button>
+  <button id="me">Find me</button>
+  <button id="top">The shining</button>
+  <select id="pick" aria-label="View">
+    <optgroup label="View">
+      <option value="v:tallest">Tallest first</option>
+      <option value="v:all">All of them</option>
+      <option value="v:me">Find me</option>
+      <option value="v:top">The shining</option>
+    </optgroup>
+    <optgroup label="House">
+      <option value="h:all" selected>Everyone</option>
+      <option value="h:stark">Stark</option>
+      <option value="h:lannister">Lannister</option>
+      <option value="h:targaryen">Targaryen</option>
+      <option value="h:watch">Night's Watch</option>
+    </optgroup>
+  </select>
+  <button class="house on" data-house="all">All</button>
+  <button class="house" data-house="stark">Stark</button>
+  <button class="house" data-house="lannister">Lannister</button>
+  <button class="house" data-house="targaryen">Targaryen</button>
+  <button class="house" data-house="watch">Watch</button>
+</div>
+<div id="who">
+  <div class="close" onclick="closeWho()">×</div>
+  <div class="name" id="who-name">—</div>
+  <div class="dragon" id="who-dragon">—</div>
+  <div class="row"><span>House</span><span id="who-house">—</span></div>
+  <div class="row"><span>Points</span><span id="who-points">—</span></div>
+  <div class="row"><span>Rank</span><span id="who-rank">—</span></div>
+  <div class="row"><span>Height</span><span id="who-height">—</span></div>
+  <div class="row"><span>Best day</span><span id="who-best">—</span></div>
+  <div class="row"><span>Days played</span><span id="who-days">—</span></div>
+  <p class="chart-title">Points a day, this month</p>
+  <canvas id="who-chart" width="250" height="92"></canvas>
+  <p class="chart-foot" id="who-foot">—</p>
+</div>
+<section id="viewer">
+  <button id="viewer-close" aria-label="Close">×</button>
+  <div class="frame">
+    <img id="viewer-art" alt="">
+    <div class="meta">
+      <p class="rar" id="viewer-rarity">—</p>
+      <h3 id="viewer-name">—</h3>
+      <p class="worth" id="viewer-worth">—</p>
+      <div id="viewer-copies"></div>
+    </div>
+  </div>
+  <div class="nav"><button id="viewer-prev">←</button><button id="viewer-next">→</button></div>
+</section>
+<section id="guide">
+  <button id="guide-back">← My dragon</button>
+  <article>
+    <p class="eyebrow">Fire &amp; Blood</p>
+    <h2>How the month works</h2>
+    <p class="lede">Everything you need, in the order you will need it.</p>
+
+    <figure><img src="eggs/egg-3.png" alt="A dragon egg, cracked and glowing"></figure>
+    <h3>1 · The egg</h3>
+    <p>Anyone who wants in claims an egg. That is the only thing you have to do. It sits with you for a week and watches whatever you were already doing — it needs no feeding and no babysitting.</p>
+    <p><b>On 8 October at 12 noon every egg hatches at once</b>, and yours tells you which house you belong to. Nobody picks, nobody is picked.</p>
+
+    <h3>2 · The one strange rule</h3>
+    <p>During the egg week, <b>your egg is hungry for two games at a time, and only those two pay you</b>. Everything else still runs and is still fun; it just does not feed your egg.</p>
+    <p><b>Everyone gets different games.</b> If all of us had the same two, fifty people would pile into anagrams and every other channel would be dead. Over the week your egg will have asked for every game.</p>
+    <p>Type <code>/egg</code> to see what yours wants right now and when it changes. The warmer your egg, the bigger the dragon you hatch — and ignoring it entirely still hatches one, just a small one.</p>
+
+    <figure><img src="guide/hatch.png" alt="Four dragons of different houses"></figure>
+    <h3>3 · The hatch, and why the houses will be even</h3>
+    <p>The egg uses your week — how much you actually played — and deals everyone out so the <b>four houses end up equally matched in activity, not in headcount</b>.</p>
+    <p>One house might have thirty members and another twenty-two and still be dead level. The quiet members are spread out instead of landing in one place. No house is carried by three people, and no house is dead weight. That was September's problem; this is the fix.</p>
+
+    <div class="four" id="guide-houses"></div>
+
+    <figure><img src="guide/raven.png" alt="A raven carrying a sealed scroll"></figure>
+    <h3>4 · Ravens</h3>
+    <p>The Golden Snitch is gone, and so are the frog drops. One thing replaces both: <b>a raven lands carrying a sealed scroll</b>. Anyone can press <b>Capture</b> — everyone who presses gets their own riddle, privately — and the first correct answer takes it.</p>
+    <p>Inside is a card. <b>Every card is numbered</b>: yours is <i>House Targaryen, No. 016</i>, and nobody else on this server will ever hold that one. Your old frog cards come across with their numbers intact.</p>
+
+    <div class="tiers">
+      <div><b>Common</b><span>2 points</span><p>Stark · Lannister · Targaryen · Night's Watch</p></div>
+      <div><b>Uncommon</b><span>5 points</span><p>Baratheon · Greyjoy · Tyrell · Martell</p></div>
+      <div><b>Rare</b><span>10 points</span><p>Tully · Arryn</p></div>
+      <div><b>Legendary</b><span>25 points</span><p>The Faceless Man · The Night King — perhaps one a week, server-wide</p></div>
+    </div>
+    <div class="deck" id="guide-deck"></div>
+
+    <h3>5 · Points and limits</h3>
+    <p><b>One points pile.</b> No currencies. Your points are your dragon's size — that is the whole scoreboard.</p>
+    <ul>
+      <li><b>Quick games</b> — anagrams, cat game, guess the word — <b>20 a day between them</b></li>
+      <li><b>Thinking games</b> — quiz, koto, geo, movie names — <b>30 a day between them</b></li>
+    </ul>
+    <p>Some games pay <b>double</b> at certain hours, and your page always says which. <b>The bonus counts towards the same daily limit</b>, so it never lets anyone earn more than anyone else — it just gets you there in half the rounds. That is deliberate: it is a kindness to people with less time.</p>
+
+    <h3>6 · The commands</h3>
+    <div class="cmds">
+      <div><code>/egg</code><span>your egg, and your dragon after the hatch</span></div>
+      <div><code>/livepoints</code><span>this page, opened on your own dragon</span></div>
+      <div><code>/mycards</code><span>your collection, with its numbers</span></div>
+      <div><code>/trade</code><span>swap cards, same as always</span></div>
+    </div>
+    <p class="end">Eggs are open. Claim one. It hatches on the 8th at noon. 🥚🐉</p>
+  </article>
+</section>
+<section id="houses">
+  <button id="houses-back">← My dragon</button>
+  <h2>The House Cup</h2>
+  <div id="houses-standings"></div>
+  <div class="hpick" id="houses-pick"></div>
+  <p class="note" id="houses-note">—</p>
+  <div id="houses-table"></div>
+</section>
+<section id="board">
+  <button id="board-back">← Back to my dragon</button>
+  <h2>The leaderboard</h2>
+  <div id="board-list"></div>
+</section>
+<section id="solo">
+  <canvas id="solo-canvas"></canvas>
+  <div id="house-banner">
+    <img id="house-crest" src="" alt="">
+    <div><h2 id="house-name">—</h2><p id="house-words">—</p></div>
+  </div>
+  <div id="egg-layer">
+    <div class="halo"></div>
+    <img id="egg-img" src="eggs/egg-1.png" alt="Your egg">
+    <div class="shadow"></div>
+  </div>
+  <div id="solo-zoom">
+    <button id="solo-out" title="Zoom out">−</button>
+    <button id="solo-in" title="Zoom in">+</button>
+  </div>
+  <nav id="go">
+    <button class="on">My dragon</button>
+    <button id="to-hall">The hall</button>
+    <button id="to-houses">Houses</button>
+    <button id="to-guide">How it works</button>
+    <button id="to-board">Leaderboard</button>
+  </nav>
+  <!-- The week toggle and the day stepper were preview controls and are gone:
+       egg week or after the hatch is the bot's decision, from the clock
+       against the hatch moment, and the day is the day it really is. -->
+  <p id="egg-when">&nbsp;</p>
+  <div id="solo-card">
+    <div class="whoami">
+      <img id="solo-face" alt="" src="">
+      <div>
+        <p class="eyebrow" id="solo-house">—</p>
+        <h2 id="solo-name">—</h2>
+      </div>
+    </div>
+    <p class="dragon-name" id="solo-dragon">—</p>
+    <div class="big"><span id="solo-points">—</span><small>points</small></div>
+    <div class="facts">
+      <div><b id="solo-rank">—</b><span>rank</span></div>
+      <div><b id="solo-height">—</b><span>height</span></div>
+      <div><b id="solo-best">—</b><span>best day</span></div>
+    </div>
+    <div id="solo-crave" class="crave"></div>
+
+    <p class="chart-title">Today</p>
+    <div id="solo-today"></div>
+
+    <p class="chart-title">This month, by game</p>
+    <div id="solo-by"></div>
+
+    <p class="chart-title">Day by day</p>
+    <canvas id="solo-chart" width="300" height="80"></canvas>
+
+    <p class="chart-title">Cards</p>
+    <div id="solo-cards" class="deck"></div>
+
+    <p class="chart-title">Achievements</p>
+    <div id="solo-ach"></div>
+
+    <button id="solo-board" class="wide-btn">See the leaderboard →</button>
+  </div>
+</section>
+<p class="hint" id="hint">Waking the dragons…</p>
+<p class="credit">“European Dragon” by Nonexistent 101 · CC BY 4.0</p>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// The models arrive inlined (see models-v5.js), so they are parsed from memory
+// rather than fetched. Same GLTFLoader, no network round trip.
+//
+// But they are two and a half megabytes, and the dragon's baked textures are
+// three more, and NOBODY LOOKS AT A DRAGON DURING EGG WEEK. So neither is asked
+// for until there is a dragon to draw: on a phone on mobile data, egg week
+// costs one picture of an egg.
+let MODELS = null;
+const bytes = (name) => Uint8Array.from(atob(MODELS[name]), (c) => c.charCodeAt(0)).buffer;
+const loadModel = async (name) => {
+  if (!MODELS) ({ MODELS } = await import('./models-v5.js'));
+  return new Promise((ok, no) => loader.parse(bytes(name), '', ok, no));
+};
+
+// --- the people ---------------------------------------------------------------
+// Real numbers, from the bot, in at most two calls.
+//
+//   /live/api/hall.json        everybody: name, picture, points, house, rank,
+//                              how hot their egg burns, and four small totals
+//   /live/api/u/<id>.json      when the address names somebody: that person's
+//                              whole page - every game, every day, today's
+//                              limits, the cards they hold and their badges
+//
+// Nothing on this page is invented and nothing is a sample. The long lists ride
+// only on the one page that shows them, so the hall a hundred and fifty people
+// open on mobile data is a few tens of kilobytes.
+//
+// The id in the address is the link /egg and /livepoints hand out. It is read
+// from the path to ask for one body and is never put back on the page, and
+// nothing the bot sends carries an id at all.
+const ROOT = location.pathname.replace(/\/u\/[^/]*\/?$/, '').replace(/\/+$/, '');
+const MY_ID = (location.pathname.match(/\/u\/(\d{5,25})\/?$/) || [])[1] || '';
+const ask = (what) => fetch(`${ROOT}/api/${what}`, { headers: { accept: 'application/json' } })
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${what}: ${r.status}`))));
+
+const hint = document.getElementById('hint');
+const [hallBody, myBody] = await Promise.all([
+  ask('hall.json').catch((err) => { console.error(err); return null; }),
+  MY_ID ? ask(`u/${MY_ID}.json`).catch((err) => { console.error(err); return null; }) : Promise.resolve(null),
+]);
+const BODY = hallBody || { houses: [], members: [], deck: [], egg_week: true, total: 0, hatch_at: 0 };
+if (!hallBody) hint.textContent = 'The hall is dark just now — the bot could not be reached. Try again in a minute.';
+
+// Egg week or after the hatch is the bot's decision, taken on the server from
+// the clock against the hatch moment. There is no toggle on this page.
+const EGG_WEEK = !!BODY.egg_week;
+const HATCH_AT = (BODY.hatch_at || 0) * 1000;
+const WEEK_DAYS = Math.max(1, BODY.egg_week_days || 7);
+hint.textContent = EGG_WEEK ? 'Counting the eggs…' : 'Waking the dragons…';
+
+// The four houses keep their own keys in the ledger for ever and wear this
+// month's names as paint, so what the art is matched on is the SLOT - which
+// never moves - and never the name, which does.
+const HOUSE_ART = [
+  { art: 'stark',     words: 'Winter is coming',       glow: 'rgba(150,180,205,.20)', ring: '#b9c6cf' },
+  { art: 'lannister', words: 'Hear me roar',           glow: 'rgba(200,60,45,.20)',   ring: '#c2362c' },
+  { art: 'targaryen', words: 'Fire and blood',         glow: 'rgba(170,35,45,.22)',   ring: '#a8303a' },
+  { art: 'watch',     words: 'And now my watch begins', glow: 'rgba(120,170,220,.18)', ring: '#7fa8c8' },
+];
+const HOUSES = {};
+(BODY.houses || []).forEach((h) => {
+  const art = HOUSE_ART[h.slot] || HOUSE_ART[0];
+  HOUSES[h.key] = {
+    key: h.key, slot: h.slot, name: h.name, points: h.points, members: h.members,
+    colour: parseInt(String(h.colour || '#d3a625').replace('#', ''), 16) || 0xd3a625,
+    crest: `crest-${art.art}.png`, art: art.art, words: art.words, glow: art.glow, ring: art.ring,
+  };
+});
+// In slot order, which is the order the four are always listed in.
+const HOUSE_KEYS = Object.values(HOUSES).sort((a, b) => a.slot - b.slot).map((h) => h.key);
+// Nobody has a house during egg week — that is the whole suspense of it — so
+// every `HOUSES[...]` lookup on the page goes through this.
+const EGG_HOUSE = {
+  key: null, slot: 0, name: 'Egg week', colour: 0xd3a625, crest: 'eggs/egg-1.png',
+  art: 'targaryen', words: 'Not yet sorted', glow: 'rgba(211,166,37,.16)', ring: '#d3a625',
+};
+const houseOf = (p) => (p && p.house && HOUSES[p.house]) || EGG_HOUSE;
+
+// A display name, a dragon's name and this month's house names are all text
+// somebody else chose, and all of them land in innerHTML somewhere below. So
+// none of them gets there without going through here first.
+const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Everybody, already ranked and sorted by the bot.
+const people = (BODY.members || []).map((m) => ({
+  name: m.name || 'A member',
+  avatar: m.avatar || '',
+  house: m.house || null,
+  dragon: m.dragon || '',
+  points: m.points || 0,
+  rank: m.rank || 0,
+  // Nought for an untouched egg, one for the best fed on the page.
+  heat: Math.max(0, Math.min(100, m.heat || 0)) / 100,
+  stage: m.egg_stage || 0,
+  got: m.today_used || 0,
+  cap: m.today_limit || 0,
+  best: m.best_day || 0,
+  daysPlayed: m.days_played || 0,
+}));
+
+// The whole deck, with what somebody holds of each: the page greys the ones
+// nobody has caught yet, so it is told every card in play and not only theirs.
+const deckWith = (held) => (BODY.deck || []).map((k) => {
+  const mine = (held || []).filter((c) => c.slug === k.slug);
+  return {
+    key: k.slug, name: k.name, rarity: k.rarity, rarityName: k.rarity_name, worth: k.worth,
+    // The picture's name comes from the bot; where it is kept is this page's
+    // own business.
+    art: `cards/${k.art || `card-${k.slug}.png`}`,
+    have: mine.length,
+    copies: mine.map((c) => ({ serial: c.serial, label: c.serial_label, day: c.day })),
+  };
+});
+
+// "You", when the address said who you are. The hall's row and the long lists
+// are the same person, so they are put together into one object.
+let ME = null;
+if (myBody && myBody.me) {
+  const me = myBody.me;
+  ME = people.find((p) => p.rank === me.rank && p.name === me.name) || null;
+  if (!ME) {
+    // A member the hall has not got to yet (a brand new egg, mid-cache).
+    ME = {
+      name: me.name, avatar: me.avatar || '', house: me.house || null, dragon: me.dragon || '',
+      points: me.points || 0, rank: me.rank || 0, heat: (me.heat || 0) / 100, stage: me.egg_stage || 0,
+      got: 0, cap: 0, best: 0, daysPlayed: 0,
+    };
+    people.push(ME);
+  }
+  const perDay = (me.per_day || []).map((d) => d.points);
+  Object.assign(ME, {
+    perDay,
+    perDayFrom: (me.per_day || [])[0] && (me.per_day || [])[0].day,
+    by: (me.per_game || []).map((g) => ({ game: g.label, points: g.points })),
+    today: (me.today || []).map((t) => ({
+      group: t.label, games: (t.games || []).join(' · '), cap: t.limit, got: t.used, left: t.left,
+    })),
+    crave: (me.craving || []).map((c) => c.label),
+    craveUntil: (me.craving_until || 0) * 1000,
+    cards: deckWith(me.cards),
+    achievements: me.achievements || [],
+    stageLabel: me.egg_stage_label || '',
+    stageIcon: me.egg_stage_icon || '🥚',
+    // Their own week: somebody who claimed late is not on the month's.
+    eggFrom: (me.egg_from || 0) * 1000,
+    eggUntil: (me.egg_until || 0) * 1000,
+    got: me.today ? me.today.reduce((n, t) => n + t.used, 0) : ME.got,
+    cap: me.today ? me.today.reduce((n, t) => n + t.limit, 0) : ME.cap,
+    best: perDay.length ? Math.max(0, ...perDay) : ME.best,
+    daysPlayed: perDay.filter((v) => v > 0).length || ME.daysPlayed,
+  });
+}
+
+// --- the scene -----------------------------------------------------------------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(26, innerWidth / innerHeight, 0.1, 4000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.35;
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableRotate = false;        // read side-on; spinning it loses the size comparison
+controls.screenSpacePanning = true;
+controls.mouseButtons = {
+  LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN,
+};
+controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
+controls.panSpeed = 1.4;
+controls.minDistance = 4;
+controls.maxDistance = 1600;
+
+scene.add(new THREE.AmbientLight(0x9aa6bb, 2.2));
+const key = new THREE.DirectionalLight(0xfff2dd, 3.0);
+key.position.set(-30, 60, 90);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x7fa8ff, 1.8);
+rim.position.set(60, 30, -40);
+scene.add(rim);
+// A warm pool on the floor so the small ones aren't lost in the dark.
+const fill = new THREE.DirectionalLight(0xffffff, 1.2);
+fill.position.set(0, 10, 120);
+scene.add(fill);
+
+
+// --- the measuring wall -------------------------------------------------------
+// Guide lines every STEP points, labelled, running the length of the room. This
+// is what turns a row of models into a chart you can read at a glance.
+const STEP = 500;
+const guides = new THREE.Group();
+scene.add(guides);
+const guideLabels = [];
+function drawGuides(spanX, maxPoints) {
+  guides.clear();
+  guideLabels.forEach((e) => e.remove());
+  guideLabels.length = 0;
+  const mat = new THREE.LineBasicMaterial({ color: 0x2f3d55, transparent: true, opacity: .75 });
+  for (let pts = STEP; pts <= maxPoints + STEP; pts += STEP) {
+    const y = pts * UNIT;
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-30, y, -40), new THREE.Vector3(spanX + 30, y, -40),
+    ]);
+    guides.add(new THREE.Line(g, mat));
+    const el = document.createElement('div');
+    el.className = 'guide';
+    el.textContent = pts.toLocaleString();
+    el.dataset.y = String(y);
+    labels.appendChild(el);
+    guideLabels.push(el);
+  }
+  // The floor they all stand on.
+  const floor = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-30, 0, -40), new THREE.Vector3(spanX + 30, 0, -40),
+  ]);
+  guides.add(new THREE.Line(floor, new THREE.LineBasicMaterial({ color: 0x5b6d8c })));
+}
+
+// --- the dragons ---------------------------------------------------------------
+// Size is linear in points: twice the points is twice the height. The smallest
+// gets a floor so it stays clickable; the label always tells the true number.
+const UNIT = 0.022;                       // world units of height per point
+const MIN_H = 0.5;
+// An egg is an egg: every one of them exactly the same size, whatever its owner
+// has been feeding it. Size belongs to the dragons, and hatch day is the first
+// time anybody sees it. What a well-fed egg has instead is heat.
+const EGG_H = 2.2;
+const heightOf = (p) => (EGG_WEEK ? EGG_H : Math.max(MIN_H, p.points * UNIT));
+// A seeded wobble. The hall's small differences - when each one breathes, how
+// far apart they stand in the field - are meant to look unplanned, not to be
+// different on every reload, so nobody's egg moves while they are looking at it.
+let seed = 11;
+const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+// How wide the hall is, from the last thing put in it.
+let spanX = 0;
+
+const labels = document.getElementById('labels');
+const loader = new GLTFLoader();
+const tex = new THREE.TextureLoader();
+const skin = (file, srgb) => {
+  const t = tex.load(file);
+  t.flipY = false;                       // glTF's UVs run the other way up
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.anisotropy = 4;
+  return t;
+};
+// Asked for the first time a dragon needs painting, and never in egg week.
+let SKINS = null;
+const skins = () => (SKINS ||= {
+  'Low_Poly_Bake': {
+    map: skin('tex-Low_Poly_Bake_baseColor.png', true),
+    normalMap: skin('tex-Low_Poly_Bake_normal.png', false),
+    metalnessMap: skin('tex-Low_Poly_Bake_metallicRoughness.png', false),
+    roughnessMap: skin('tex-Low_Poly_Bake_metallicRoughness.png', false),
+  },
+  'Material.001': { map: skin('tex-Material_001_baseColor.png', true) },
+  'Material.002': { map: skin('tex-Material_002_baseColor.png', true) },
+  'Material.003': { map: skin('tex-Material_003_baseColor.png', true) },
+});
+const dragons = [];
+const mixers = [];
+const clock = new THREE.Clock();
+
+// Egg week: the field of eggs, and not a megabyte of dragon parsed to show
+// nobody a dragon. After the hatch: the hall as it was always meant to look.
+// Queued rather than called: everything the build touches - the strip, the solo
+// page, the chart - is declared further down, and a microtask runs after the
+// whole of this file has been read.
+if (EGG_WEEK) Promise.resolve().then(buildEggs); else loadModel('dragon.glb').then((gltf) => {
+  const template = gltf.scene;
+  const byName = (re) => gltf.animations.find((a) => re.test(a.name));
+  const idle = byName(/idle stand/i) || gltf.animations[0];
+  const flap = byName(/fly/i);
+  // What a dragon does when it stirs: a wingbeat, a shuffle, a short run, or a
+  // sit. Picked at random so no two stirs in a row look the same.
+  const MOVES = [byName(/fly/i), byName(/walk/i), byName(/run/i), byName(/idle sit/i)].filter(Boolean);
+  soloClips = { idle, flap, moves: MOVES };
+  // The dragon is skinned, so each one is a proper clone with its own skeleton
+  // rather than a shared geometry, and the highest neck bone is the head,
+  // which is where the fire comes from.
+  const box = new THREE.Box3().setFromObject(template);
+  const modelH = box.max.y - box.min.y;
+  const modelW = box.max.x - box.min.x;
+
+  let x = 0;
+  people.forEach((p) => {
+    const h = heightOf(p);
+    const s = h / modelH;
+    const mesh = cloneSkinned(template);
+    mesh.scale.setScalar(s);
+    // Depth is shallow on purpose: enough to break the straight line, not enough
+    // for perspective to lie about who is bigger.
+    x += modelW * s * 0.62;
+    mesh.position.set(x, -box.min.y * s, 0);
+    const baseY = mesh.position.y;
+    mesh.rotation.y = 0.28;
+    x += modelW * s * 0.62 + h * 0.3 + 2.5;
+
+    // House colour multiplies the painted texture, so the scales still read.
+    const tint = new THREE.Color(houseOf(p).colour).lerp(new THREE.Color(0xffffff), 0.22);
+    mesh.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = o.material.clone();
+      Object.assign(o.material, skins()[o.material.name] || {});
+      o.material.color = tint;
+      o.material.needsUpdate = true;
+      o.material.roughness = Math.min(1, (o.material.roughness ?? 1) * 0.85);
+      o.userData.person = p;
+      o.frustumCulled = false;
+    });
+    mesh.userData.person = p;
+    scene.add(mesh);
+
+    let head = null;
+    mesh.traverse((o) => {
+      if (!o.isBone || !/neck/i.test(o.name)) return;
+      const n = Number(o.name.replace(/\D+/g, '')) || 0;
+      if (!head || n >= head.n) head = { bone: o, n };
+    });
+
+    let mixer = null, idleAction = null, moveActions = [];
+    if (idle) {
+      mixer = new THREE.AnimationMixer(mesh);
+      idleAction = mixer.clipAction(idle);
+      idleAction.time = rnd() * idle.duration;   // nobody breathes in time with anybody else
+      idleAction.timeScale = 0.75 + rnd() * 0.5;
+      idleAction.play();
+      moveActions = MOVES.map((clip) => {
+        const a = mixer.clipAction(clip);
+        a.setLoop(THREE.LoopRepeat);
+        a.timeScale = 0.9 + rnd() * 0.5;
+        return { action: a, flying: /fly/i.test(clip.name) };
+      });
+      mixers.push(mixer);
+    }
+
+    const el = document.createElement('div');
+    el.className = 'label' + (p.rank <= 3 ? ' big' : '');
+    el.innerHTML = `<img src="${houseOf(p).crest}" alt=""><b>${esc(p.name)}</b> <span>${p.points.toLocaleString()}</span>`;
+    labels.appendChild(el);
+    dragons.push({ p, mesh, el, h, head: head && head.bone, roar: 0, baseY, idleAction, moveActions, moving: null, next: 4 + rnd() * 26 });
+  });
+
+  // The top three stand in a spotlight. The cone is drawn as well as lit, so the
+  // beam reads against a dark background instead of being invisible light.
+  const BEAM = [0xffd166, 0xdfe6f0, 0xd6904a];
+  dragons.slice(0, 3).forEach((d, i) => {
+    const lamp = new THREE.SpotLight(BEAM[i], d.h * d.h * 1.6, d.h * 5, 0.42, 0.6, 1.0);
+    lamp.position.set(d.mesh.position.x, d.h * 2.4, d.h * 0.35);
+    lamp.target.position.set(d.mesh.position.x, 0, 0);
+    scene.add(lamp, lamp.target);
+
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(d.h * 0.62, d.h * 2.4, 32, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: BEAM[i], transparent: true, opacity: 0.075,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+    );
+    cone.position.set(d.mesh.position.x, d.h * 1.2, d.h * 0.12);
+    scene.add(cone);
+
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(d.h * 0.6, 48),
+      new THREE.MeshBasicMaterial({ color: BEAM[i], transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }),
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set(d.mesh.position.x, 0.05, 0);
+    scene.add(pool);
+  });
+
+  spanX = x;
+  ready();
+});
+
+// --- the field of eggs ------------------------------------------------------------
+// Egg week's hall. One picture and one plane between all of them, so a hundred
+// and fifty eggs cost about what one does, and EVERY EGG THE SAME SIZE: the
+// only thing that tells them apart is how hot each one burns, which is its
+// owner's points against the best-fed egg on the page. A well-fed egg is a
+// lantern; one nobody has touched sits cold and dark.
+function buildEggs() {
+  if (!people.length) { ready(); return; }
+  const art = tex.load(`eggs/egg-${eggStage(null)}.png`);
+  art.colorSpace = THREE.SRGBColorSpace;
+  // A soft round halo, drawn here rather than fetched: one more picture over
+  // mobile data for a circle is one picture too many.
+  const halo = (() => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d').createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, 'rgba(255,255,255,.7)');
+    g.addColorStop(0.3, 'rgba(255,255,255,.34)');
+    g.addColorStop(0.62, 'rgba(255,255,255,.1)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    const x = c.getContext('2d');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 128, 128);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  })();
+  // One circle between all of them, scaled rather than rebuilt: a hundred and
+  // fifty eggs are a hundred and fifty pools of light and one geometry.
+  const disc = new THREE.CircleGeometry(1, 24);
+  let x = 0;
+  people.forEach((p, i) => {
+    const heat = p.heat;
+    // Three staggered depths read as a field rather than a queue, while the
+    // hall stays one line to walk along with the arrows.
+    const row = i % 3;
+    const z = (row - 1) * EGG_H * 2.1 + (rnd() - 0.5) * EGG_H * 0.4;
+    x += EGG_H * (1.2 + rnd() * 0.2);
+
+    // The egg art is a lit egg on black with no alpha channel, so it is added
+    // to the hall rather than drawn over it: the black goes, and the egg itself
+    // is a light. Dimmed by heat, so an egg nobody has fed really is dark and
+    // not merely unglowing.
+    const shell = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: art, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+      color: new THREE.Color().setScalar(0.3 + heat * 0.7),
+    }));
+    shell.scale.set(EGG_H * 0.74, EGG_H, 1);
+    shell.position.set(x, EGG_H * 0.5, z);
+    shell.userData.person = p;
+    scene.add(shell);
+
+    // Cold is almost black against a dark hall; hot is gold. Added rather than
+    // blended, so nought points really is no light at all.
+    const colour = new THREE.Color(0x2a1206).lerp(new THREE.Color(0xffc24a), Math.pow(heat, 0.8));
+    const size = EGG_H * (1.35 + heat * 1.25);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: halo, color: colour, transparent: true, opacity: 0.12 + heat * 0.72,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    glow.scale.set(size, size, 1);
+    glow.position.set(x, EGG_H * 0.52, z - 0.05);
+    scene.add(glow);
+
+    // And the light it throws on the floor around it.
+    const pool = new THREE.Mesh(disc, new THREE.MeshBasicMaterial({
+      color: colour, transparent: true, opacity: 0.05 + heat * 0.2,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    pool.scale.setScalar(EGG_H * (0.45 + heat * 0.55));
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set(x, 0.02, z);
+    scene.add(pool);
+
+    const el = document.createElement('div');
+    el.className = 'label';
+    el.innerHTML = `<img src="eggs/egg-${eggStage(null)}.png" alt=""><b>${esc(p.name)}</b> <span>${p.points.toLocaleString()}</span>`;
+    labels.appendChild(el);
+    dragons.push({
+      p, mesh: shell, el, h: EGG_H, head: null, roar: 0, baseY: shell.position.y,
+      idleAction: null, moveActions: [], moving: null, next: 4 + rnd() * 20,
+      egg: true, glow, pool, heat, glowSize: size, glowOpacity: 0.12 + heat * 0.72, phase: rnd() * 6.28,
+    });
+    x += EGG_H * (1.2 + rnd() * 0.2);
+  });
+  spanX = x;
+  ready();
+}
+
+// The floor of the hall, drawn once everything is standing on it.
+function ready() {
+  if (!people.length) {
+    hint.textContent = BODY.on === false
+      ? 'There is no themed month running just now. The games are all still paying their own points.'
+      : 'Nobody has an egg yet. Claim one with /egg in the server.';
+    document.getElementById('count').textContent = '—';
+    return;
+  }
+  // The measuring wall is the dragons': it reads points as height, and in egg
+  // week there is no height to read.
+  if (!EGG_WEEK) drawGuides(spanX, people[0].points);
+  drawStrip();
+  hint.style.display = 'none';
+  // This is a personal page first: it opens on your own egg or dragon, and the
+  // hall is a button away.
+  if (ME) openSolo(ME);
+  document.getElementById('count').textContent = EGG_WEEK
+    ? `${people.length} ${people.length === 1 ? 'egg' : 'eggs'} · brightest ${people[0].points.toLocaleString()} points · every egg the same size until it hatches`
+    : `${people.length} dragons · tallest ${people[0].points.toLocaleString()} points · drag or ← → to move · + − to zoom`;
+  if (EGG_WEEK) strip.title = 'Every egg, by what it has been fed. Tap one.';
+  fitAll();
+}
+
+// --- camera moves ---------------------------------------------------------------
+function frame(targetX, spanX, topY) {
+  const dist = Math.max(spanX * 0.92, topY * 1.7) / (2 * Math.tan(camera.fov * Math.PI / 360)) + 12;
+  camera.position.set(targetX, topY * 0.42 + 1.5, dist);
+  controls.target.set(targetX, topY * 0.38, 0);
+  controls.update();
+}
+function fitAll() {
+  if (!dragons.length) return;
+  // Nothing in egg week is taller than anything else, so there is no tall end
+  // to open on: the view opens on the hottest few instead, close enough to read
+  // a name, and "All of them" still shows the whole field.
+  if (EGG_WEEK) {
+    const xs = dragons.slice(0, 5).map((d) => d.mesh.position.x);
+    const lo = Math.min(...xs), hi = Math.max(...xs);
+    return frame((lo + hi) / 2, (hi - lo) + EGG_H * 2, EGG_H * 1.6);
+  }
+  // The tall end, at a zoom where the whole scale fits top to bottom.
+  const tall = Math.max(...dragons.map((d) => d.h));
+  const first = dragons.slice(0, 6);
+  const xs = first.map((d) => d.mesh.position.x);
+  frame((Math.min(...xs) + Math.max(...xs)) / 2, tall * 3.2, tall);
+}
+function wholeLine() {
+  if (!dragons.length) return;
+  const xs = dragons.map((d) => d.mesh.position.x);
+  const lo = Math.min(...xs), hi = Math.max(...xs);
+  frame((lo + hi) / 2, (hi - lo) + 12, Math.max(...dragons.map((d) => d.h)));
+}
+function findMe() {
+  const d = ME && dragons.find((x) => x.p === ME);
+  if (!d) return;
+  frame(d.mesh.position.x, Math.max(d.h * 3, 14), d.h);
+  openPerson(d.p);
+}
+// Some hosts eat the wheel event, so zoom has buttons of its own.
+const zoomBy = (f) => {
+  const dir = camera.position.clone().sub(controls.target);
+  const want = THREE.MathUtils.clamp(dir.length() * f, controls.minDistance, controls.maxDistance);
+  camera.position.copy(controls.target).add(dir.setLength(want));
+  controls.update();
+};
+document.getElementById('zin').onclick = () => zoomBy(0.65);
+document.getElementById('zout').onclick = () => zoomBy(1.5);
+document.getElementById('fit').onclick = fitAll;
+document.getElementById('all').onclick = wholeLine;
+// The arrows step to the next dragon rather than sliding the camera: on a phone
+// a precise drag is hard, and a dragon half off the screen is no use.
+let at = 0;
+const walk = (dir) => {
+  const shown = dragons.filter((d) => d.mesh.visible);
+  if (!shown.length) return;
+  at = Math.max(0, Math.min(shown.length - 1, at + dir));
+  const d = shown[at];
+  frame(d.mesh.position.x, Math.max(d.h * 2.6, 12), d.h);
+  document.getElementById('count').textContent =
+    `${d.p.name} · ${d.p.points.toLocaleString()} points · ${at + 1} of ${shown.length}`;
+  drawStrip();
+};
+document.getElementById('left').onclick = () => walk(-1);
+document.getElementById('right').onclick = () => walk(1);
+addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') walk(-1);
+  if (e.key === 'ArrowRight') walk(1);
+  if (e.key === '+' || e.key === '=') zoomBy(0.65);
+  if (e.key === '-') zoomBy(1.5);
+});
+// The three shining ones, framed together - the shot everybody screenshots.
+document.getElementById('top').onclick = () => {
+  if (dragons.length < 3) return wholeLine();
+  const three = dragons.slice(0, 3);
+  const xs = three.map((d) => d.mesh.position.x);
+  frame((Math.min(...xs) + Math.max(...xs)) / 2, (Math.max(...xs) - Math.min(...xs)) + three[0].h * 1.6, three[0].h * 1.25);
+};
+document.getElementById('me').onclick = findMe;
+
+// The four buttons and the phone's dropdown wear whatever this month calls the
+// houses, and carry the ledger's own key underneath. During egg week nobody has
+// a house at all, so they are not there to press.
+{
+  const picks = Array.from(document.querySelectorAll('.house')).filter((b) => b.dataset.house !== 'all');
+  const options = Array.from(document.querySelectorAll('#pick optgroup[label="House"] option'))
+    .filter((o) => o.value !== 'h:all');
+  HOUSE_KEYS.forEach((key, i) => {
+    if (picks[i]) { picks[i].dataset.house = key; picks[i].textContent = HOUSES[key].name; }
+    if (options[i]) { options[i].value = `h:${key}`; options[i].textContent = HOUSES[key].name; }
+  });
+  if (EGG_WEEK || !HOUSE_KEYS.length) {
+    picks.forEach((b) => b.remove());
+    options.forEach((o) => o.remove());
+    document.querySelector('#pick optgroup[label="House"]')?.remove();
+    document.querySelector('.house[data-house="all"]')?.remove();
+  }
+}
+
+// An egg is not a dragon yet, and the two buttons that lead to your own page
+// are not there at all when the address did not say who you are.
+{
+  // Nothing has hatched yet, so nothing is anybody's dragon.
+  if (EGG_WEEK) {
+    for (const [id, words] of [['back-mine', '← My egg'], ['guide-back', '← My egg'], ['houses-back', '← My egg'],
+                               ['board-back', '← Back to my egg']]) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = words;
+    }
+    const first = document.querySelector('#go button.on');
+    if (first) first.textContent = 'My egg';
+  }
+  // And when the address did not say who you are there is no page of your own
+  // to go back to: those buttons lead to the hall instead, and the two that
+  // only ever meant "you" are hidden. Hidden rather than taken out, because
+  // everything below still hangs its handlers on them.
+  if (!MY_ID) {
+    for (const el of [document.getElementById('back-mine'), document.getElementById('me'), document.querySelector('#go button.on')]) {
+      if (el) el.style.display = 'none';
+    }
+    for (const id of ['guide-back', 'houses-back', 'board-back']) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = '← The hall';
+    }
+    document.querySelector('#pick option[value="v:me"]')?.remove();
+  }
+}
+
+// Filtering by house hides the others rather than re-laying them out, so a
+// dragon never moves - you always find it in the same place.
+document.querySelectorAll('.house').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('.house').forEach((o) => o.classList.toggle('on', o === b));
+    const want = b.dataset.house;
+    dragons.forEach((d) => {
+      const show = want === 'all' || d.p.house === want;
+      d.mesh.visible = show;
+      if (d.glow) d.glow.visible = show;
+      if (d.pool) d.pool.visible = show;
+      d.el.style.display = show ? '' : 'none';
+    });
+    at = 0;
+    drawStrip();
+  };
+});
+
+// --- clicking a dragon ------------------------------------------------------------
+const ray = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+// What is under the cursor, if anything.
+function under(e) {
+  pointer.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(pointer, camera);
+  const hit = ray.intersectObjects(dragons.filter((d) => d.mesh.visible).map((d) => d.mesh), true)[0];
+  const who = hit && (hit.object.userData.person || hit.object.parent?.userData.person);
+  return who ? dragons.find((x) => x.p === who) : null;
+}
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  const d = under(e);
+  if (!d) return;
+  roar(d);
+  openPerson(d.p);
+});
+// Hovering an egg says whose it is and what it has been fed, without opening
+// anything: its label comes to the front and stays there while the cursor is on
+// it, however crowded the field is.
+let hovered = null;
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch') return;
+  const d = under(e);
+  if (d === hovered) return;
+  if (hovered) hovered.el.classList.remove('big');
+  hovered = d;
+  if (hovered) hovered.el.classList.add('big');
+  renderer.domElement.style.cursor = hovered ? 'pointer' : '';
+});
+
+// Whoever is tapped in the hall: their name, their points and the few facts
+// the hall itself knows. The day-by-day chart is only ever your own: the hall's
+// body carries nobody's thirty-one numbers, which is what keeps it small enough
+// to open on a phone.
+function openWho(p) {
+  const at = document.getElementById('who-height');
+  document.getElementById('who-name').textContent = p.name;
+  document.getElementById('who-dragon').textContent = EGG_WEEK ? 'unhatched' : (p.dragon || '—');
+  document.getElementById('who-house').textContent = EGG_WEEK ? 'not yet sorted' : houseOf(p).name;
+  document.getElementById('who-points').textContent = p.points.toLocaleString();
+  document.getElementById('who-rank').textContent = `${p.rank} of ${people.length}`;
+  // Every egg is the same size, so in egg week this row says how hot it burns
+  // instead of how tall it stands.
+  at.previousElementSibling.textContent = EGG_WEEK ? 'Heat' : 'Height';
+  at.textContent = EGG_WEEK
+    ? (p.points > 0 ? `${Math.round(p.heat * 100)}% · ${['cold and still', 'warm', 'shifting', 'veined with fire', 'cracking'][p.stage] || 'cold and still'}` : 'cold and dark')
+    : `${(p.points * UNIT).toFixed(1)} m`;
+  document.getElementById('who-best').textContent = p.best ? p.best.toLocaleString() : '—';
+  document.getElementById('who-days').textContent = p.daysPlayed ? `${p.daysPlayed}` : '—';
+  const chart = document.getElementById('who-chart'), foot = document.getElementById('who-foot');
+  const mine = p === ME && p.perDay && p.perDay.length;
+  chart.style.display = mine ? '' : 'none';
+  chart.previousElementSibling.style.display = mine ? '' : 'none';
+  foot.style.display = mine ? '' : 'none';
+  if (mine) {
+    drawChart(p.perDay);
+    foot.innerHTML = `<span>${esc(p.perDayFrom || 'day 1')}</span><span>today</span>`;
+  }
+  document.getElementById('who').classList.add('open');
+}
+
+// Your own page if it is you, and the quick panel if it is anybody else.
+const openPerson = (p) => (p === ME && ME.by ? openSolo(p) : openWho(p));
+window.closeWho = () => document.getElementById('who').classList.remove('open');
+
+function drawChart(perDay) { drawChartOn(document.getElementById('who-chart'), perDay); }
+function drawChartOn(c, perDay) {
+  const x = c.getContext('2d');
+  x.clearRect(0, 0, c.width, c.height);
+  const max = Math.max(...perDay, 1);
+  const gap = 3, w = (c.width - gap * (perDay.length - 1)) / perDay.length;
+  perDay.forEach((v, i) => {
+    const hgt = Math.max(2, (v / max) * (c.height - 18));
+    const px = i * (w + gap), py = c.height - 14 - hgt;
+    const g = x.createLinearGradient(0, py, 0, c.height - 14);
+    g.addColorStop(0, '#f0cf6a'); g.addColorStop(1, '#8a6a12');
+    x.fillStyle = v > 0 ? g : '#2a2030';
+    x.fillRect(px, py, w, hgt);
+    if (v === max) {
+      x.fillStyle = '#f6ead2'; x.font = '11px Jost, sans-serif'; x.textAlign = 'center';
+      x.fillText(String(v), px + w / 2, py - 3);
+    }
+  });
+}
+
+// --- the roar ------------------------------------------------------------------
+// The model has no roar clip, so one is made: the dragon rears up and throws a
+// plume of fire, which reads as a roar and costs one particle system.
+const FIRE_N = 140;
+const firePos = new Float32Array(FIRE_N * 3);
+const fireLife = new Float32Array(FIRE_N);
+const fireVel = [];
+for (let i = 0; i < FIRE_N; i++) fireVel.push(new THREE.Vector3());
+const fireGeo = new THREE.BufferGeometry();
+fireGeo.setAttribute('position', new THREE.BufferAttribute(firePos, 3));
+const fire = new THREE.Points(fireGeo, new THREE.PointsMaterial({
+  color: 0xffa23c, size: 1.6, transparent: true, opacity: .9,
+  map: tex.load('fire.png'),            // a soft glow, not a square
+  blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+}));
+fire.frustumCulled = false;
+scene.add(fire);
+let firing = null;
+
+function stir(d) {
+  if (d.roar > 0) return false;
+  d.roar = 1;                                   // counts down in the loop
+  // An egg has no animation to pick: it shifts in the nest instead, which the
+  // loop does from `roar` alone.
+  if (d.egg) return true;
+  // A different move each time, so the hall never looks choreographed.
+  if (d.moveActions.length && d.idleAction) {
+    const pick = d.moveActions[Math.floor(Math.random() * d.moveActions.length)];
+    d.moving = pick;
+    pick.action.reset().setEffectiveWeight(1).fadeIn(0.18).play();
+    d.idleAction.fadeOut(0.18);
+  }
+  return true;
+}
+
+// A stir with fire on the end of it.
+function roar(d) {
+  // Nothing in an egg breathes fire yet. It stirs, and it stirs brighter.
+  if (d.egg) { stir(d); return; }
+  if (!stir(d)) return;
+  // A roar always beats its wings, whatever it happened to be doing.
+  if (d.moveActions.length) {
+    const wings = d.moveActions.find((m) => m.flying) || d.moveActions[0];
+    if (d.moving && d.moving !== wings) d.moving.action.fadeOut(0.15);
+    d.moving = wings;
+    wings.action.reset().setEffectiveWeight(1).fadeIn(0.12).play();
+  }
+  const at = new THREE.Vector3();
+  if (d.head) d.head.getWorldPosition(at); else at.set(d.mesh.position.x, d.h * 0.7, 0);
+  const r = d.mesh.rotation.y;
+  const fwd = new THREE.Vector3(Math.sin(r), 0.04, Math.cos(r)).normalize();
+  firing = { at: at.clone(), fwd, size: d.h * 0.06 };
+  fire.material.size = Math.max(0.8, d.h * 0.075);
+  for (let i = 0; i < FIRE_N; i++) {
+    fireLife[i] = Math.random() * 0.35;          // staggered, so it streams
+    fireVel[i].copy(fwd)
+      .add(new THREE.Vector3((Math.random() - .5) * .28, (Math.random() - .45) * .28, (Math.random() - .5) * .28))
+      .multiplyScalar(d.h * (0.5 + Math.random() * 0.9));
+    firePos[i * 3] = at.x; firePos[i * 3 + 1] = at.y; firePos[i * 3 + 2] = at.z;
+  }
+}
+
+function burn(dt) {
+  if (!firing) return;
+  let alive = 0;
+  for (let i = 0; i < FIRE_N; i++) {
+    fireLife[i] += dt;
+    const t = fireLife[i];
+    if (t < 0) continue;
+    if (t > 1.1) { continue; }
+    alive++;
+    firePos[i * 3] = firing.at.x + fireVel[i].x * t;
+    firePos[i * 3 + 1] = firing.at.y + fireVel[i].y * t - 2.2 * t * t * firing.size;
+    firePos[i * 3 + 2] = firing.at.z + fireVel[i].z * t;
+  }
+  fireGeo.attributes.position.needsUpdate = true;
+  fire.material.opacity = Math.max(0, 0.95 - (fireLife[0] / 1.1));
+  if (!alive) { firing = null; fire.material.opacity = 0; }
+}
+
+// --- the solo page: your dragon, alone, lit like it matters -----------------------
+const solo = {
+  el: document.getElementById('solo'),
+  scene: new THREE.Scene(),
+  camera: new THREE.PerspectiveCamera(32, 1, 0.1, 400),
+  renderer: new THREE.WebGLRenderer({ antialias: true, alpha: true, canvas: document.getElementById('solo-canvas') }),
+  mixer: null, dragon: null, embers: null, spin: 0, open: false,
+};
+solo.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+solo.scene.environment = scene.environment;
+solo.scene.environmentIntensity = 0.5;
+solo.scene.add(new THREE.AmbientLight(0x8d7f9c, 1.6));
+{
+  const key = new THREE.DirectionalLight(0xffe6c0, 3.4); key.position.set(-6, 9, 8); solo.scene.add(key);
+  const rim = new THREE.DirectionalLight(0x87a8ff, 2.2); rim.position.set(7, 4, -6); solo.scene.add(rim);
+  const up = new THREE.PointLight(0xffb866, 60, 40, 2); up.position.set(0, 0.6, 3); solo.scene.add(up);
+}
+
+// Embers drifting up, because an empty frame around one dragon looks unfinished.
+{
+  const N = 90, pos = new Float32Array(N * 3), speed = [];
+  for (let i = 0; i < N; i++) {
+    pos[i * 3] = (Math.random() - .5) * 14;
+    pos[i * 3 + 1] = Math.random() * 10;
+    pos[i * 3 + 2] = (Math.random() - .5) * 10 - 2;
+    speed.push(0.25 + Math.random() * 0.6);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  solo.embers = new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0xffb46a, size: 0.14, map: tex.load('fire.png'), transparent: true,
+    opacity: .75, blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  solo.embers.userData.speed = speed;
+  solo.scene.add(solo.embers);
+}
+
+function openSolo(p) {
+  // In egg week there is no dragon to show and the egg layer takes the stage
+  // (#solo.egg), so everything from here to the house banner is skipped.
+  const template = !EGG_WEEK && dragons[0] && dragons[0].mesh;
+  if (template) buildSoloDragon(p, template);
+  dressSolo(p);
+}
+
+function buildSoloDragon(p, template) {
+  if (solo.dragon) solo.scene.remove(solo.dragon);
+  const m = cloneSkinned(template);
+  // Standard size here: this page is about one dragon, not about comparing.
+  // The clone arrives at the hall's scale, so this adjusts it rather than
+  // replacing it - setting the scale outright shrinks it back to crumb size.
+  const box = new THREE.Box3().setFromObject(m);
+  m.scale.multiplyScalar(6 / (box.max.y - box.min.y));
+  m.updateWorldMatrix(true, true);
+  const box2 = new THREE.Box3().setFromObject(m);
+  // Shift it by the gap between its own middle and the origin, rather than
+  // moving it to the origin outright - it still carries the hall's position.
+  const mid = box2.getCenter(new THREE.Vector3());
+  m.position.x -= mid.x;
+  m.position.z -= mid.z;
+  m.position.y -= box2.min.y;
+  m.updateWorldMatrix(true, true);
+  solo.height = box2.max.y - box2.min.y;
+  solo.width = box2.max.x - box2.min.x;      // wings make this the binding one
+  const tint = new THREE.Color(houseOf(p).colour).lerp(new THREE.Color(0xffffff), 0.22);
+  m.traverse((o) => {
+    if (!o.isMesh) return;
+    o.material = o.material.clone();
+    Object.assign(o.material, skins()[o.material.name] || {});
+    o.material.color = tint;
+    o.material.needsUpdate = true;
+  });
+  solo.scene.add(m);
+  solo.dragon = m;
+  solo.mixer = new THREE.AnimationMixer(m);
+  const clip = soloClips.idle;
+  if (clip) solo.mixer.clipAction(clip).play();
+  if (soloClips.flap) {
+    // A wingbeat every few seconds, so the page is never still.
+    solo.flap = solo.mixer.clipAction(soloClips.flap);
+    solo.flapIn = 3;
+  }
+  // Walk through the wingbeat once, invisibly, and remember the largest box it
+  // ever occupies. Everything is framed against that, not the standing pose.
+  solo.frameBox = new THREE.Box3().setFromObject(m);
+  if (soloClips.flap && solo.mixer) {
+    const probe = solo.mixer.clipAction(soloClips.flap);
+    probe.play();
+    for (let t = 0; t <= soloClips.flap.duration; t += soloClips.flap.duration / 8) {
+      probe.time = t;
+      solo.mixer.update(0);
+      m.updateWorldMatrix(true, true);
+      solo.frameBox.union(new THREE.Box3().setFromObject(m));
+    }
+    probe.stop();
+    if (clip) solo.mixer.clipAction(clip).reset().play();
+    solo.mixer.update(0);
+  }
+  solo.spin = 0;
+}
+
+// Their own page, filled in. Everything here is what the bot sent back for
+// them and nothing else; the long lists only ever arrive for the one person the
+// address named.
+function dressSolo(p) {
+  const h = houseOf(p);
+  // Egg week shows the egg instead of the dragon, and no house at all - that is
+  // the whole suspense of the week.
+  solo.el.classList.toggle('egg', EGG_WEEK);
+  if (solo.dragon) solo.dragon.visible = !EGG_WEEK;
+
+  // Dress the room in their house before anything else is drawn.
+  solo.el.style.setProperty('--house-bg', `url('cards/card-${h.art}.png')`);
+  solo.el.style.setProperty('--house-glow', h.glow);
+  document.getElementById('house-crest').src = h.crest;
+  document.getElementById('house-name').textContent = EGG_WEEK ? 'Egg week' : h.name;
+  document.getElementById('house-words').textContent = EGG_WEEK ? 'No house until it hatches' : h.words;
+  solo.el.style.setProperty('--ring', EGG_WEEK ? '#d3a625' : h.ring);
+  // Their Discord picture, from Discord's own public CDN, with a drawn initial
+  // for anybody whose picture the bot has never seen.
+  setFace(document.getElementById('solo-face'), p);
+
+  document.getElementById('solo-house').innerHTML = EGG_WEEK
+    ? '🥚 Egg week'
+    : `<img src="${h.crest}" alt="" style="width:15px;vertical-align:-2px"> ${esc(h.name)}`;
+  document.getElementById('solo-name').textContent = p.name;
+  document.getElementById('solo-dragon').textContent = EGG_WEEK ? 'unhatched' : (p.dragon || '—');
+  document.getElementById('solo-points').textContent = p.points.toLocaleString();
+  document.getElementById('solo-rank').textContent = `${p.rank}/${people.length}`;
+  // Every egg is the same size: in egg week this is how hot theirs burns.
+  const height = document.getElementById('solo-height');
+  height.textContent = EGG_WEEK ? `${Math.round(p.heat * 100)}%` : `${(p.points * UNIT).toFixed(1)} m`;
+  if (height.nextElementSibling) height.nextElementSibling.textContent = EGG_WEEK ? 'heat' : 'height';
+  const perDay = p.perDay || [];
+  document.getElementById('solo-best').textContent = (p.best || 0).toLocaleString();
+
+  // What is paying double right now, and until when.
+  const wants = (p.crave || []).map((c) => `<b>${esc(c)}</b>`).join(' and ');
+  const until = p.craveUntil ? new Date(p.craveUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+  document.getElementById('solo-crave').innerHTML = !wants
+    ? '🥚 Nothing in particular just now — every game pays as normal.'
+    : EGG_WEEK
+      ? `🥚 Your egg is hungry for ${wants} — only that feeds it this week${until ? `, until <b>${esc(until)}</b>` : ''}.`
+      : `🐉 Your dragon hungers for ${wants} — double points${until ? ` until <b>${esc(until)}</b>` : ''}. Everything else pays as normal.`;
+
+  // Today, against the limits.
+  document.getElementById('solo-today').innerHTML = (p.today || []).map((t) => {
+    const full = t.cap > 0 && t.got >= t.cap;
+    return `<div class="quota">
+      <div class="top"><span>${esc(t.group)}</span><span>${t.got} / ${t.cap}</span></div>
+      <div class="sub">${full ? 'full for today — come back tomorrow' : `${Math.max(0, t.cap - t.got)} left today`} · ${esc(t.games)}</div>
+      <div class="bar"><i class="${full ? 'full' : ''}" style="width:${Math.round(Math.min(1, t.cap ? t.got / t.cap : 0) * 100)}%"></i></div>
+    </div>`;
+  }).join('') || '<p class="ach"><span>No limits are running just now.</span></p>';
+
+  // The collection, greyed where it is still missing.
+  const cards = p.cards || [];
+  const held = cards.filter((c) => c.have > 0).length;
+  document.getElementById('solo-cards').innerHTML = cards.map((c, i) => `
+    <figure class="${c.have ? '' : 'none'}" data-card="${i}">
+      <img src="${esc(c.art)}" alt="${esc(c.name)}" loading="lazy">
+      ${c.have > 1 ? `<b>×${c.have}</b>` : ''}
+    </figure>`).join('');
+  shownCards = cards;
+  solo.el.querySelectorAll('.sub-count').forEach((e) => e.remove());
+  if (cards.length) {
+    document.getElementById('solo-cards').insertAdjacentHTML('beforebegin',
+      `<p class="sub-count">${held} of ${cards.length} kinds</p>`);
+  }
+
+  document.getElementById('solo-ach').innerHTML = (p.achievements || []).length
+    ? p.achievements.map((a) => `<div class="ach">${esc(a.icon)} <b>${esc(a.title)}</b> <span>${esc(a.what)}</span></div>`).join('')
+    : '<p class="ach"><span>None yet — the month is young.</span></p>';
+
+  const by = p.by || [];
+  const top = by.length ? Math.max(1, by[0].points) : 1;
+  document.getElementById('solo-by').innerHTML = by.length
+    ? by.map((r) => `
+    <div class="byrow"><span class="g">${esc(r.game)}</span>
+      <span class="bar"><i style="width:${Math.round(r.points / top * 100)}%"></i></span>
+      <span class="n">${r.points.toLocaleString()}</span></div>`).join('')
+    : '<p class="ach"><span>Nothing yet this month.</span></p>';
+  drawChartOn(document.getElementById('solo-chart'), perDay.length ? perDay : [0]);
+
+  // The egg's five pictures are the calendar's, not the scoreboard's: nobody's
+  // egg is splitting open on day one. Points only set how hot it glows.
+  if (EGG_WEEK) dressEgg(p);
+  soloPerson = p;
+  solo.el.classList.add('open');
+  solo.open = true;
+  sizeSolo();
+  // Again once the browser has actually laid the card out and the pose has
+  // settled: the first measurement happens before either is true.
+  requestAnimationFrame(() => sizeSolo());
+  setTimeout(sizeSolo, 350);
+}
+function sizeSolo() {
+  const w = solo.el.clientWidth, h = solo.el.clientHeight;
+  solo.renderer.setSize(w, h, false);
+  solo.camera.aspect = w / h;
+  solo.camera.updateProjectionMatrix();
+
+  const tall = solo.height || 6, wideModel = solo.width || 7;
+  const card = document.getElementById('solo-card');
+  const wide = w > 760;
+
+  // Desktop: the dragon has the width beside the card. Phone: it has the height
+  // above it. Either way the frame is set from the model, with room for a
+  // wingbeat, and the card's own size decides where the middle is.
+  const freeW = wide ? (w - card.offsetWidth) / w : 1;
+  const freeH = wide ? 1 : Math.max(0.42, (h - card.offsetHeight) / h);
+  const byHeight = tall * 1.7 / freeH;
+  const byWidth = wideModel * 1.7 / freeW / solo.camera.aspect;
+  const visH = Math.max(byHeight, byWidth);
+  const visW = visH * solo.camera.aspect;
+  const dist = (visH / 2) / Math.tan((solo.camera.fov * Math.PI / 180) / 2);
+
+  const midX = wide ? (w - card.offsetWidth) / 2 / w : 0.5;   // of the window
+  const midY = wide ? 0.5 : freeH / 2;
+  // Camera below the middle puts the dragon above it, which is where the
+  // free space is on a phone.
+  const eye = new THREE.Vector3((0.5 - midX) * visW, tall * 0.5 + (midY - 0.5) * visH, dist);
+  solo.camera.position.copy(eye);
+  solo.camera.lookAt(eye.x, eye.y, 0);
+
+  // Then correct by what is actually on screen. Distance first, then position,
+  // re-measuring in between - changing the zoom moves everything else.
+  if (!solo.dragon) return;
+  const want = wide ? { x: midX, y: 0.5, h: 0.58 } : { x: 0.5, y: 0.30, h: 0.34 };
+  const seen = () => {
+    solo.camera.updateProjectionMatrix();
+    solo.camera.updateMatrixWorld();
+    const box = solo.frameBox || new THREE.Box3().setFromObject(solo.dragon);
+    const pts = [
+      [box.min.x, box.min.y], [box.max.x, box.max.y], [box.min.x, box.max.y], [box.max.x, box.min.y],
+    ].map(([x, y]) => new THREE.Vector3(x, y, 0).project(solo.camera));
+    const ys = pts.map((v) => v.y), xs = pts.map((v) => v.x);
+    return {
+      h: (Math.max(...ys) - Math.min(...ys)) / 2,
+      x: (Math.max(...xs) + Math.min(...xs)) / 2,
+      y: (Math.max(...ys) + Math.min(...ys)) / 2,
+    };
+  };
+  for (let pass = 0; pass < 4; pass++) {
+    const a = seen();
+    if (a.h > 0.02) solo.camera.position.z *= a.h / want.h;   // zoom to the right size
+    const b = seen();                                          // then look at it again
+    const vh = 2 * solo.camera.position.z * Math.tan((solo.camera.fov * Math.PI / 180) / 2);
+    solo.camera.position.x += (b.x - (want.x * 2 - 1)) * (vh * solo.camera.aspect) / 2;
+    solo.camera.position.y += (b.y - (1 - want.y * 2)) * vh / 2;
+    solo.camera.lookAt(solo.camera.position.x, solo.camera.position.y, 0);
+  }
+}
+
+addEventListener('resize', () => solo.open && sizeSolo());
+// Search: type a name, pick a dragon, land on their page.
+{
+  const q = document.getElementById('q'), hits = document.getElementById('hits');
+  const show = (list) => {
+    hits.innerHTML = list.map((p) =>
+      `<button data-rank="${p.rank}" data-name="${esc(p.name)}">${esc(p.name)}<span>${p.points.toLocaleString()}</span></button>`).join('');
+    hits.classList.toggle('open', list.length > 0);
+  };
+  q.addEventListener('input', () => {
+    const want = q.value.trim().toLowerCase();
+    show(want ? people.filter((p) => p.name.toLowerCase().includes(want)).slice(0, 8) : []);
+  });
+  hits.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const p = people.find((x) => x.name === b.dataset.name && String(x.rank) === b.dataset.rank);
+    if (!p) return;
+    q.value = ''; show([]);
+    const d = dragons.find((x) => x.p === p);
+    if (d) frame(d.mesh.position.x, Math.max(d.h * 3, 14), d.h);
+    openPerson(p);
+  });
+  q.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') hits.querySelector('button')?.click();
+    if (e.key === 'Escape') { q.value = ''; show([]); }
+  });
+  addEventListener('click', (e) => { if (!e.target.closest('.find')) show([]); });
+}
+
+// The phone's dropdown drives the same actions as the buttons.
+document.getElementById('pick').addEventListener('change', (e) => {
+  const [kind, what] = e.target.value.split(':');
+  if (kind === 'v') ({ tallest: fitAll, all: wholeLine, me: findMe, top: () => document.getElementById('top').click() })[what]();
+  else document.querySelector(`.house[data-house="${what}"]`)?.click();
+});
+
+// --- the card viewer --------------------------------------------------------------
+let shownCards = [], viewingAt = 0;
+const viewer = document.getElementById('viewer');
+function showCard(i) {
+  const c = shownCards[i];
+  if (!c) return;
+  viewingAt = i;
+  document.getElementById('viewer-art').src = c.art;
+  document.getElementById('viewer-rarity').textContent = c.rarityName || '';
+  document.getElementById('viewer-name').textContent = c.name || c.key;
+  document.getElementById('viewer-worth').textContent = `worth ${c.worth} points when caught`;
+  document.getElementById('viewer-copies').innerHTML = c.have
+    ? c.copies.map((o) => `<div class="copy"><b>${esc(o.label)}</b><span>caught on the ${o.day}${['th','st','nd','rd'][o.day % 10 > 3 || (o.day > 10 && o.day < 14) ? 0 : o.day % 10]}</span></div>`).join('')
+    : '<div class="copy"><span>You have not caught one of these yet.</span></div>';
+  viewer.classList.add('open');
+}
+document.getElementById('solo-cards').addEventListener('click', (e) => {
+  const fig = e.target.closest('figure');
+  if (fig) showCard(Number(fig.dataset.card));
+});
+document.getElementById('viewer-close').onclick = () => viewer.classList.remove('open');
+document.getElementById('viewer-prev').onclick = () => showCard((viewingAt - 1 + shownCards.length) % shownCards.length);
+document.getElementById('viewer-next').onclick = () => showCard((viewingAt + 1) % shownCards.length);
+addEventListener('keydown', (e) => {
+  if (!viewer.classList.contains('open')) return;
+  if (e.key === 'Escape') viewer.classList.remove('open');
+  if (e.key === 'ArrowLeft') document.getElementById('viewer-prev').click();
+  if (e.key === 'ArrowRight') document.getElementById('viewer-next').click();
+});
+
+// --- the guide ---------------------------------------------------------------------
+{
+  // The four, in slot order, wearing whatever this month calls them.
+  document.getElementById('guide-houses').innerHTML = HOUSE_KEYS.map((k) => {
+    const h = HOUSES[k];
+    return `<figure><img src="guide/dragon-${h.art}.png" alt="${esc(h.name)}"><b>${esc(h.name)}</b><span>${esc(h.words)}</span></figure>`;
+  }).join('');
+  // And every card really in play, from the bot - not a list kept in step here.
+  document.getElementById('guide-deck').innerHTML = (BODY.deck || [])
+    .map((c) => `<img src="cards/${esc(c.art || `card-${c.slug}.png`)}" alt="${esc(c.name)}" loading="lazy">`).join('');
+  const guideEl = document.getElementById('guide');
+  document.getElementById('guide-back').onclick = () => guideEl.classList.remove('open');
+  window.openGuide = () => guideEl.classList.add('open');
+}
+
+// --- the house page ----------------------------------------------------------------
+const housesEl = document.getElementById('houses');
+let housePicked = null;
+function showHouses(which) {
+  // The four totals are the bot's, so a house with nobody in it yet is still
+  // one of the four rather than missing from the list.
+  const standings = (BODY.houses || []).slice().sort((a, b) => b.points - a.points);
+  const most = Math.max(1, ...standings.map((h) => h.points));
+  document.getElementById('houses-standings').innerHTML = standings.map((row) => {
+    const h = HOUSES[row.key] || EGG_HOUSE;
+    const c = h.colour.toString(16).padStart(6, '0');
+    return `<div class="hrow">
+        <span class="hn"><img src="${h.crest}" alt="">${esc(h.name)}</span>
+        <span class="track"><i style="width:${Math.round(row.points / most * 100)}%;background:linear-gradient(90deg,#${c},#d3a625)"></i></span>
+        <span class="hp">${row.points.toLocaleString()}</span></div>`;
+  }).join('');
+
+  housePicked = which || housePicked || (ME && ME.house) || HOUSE_KEYS[0];
+  document.getElementById('houses-pick').innerHTML = HOUSE_KEYS
+    .map((k) => `<button data-h="${k}" class="${k === housePicked ? 'on' : ''}">${esc(HOUSES[k].name)}</button>`).join('');
+
+  const members = people.filter((p) => p.house === housePicked).sort((a, b) => b.points - a.points);
+  const capTotal = (p) => p.cap || 0;
+  const gotTotal = (p) => p.got || 0;
+  document.getElementById('houses-note').textContent = EGG_WEEK
+    ? 'Nobody has a house until the eggs hatch — then everybody is dealt one, so the four come out level on the week they have played.'
+    : `${members.length} members · ${members.reduce((n, p) => n + p.points, 0).toLocaleString()} points this month · what each has left today`;
+  document.getElementById('houses-table').innerHTML =
+    `<div class="trow head"><span></span><span>Member</span><span class="num month">This month</span><span class="num">Today</span><span class="cap">Left</span></div>` +
+    members.map((p, i) => {
+      const got = gotTotal(p), cap = capTotal(p), left = Math.max(0, cap - got);
+      return `<div class="trow ${p === ME ? 'me' : ''}">
+        <span class="r">${i + 1}</span>
+        <span class="n">${esc(p.name)}</span>
+        <span class="num month">${p.points.toLocaleString()}</span>
+        <span class="num">${got} / ${cap}</span>
+        <span class="cap ${left === 0 ? 'full' : ''}">${left === 0 ? 'done' : left}</span>
+      </div>`;
+    }).join('');
+  housesEl.classList.add('open');
+}
+document.getElementById('houses-pick').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (b) showHouses(b.dataset.h);
+});
+document.getElementById('houses-back').onclick = () => housesEl.classList.remove('open');
+
+// The leaderboard: everyone, ranked, with you marked.
+const board = document.getElementById('board');
+document.getElementById('solo-board').onclick = () => {
+  document.getElementById('board-list').innerHTML = people.map((p) => `
+    <div class="brow ${p === ME ? 'me' : ''}">
+      <span class="r">${p.rank}</span>
+      <span class="n"><img src="${houseOf(p).crest}" alt="">${esc(p.name)}</span>
+      <span class="p">${p.points.toLocaleString()}</span>
+    </div>`).join('');
+  board.classList.add('open');
+};
+document.getElementById('board-back').onclick = () => board.classList.remove('open');
+
+// --- the egg's week ---------------------------------------------------------
+// Egg week runs to the hatch, and the art moves with the days: five pictures
+// over seven, cold and dark for the first two and splitting open on the last.
+//
+// BOTH ENDS OF THE WEEK COME FROM THE BOT. The hatch moment is a setting
+// (VIZIER_MONTH_HATCH), so a correction to it needs no release and no edit
+// here; and somebody who claimed their egg late is on a watch of their own, so
+// their own two dates are used for their own page rather than the month's.
+//
+// The week toggle and the day stepper that were here are gone with the preview
+// they belonged to: which state the page is in is the bot's decision, and the
+// day is the day it really is.
+const STAGE_BY_DAY = [1, 1, 2, 3, 3, 4, 5];         // day 1-7
+
+function eggDay(p) {
+  const from = (p && p.eggFrom) || (HATCH_AT - WEEK_DAYS * 864e5);
+  const until = (p && p.eggUntil) || HATCH_AT;
+  const span = Math.max(864e5, until - from);
+  const through = (Date.now() - from) / span;
+  return Math.max(1, Math.min(7, Math.floor(through * 7) + 1));
+}
+const eggStage = (p) => STAGE_BY_DAY[eggDay(p) - 1];
+
+function dressEgg(p) {
+  const day = eggDay(p);
+  document.getElementById('egg-img').src = `eggs/egg-${STAGE_BY_DAY[day - 1]}.png`;
+  // Hotter the more its owner has fed it, but the crack is the calendar's.
+  document.getElementById('egg-layer').style.setProperty('--heat', (0.45 + (p ? p.heat : 0) * 0.75).toFixed(3));
+  const left = 7 - day;
+  document.getElementById('egg-when').textContent = left > 0
+    ? `Day ${day} of 7 · it splits open in ${left} ${left === 1 ? 'day' : 'days'}`
+    : 'Hatch day · it splits open at noon';
+}
+
+// The framing is automatic, but a dragon mid-wingbeat can still crowd the
+// frame, so people get a zoom of their own.
+const soloZoom = (f) => {
+  solo.camera.position.z *= f;
+  solo.camera.lookAt(solo.camera.position.x, solo.camera.position.y, 0);
+};
+document.getElementById('solo-out').onclick = () => soloZoom(1.25);
+document.getElementById('solo-in').onclick = () => soloZoom(0.8);
+
+const closeSolo = () => { solo.el.classList.remove('open'); solo.open = false; };
+document.getElementById('to-hall').onclick = closeSolo;
+document.getElementById('to-board').onclick = () => document.getElementById('solo-board').click();
+document.getElementById('back-mine').onclick = () => { if (ME) openSolo(ME); };
+document.getElementById('hall-board').onclick = () => document.getElementById('solo-board').click();
+document.getElementById('to-houses').onclick = () => showHouses();
+document.getElementById('hall-houses').onclick = () => showHouses();
+document.getElementById('to-guide').onclick = () => window.openGuide();
+document.getElementById('hall-guide').onclick = () => window.openGuide();
+// Their own Discord picture, from Discord's own public CDN, with a drawn
+// initial for anybody whose picture the bot has never seen - or whose picture
+// will not load.
+function setFace(el, p) {
+  el.onerror = () => { el.onerror = null; el.src = facePic(p); };
+  el.src = p.avatar || facePic(p);
+}
+function facePic(p) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  const col = houseOf(p).colour.toString(16).padStart(6, '0');
+  const g = x.createLinearGradient(0, 0, 128, 128);
+  g.addColorStop(0, `#${col}`); g.addColorStop(1, '#1b1420');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+  x.fillStyle = '#f6ead2'; x.font = '600 58px Jost, sans-serif';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText((p.name.match(/\p{L}/u) || ['?'])[0].toUpperCase(), 64, 68);
+  return c.toDataURL();
+}
+
+let soloClips = {};
+let soloPerson = null;
+
+// --- the scale strip -------------------------------------------------------------
+const strip = document.getElementById('strip');
+function drawStrip() {
+  const list = dragons.filter((d) => d.mesh.visible);
+  if (!list.length) return;
+  const r = Math.min(devicePixelRatio, 2);
+  const w = strip.clientWidth, h = strip.clientHeight;
+  strip.width = w * r; strip.height = h * r;
+  const x = strip.getContext('2d');
+  x.setTransform(r, 0, 0, r, 0, 0);
+  x.clearRect(0, 0, w, h);
+
+  const max = Math.max(...list.map((d) => d.p.points));
+  const gap = Math.max(1, Math.min(4, w / list.length * 0.25));
+  const bw = (w - gap * (list.length - 1)) / list.length;
+  const shown = dragons.filter((d) => d.mesh.visible);
+  list.forEach((d, i) => {
+    const bh = Math.max(2, (d.p.points / max) * (h - 16));
+    const px = i * (bw + gap), py = h - 4 - bh;
+    const here = shown[at] === d;
+    x.fillStyle = here ? '#ffd166' : `#${houseOf(d.p).colour.toString(16).padStart(6, '0')}`;
+    x.globalAlpha = here ? 1 : 0.65;
+    x.fillRect(px, py, bw, bh);
+    if (here) {
+      x.globalAlpha = 1;
+      x.fillStyle = '#f6ead2';
+      x.font = '11px Jost, sans-serif';
+      x.textAlign = 'center';
+      x.fillText(d.p.points.toLocaleString(), Math.min(w - 20, Math.max(20, px + bw / 2)), py - 4);
+    }
+  });
+  x.globalAlpha = 1;
+}
+strip.addEventListener('click', (e) => {
+  const list = dragons.filter((d) => d.mesh.visible);
+  if (!list.length) return;
+  const i = Math.floor((e.offsetX / strip.clientWidth) * list.length);
+  at = Math.max(0, Math.min(list.length - 1, i));
+  const d = list[at];
+  frame(d.mesh.position.x, Math.max(d.h * 2.6, 12), d.h);
+  document.getElementById('count').textContent =
+    `${d.p.name} · ${d.p.points.toLocaleString()} points · ${at + 1} of ${list.length}`;
+  openPerson(d.p);
+  drawStrip();
+});
+addEventListener('resize', drawStrip);
+
+// --- the loop ---------------------------------------------------------------------
+const v = new THREE.Vector3();
+window.__hall = { dragons, camera, controls, THREE, solo };
+function tick() {
+  controls.update();
+  const dt = clock.getDelta();
+  const now = performance.now();
+  for (const m of mixers) m.update(dt);
+  burn(dt);
+  for (const d of dragons) {
+    if (d.egg) {
+      // An egg shifts in the nest every so often, and its glow breathes. Both
+      // are the same size for everybody: only the brightness is theirs.
+      if (!d.mesh.visible) continue;
+      if (d.roar <= 0) {
+        d.next -= dt;
+        if (d.next <= 0) { d.roar = 1; d.next = 9 + Math.random() * 20; }
+      } else {
+        d.roar = Math.max(0, d.roar - dt / 1.4);
+      }
+      const shift = Math.sin((1 - d.roar) * Math.PI) * (d.roar > 0 ? 1 : 0);
+      d.mesh.position.y = d.baseY + shift * EGG_H * 0.07;
+      d.mesh.material.rotation = shift * 0.08;
+      const breathe = 1 + Math.sin(now / 900 + d.phase) * 0.05 * (0.4 + d.heat);
+      d.glow.scale.set(d.glowSize * breathe, d.glowSize * breathe, 1);
+      d.glow.material.opacity = Math.min(1, d.glowOpacity * (0.9 + 0.2 * shift) * breathe);
+      continue;
+    }
+    // Left alone, each one stirs every twenty seconds or so, at its own moment.
+    if (d.roar <= 0 && d.mesh.visible) {
+      d.next -= dt;
+      if (d.next <= 0) {
+        stir(d);
+        d.next = 12 + Math.random() * 26;
+      }
+    }
+    if (d.roar <= 0) continue;
+    d.roar = Math.max(0, d.roar - dt / 1.1);
+    // Up on the way out, down on the way back: a lunge, not a wobble.
+    const k = Math.sin((1 - d.roar) * Math.PI);
+    // Only a wingbeat lifts it off the ground; a walk keeps its feet down.
+    const airborne = d.moving && d.moving.flying;
+    d.mesh.rotation.x = (airborne ? -0.22 : -0.05) * k;
+    d.mesh.position.y = d.baseY + (airborne ? d.h * 0.06 : 0) * k;
+    if (d.roar === 0 && d.idleAction) {
+      if (d.moving) d.moving.action.fadeOut(0.3);
+      d.moving = null;
+      d.idleAction.reset().fadeIn(0.3).play();
+      d.mesh.rotation.x = 0;
+      d.mesh.position.y = d.baseY;
+    }
+  }
+  // Labels follow their dragon's head in screen space.
+  const shown = [];
+  // Biggest first, so when two labels collide it is the smaller one that waits.
+  for (const d of dragons) {
+    if (!d.mesh.visible) continue;
+    v.set(d.mesh.position.x, d.h * 1.06, 0).project(camera);
+    const px = d.h / (camera.position.distanceTo(d.mesh.position) * 2 * Math.tan(camera.fov * Math.PI / 360)) * innerHeight;
+    const on = (v.z < 1 && Math.abs(v.x) < 1.25 && px > 26) || d === hovered;
+    d.el.style.display = on ? '' : 'none';
+    if (!on) continue;
+    const lx = (v.x * 0.5 + 0.5) * innerWidth;
+    const ly = (-v.y * 0.5 + 0.5) * innerHeight - 8;
+    // Two labels in the same place read as neither, so the later one waits.
+    const w = d.el.offsetWidth || 90, hgt = 18;
+    const clash = shown.some((r) => Math.abs(r.x - lx) < (r.w + w) / 2 && Math.abs(r.y - ly) < hgt);
+    if (clash && d !== hovered) { d.el.style.display = 'none'; continue; }
+    shown.push({ x: lx, y: ly, w });
+    d.el.style.left = `${lx}px`;
+    d.el.style.top = `${ly}px`;
+  }
+  for (const el of guideLabels) {
+    v.set(controls.target.x, Number(el.dataset.y), -40).project(camera);
+    const y = (-v.y * 0.5 + 0.5) * innerHeight;
+    const on = v.z < 1 && y > 60 && y < innerHeight - 90;
+    el.style.display = on ? '' : 'none';
+    if (on) el.style.top = `${y}px`;
+  }
+  renderer.render(scene, camera);
+  if (solo.open) {
+    solo.spin += dt * 0.25;
+    if (solo.dragon) solo.dragon.rotation.y = Math.sin(solo.spin) * 0.5 + 0.1;
+    if (solo.mixer) solo.mixer.update(dt);
+    if (solo.flap) {
+      solo.flapIn -= dt;
+      if (solo.flapIn <= 0) { solo.flap.reset().setLoop(THREE.LoopOnce).play(); solo.flapIn = 5 + Math.random() * 5; }
+    }
+    const pos = solo.embers.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      let y = pos.getY(i) + solo.embers.userData.speed[i] * dt;
+      if (y > 11) y = -1;
+      pos.setY(i, y);
+    }
+    pos.needsUpdate = true;
+    solo.renderer.render(solo.scene, solo.camera);
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

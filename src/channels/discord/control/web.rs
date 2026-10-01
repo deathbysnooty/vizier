@@ -1328,13 +1328,18 @@ fn asset(kind: &'static str, body: Cow<'static, str>) -> Response {
 async fn security_headers(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     let h = res.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'self' 'unsafe-inline'; \
-             frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        ),
-    );
+    // A page that has already set a policy of its own keeps it: the public live
+    // page needs three.js from a CDN and carries its script inside the one
+    // file, which this policy refuses. Everything else gets this one.
+    if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; img-src 'self' https://cdn.discordapp.com data:; style-src 'self' 'unsafe-inline'; \
+                 frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            ),
+        );
+    }
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));

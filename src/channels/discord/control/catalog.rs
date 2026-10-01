@@ -333,6 +333,17 @@ pub fn sections() -> Vec<Section> {
                     Kind::Text,
                     "C9D3DC,F0D98A,D96A6A,6E7681",
                 ),
+                toggle(
+                    "VIZIER_LIVE",
+                    "Live page: on",
+                    "The public Hall of Dragons, in one switch. ON serves it at `/live` with no sign-in: anyone with the \
+                     link can open it, and what it shows is display names, Discord pictures, points, ranks, houses, the \
+                     cards people hold and the badges earned from those same numbers - nothing else, and no member ids \
+                     anywhere in it. Each person's own page is `/live/u/<their Discord id>`, which is the link /egg and \
+                     /livepoints hand them. OFF answers every one of those addresses with a plain Not Found. The page's \
+                     own pictures and models are pushed to `<runtime>/live` (scripts/push-live.sh), so a change to the \
+                     page itself needs no release.",
+                ),
                 setting(
                     "VIZIER_LIVE_URL",
                     "Live page",
