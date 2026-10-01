@@ -714,7 +714,7 @@ const deckWith = (held) => (BODY.deck || []).map((k) => {
     key: k.slug, name: k.name, rarity: k.rarity, rarityName: k.rarity_name, worth: k.worth,
     // The picture's name comes from the bot; where it is kept is this page's
     // own business.
-    art: `cards/${k.art || `card-${k.slug}.png`}`,
+    art: `cards/${k.art || `${k.slug}.png`}`,
     have: mine.length,
     copies: mine.map((c) => ({ serial: c.serial, label: c.serial_label, day: c.day })),
   };
@@ -1736,7 +1736,7 @@ addEventListener('keydown', (e) => {
   }).join('');
   // And every card really in play, from the bot - not a list kept in step here.
   document.getElementById('guide-deck').innerHTML = (BODY.deck || [])
-    .map((c) => `<img src="cards/${esc(c.art || `card-${c.slug}.png`)}" alt="${esc(c.name)}" loading="lazy">`).join('');
+    .map((c) => `<img src="cards/${esc(c.art || `${c.slug}.png`)}" alt="${esc(c.name)}" loading="lazy">`).join('');
   const guideEl = document.getElementById('guide');
   document.getElementById('guide-back').onclick = () => guideEl.classList.remove('open');
   window.openGuide = () => guideEl.classList.add('open');

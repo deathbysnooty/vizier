@@ -300,6 +300,8 @@ pub struct Card {
     /// Per shared limit: label, used today, the ceiling.
     pub caps: Vec<(&'static str, i64, i64)>,
     pub cards: usize,
+    /// How many different kinds those copies cover.
+    pub kinds: usize,
     pub cards_in_play: usize,
     pub frozen: bool,
 }
@@ -369,7 +371,15 @@ pub fn card_text(card: &Card, now: i64) -> String {
             if left == 0 { " · maxed".to_string() } else { format!(" · {} left", left) }
         ));
     }
-    text.push_str(&format!("\n🃏 **{}** of {} cards", card.cards, card.cards_in_play));
+    // Copies first, then how much of the deck they cover: "41 of 12 cards" was
+    // counting copies against kinds and reading as nonsense.
+    text.push_str(&format!(
+        "\n🃏 **{}** card{} · **{}** of {} kinds",
+        card.cards,
+        if card.cards == 1 { "" } else { "s" },
+        card.kinds,
+        card.cards_in_play
+    ));
     if card.frozen {
         text.push_str(
             "\n-# You're opted out, so nothing you play is counting towards the month. Press **Join the games** to pick up \
@@ -512,6 +522,15 @@ fn month_points(user: u64, since: i64) -> i64 {
     ledger_points + pool
 }
 
+/// Which day of its own week an egg is on, 1 to 7. A member who claimed late
+/// has their own week, so this counts from their claim rather than the month's
+/// start - the same rule the live page dates its five pictures by.
+fn egg_day(egg: &super::egg_store::Egg, now: i64) -> i64 {
+    let week = (egg.hatch_ts - egg.claimed_ts).max(1);
+    let through = (now - egg.claimed_ts).clamp(0, week) as f64 / week as f64;
+    ((through * 7.0).floor() as i64 + 1).clamp(1, 7)
+}
+
 /// `/dragon` and `/egg`, which are one command. Whispered, so a channel is
 /// never cluttered by fifty people checking their own egg.
 pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
@@ -526,8 +545,10 @@ pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
         let _ = command.create_response(&ctx.http, whisper(no_egg_text())).await;
         return;
     };
-    let since = egg.claimed_ts.max(ledger::month_start(now));
-    let points = month_points(user, since);
+    // The month, not the moment the egg was claimed: the hall, the live page
+    // and /livepoints all count from the month's start, and an egg that says
+    // "warmth 0" beside a page saying 18 is the same number told two ways.
+    let points = month_points(user, ledger::month_start(now));
     let rank = super::house::db().and_then(|db| {
         let conn = db.lock();
         ledger::server_rank(&conn, user, ledger::month_start(now), i64::MAX).ok().flatten()
@@ -542,10 +563,11 @@ pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
     let (cards, in_play) = match super::frog_store::db() {
         Some(db) => {
             let conn = db.lock();
-            let mine = super::frog_store::cards_of(&conn, user).len();
-            (mine, super::frog_store::wizards(&conn).into_iter().filter(|w| w.enabled).count())
+            let mine = super::frog_store::cards_of(&conn, user);
+            let kinds: std::collections::HashSet<i64> = mine.iter().map(|c| c.wizard_id).collect();
+            ((mine.len(), kinds.len()), super::frog_store::wizards(&conn).into_iter().filter(|w| w.enabled).count())
         }
-        None => (0, 0),
+        None => ((0, 0), 0),
     };
     let card = Card {
         name,
@@ -558,11 +580,29 @@ pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
         hatch_at: egg.hatch_ts,
         hatched: !egg.waiting(now),
         caps,
-        cards,
+        cards: cards.0,
+        kinds: cards.1,
         cards_in_play: in_play.max(raven::DECK.len()),
         frozen: egg.frozen(),
     };
-    let _ = command.create_response(&ctx.http, whisper(card_text(&card, now))).await;
+    // The egg itself, painted, at the stage the calendar has it. A reply about
+    // somebody's egg that does not show the egg is a reply about nothing.
+    let picture = (!card.hatched)
+        .then(|| {
+            let day = egg_day(&egg, now);
+            super::battle_art::sized(super::battle_art::Art::Egg(super::battle_art::egg_for_day(day)), 420, 420)
+        })
+        .flatten()
+        .and_then(|art| art.encode_png().ok());
+    let text = card_text(&card, now);
+    let reply = match picture {
+        Some(png) => CreateInteractionResponseMessage::new()
+            .content(text)
+            .ephemeral(true)
+            .add_file(serenity::all::CreateAttachment::bytes(png, "egg.png")),
+        None => CreateInteractionResponseMessage::new().content(text).ephemeral(true),
+    };
+    let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }
 
 pub fn craving_builder() -> CreateCommand {
@@ -656,7 +696,14 @@ pub async fn livepoints_command(ctx: &Context, command: &CommandInteraction) {
     let name = command.user.global_name.clone().unwrap_or_else(|| command.user.name.clone());
     let since = ledger::month_start(now);
     let points = month_points(user, since);
-    let house = super::house::house_of(user).map(month::name_of);
+    // Only a hatched egg has a house. house_of() is the member's house from
+    // before the month, and painting it with this month's names told everybody
+    // they were in Stark a week before the hatch.
+    let house = egg_state(user, now)
+        .map(|(egg, _, _)| egg)
+        .filter(|egg| !egg.waiting(now) && !egg.house.is_empty())
+        .and_then(|egg| super::house::house(&egg.house))
+        .map(month::name_of);
     let mut left: Vec<(&'static str, i64, i64)> = Vec::new();
     if month::running() {
         for group in ledger::Group::ALL {
@@ -1211,7 +1258,8 @@ mod tests {
             hatch_at: month::parse_ist("2026-10-08 12:00").unwrap(),
             hatched: false,
             caps: vec![("Quick games", 12, 20), ("Thinking games", 30, 30)],
-            cards: 3,
+            cards: 7,
+            kinds: 3,
             cards_in_play: 12,
             frozen: false,
         }
@@ -1246,7 +1294,7 @@ mod tests {
             assert!(text.contains("double points until 8 pm"), "and how long the double lasts: {}", text);
             assert!(text.contains("Quick games: 12/20") && text.contains("8 left"), "{}", text);
             assert!(text.contains("Thinking games: 30/30") && text.contains("maxed"), "{}", text);
-            assert!(text.contains("**3** of 12 cards"), "the cards: {}", text);
+            assert!(text.contains("**7** cards · **3** of 12 kinds"), "the cards: {}", text);
             assert!(text.contains("https://mlci.example/live"), "and the page, always: {}", text);
         }
     }
