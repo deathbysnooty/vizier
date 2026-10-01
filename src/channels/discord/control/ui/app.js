@@ -552,6 +552,7 @@
     const nav = h('nav', { class: 'side-nav' });
     nav.appendChild(navItem('#/', icon('overview'), 'Overview'));
     nav.appendChild(navItem('#/houses', icon('trophy'), 'House Cup', h('span', { class: 'nav-live', 'aria-label': 'live' })));
+    nav.appendChild(navItem('#/month', icon('flame'), 'Month'));
 
     const pinned = prefs.pins.map(sectionById).filter(Boolean);
     if (pinned.length) nav.appendChild(h('div', { class: 'nav-group' }, h('span', { class: 'nav-label' }, 'Pinned'), pinned.map(sectionItem)));
@@ -778,6 +779,7 @@
       case 'topics': renderTopics(page, r.q); break;
       case 'left': renderLeft(page, r.q); break;
       case 'invites': if (r.parts[1]) renderInviter(page, r.parts[1]); else renderInvites(page); break;
+      case 'month': renderMonth(page); break;
       case 'signups': renderSignups(page); break;
       case 'confessions': renderConfessions(page, r.q); break;
       case 'automod': renderAutomod(page, r.q); break;
@@ -894,6 +896,191 @@
 
   function tile(label, ic, value, sub) {
     return h('div', { class: 'tile' }, h('div', { class: 'tile-label' }, icon(ic), label), h('div', { class: 'tile-value' }, value), h('div', { class: 'tile-sub' }, sub));
+  }
+
+  // --- the Month page ----------------------------------------------------------------
+  //
+  // One page for the whole themed month, because a mod asks about a month and
+  // not about a feature: where the egg week stands, who is in it and who is not
+  // playing, what everybody craves, the countdown, the split the hatch produced,
+  // today against each shared limit, and where the cards are.
+  //
+  // Everything on it comes from GET /api/month. The two writes - the hatch (with
+  // a dry run that writes nothing) and the cravings - are the only buttons.
+
+  function monthCountdown(seconds) {
+    if (seconds <= 0) return 'the eggs are due';
+    const d = Math.floor(seconds / 86400);
+    const hrs = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return d + 'd ' + hrs + 'h';
+    if (hrs > 0) return hrs + 'h ' + mins + 'm';
+    return mins + ' min';
+  }
+
+  function monthMember(m, extra) {
+    return h('div', { class: 'row' },
+      avatar(m.avatar, m.name, 'xs'),
+      h('span', { class: 'grow' }, m.name || 'Unknown member'),
+      extra || null);
+  }
+
+  function renderMonth(page) {
+    document.title = 'Month · Loduchand';
+    page.appendChild(pageHead('Month',
+      'The themed month, start to finish: who has an egg, what every egg is craving right now, how long to the hatch, how evenly the four houses were dealt, what today has cost against each shared limit, and where every card is.'));
+    const holder = h('div', null, h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Reading the month…')));
+    page.appendChild(holder);
+    api('GET', '/month').then((d) => { if (holder.isConnected) drawMonth(holder, d); })
+      .catch((e) => { if (holder.isConnected) { clear(holder); holder.appendChild(h('div', { class: 'card' }, h('div', { class: 'card-body pad' }, e.message))); } });
+  }
+
+  function drawMonth(holder, d) {
+    clear(holder);
+    const t = d.tally || {};
+    const eggWeek = !!d.egg_week;
+    if (!d.on) {
+      holder.appendChild(h('div', { class: 'banner warn' }, icon('info'),
+        h('span', null, 'The themed month is switched off, so none of this is running. Switch ', h('b', null, 'Themed month'), ' on under Settings to start it.')));
+    }
+    holder.appendChild(h('div', { class: 'tiles' },
+      tile('Eggs', 'spark', numberFmt.format(t.eggs || 0), eggWeek ? 'members in the month' : 'dragons and eggs'),
+      tile('No egg yet', 'userplus', numberFmt.format(t.unclaimed || 0), (t.unclaimed ? 'hold the role, never claimed' : 'everybody with the role has one')),
+      tile('Not playing', 'alert', numberFmt.format(t.quiet || 0), (t.quiet ? 'an egg and not one point' : 'everybody has scored')),
+      tile(eggWeek ? 'Hatches in' : 'Houses apart', eggWeek ? 'clock' : 'trophy',
+        eggWeek ? monthCountdown((d.hatch_at || 0) - (d.now || 0)) : numberFmt.format(d.gap || 0),
+        eggWeek ? when(d.hatch_at) : 'points between first and last')));
+
+    // --- the hatch ---------------------------------------------------------------
+    const out = h('div', { class: 'card-body pad' });
+    const run = async (dry) => {
+      clear(out);
+      out.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), dry ? 'Dealing, writing nothing…' : 'Opening every egg…'));
+      try {
+        const r = await api('POST', '/month/hatch', { dry: dry });
+        clear(out);
+        out.appendChild(h('div', { class: 'banner ' + (dry ? 'info' : 'ok') }, icon(dry ? 'flask' : 'check'),
+          h('span', null, dry
+            ? 'Dry run. Nothing has been written — this is how the hatch would fall.'
+            : 'Done. ' + plural(r.eggs, 'egg') + ' opened.')));
+        out.appendChild(h('div', { class: 'sub' }, 'The four started within ' + plural(r.gap, 'point') + ' of each other, and ' + plural(r.head_gap, 'member') + ' apart in headcount — the deal evens activity, not heads.'));
+        out.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
+          h('thead', null, h('tr', null, h('th', null, 'House'), h('th', null, 'From the week'), h('th', null, 'Members'))),
+          h('tbody', null, (r.houses || []).map((x) => h('tr', null,
+            h('td', null, (x.crest || '') + ' ' + (x.name || x.key)),
+            h('td', null, numberFmt.format(x.points)),
+            h('td', null, numberFmt.format(x.members))))))));
+        out.appendChild(h('pre', { class: 'preview' }, r.reveal || ''));
+        if (!dry) toast('The eggs are open.');
+      } catch (e) {
+        clear(out);
+        out.appendChild(h('div', { class: 'banner error' }, icon('alert'), h('span', null, e.message)));
+      }
+    };
+    const dryBtn = h('button', { class: 'btn', type: 'button', onclick: () => run(true) }, icon('flask'), 'Dry run');
+    const realBtn = h('button', { class: 'btn danger', type: 'button', onclick: () => {
+      if (!window.confirm('Open every egg, deal the four houses and name every dragon? This can only be done once.')) return;
+      run(false);
+    } }, icon('zap'), 'Hatch for real');
+    holder.appendChild(card('month-hatch', 'The hatch',
+      d.hatched_at ? 'Already run ' + ago(d.hatched_at) + '. A second hatch is refused: re-running it would deal every house out from under everybody.'
+                   : 'Opens every egg, deals the four houses level on the week’s activity and names every dragon. Try the dry run first — it writes nothing.',
+      [h('div', { class: 'row gap' }, dryBtn, d.hatched_at ? null : realBtn), out], { pad: true }));
+
+    // --- the cravings -------------------------------------------------------------
+    const games = d.craving && d.craving.games ? d.craving.games : [];
+    const counts = (d.craving && d.craving.counts) || {};
+    const forced = d.craving && d.craving.overridden;
+    const picked = new Set(forced || []);
+    const chips = h('div', { class: 'row gap wrap' });
+    games.forEach((g) => {
+      const on = picked.has(g.key);
+      const b = h('button', { class: 'btn pill' + (on ? ' on' : ''), type: 'button' },
+        h('span', null, g.label), h('span', { class: 'nav-count' }, String(counts[g.key] || 0)));
+      b.addEventListener('click', () => {
+        if (picked.has(g.key)) picked.delete(g.key); else picked.add(g.key);
+        b.classList.toggle('on');
+      });
+      chips.appendChild(b);
+    });
+    const apply = async (clearIt) => {
+      try {
+        const r = await api('PUT', '/month/craving', { games: clearIt ? '' : Array.from(picked).join(',') });
+        toast(r.cleared ? 'The rotation is back.' : 'Every egg is now craving ' + r.games.join(', ') + '.');
+        rerender(true);
+      } catch (e) { toast(e.message, 'error'); }
+    };
+    holder.appendChild(card('month-craving', 'What the eggs are craving',
+      'Slot ' + (d.craving ? d.craving.slot : 0) + ', changing in ' + monthCountdown(((d.craving && d.craving.changes_at) || 0) - (d.now || 0)) +
+      '. Each egg wants ' + plural((d.craving && d.craving.per_egg) || 2, 'game') + ' at a time, rotating every ' + plural((d.craving && d.craving.hours) || 6, 'hour') + '.' +
+      (forced ? ' A mod has overridden this slot.' : ''),
+      [chips, h('div', { class: 'row gap' },
+        h('button', { class: 'btn', type: 'button', onclick: () => apply(false) }, icon('check'), 'Make every egg crave these'),
+        h('button', { class: 'btn ghost', type: 'button', onclick: () => apply(true) }, icon('reset'), 'Back to the rotation'))],
+      { pad: true }));
+
+    // --- the houses and the caps ---------------------------------------------------
+    if (!eggWeek && (d.houses || []).length) {
+      holder.appendChild(card('month-houses', 'The four houses',
+        'Dealt by the week’s activity, not by headcount — which is why the member counts differ and the totals do not.',
+        h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
+          h('thead', null, h('tr', null, h('th', null, 'House'), h('th', null, 'Points'), h('th', null, 'Members'))),
+          h('tbody', null, d.houses.map((x) => h('tr', null,
+            h('td', null, (x.crest || '') + ' ' + x.name),
+            h('td', null, numberFmt.format(x.points)),
+            h('td', null, numberFmt.format(x.members)))))))));
+    }
+    holder.appendChild(card('month-caps', 'Today’s limits',
+      'The seven games share two daily limits instead of seven, so everybody’s ceiling is the same whatever their egg craves. A craved game pays double through the same limit — it buys speed, never a bigger number.',
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
+        h('thead', null, h('tr', null, h('th', null, 'Group'), h('th', null, 'Games'), h('th', null, 'Limit'), h('th', null, 'Earned today'), h('th', null, 'Members maxed'))),
+        h('tbody', null, (d.caps || []).map((c) => h('tr', null,
+          h('td', null, c.label),
+          h('td', null, (c.games || []).join(', ')),
+          h('td', null, numberFmt.format(c.limit)),
+          h('td', null, numberFmt.format(c.used_by_everyone)),
+          h('td', null, numberFmt.format(c.members_maxed)))))))));
+
+    // --- who is not playing, and who has no egg -------------------------------------
+    const quiet = d.quiet_members || [];
+    holder.appendChild(card('month-quiet', 'Not playing',
+      quiet.length ? 'An egg, and not one point yet. This is the list worth doing something about.' : 'Everybody with an egg has scored at least once.',
+      quiet.length ? h('div', { class: 'list' }, quiet.map((m) => monthMember(m, h('span', { class: 'sub' }, m.egg_stage_label)))) : h('div', { class: 'sub' }, 'Nothing to chase.'),
+      { pad: true }));
+    const noEgg = d.signed_up_without_an_egg || [];
+    if (noEgg.length) {
+      holder.appendChild(card('month-noegg', 'On the sign-up sheet, no egg',
+        'They said yes last month but do not hold the server games role, so they are not in the month. Pressing Join the games gives them the role and an egg on the spot.',
+        h('div', { class: 'list' }, noEgg.map((m) => monthMember(m))), { pad: true }));
+    }
+
+    // --- everybody ------------------------------------------------------------------
+    const members = d.members || [];
+    holder.appendChild(card('month-members', 'Everybody', plural(members.length, 'member') + ' in the month.',
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
+        h('thead', null, h('tr', null, h('th', null, 'Member'), h('th', null, eggWeek ? 'Egg' : 'Dragon'), h('th', null, 'House'), h('th', null, 'Points'), h('th', null, 'Craving'), h('th', null, 'Cards'))),
+        h('tbody', null, members.map((m) => h('tr', { class: m.quiet ? 'dim' : null },
+          h('td', null, monthMember(m)),
+          h('td', null, m.opened ? (m.dragon || '—') : m.egg_stage_label),
+          h('td', null, m.house ? (m.house.crest + ' ' + m.house.name) : '—'),
+          h('td', null, numberFmt.format(m.points)),
+          h('td', null, (m.craving || []).join(', ')),
+          h('td', null, String((m.cards || []).length))))))), { pad: false }));
+
+    // --- the deck --------------------------------------------------------------------
+    const deck = d.deck || {};
+    holder.appendChild(card('month-deck', 'The deck',
+      (deck.deck_line || '') + ' · ' + plural(deck.uncaught || 0, 'card') + ' nobody has caught yet.',
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' },
+        h('thead', null, h('tr', null, h('th', null, 'Card'), h('th', null, 'Rarity'), h('th', null, 'Worth'), h('th', null, 'Printed'), h('th', null, 'Who holds it'))),
+        h('tbody', null, (deck.cards || []).map((c) => h('tr', { class: c.in_play ? null : 'dim' }, 
+          h('td', null, c.name + (c.in_play ? '' : ' (not in play)')),
+          h('td', null, (c.emoji || '') + ' ' + c.rarity_name),
+          h('td', null, numberFmt.format(c.points)),
+          h('td', null, c.uncaught ? 'none yet' : numberFmt.format(c.printed)),
+          h('td', null, (c.holders || []).length
+            ? h('div', { class: 'row gap wrap' }, c.holders.map((o) => h('span', { class: 'chip' }, avatar(o.avatar, o.name, 'xs'), h('span', { class: 'chip-text' }, (o.name || '?') + ' ' + o.serial_label))))
+            : h('span', { class: 'sub' }, 'uncaught'))))))), { pad: false }));
   }
 
   function renderOverview(page) {

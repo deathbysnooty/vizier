@@ -1714,6 +1714,8 @@ async fn everything_needs_a_session() {
         ("GET", "/api/deepdives"),
         // Who signed up for next month is a moderators' list like any other.
         ("GET", "/api/signups"),
+        // The month, and the hatch, which is the one write that cannot be undone.
+        ("GET", "/api/month"),
         // And the confessions are the most private list of the lot: there is no
         // public corner of this page and no session-less way in.
         ("GET", "/api/confessions"),
@@ -4731,6 +4733,99 @@ async fn the_moderation_page_is_admin_only_and_every_look_is_logged() {
     assert_eq!(mine.len(), 1, "{audit}");
     assert_eq!(mine[0]["label"], "Looked at the moderation flags");
     assert_eq!(mine[0]["change"], "last 7 days · possibly AI");
+}
+
+// --- the Month page ----------------------------------------------------------------------
+
+/// The Month page is a moderators' page like every other: no session, no answer.
+/// Its two writes are the only destructive things on the panel that are not a
+/// setting, so they are checked by name as well as by the blanket sweep above.
+#[tokio::test]
+async fn the_month_page_is_admins_only_and_its_writes_are_too() {
+    let app = panel();
+    for (method, path) in [("GET", "/api/month"), ("POST", "/api/month/hatch"), ("PUT", "/api/month/craving")] {
+        let (status, _, _) = call(&app, method, path, None, Some(json!({ "dry": true })), true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} with no session");
+        let (status, _, _) = call(&app, method, path, Some("made-up"), Some(json!({ "dry": true })), true).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} with a made-up session");
+        let (status, _, _) = call(&app, method, path, Some(&session_for(MEMBER)), Some(json!({ "dry": true })), true).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} as a member");
+    }
+}
+
+/// The page's shape, and - whichever way this process left the egg store - never
+/// a half-answer. With the store shut it says so in words, because a page that
+/// answered "0 eggs, nobody craving anything" would have a mod chasing a
+/// problem that is not there; with it open every block the UI draws is present.
+#[tokio::test]
+async fn the_month_page_answers_whole_or_says_the_store_is_shut() {
+    let app = panel();
+    let session = session_for(ADMIN);
+    let (status, body, _) = call(&app, "GET", "/api/month", Some(&session), None, true).await;
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        assert!(body["error"].as_str().unwrap_or_default().contains("egg store"), "{body}");
+        return;
+    }
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for key in [
+        "on", "title", "hatch_at", "hatched_at", "egg_week", "now", "watch_days", "craving", "tally", "houses",
+        "gap", "caps", "members", "quiet_members", "signed_up_without_an_egg", "deck",
+    ] {
+        assert!(body.get(key).is_some(), "the Month page needs `{key}`");
+    }
+    // The four houses are always there, even at nought, or the standings would
+    // vanish for the whole of the egg week.
+    assert_eq!(body["houses"].as_array().map(|h| h.len()), Some(4));
+    // Every game has a number, even one nobody is craving.
+    assert_eq!(body["craving"]["counts"].as_object().map(|c| c.len()), Some(7));
+    assert_eq!(body["craving"]["games"].as_array().map(|g| g.len()), Some(7));
+    // Two shared limits, each naming its games, so the page needs no table.
+    let caps = body["caps"].as_array().expect("the two limits");
+    assert_eq!(caps.len(), 2);
+    assert_eq!(caps[0]["key"], "quick");
+    assert_eq!(caps[0]["games"], json!(["anagram", "cat", "guess"]));
+    assert_eq!(caps[1]["games"], json!(["quiz", "koto", "geo", "movie"]));
+    // Five stages, in order, each with the words the egg is described by.
+    let stages = body["tally"]["stages"].as_array().expect("five stages");
+    assert_eq!(stages.len(), 5);
+    assert_eq!(stages[0]["stage"], 0);
+    assert_eq!(stages[4]["label"], "Cracking");
+    // Every card in the store is on the deck block with its art name.
+    for card in body["deck"]["cards"].as_array().expect("the deck") {
+        assert!(card["art"].as_str().unwrap_or_default().ends_with(".png"), "{card}");
+        for key in ["slug", "name", "rarity", "points", "printed", "uncaught", "holders"] {
+            assert!(card.get(key).is_some(), "a deck card needs `{key}`: {card}");
+        }
+    }
+    // The list of people with no egg is in a stable order, so a refresh does
+    // not reshuffle it under a mod's cursor.
+    let names: Vec<&str> =
+        body["signed_up_without_an_egg"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap_or("")).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "the no-egg list has to come out in the same order every time");
+}
+
+/// The page's own words, so a rename in the UI that loses one is caught here
+/// rather than by somebody opening the panel on the morning of the hatch.
+#[test]
+fn the_month_page_is_in_the_panel_ui() {
+    for text in [
+        "function renderMonth(",
+        "'#/month'",
+        "case 'month': renderMonth(page); break;",
+        "The hatch",
+        "Dry run",
+        "What the eggs are craving",
+        "Not playing",
+        "The deck",
+    ] {
+        assert!(APP_JS.contains(text), "the Month page lost {:?}", text);
+    }
+    // The dry run must stay a separate, safe button, and the real one must keep
+    // asking: it is the only thing on the panel that cannot be undone.
+    assert!(APP_JS.contains("writes nothing"), "the dry run has to say it writes nothing");
+    assert!(APP_JS.contains("This can only be done once."), "the hatch has to ask before it runs");
 }
 
 // --- sign-ups --------------------------------------------------------------------------

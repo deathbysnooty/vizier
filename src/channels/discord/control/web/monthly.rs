@@ -346,6 +346,16 @@ pub async fn overview(
         })
         .collect();
 
+    // Sorted, because a set's order is nobody's friend and a list that
+    // reshuffles itself on every refresh is unreadable.
+    let no_egg = {
+        let mut waiting: Vec<u64> =
+            signed_up.iter().copied().filter(|u| !rows.iter().any(|r| r.user == *u)).collect();
+        waiting.sort_unstable();
+        let mut out: Vec<Value> = waiting.into_iter().map(|u| member_json(&panel, u, "", "")).collect();
+        out.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+        out
+    };
     let overridden = {
         let conn = eggs_db()?.lock();
         store::override_for(&conn, slot)
@@ -387,11 +397,7 @@ pub async fn overview(
         "caps": used_today,
         "members": rows.iter().map(|r| row_json(&panel, r)).collect::<Vec<_>>(),
         "quiet_members": rows.iter().filter(|r| r.quiet()).map(|r| row_json(&panel, r)).collect::<Vec<_>>(),
-        "signed_up_without_an_egg": signed_up
-            .iter()
-            .filter(|u| !rows.iter().any(|r| r.user == **u))
-            .map(|u| member_json(&panel, *u, "", ""))
-            .collect::<Vec<_>>(),
+        "signed_up_without_an_egg": no_egg,
         "deck": deck_json(&panel, &rows),
     }))
 }
