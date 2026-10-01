@@ -884,7 +884,7 @@ pub fn spawn(ctx: serenity::all::Context) {
     tokio::spawn(async move {
         loop {
             if month::running() {
-                let fresh = hand_out(&role_holders(&ctx), Utc::now().timestamp());
+                let fresh = hand_out(&role_holders(&ctx).await, Utc::now().timestamp());
                 if fresh > 0 {
                     tracing::info!("egg: {} new egg{} handed out to the games role", fresh, if fresh == 1 { "" } else { "s" });
                 }
@@ -894,19 +894,44 @@ pub fn spawn(ctx: serenity::all::Context) {
     });
 }
 
-/// Everybody wearing the server games role, from the gateway cache. The role IS
-/// the membership, so this is read fresh rather than from any list of our own:
-/// a mod who hands the role out by hand has handed out an egg.
-fn role_holders(ctx: &serenity::all::Context) -> Vec<(u64, String)> {
+/// Everybody wearing the server games role. The role IS the membership, so this
+/// is read fresh rather than from any list of our own: a mod who hands the role
+/// out by hand has handed out an egg.
+///
+/// Asked of Discord rather than of the cache. The gateway only ever caches the
+/// members it has had reason to see - whoever spoke, joined or was looked up -
+/// so on a server of six hundred the cache held a handful, and a handful is how
+/// many eggs went out. One page of a thousand covers this server; it pages on
+/// in case it ever does not.
+async fn role_holders(ctx: &serenity::all::Context) -> Vec<(u64, String)> {
     let Some(role) = super::signup::role_id().map(serenity::all::RoleId::new) else { return Vec::new() };
     let Some(guild) = ctx.cache.guilds().first().copied() else { return Vec::new() };
-    let Some(cached) = ctx.cache.guild(guild) else { return Vec::new() };
-    cached
-        .members
-        .values()
-        .filter(|m| !m.user.bot && m.roles.contains(&role))
-        .map(|m| (m.user.id.get(), m.display_name().to_string()))
-        .collect()
+    let mut out = Vec::new();
+    let mut after = None;
+    loop {
+        let batch = match guild.members(&ctx.http, Some(1000), after).await {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!("egg: could not read the games role's members: {e}");
+                break;
+            }
+        };
+        if batch.is_empty() {
+            break;
+        }
+        after = batch.last().map(|m| m.user.id);
+        let full = batch.len() == 1000;
+        out.extend(
+            batch
+                .into_iter()
+                .filter(|m| !m.user.bot && m.roles.contains(&role))
+                .map(|m| (m.user.id.get(), m.display_name().to_string())),
+        );
+        if !full {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
