@@ -253,12 +253,11 @@ pub trait PanelData: Send + Sync + 'static {
     async fn drop_frog(&self, _channel: u64, _by: u64) -> Result<super::super::frog_store::Drop, String> {
         Err("Discord isn't connected right now.".into())
     }
-    /// Opens a battle royale lobby in the arena this instant.
+    /// Opens a melee lobby in the lists this instant.
     async fn start_battle(
         &self,
         _minutes: Option<i64>,
         _ping: Option<&str>,
-        _theme: Option<&str>,
     ) -> Result<super::super::battle::StartedBattle, String> {
         Err("Discord isn't connected right now.".into())
     }
@@ -890,10 +889,9 @@ impl PanelData for LiveData {
         &self,
         minutes: Option<i64>,
         ping: Option<&str>,
-        theme: Option<&str>,
     ) -> Result<super::super::battle::StartedBattle, String> {
         let ctx = CTX.get().ok_or("Discord isn't connected right now.")?;
-        super::super::battle::start_now(ctx, minutes, ping, theme).await
+        super::super::battle::start_now(ctx, minutes, ping).await
     }
 
     async fn cancel_trade(&self, id: i64, by: u64) -> Result<super::super::frog_trade::Trade, String> {

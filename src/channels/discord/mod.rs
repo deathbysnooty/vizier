@@ -35,7 +35,9 @@ mod battle;
 mod battle_bracket;
 pub(crate) mod control;
 mod battle_card;
-mod battle_theme;
+mod battle_lines;
+mod battle_prize;
+mod battle_scroll;
 mod frog;
 mod frog_answer;
 mod frog_house;
@@ -1623,7 +1625,7 @@ impl EventHandler for Handler {
         announce::spawn(ctx.clone());
         // A card in the houses channel when a different house takes the lead.
         standings::spawn_lead_watch(ctx.clone());
-        // The daily battle royale, when switched on in the panel.
+        // The daily melee, when switched on in the panel.
         battle::spawn_daily(ctx.clone());
         // Snitch drops: restores cards left live by a restart, then schedules.
         snitch::spawn(ctx.clone());
@@ -1773,16 +1775,15 @@ impl EventHandler for Handler {
         commands.push(admin_command(quiz_stop));
 
         let fight_cmd = CreateCommand::new("fight")
-            .description("challenge someone to a 1v1 - the fight happens in the fight channel")
+            .description("call someone out for a duel - the fight happens in the fight channel")
             .add_option(
                 CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "kisse ladna hai")
                     .required(true),
-            )
-            .add_option(battle::theme_command_option());
+            );
         commands.push(fight_cmd);
 
         let battle_cmd = CreateCommand::new("battle")
-            .description("admin only: open a battle royale lobby and ping the warriors")
+            .description("admin only: open a melee lobby and call the games role to the lists")
             .add_option(
                 CreateCommandOption::new(
                     serenity::all::CommandOptionType::Integer,
@@ -1795,17 +1796,14 @@ impl EventHandler for Handler {
                 )
                 .min_int_value(1)
                 .max_int_value(battle::max_lobby_minutes() as u64),
-            )
-            .add_option(battle::theme_command_option());
+            );
         commands.push(battle_cmd);
 
-        let warrior_cmd = CreateCommand::new("warrior").description("get or drop the Warrior role, pinged for battles");
-
-        let fight_board = CreateCommand::new("fightboard").description("who has won the most fights and battles");
+        let fight_board = CreateCommand::new("fightboard").description("who has won the most duels and melees");
         commands.push(fight_board);
 
         let battle_stop =
-            CreateCommand::new("battlestop").description("admin only: clear a battle that got stuck mid-fight");
+            CreateCommand::new("battlestop").description("admin only: clear a melee that got stuck mid-fight");
         commands.push(admin_command(battle_stop));
 
         // The four houses. There is no self-serve sorting command: the bot
@@ -2323,6 +2321,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 chess::on_modal(&ctx, modal).await;
                 return;
             }
+            if modal.data.custom_id.starts_with("fightans:") {
+                battle::on_modal(&ctx, modal).await;
+                return;
+            }
             if confess::owns_modal(&modal.data.custom_id) {
                 confess::on_modal(&ctx, modal).await;
                 return;
@@ -2605,9 +2607,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "battle" {
                 battle::battle_command(&ctx, &command).await;
-            }
-            if command.data.name == "warrior" {
-                battle::warrior_command(&ctx, &command).await;
             }
             if command.data.name == "fightboard" {
                 battle::board_command(&ctx, &command).await;

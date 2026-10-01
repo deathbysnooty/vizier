@@ -1,6 +1,6 @@
-//! The Arena page's one action: "Start a battle royale now" - a lobby in the
-//! fight channel this instant, tagging the four houses, exactly as the daily
-//! battle does. Starts go to the activity log as `battle:now:<channel>`.
+//! The Arena page's one action: "Call a melee now" - a lobby in the fight
+//! channel this instant, calling the server games role to the lists, exactly as
+//! the daily melee does. Starts go to the activity log as `battle:now:<channel>`.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -10,9 +10,9 @@ use serde_json::{Map, Value, json};
 use super::super::super::battle;
 use super::{ApiError, ApiResult, Caller, Panel, ok};
 
-/// The channel a battle would open in, as the panel can see it: the fight
+/// The channel a melee would open in, as the panel can see it: the fight
 /// channel, else one named `fight-fight-fight`. The bot resolves it again for
-/// real when the battle starts - this is only for saying where beforehand. A
+/// real when the melee starts - this is only for saying where beforehand. A
 /// fight channel the panel can't put a name to is still the arena, so it comes
 /// back with a blank name rather than as nothing at all.
 fn channel_json(panel: &Panel) -> Value {
@@ -36,8 +36,8 @@ pub async fn overview(State(panel): State<Panel>) -> ApiResult {
         "max_minutes": battle::max_lobby_minutes(),
         "default_minutes": battle::default_lobby_minutes(),
         "pings": [
-            { "key": "houses", "emoji": "🏰", "label": "All four houses", "about": "Tags every house role, like the daily battle." },
-            { "key": "warriors", "emoji": "⚔️", "label": "Warriors role", "about": "Only the people who asked to be tagged for fights." },
+            { "key": "games", "emoji": "🎮", "label": "Games role", "about": "Tags the server games role: everyone who opted into the month." },
+            { "key": "houses", "emoji": "🏰", "label": "All four houses", "about": "Tags every house role. While the Cup is paused the games role is called instead." },
             { "key": "none", "emoji": "🤫", "label": "Nobody", "about": "The lobby goes up quietly, with no tag at all." },
         ],
     }))
@@ -49,24 +49,22 @@ pub struct StartBody {
     minutes: Option<i64>,
     #[serde(default)]
     ping: Option<String>,
-    #[serde(default)]
-    theme: Option<String>,
 }
 
-/// Opens a battle royale lobby in the arena now.
+/// Opens a melee lobby in the lists now.
 pub async fn start(
     State(panel): State<Panel>,
     axum::Extension(Caller(admin)): axum::Extension<Caller>,
     body: axum::body::Bytes,
 ) -> ApiResult {
     let b: StartBody = if body.is_empty() {
-        StartBody { minutes: None, ping: None, theme: None }
+        StartBody { minutes: None, ping: None }
     } else {
-        serde_json::from_slice(&body).map_err(|_| ApiError::bad("That isn't a battle to start."))?
+        serde_json::from_slice(&body).map_err(|_| ApiError::bad("That isn't a melee to call."))?
     };
     let started = panel
         .data
-        .start_battle(b.minutes, b.ping.as_deref(), b.theme.as_deref())
+        .start_battle(b.minutes, b.ping.as_deref())
         .await
         .map_err(|e| ApiError(StatusCode::CONFLICT, e))?;
     let channel = panel.data.channels().into_iter().find(|c| c.id == started.channel.to_string());
@@ -77,24 +75,20 @@ pub async fn start(
         "minutes": started.minutes,
         "ping": started.ping,
         "ping_label": started.ping_label,
-        "theme": started.theme,
-        "theme_label": started.theme_label,
     })
     .to_string();
     super::super::log_change(&format!("battle:now:{}", started.channel), None, Some(&facts), admin)
         .map_err(ApiError::internal)?;
-    tracing::info!("panel: {} started a battle royale in {} ({} min, {})", admin, name, started.minutes, started.ping);
+    tracing::info!("panel: {} called a melee in {} ({} min, {})", admin, name, started.minutes, started.ping);
     ok(json!({
         "channel": { "id": started.channel.to_string(), "name": channel.map(|c| c.name) },
         "minutes": started.minutes,
         "ping": started.ping,
         "ping_label": started.ping_label,
-        "theme": started.theme,
-        "theme_label": started.theme_label,
     }))
 }
 
-/// "Started a battle royale in #fight-fight-fight (10 min, the four houses)".
+/// "Called a melee in #fight-fight-fight (10 min, the server games role)".
 pub fn audit_entry(e: &super::super::AuditEntry) -> Map<String, Value> {
     let facts: Value = e.new.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
     let text = |k: &str| facts.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -111,19 +105,15 @@ pub fn audit_entry(e: &super::super::AuditEntry) -> Map<String, Value> {
     if !tagged.is_empty() {
         how.push(tagged);
     }
-    let style = text("theme_label");
-    if !style.is_empty() {
-        how.push(style);
-    }
     let mut obj = Map::new();
-    obj.insert("label".into(), json!("Battle royale"));
+    obj.insert("label".into(), json!("Melee"));
     obj.insert("section".into(), json!({ "id": "arena", "title": "Arena", "icon": "⚔️" }));
     obj.insert(
         "change".into(),
         json!(if how.is_empty() {
-            format!("Started a battle royale in {}", where_)
+            format!("Called a melee in {}", where_)
         } else {
-            format!("Started a battle royale in {} ({})", where_, how.join(", "))
+            format!("Called a melee in {} ({})", where_, how.join(", "))
         }),
     );
     obj.insert("old".into(), Value::Null);

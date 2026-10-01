@@ -511,7 +511,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_CAP_GUESS", "Guess the Word points a day", "Most points one person can earn from Guess the Word in a day. 100 means no limit.", number(0, 100, "points"), "10"),
                 setting("VIZIER_CAP_ANAGRAM", "Anagram points a day", "Most points one person can earn from anagrams in a day — the bot's own Anagrams game and Anagram Bot together, since they are one kind of word game. 100 means no limit.", number(0, 100, "points"), "10"),
                 setting("VIZIER_CAP_CAT", "Cat Bot points a day", "Most points one person can earn from Cat Bot catches in a day. 100 means no limit.", number(0, 100, "points"), "3"),
-                setting("VIZIER_CAP_ARENA", "Arena points a day", "Most points one person can earn from 1v1 fights in a day. 100 means no limit.", number(0, 100, "points"), "3"),
+                setting("VIZIER_CAP_ARENA", "Arena points a day", "Most points one person can earn from 1v1 fights in a day. 100 means no limit.", number(0, 100, "points"), "9"),
                 setting(
                     "VIZIER_CAP_SNITCH",
                     "Snitch points a day",
@@ -1397,7 +1397,7 @@ pub fn sections() -> Vec<Section> {
             about: "1v1 fights and battle royales, just for fun. /fight challenges someone; if they accept, both pick \
                     △ ○ □ ✕ once at the start and the winner of that clash wins the fight, which then plays out. \
                     Winning a 1v1 earns a house point (only the first fight between the same two people each day \
-                    counts). /battle opens a lobby, pings the Warrior role, and knocks the joiners out on a bracket \
+                    counts). /battle opens a lobby, calls the server games role to the lists, and knocks the joiners out on a bracket \
                     until one champion is left, who wears the Battle Champion role and wins house points, as does the \
                     runner-up. Early rounds of a big battle are quick rounds posted as a list; later rounds are fought \
                     out in full. A daily battle can open by itself at a set time, tagging the houses.",
@@ -1425,36 +1425,30 @@ pub fn sections() -> Vec<Section> {
                 ),
                 setting("VIZIER_BATTLE_DAILY_MINUTES", "Daily lobby length", "How long the daily lobby stays open for joining.", number(1, 60, "minutes"), "10"),
                 setting(
-                    "VIZIER_BATTLE_DAILY_THEME",
-                    "Daily battle style",
-                    "The fight type for the daily battle, or a random one each day.",
-                    Kind::Choice {
-                        options: &[
-                            ("random", "Random each day"),
-                            ("classic", "Classic"),
-                            ("pokemon", "Pokémon"),
-                            ("harrypotter", "Harry Potter"),
-                            ("dbz", "Dragon Ball Z"),
-                            ("wwe", "WWE"),
-                            ("cs2", "Counter-Strike 2"),
-                            ("eldenring", "Elden Ring"),
-                        ],
-                    },
-                    "classic",
+                    "VIZIER_ARENA_GAMES_ROLE",
+                    "Games role",
+                    "The role a melee calls to the lists: the people who opted into the month. Empty uses the server games role. A melee that cannot find the role posts its lobby with no tag at all rather than tagging anyone else.",
+                    Kind::Role,
+                    "1554720685514035241",
                 ),
                 setting(
                     "VIZIER_BATTLE_DAILY_PING",
-                    "Daily battle tags",
-                    "Who the daily lobby tags. Houses tags all four house roles (the bot needs permission to mention roles); Warriors tags the Warrior role.",
+                    "Daily melee tags",
+                    "Who the daily lobby tags. Games tags the games role above - the people who opted into the month. Houses tags all four house roles, and needs permission to mention roles.",
                     Kind::Choice {
-                        options: &[("houses", "All 4 houses"), ("warriors", "Warrior role"), ("everyone", "@everyone"), ("none", "Nobody")],
+                        options: &[
+                            ("games", "Games role"),
+                            ("houses", "All 4 houses"),
+                            ("everyone", "@everyone"),
+                            ("none", "Nobody"),
+                        ],
                     },
-                    "houses",
+                    "games",
                 ),
                 setting("VIZIER_FIGHT_COOLDOWN_SECS", "Challenge cooldown", "How long a member waits between two /fight challenges.", number(0, 3600, "seconds"), "60"),
                 setting("VIZIER_FIGHT_EXPIRY_SECS", "Challenge expiry", "How long a challenge waits for an answer before it is cancelled.", number(10, 3600, "seconds"), "120"),
-                setting("VIZIER_FIGHT_PICK_SECS", "Move pick time", "How long both fighters have to pick a move each turn before the bot picks for them.", number(3, 120, "seconds"), "15"),
-                setting("VIZIER_POINTS_ARENA_WIN", "1v1 win", "House points for winning a 1v1 challenge.", number(0, 100, "points"), "1"),
+                setting("VIZIER_FIGHT_SCROLL_SECS", "Scroll time", "How long a duel's scroll stands before it burns unread. Three scrolls to a duel, first to two wins.", number(5, 120, "seconds"), "25"),
+                setting("VIZIER_POINTS_ARENA_WIN", "Duel win", "House points for winning a 1v1 duel. The loser gets nothing, and only the first two duels between the same pair each day pay at all.", number(0, 100, "points"), "3"),
                 setting("VIZIER_BATTLE_MIN_PLAYERS", "Fewest fighters", "A battle with fewer joiners than this is called off.", number(2, 64, "players"), "4"),
                 setting(
                     "VIZIER_BATTLE_FULL_FIGHTS_FROM",
@@ -1476,10 +1470,10 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_POINTS_ROYALE_RUNNER_UP", "Battle runner-up", "House points for losing the battle royale final.", number(0, 1000, "points"), "3"),
             ],
             commands: vec![
-                command("fight", EVERYONE, "/fight who: type:", "Challenges someone to a 1v1 in the fight channel, in an optional fight style."),
-                command("battle", ADMINS, "/battle minutes: type:", "Opens a battle royale lobby for that many minutes and pings the Warrior role."),
-                command("fightboard", EVERYONE, "/fightboard", "Who has won the most fights, with battle crowns, and your own record."),
-                command("battlestop", ADMINS, "/battlestop", "Clears a battle or fight that got stuck, so /battle works again."),
+                command("fight", EVERYONE, "/fight who:", "Calls someone out for a duel in the fight channel: three scrolls, first to two."),
+                command("battle", ADMINS, "/battle minutes:", "Opens a melee lobby for that many minutes and calls the server games role to the lists."),
+                command("fightboard", EVERYONE, "/fightboard", "Who has won the most duels, with melee crowns, and your own record."),
+                command("battlestop", ADMINS, "/battlestop", "Clears a melee or duel that got stuck, so /battle works again."),
             ],
         },
         Section {

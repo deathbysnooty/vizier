@@ -1,14 +1,31 @@
-//! /fight and /battle - the arena.
+//! /fight and /battle - the lists.
 //!
-//! `/fight @someone` works in any channel: the challenge card goes up in the
-//! fight channel and the caller's channel gets a link to it. `/battle` is for
-//! admins, opens a lobby for as many minutes as they ask for, pings the warrior
-//! role, and then knocks the joiners out in pairs until one is left. Winners are
-//! a coin toss - this is banter, not a ladder - and the last one standing wears
-//! the champion role until the next battle.
+//! Two shapes, one arena. **A duel** (`/fight @someone`) works in any channel:
+//! the challenge card goes up in the fight channel and the caller's channel
+//! gets a link to it. Nobody but the two of them is tagged. **A melee**
+//! (`/battle`) is for admins, opens a lobby for as many minutes as they ask
+//! for, calls the server games role to the lists, and then knocks the joiners
+//! out in pairs until one is left. Winners are a coin toss - this is banter,
+//! not a ladder - and the last one standing wears the champion role until the
+//! next melee.
+//!
+//! The arena has **one world and no styles**: Westeros, spoken in the server's
+//! own Hinglish (see [`super::battle_lines`]). There used to be a `type` option
+//! that picked between seven of them; it is gone, along with every branch that
+//! read it.
+//!
+//! It has **two seasons**, which is not the same thing. Before the hatch nobody
+//! has a house, so the cards show every fighter as an unhatched dragon egg and
+//! name no house anywhere; after it they wear their house's banner and mark.
+//! [`hatched`] is the one place that decides which.
+//!
+//! Winning earns a card from the month's deck as well as the points - see
+//! [`super::battle_prize`].
 //!
 //! Fights live in memory; only results go to battle.db, so a restart loses an
-//! open lobby but never the record of who won.
+//! open lobby but never the record of who won. The daily melee's slot is
+//! remembered, so a restart neither re-opens a melee that already ran nor
+//! forgets one that was due while the bot was down.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -20,18 +37,22 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
     ButtonStyle, ChannelId, CommandDataOptionValue, CommandInteraction, ComponentInteraction, Context,
     CreateActionRow, CreateAllowedMentions, CreateAttachment, CreateButton, CreateEmbed, CreateEmbedFooter,
-    CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditAttachments, EditMessage, EditRole,
-    GuildId, Member, Message, MessageId, RoleId, UserId,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, CreateModal,
+    EditAttachments, EditMessage, EditRole, GuildId, InputTextStyle, Member, Message, MessageId, RoleId, UserId,
 };
 
-use super::battle_card::{self, Champion, Fight, Fighter, Outcome};
+use super::battle_card::{self, Champion, Fight, Fighter, HouseLook, Outcome, Season, EGG_STAGES};
 use super::battle_bracket::{self, Bracket, Entrant, Slot, round_title};
-use super::battle_theme::{Lines, Theme};
+use super::battle_lines::{Lines, lines};
+use super::battle_scroll;
 
 /// Fight channel, from `VIZIER_FIGHT_CHANNEL`; otherwise found by name.
 const CHANNEL_NAME: &str = "fight-fight-fight";
-/// Pinged when a battle opens. Created if the server has no such role.
-const WARRIOR_ROLE: &str = "Warrior";
+/// Called to the lists when a melee opens: the people who opted into the
+/// month, and the only role the arena ever mentions.
+/// `VIZIER_ARENA_GAMES_ROLE`, or this role if it is not set; "0" or "none"
+/// turns the tag off and the lobby simply goes up untagged.
+const GAMES_ROLE: u64 = 1_554_720_685_514_035_241;
 /// Worn by the last battle's winner.
 const CHAMPION_ROLE: &str = "Battle Champion";
 /// Health both fighters start a fight with.
@@ -119,6 +140,85 @@ fn span(secs: u64) -> String {
     }
 }
 
+/// The role the melee calls to the lists, or `None` for no tag at all.
+fn games_role_id() -> Option<u64> {
+    games_role_from(super::control::var("VIZIER_ARENA_GAMES_ROLE").as_deref())
+}
+
+/// What a stored setting means. Split out so it can be read without a panel:
+/// blank is "not said" and the month's own role, "0" or "none" switches the tag
+/// off, and anything that isn't a role id falls back rather than tagging the
+/// wrong thing.
+fn games_role_from(raw: Option<&str>) -> Option<u64> {
+    match raw.map(str::trim) {
+        None => Some(GAMES_ROLE),
+        Some(raw) if raw.is_empty() => Some(GAMES_ROLE),
+        Some(raw) if raw == "0" || raw.eq_ignore_ascii_case("none") => None,
+        Some(raw) => raw.parse().ok().or(Some(GAMES_ROLE)),
+    }
+}
+
+/// Whether the eggs have hatched. Before the hatch nobody has a house, so every
+/// card the arena draws shows eggs and names no house; after it they wear their
+/// houses. The month owns the moment - [`super::month::hatch_at`] - so the
+/// arena reads the same clock everything else in the month reads.
+pub(super) fn hatched() -> bool {
+    hatched_at(Utc::now().timestamp())
+}
+
+/// The same question at a given moment, so a test can hold time still.
+fn hatched_at(now: i64) -> bool {
+    let at = super::month::hatch_at();
+    at > 0 && now >= at
+}
+
+/// Which season the cards are drawn in.
+fn season() -> Season {
+    if hatched() { Season::Houses } else { Season::Eggs }
+}
+
+/// How a house is shown this month: the name, crest and colour come from the
+/// month's own paint, so a server that renames the four renames them here too.
+/// The banner's trim is the same colour lifted, because a banner needs two and
+/// the month only names one - one source, two shades of it.
+fn house_look(house: &'static super::house::House) -> HouseLook {
+    let themed = super::month::themed(house);
+    let colour = themed.colour;
+    let field = [(colour >> 16) as u8, (colour >> 8) as u8, colour as u8];
+    HouseLook {
+        key: house.key,
+        initial: themed.name.chars().find(|c| c.is_alphabetic()).map(|c| c.to_uppercase().to_string()).unwrap_or_default(),
+        name: themed.name,
+        crest: themed.crest,
+        colours: (field, battle_card::lift(field, 0.58)),
+    }
+}
+
+/// How far along a member's egg is, 1..=[`EGG_STAGES`], by the points they have
+/// towards the month. Cold at nothing, splitting open once they have really
+/// played: the thresholds are wide, so an egg warms over a week rather than in
+/// an afternoon.
+fn egg_stage(points: i64) -> u8 {
+    match points {
+        p if p <= 0 => 1,
+        p if p < 10 => 2,
+        p if p < 30 => 3,
+        p if p < 70 => 4,
+        _ => EGG_STAGES,
+    }
+}
+
+/// Everything a member has earned towards the month, read from the house
+/// ledger. Read-only, and 0 when the store is not open.
+fn points_of(user: u64) -> i64 {
+    let Some(db) = super::house::db() else {
+        return 0;
+    };
+    db.lock()
+        .query_row("SELECT COALESCE(SUM(points), 0) FROM ledger WHERE user_id = ?1", params![user as i64], |r| r.get(0))
+        .unwrap_or(0)
+}
+
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 /// Open lobbies, by the lobby message id.
 static LOBBIES: LazyLock<Mutex<HashMap<u64, Lobby>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -139,7 +239,6 @@ struct Lobby {
     /// Kept so a join can redraw the lobby with its own countdown.
     ends: i64,
     minutes: i64,
-    theme: Theme,
 }
 
 struct Challenge {
@@ -148,25 +247,30 @@ struct Challenge {
     accepted: Option<bool>,
 }
 
-/// A fighter with everything the card needs.
+/// Somebody in the lists, with everything the card needs to draw them.
 #[derive(Clone)]
-struct Warrior {
+struct Contender {
     id: u64,
     name: String,
     avatar: Option<Vec<u8>>,
-    house: Option<&'static super::house::House>,
+    /// Their house as the month paints it. `None` for anyone unsorted or
+    /// stepped out, who stays neutral rather than being handed one.
+    house: Option<HouseLook>,
+    /// How far along their egg is, for the cards drawn before the hatch.
+    stage: u8,
     /// Where their picture is, for fetching it later.
     face: String,
 }
 
-impl Warrior {
+impl Contender {
     fn card(&self, hp: i32) -> Fighter {
         Fighter {
             name: self.name.clone(),
             avatar: self.avatar.clone(),
             hp: hp.max(0) as u32,
             max_hp: START_HP as u32,
-            house: self.house,
+            house: self.house.clone(),
+            stage: self.stage,
         }
     }
 }
@@ -322,8 +426,16 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
          CREATE INDEX IF NOT EXISTS results_loser ON results (loser);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )?;
+    // The scrolls a duel is fought over, written down as they are shown.
+    conn.execute_batch(battle_scroll::SCHEMA)?;
     let _ = DB.set(Mutex::new(conn));
     Ok(())
+}
+
+/// Runs `f` against battle.db, or nothing at all when it is not open - a fight
+/// has to carry on without its record rather than stop.
+fn with_db<T>(f: impl FnOnce(&Connection) -> T) -> Option<T> {
+    DB.get().map(|db| f(&db.lock()))
 }
 
 fn meta_get(key: &str) -> Option<String> {
@@ -341,8 +453,9 @@ fn meta_set(key: &str, value: &str) {
     }
 }
 
-/// Logs one finished fight. `loser` is `None` for a battle championship, where
-/// the whole field lost rather than one person.
+/// Logs one finished fight. `loser` is `None` for a melee championship, where
+/// the whole field lost rather than one person. Points are paid separately:
+/// a duel through [`pay_duel`], a melee through [`award_royale`].
 fn record(kind: &str, winner: u64, loser: Option<u64>) {
     let now = Utc::now().timestamp();
     if let Some(db) = DB.get() {
@@ -351,18 +464,72 @@ fn record(kind: &str, winner: u64, loser: Option<u64>) {
             params![kind, winner as i64, loser.map(|u| u as i64), now],
         );
     }
-    // House points for a 1v1 challenge: 1 to the winner. The dedupe key is the
-    // PAIR and the day, not the winner, so two friends fighting over and over earn
-    // only their first fight of the day - whoever wins it. Fights inside a battle
-    // royale score through `award_royale` instead.
-    if let ("fight", Some(loser)) = (kind, loser) {
-        let (low, high) = if winner < loser { (winner, loser) } else { (loser, winner) };
-        let key = format!("arena:{}:{}:{}", super::points::ist_day(now), low, high);
-        let points = super::control::number("VIZIER_POINTS_ARENA_WIN", 1) as i64;
-        if points > 0 {
-            super::house::award_person(winner, super::points::Source::Arena, points, "won a 1v1", None, Some(key), None);
+}
+
+/// Only the first two duels between the same two people each day pay anything.
+/// The third is still fought and still recorded - it simply earns nothing, so
+/// two friends cannot farm the Cup between them.
+const PAID_DUELS_A_DAY: i64 = 2;
+
+/// What a duel's win paid, and why, so the result can say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Paid {
+    Points(i64),
+    /// This pair has already had their two paying duels today.
+    Enough,
+    /// The setting is at zero, so a duel pays nothing to anybody.
+    Nothing,
+}
+
+impl Paid {
+    /// What to add after "won the duel", or nothing at all.
+    fn said(self) -> String {
+        match self {
+            Paid::Points(n) => format!(" (+{} house points)", n),
+            Paid::Enough => " — no points, you two have fought enough today".to_string(),
+            Paid::Nothing => String::new(),
         }
     }
+}
+
+/// The unix second India's day containing `now` began at.
+fn ist_midnight(now: i64) -> i64 {
+    let offset = super::stats::ist().local_minus_utc() as i64;
+    (now + offset).div_euclid(86_400) * 86_400 - offset
+}
+
+/// How many duels this pair has already had today, the one just recorded
+/// included. 0 when the store is not open, which pays as a first duel.
+fn duels_today(low: u64, high: u64, now: i64) -> i64 {
+    with_db(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM results WHERE kind = 'fight' AND ts >= ?1
+               AND ((winner = ?2 AND loser = ?3) OR (winner = ?3 AND loser = ?2))",
+            params![ist_midnight(now), low as i64, high as i64],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    })
+    .unwrap_or(0)
+}
+
+/// House points for a duel: three to the winner, nothing whatsoever to the
+/// loser - not for turning up, and not for reading a scroll. The dedupe key is
+/// the PAIR, the day and which duel of the day it was, so a replayed message
+/// cannot pay twice and the third duel of the day cannot pay at all.
+fn pay_duel(winner: u64, loser: u64, now: i64) -> Paid {
+    let points = super::control::number("VIZIER_POINTS_ARENA_WIN", 3) as i64;
+    if points <= 0 {
+        return Paid::Nothing;
+    }
+    let (low, high) = if winner < loser { (winner, loser) } else { (loser, winner) };
+    let so_far = duels_today(low, high, now).max(1);
+    if so_far > PAID_DUELS_A_DAY {
+        return Paid::Enough;
+    }
+    let key = format!("arena:{}:{}:{}:{}", super::points::ist_day(now), low, high, so_far);
+    super::house::award_person(winner, super::points::Source::Arena, points, "won a duel", None, Some(key), None);
+    Paid::Points(points)
 }
 
 /// House points for a battle royale: 8 to the champion, 3 to the runner-up.
@@ -485,8 +652,25 @@ async fn role_named(ctx: &Context, guild: GuildId, name: &str, colour: u32, key:
     Some(id)
 }
 
-async fn warrior_role(ctx: &Context, guild: GuildId) -> Option<RoleId> {
-    role_named(ctx, guild, WARRIOR_ROLE, 0xE67E22, "warrior_role").await
+/// The role a melee calls to the lists, if the server really has it. It is
+/// never created: it is a role the server already owns, and a melee that
+/// cannot find it goes up untagged rather than inventing one.
+async fn games_role(ctx: &Context, guild: GuildId) -> Option<RoleId> {
+    let wanted = RoleId::new(games_role_id()?);
+    match guild.roles(&ctx.http).await {
+        Ok(roles) => {
+            if roles.contains_key(&wanted) {
+                return Some(wanted);
+            }
+            tracing::warn!("battle: the games role {} is not in the server, so the melee goes up untagged", wanted);
+            None
+        }
+        // The roles could not be read at all; the id is still the best we have.
+        Err(err) => {
+            tracing::warn!("battle: roles not read ({}), tagging the games role anyway", err);
+            Some(wanted)
+        }
+    }
 }
 
 /// Moves the champion role to the winner, taking it off whoever held it.
@@ -518,15 +702,15 @@ fn display(member: &Member) -> String {
 }
 
 /// A member ready to fight, picture included.
-async fn warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
-    let mut w = warrior_named(ctx, guild, user).await?;
+async fn contender(ctx: &Context, guild: GuildId, user: u64) -> Option<Contender> {
+    let mut w = contender_named(ctx, guild, user).await?;
     w.avatar = picture(&w.face).await;
     Some(w)
 }
 
 /// A member ready to fight, without their picture yet: a big royale only needs
 /// pictures for the last sixteen.
-async fn warrior_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Warrior> {
+async fn contender_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Contender> {
     // The cache guard is let go before any await.
     let cached = ctx.cache.guild(guild).and_then(|g| g.members.get(&UserId::new(user)).cloned());
     let member = match cached {
@@ -537,8 +721,12 @@ async fn warrior_named(ctx: &Context, guild: GuildId, user: u64) -> Option<Warri
     // Stepped-out members fight without a badge, as they asked to be left out -
     // and while the House Cup is paused NOBODY wears one, so the fight card, the
     // bracket and the lobby lists carry no crest at all.
-    let house = if super::house::opted_out(user) || super::house_cup::paused() { None } else { super::house::house_of(user) };
-    Some(Warrior { id: user, name: display(&member), avatar: None, house, face })
+    let house = if super::house::opted_out(user) || super::house_cup::paused() {
+        None
+    } else {
+        super::house::house_of(user).map(house_look)
+    };
+    Some(Contender { id: user, name: display(&member), avatar: None, house, stage: egg_stage(points_of(user)), face })
 }
 
 async fn picture(face: &str) -> Option<Vec<u8>> {
@@ -564,18 +752,18 @@ async fn fight_card(
     line: String,
     outcome: Outcome,
     hit: Option<(usize, i32)>,
-    theme: Theme,
+    season: Season,
 ) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        battle_card::fight_png(&Fight { stage, left: &left, right: &right, line, outcome, hit, theme })
+        battle_card::fight_png(&Fight { stage, left: &left, right: &right, line, outcome, hit, season })
     })
     .await
     .ok()
     .flatten()
 }
 
-async fn champion_card(who: Fighter, subtitle: String, line: String, theme: Theme) -> Option<Vec<u8>> {
-    tokio::task::spawn_blocking(move || battle_card::champion_png(&Champion { who: &who, subtitle, line, theme }))
+async fn champion_card(who: Fighter, subtitle: String, line: String, season: Season) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || battle_card::champion_png(&Champion { who: &who, subtitle, line, season }))
         .await
         .ok()
         .flatten()
@@ -640,31 +828,26 @@ async fn call<T>(fut: impl std::future::Future<Output = serenity::Result<T>>) ->
     }
 }
 
-/// One fight: the card goes up, the exchanges land under it, then the result.
-/// With `picks`, both fighters choose a move first and the clash decides the
-/// fight; without, every blow is a coin toss as before. Returns the winner.
-#[allow(clippy::too_many_arguments)]
+/// One fight of a melee: the card goes up, the exchanges land under it, then
+/// the result. Every blow is a coin toss - this is the melee, and it is banter.
+/// A duel is a different thing entirely; see [`duel`]. Returns the winner.
 async fn play(
     ctx: &Context,
     channel: ChannelId,
     stage: &str,
-    a: &Warrior,
-    b: &Warrior,
+    a: &Contender,
+    b: &Contender,
     seed: &mut u64,
-    theme: Theme,
-    picks: bool,
-) -> (Warrior, i32) {
-    let lines = theme.lines();
+    season: Season,
+) -> (Contender, i32) {
+    let lines = lines();
     let mut hp = [START_HP; 2];
     // One picture at the start, one at the end: the blow-by-blow rides on the
     // text, which edits without an upload.
     let opening =
-        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), String::new(), Outcome::Open, None, theme).await;
+        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), String::new(), Outcome::Open, None, season).await;
     let head = format!("**{}** · <@{}> vs <@{}>", stage, a.id, b.id);
     let mut log: Vec<String> = Vec::new();
-    // The clash table is dealt once, so a fighter can learn it as the fight goes.
-    let clash = picks.then(|| Clash::deal(seed));
-    let fight_id = if picks { roll(seed, u64::MAX >> 12) + 1 } else { 0 };
     let mut text = fight_text(&head, &log, a, b, &hp);
     tracing::info!("battle: {} - {} vs {}", stage, a.name, b.name);
     BELOW.lock().insert(channel.get(), 0);
@@ -682,42 +865,13 @@ async fn play(
         }
     };
 
-    // With picks, one clash before the first blow decides the fight. The blows
-    // that follow are dealt from a script that ends with the clash winner standing.
-    let mut decided: Option<usize> = None;
-    let mut script: std::collections::VecDeque<(usize, Swing)> = std::collections::VecDeque::new();
-    if let Some(table) = &clash {
-        let chosen = pick_moves(ctx, channel, &mut message, &head, &log, a, b, &hp, fight_id, opening.as_ref(), seed).await;
-        PICKS.lock().remove(&fight_id);
-        let side = table.winner(chosen.moves[0], chosen.moves[1]);
-        let auto = |i: usize| if chosen.auto[i] { " (auto)" } else { "" };
-        log.push(format!(
-            "{}{} vs {}{} → **{}** wins the clash ⚔️",
-            MOVES[chosen.moves[0]].0,
-            auto(0),
-            MOVES[chosen.moves[1]].0,
-            auto(1),
-            if side == 0 { &a.name } else { &b.name }
-        ));
-        text = fight_text(&head, &log, a, b, &hp);
-        keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), Some(Vec::new())).await;
-        decided = Some(side);
-        script = script_fight(seed, side).into();
-        tokio::time::sleep(REVEAL).await;
-    }
-
     // Trade blows until someone's health runs out.
     let mut turns = 0;
     while hp[0] > 0 && hp[1] > 0 && turns < MAX_EXCHANGES {
         turns += 1;
         tokio::time::sleep(BEAT).await;
-        let (attacker, swing) = match script.pop_front() {
-            Some(blow) => blow,
-            None => {
-                let attacker = roll(seed, 2) as usize;
-                (attacker, swing(seed, attacker))
-            }
-        };
+        let attacker = roll(seed, 2) as usize;
+        let swing = swing(seed, attacker);
         let (x, y) = if attacker == 0 { (a, b) } else { (b, a) };
         hp = land(hp, attacker, &swing);
         let line = fill(pick(swing.blow.lines(lines), seed), &x.name, &y.name);
@@ -726,16 +880,13 @@ async fn play(
         keep_at_bottom(ctx, channel, &mut message, &text, None, opening.as_ref(), None).await;
     }
 
-    let a_wins = match decided {
-        Some(side) => side == 0,
-        None => hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0),
-    };
+    let a_wins = hp[0] > hp[1] || (hp[0] == hp[1] && roll(seed, 2) == 0);
     let (winner, loser) = if a_wins { (a, b) } else { (b, a) };
     let finish = fill(pick(lines.finish, seed), &winner.name, &loser.name);
     text.push_str(&format!("\n\n🏆 {}", finish));
     let side = if a_wins { 0 } else { 1 };
     let done =
-        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None, theme).await;
+        fight_card(stage.to_string(), a.card(hp[0]), b.card(hp[1]), finish, Outcome::Won(side), None, season).await;
     tokio::time::sleep(BEAT).await;
     keep_at_bottom(ctx, channel, &mut message, &text, done, opening.as_ref(), None).await;
     tracing::info!("battle: {} won ({} - {})", winner.name, hp[0].max(0), hp[1].max(0));
@@ -744,166 +895,341 @@ async fn play(
     (winner.clone(), hp[if a_wins { 0 } else { 1 }].max(0))
 }
 
-// --- clash picks ------------------------------------------------------------
+// --- the scrolls: a duel ----------------------------------------------------
 
-/// The four moves: the symbol shown, the button's name, and its colour.
-const MOVES: [(&str, &str, ButtonStyle); 4] = [
-    ("△", "triangle", ButtonStyle::Success),
-    ("○", "circle", ButtonStyle::Danger),
-    ("□", "square", ButtonStyle::Secondary),
-    ("✕", "cross", ButtonStyle::Primary),
-];
-/// How long both fighters have to pick before the bot picks for them,
-/// `VIZIER_FIGHT_PICK_SECS`.
-const PICK_WAIT: u64 = 15;
-/// How long the clash result stays up before the first blow.
-const REVEAL: Duration = Duration::from_millis(1800);
+/// The button that opens a scroll, and the modal it opens.
+const SCROLL_BUTTON: &str = "fightscroll:";
+const SCROLL_MODAL: &str = "fightans:";
+const SCROLL_FIELD: &str = "scrollanswer";
+/// How long a scroll stands before it burns, `VIZIER_FIGHT_SCROLL_SECS`.
+const SCROLL_WAIT: u64 = 25;
+/// How long a fighter waits after a wrong answer. Theirs alone: the other one
+/// is not held up by somebody else guessing.
+const SCROLL_LOCKOUT: Duration = Duration::from_secs(6);
+/// Scrolls in a duel, how many win it, and the blow reading one lands.
+const SCROLLS: usize = 3;
+const TO_WIN: u32 = 2;
+const SCROLL_BLOW: (i32, u64) = (25, 11);
 
-/// Who beats whom for one fight. Every move beats exactly two of the other
-/// side's moves and loses to the other two, for both fighters, so no button is
-/// ever better than another: each side wins a turn half the time, whatever
-/// they press, until they start reading the pattern.
-struct Clash {
-    left: [usize; 4],
-    right: [usize; 4],
+fn scroll_wait() -> Duration {
+    Duration::from_secs(super::control::number("VIZIER_FIGHT_SCROLL_SECS", SCROLL_WAIT).clamp(5, 120))
 }
 
-impl Clash {
-    fn deal(seed: &mut u64) -> Clash {
-        let mut perm = |seed: &mut u64| {
-            let mut p = [0, 1, 2, 3];
-            for i in (1..4).rev() {
-                p.swap(i, roll(seed, i as u64 + 1) as usize);
-            }
-            p
-        };
-        let left = perm(seed);
-        let right = perm(seed);
-        Clash { left, right }
-    }
-
-    /// 0 if the left fighter's move wins the clash, 1 if the right's does.
-    fn winner(&self, left_move: usize, right_move: usize) -> usize {
-        if (self.left[left_move % 4] + self.right[right_move % 4]) % 4 < 2 { 0 } else { 1 }
-    }
-}
-
-/// One turn's picks, filled in by the buttons.
-struct Picks {
+/// One scroll that is open right now.
+struct Live {
     fighters: [u64; 2],
-    moves: [Option<usize>; 2],
+    puzzle: battle_scroll::Puzzle,
+    /// Who read it first, and how long the card had been up when they did.
+    won_by: Option<(usize, Duration)>,
+    /// When the card went up. Both clocks start there, so opening the box late
+    /// is not a way to get more reading time.
+    opened: std::time::Instant,
+    /// Each fighter's own lockout after a wrong answer.
+    locked: [Option<std::time::Instant>; 2],
     open: bool,
 }
 
-/// Open picks, by fight.
-static PICKS: LazyLock<Mutex<HashMap<u64, Picks>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Scrolls with answers still coming in, by the message they ride on.
+static OPEN_SCROLLS: LazyLock<Mutex<HashMap<u64, Live>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-struct Chosen {
-    moves: [usize; 2],
-    /// Which side the bot picked for.
-    auto: [bool; 2],
-}
-
-fn pick_rows(fight_id: u64) -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(
-        MOVES
-            .iter()
-            .enumerate()
-            .map(|(i, (symbol, _, style))| {
-                CreateButton::new(format!("fightpick:{}:{}", fight_id, i)).label(*symbol).style(*style)
-            })
-            .collect(),
-    )]
-}
-
-/// Opens a turn, waits for both picks or the timer, and fills in whoever didn't press.
-#[allow(clippy::too_many_arguments)]
-async fn pick_moves(
-    ctx: &Context,
-    channel: ChannelId,
-    message: &mut Message,
-    head: &str,
-    log: &[String],
-    a: &Warrior,
-    b: &Warrior,
-    hp: &[i32; 2],
-    fight_id: u64,
-    carry: Option<&Vec<u8>>,
-    seed: &mut u64,
-) -> Chosen {
-    PICKS.lock().insert(fight_id, Picks { fighters: [a.id, b.id], moves: [None, None], open: true });
-    let pick_wait = Duration::from_secs(super::control::number("VIZIER_FIGHT_PICK_SECS", PICK_WAIT).max(3));
-    let closes = Utc::now().timestamp() + pick_wait.as_secs() as i64;
-    let prompt = format!(
-        "{}\n\n🎮 <@{}> and <@{}>, pick a move! **Win the clash, win the fight.** Closes <t:{}:R>",
-        fight_text(head, log, a, b, hp),
-        a.id,
-        b.id,
-        closes
-    );
-    keep_at_bottom(ctx, channel, message, &prompt, None, carry, Some(pick_rows(fight_id))).await;
-    let deadline = tokio::time::Instant::now() + pick_wait;
-    loop {
-        let both = PICKS.lock().get(&fight_id).is_some_and(|p| p.moves.iter().all(Option::is_some));
-        if both || tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+/// Whether another scroll goes up, by how many have been and the score. Three
+/// scrolls; a fourth only to break a tie that somebody actually scored in - all
+/// three burning is a coin flip, not a reason to burn a fourth.
+fn another_scroll(done: usize, score: [u32; 2]) -> bool {
+    if score[0] >= TO_WIN || score[1] >= TO_WIN {
+        return false;
     }
-    let taken = {
-        let mut picks = PICKS.lock();
-        match picks.get_mut(&fight_id) {
-            Some(p) => {
-                p.open = false;
-                p.moves
-            }
-            None => [None, None],
+    if done < SCROLLS {
+        return true;
+    }
+    done == SCROLLS && score[0] == score[1] && score[0] > 0
+}
+
+/// Who took a duel: whoever read the most scrolls, or `None` when they are
+/// level and the gods have to decide.
+fn duel_winner(score: [u32; 2]) -> Option<usize> {
+    match score[0].cmp(&score[1]) {
+        std::cmp::Ordering::Greater => Some(0),
+        std::cmp::Ordering::Less => Some(1),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// The one button under a scroll.
+fn scroll_rows(scroll: u64, open: bool) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("{}{}", SCROLL_BUTTON, scroll))
+            .label("📜 Open the scroll")
+            .style(ButtonStyle::Primary)
+            .disabled(!open),
+    ])]
+}
+
+/// Drawing a scroll card is CPU work, so it never runs on the gateway thread.
+async fn scroll_card(
+    left: Fighter,
+    right: Fighter,
+    number: String,
+    score: [u32; 2],
+    puzzle: &battle_scroll::Puzzle,
+    season: Season,
+    seconds: u64,
+) -> Option<Vec<u8>> {
+    let (prompt, spec) = (puzzle.prompt.clone(), puzzle.spec.clone());
+    tokio::task::spawn_blocking(move || {
+        battle_card::scroll_png(&battle_card::Scroll {
+            left: &left,
+            right: &right,
+            number,
+            score,
+            prompt: &prompt,
+            spec: &spec,
+            season,
+            seconds,
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// A duel: best of three scrolls, first to two. Each scroll goes up as a card
+/// with the puzzle drawn on it - a modal is text only, so a puzzle hidden in
+/// one would be no puzzle at all - and the first fighter to read it lands a
+/// real blow. Nothing here is scripted: the health shown is the health.
+async fn duel(ctx: &Context, channel: ChannelId, a: &Contender, b: &Contender, seed: &mut u64, season: Season) -> (Contender, i32) {
+    let mut hp = [START_HP; 2];
+    let mut score = [0u32; 2];
+    let mut rng = battle_scroll::Rng::new(*seed);
+    let mut used: Vec<&'static str> = Vec::new();
+    let mut done = 0usize;
+    let wait = scroll_wait();
+    tracing::info!("battle: a duel - {} vs {}", a.name, b.name);
+
+    while another_scroll(done, score) {
+        done += 1;
+        let mut puzzle = battle_scroll::generate(&mut rng, &used);
+        used.push(puzzle.kind);
+        // Written down before it is shown, so the bank can be looked over later
+        // for scrolls nobody can read and scrolls everybody can.
+        if let Some(Ok(id)) = with_db(|conn| battle_scroll::record(conn, &puzzle, Utc::now().timestamp())) {
+            puzzle.id = id;
         }
+        let number = format!("Scroll {} of {}", done, SCROLLS.max(done));
+        let card =
+            scroll_card(a.card(hp[0]), b.card(hp[1]), number.clone(), score, &puzzle, season, wait.as_secs()).await;
+        let head = format!(
+            "📜 **{}** · <@{}> vs <@{}> — first to read it lands the blow",
+            number, a.id, b.id
+        );
+        // The scroll's own id, settled before the card goes up, so the button
+        // is live in the very first message: a card that went up and then had
+        // its button added a moment later would be a card nobody could answer
+        // while its clock was already running.
+        let scroll = roll(seed, u64::MAX >> 12) + 1;
+        let mut msg = CreateMessage::new()
+            .content(&head)
+            .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(a.id), UserId::new(b.id)]))
+            .components(scroll_rows(scroll, true));
+        if let Some(png) = card {
+            msg = msg.add_file(CreateAttachment::bytes(png, "scroll.png"));
+        }
+        let mut posted = match call(channel.send_message(&ctx.http, msg)).await {
+            Ok(posted) => posted,
+            Err(err) => {
+                tracing::warn!("battle: scroll not sent: {}", err);
+                break;
+            }
+        };
+        // The clock starts the instant the card is up, for both of them: not
+        // when either of them gets round to pressing the button.
+        OPEN_SCROLLS.lock().insert(
+            scroll,
+            Live {
+                fighters: [a.id, b.id],
+                puzzle,
+                won_by: None,
+                opened: std::time::Instant::now(),
+                locked: [None, None],
+                open: true,
+            },
+        );
+
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let read = OPEN_SCROLLS.lock().get(&scroll).and_then(|l| l.won_by);
+            if read.is_some() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let closed = {
+            let mut scrolls = OPEN_SCROLLS.lock();
+            match scrolls.get_mut(&scroll) {
+                Some(live) => {
+                    live.open = false;
+                    (live.won_by, live.puzzle.answer.clone(), live.puzzle.id)
+                }
+                None => (None, String::new(), 0),
+            }
+        };
+        OPEN_SCROLLS.lock().remove(&scroll);
+        let (read, answer, puzzle_id) = closed;
+
+        let outcome = match read {
+            Some((side, took)) => {
+                let blow = SCROLL_BLOW.0 + roll(seed, SCROLL_BLOW.1) as i32;
+                hp[1 - side] = (hp[1 - side] - blow).max(0);
+                score[side] += 1;
+                if puzzle_id > 0 {
+                    let _ = with_db(|conn| battle_scroll::solved(conn, puzzle_id));
+                }
+                let who = if side == 0 { a } else { b };
+                let other = if side == 0 { b } else { a };
+                format!(
+                    "✅ **{}** read it in **{:.1}s** — “{}”. **{}** takes **-{} HP**.\nScrolls: **{} – {}**",
+                    who.name,
+                    took.as_secs_f32(),
+                    answer,
+                    other.name,
+                    blow,
+                    score[0],
+                    score[1]
+                )
+            }
+            None => format!(
+                "🔥 Nobody could read it. The scroll burns — the answer was “{}”.\nScrolls: **{} – {}**",
+                answer, score[0], score[1]
+            ),
+        };
+        let text = format!("{}\n\n{}", head, outcome);
+        let _ = call(posted.edit(&ctx.http, EditMessage::new().content(text).components(scroll_rows(scroll, false))))
+            .await;
+        if another_scroll(done, score) {
+            tokio::time::sleep(FIGHT_GAP).await;
+        }
+    }
+
+    // Whoever read the most scrolls. Level means every scroll burned, and the
+    // duel is settled the only way left.
+    let (side, gods) = match duel_winner(score) {
+        Some(side) => (side, false),
+        None => (roll(seed, 2) as usize, true),
     };
-    let mut chosen = Chosen { moves: [0, 0], auto: [false, false] };
-    for side in 0..2 {
-        match taken[side] {
-            Some(m) => chosen.moves[side] = m,
-            None => {
-                chosen.moves[side] = roll(seed, 4) as usize;
-                chosen.auto[side] = true;
-            }
-        }
+    // A coin flip still leaves somebody standing, so the bars have to say so.
+    if gods {
+        hp[1 - side] = (hp[1 - side] - (SCROLL_BLOW.0 + roll(seed, SCROLL_BLOW.1) as i32)).max(0);
     }
-    chosen
+    let (winner, loser) = if side == 0 { (a, b) } else { (b, a) };
+    let lines = lines();
+    let finish = if gods {
+        format!("Na {} padh paaya, na {} — so the gods decided. 🎲", a.name, b.name)
+    } else {
+        fill(pick(lines.finish, seed), &winner.name, &loser.name)
+    };
+    let card =
+        fight_card("Challenge".into(), a.card(hp[0]), b.card(hp[1]), finish.clone(), Outcome::Won(side), None, season)
+            .await;
+    let mut msg = CreateMessage::new()
+        .content(format!("🏆 **{}** · {} – {} on the scrolls\n{}", winner.name, score[0], score[1], finish))
+        .allowed_mentions(CreateAllowedMentions::new());
+    if let Some(png) = card {
+        msg = msg.add_file(CreateAttachment::bytes(png, "fight.png"));
+    }
+    let _ = call(channel.send_message(&ctx.http, msg)).await;
+    tracing::info!("battle: {} won the duel ({} - {})", winner.name, score[0], score[1]);
+    (winner.clone(), hp[side].max(0))
 }
 
-/// A move button. Only the two fighters can press, once per turn, while it is open.
-async fn on_pick(ctx: &Context, component: &ComponentInteraction, rest: &str) {
+/// "Open the scroll": only the two fighters, only while it stands, and only
+/// once their own lockout has run out.
+async fn on_scroll_button(ctx: &Context, component: &ComponentInteraction, rest: &str) {
     let whisper = |text: String| {
         CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
     };
-    let mut parts = rest.split(':');
-    let (Some(Ok(fight_id)), Some(Ok(choice))) =
-        (parts.next().map(str::parse::<u64>), parts.next().map(str::parse::<usize>))
-    else {
+    let Ok(scroll) = rest.parse::<u64>() else {
         return;
     };
     let user = component.user.id.get();
+    let refusal = {
+        let scrolls = OPEN_SCROLLS.lock();
+        match scrolls.get(&scroll) {
+            None => Some("That scroll is ash.".to_string()),
+            Some(live) => match live.fighters.iter().position(|f| *f == user) {
+                None => Some("This isn't your fight. Grab some popcorn 🍿".to_string()),
+                Some(_) if !live.open => Some("Too late — that scroll has already gone.".to_string()),
+                Some(side) => locked_for(live, side).map(|left| {
+                    format!("The scroll still smoulders — try again in {}s.", left.as_secs().max(1))
+                }),
+            },
+        }
+    };
+    let answer = match refusal {
+        Some(text) => return drop(component.create_response(&ctx.http, whisper(text)).await),
+        None => CreateModal::new(format!("{}{}", SCROLL_MODAL, scroll), "Read the scroll").components(vec![
+            CreateActionRow::InputText(
+                CreateInputText::new(InputTextStyle::Short, "Your answer", SCROLL_FIELD)
+                    .placeholder("Whatever the scroll asks for")
+                    .required(true)
+                    .max_length(80),
+            ),
+        ]),
+    };
+    let _ = component.create_response(&ctx.http, CreateInteractionResponse::Modal(answer)).await;
+}
+
+/// How long is left on a fighter's own lockout, if any.
+fn locked_for(live: &Live, side: usize) -> Option<Duration> {
+    let at = live.locked.get(side).copied().flatten()?;
+    SCROLL_LOCKOUT.checked_sub(at.elapsed()).filter(|left| !left.is_zero())
+}
+
+/// An answer. The first right one takes the scroll; a wrong one costs that
+/// fighter six seconds and nobody else anything.
+pub async fn on_modal(ctx: &Context, modal: &serenity::all::ModalInteraction) {
+    let whisper = |text: String| {
+        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+    };
+    let Some(rest) = modal.data.custom_id.strip_prefix(SCROLL_MODAL) else {
+        return;
+    };
+    let Ok(scroll) = rest.parse::<u64>() else {
+        return;
+    };
+    let given = modal
+        .data
+        .components
+        .iter()
+        .flat_map(|row| row.components.iter())
+        .find_map(|c| match c {
+            serenity::all::ActionRowComponent::InputText(t) if t.custom_id == SCROLL_FIELD => t.value.clone(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let user = modal.user.id.get();
     let reply = {
-        let mut picks = PICKS.lock();
-        match picks.get_mut(&fight_id) {
-            None => "This fight is over.".to_string(),
-            Some(p) => match p.fighters.iter().position(|f| *f == user) {
+        let mut scrolls = OPEN_SCROLLS.lock();
+        match scrolls.get_mut(&scroll) {
+            None => "That scroll is ash.".to_string(),
+            Some(live) => match live.fighters.iter().position(|f| *f == user) {
                 None => "This isn't your fight. Grab some popcorn 🍿".to_string(),
-                Some(_) if !p.open => "Too late, this turn is already done.".to_string(),
-                Some(side) => match p.moves[side] {
-                    Some(m) => format!("You already picked {} this turn.", MOVES[m].0),
-                    None if choice < MOVES.len() => {
-                        p.moves[side] = Some(choice);
-                        format!("You picked {}. Waiting for the clash…", MOVES[choice].0)
+                Some(_) if !live.open || live.won_by.is_some() => "Too late — that scroll has already gone.".to_string(),
+                Some(side) => match locked_for(live, side) {
+                    Some(left) => format!("The scroll still smoulders — try again in {}s.", left.as_secs().max(1)),
+                    None if battle_scroll::matches(&given, &live.puzzle) => {
+                        live.won_by = Some((side, live.opened.elapsed()));
+                        live.open = false;
+                        "Read it. The blow lands ⚔️".to_string()
                     }
-                    None => "That isn't a move.".to_string(),
+                    None => {
+                        live.locked[side] = Some(std::time::Instant::now());
+                        format!("Wrong. The scroll smoulders — try again in {}s.", SCROLL_LOCKOUT.as_secs())
+                    }
                 },
             },
         }
     };
-    let _ = component.create_response(&ctx.http, whisper(reply)).await;
+    let _ = modal.create_response(&ctx.http, whisper(reply)).await;
 }
 
 /// Health after a blow. A chaos turn hurts both, so both bars can empty at once;
@@ -939,27 +1265,6 @@ fn roll_fight(seed: &mut u64) -> (Vec<(usize, Swing)>, [i32; 2]) {
     (blows, hp)
 }
 
-/// The blows for a fight whose winner the clash already decided. A fight is
-/// rolled as usual; if it went the other way it is played mirrored, which swaps
-/// every blow between the two and so the result, and it reads just as natural.
-/// A dead level fight is rolled again; the empty fallback leaves the blows to
-/// chance, and the clash still names the winner.
-fn script_fight(seed: &mut u64, winner: usize) -> Vec<(usize, Swing)> {
-    for _ in 0..8 {
-        let (blows, hp) = roll_fight(seed);
-        if hp[winner] > hp[1 - winner] {
-            return blows;
-        }
-        if hp[winner] < hp[1 - winner] {
-            return blows
-                .into_iter()
-                .map(|(attacker, s)| (1 - attacker, Swing { blow: s.blow, hits: [s.hits[1], s.hits[0]] }))
-                .collect();
-        }
-    }
-    Vec::new()
-}
-
 /// Counts chat under the live fight so it can be moved back to the bottom.
 /// Returns false for everything else, so the rest of the bot still sees it.
 pub fn note_chat(channel: ChannelId) -> bool {
@@ -983,8 +1288,8 @@ fn bar(hp: i32) -> String {
 
 /// The message under the card: both bars and the last few exchanges, trimmed so
 /// a long fight never runs past Discord's message limit.
-fn fight_text(head: &str, log: &[String], a: &Warrior, b: &Warrior, hp: &[i32; 2]) -> String {
-    let side = |who: &Warrior, hp: i32| {
+fn fight_text(head: &str, log: &[String], a: &Contender, b: &Contender, hp: &[i32; 2]) -> String {
+    let side = |who: &Contender, hp: i32| {
         let name: String = who.name.chars().take(14).collect();
         format!("`{:<14}` `{}` **{:>3}**", name, bar(hp), hp.max(0))
     };
@@ -1006,7 +1311,6 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         CommandDataOptionValue::User(id) => Some(id),
         _ => None,
     });
-    let theme = theme_option(&command.data.options);
     let Some(target) = target else {
         let _ = command.create_response(&ctx.http, whisper("Who do you want to fight? Use `/fight @name`.".into())).await;
         return;
@@ -1033,7 +1337,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     let here = command.channel_id;
     let arena = arena(ctx, guild, here).await;
     let _ = command.defer_ephemeral(&ctx.http).await;
-    let (Some(a), Some(b)) = (warrior(ctx, guild, me).await, warrior(ctx, guild, them).await) else {
+    let (Some(a), Some(b)) = (contender(ctx, guild, me).await, contender(ctx, guild, them).await) else {
         let _ = command
             .edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content("Couldn't find that member."))
             .await;
@@ -1041,6 +1345,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
     };
 
     let mut seed = Utc::now().timestamp_millis() as u64 | 1;
+    let season = season();
     let card = fight_card(
         "Challenge".into(),
         a.card(START_HP),
@@ -1048,19 +1353,16 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
         format!("{} vs {}", a.name, b.name),
         Outcome::Open,
         None,
-        theme,
+        season,
     )
     .await;
-    let flavour = match theme {
-        Theme::Classic => String::new(),
-        other => format!(" **{}** style", other.label()),
-    };
     let wait = challenge_wait();
+    // A duel is between two named people, so only those two are tagged: no
+    // role is called to the lists for a challenge.
     let content = format!(
-        "⚔️ <@{}> has challenged <@{}> to a{} fight!\n<@{}>, accept or decline — the challenge expires in {}.\n         -# When the fight starts, both fighters pick △ ○ □ ✕. Win the clash, win the fight.",
+        "⚔️ <@{}> has called <@{}> out for a duel in the lists!\n<@{}>, accept or decline — the challenge expires in {}.\n         -# Three scrolls, first to two. Read what is on the card and hit Open the scroll.",
         me,
         them,
-        if flavour.is_empty() { String::new() } else { flavour },
         them,
         span(wait.as_secs())
     );
@@ -1127,19 +1429,29 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 let _ = arena.say(&ctx.http, "A fight is already running here — try again in a moment.").await;
                 return;
             }
-            let (winner, _) = play(ctx, arena, "Challenge", &a, &b, &mut seed, theme, true).await;
+            let (winner, _) = duel(ctx, arena, &a, &b, &mut seed, season).await;
             let loser = if winner.id == a.id { b.id } else { a.id };
             record("fight", winner.id, Some(loser));
+            // The points, and the reason when there are none.
+            let now = Utc::now().timestamp();
+            let paid = pay_duel(winner.id, loser, now);
             let (fights, wins) = tally(winner.id);
+            // A duel's winner earns a card from the deck as well as the points.
+            let prize = super::battle_prize::award("duel", now, winner.id, roll(&mut seed, 10_000) as f64 / 10_000.0);
+            let text = std::iter::once(format!(
+                "🏆 **{}** won the duel{}! That is **{}** wins from **{}** fights. `/fightboard` for the rest.",
+                winner.name,
+                paid.said(),
+                wins,
+                fights
+            ))
+            .chain(prize.as_ref().map(super::battle_prize::prize_line))
+            .collect::<Vec<_>>()
+            .join("\n");
             let _ = arena
                 .send_message(
                     &ctx.http,
-                    CreateMessage::new()
-                        .content(format!(
-                            "🏆 **{}** won! That is **{}** wins from **{}** fights. `/fightboard` for the rest.",
-                            winner.name, wins, fights
-                        ))
-                        .allowed_mentions(CreateAllowedMentions::new()),
+                    CreateMessage::new().content(text).allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await;
             BUSY.lock().remove(&arena.get());
@@ -1149,7 +1461,7 @@ pub async fn fight_command(ctx: &Context, command: &CommandInteraction) {
                 .send_message(
                     &ctx.http,
                     CreateMessage::new()
-                        .content(format!("🏃 <@{}> declined the challenge.", them))
+                        .content(format!("🏃 <@{}> walked away from the lists.", them))
                         .allowed_mentions(CreateAllowedMentions::new()),
                 )
                 .await;
@@ -1178,7 +1490,7 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         return;
     };
     if !super::admin_ids().contains(&command.user.id.get()) {
-        let _ = command.create_response(&ctx.http, whisper("Only admins can start a battle.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("Only admins can call a melee.".into())).await;
         return;
     }
     let minutes = command
@@ -1191,22 +1503,24 @@ pub async fn battle_command(ctx: &Context, command: &CommandInteraction) {
         })
         .unwrap_or_else(default_lobby_minutes)
         .clamp(MIN_WAIT, max_lobby_minutes());
-    let theme = theme_option(&command.data.options);
 
     let here = command.channel_id;
     let arena = arena(ctx, guild, here).await;
     if !BUSY.lock().insert(arena.get()) {
-        let _ = command.create_response(&ctx.http, whisper("A battle is already running.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("A fight is already running in the lists.".into())).await;
         return;
     }
     let _ = command.create_response(&ctx.http, whisper(format!("Lobby open for {} minutes.", minutes))).await;
-    open_lobby(ctx, guild, arena, here, minutes, theme, Ping::Warriors).await;
+    open_lobby(ctx, guild, arena, here, minutes, Ping::Games).await;
 }
 
-/// Who a lobby tags when it opens.
+/// Who a melee's lobby calls to the lists when it opens. A duel never tags a
+/// role at all, so there is no `Ping` anywhere in that path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ping {
-    Warriors,
+    /// The month's own role: the people who opted in. The default everywhere,
+    /// and the only role a melee announcement ever mentions.
+    Games,
     Houses,
     Everyone,
     Nobody,
@@ -1215,29 +1529,32 @@ enum Ping {
 impl Ping {
     fn from_key(key: &str) -> Ping {
         match key.trim().to_ascii_lowercase().as_str() {
-            "warriors" | "warrior" => Ping::Warriors,
+            "houses" | "house" => Ping::Houses,
             "everyone" => Ping::Everyone,
             "none" | "nobody" => Ping::Nobody,
-            _ => Ping::Houses,
+            _ => Ping::Games,
         }
     }
 
     /// The same keys, but a word nobody recognises is refused instead of
-    /// quietly tagging all four houses: the panel names who it will tag, so it
+    /// quietly tagging the whole server: the panel names who it will tag, so it
     /// must not tag someone else.
     fn parse(key: &str) -> Result<Ping, String> {
         match key.trim().to_ascii_lowercase().as_str() {
-            "warriors" | "warrior" => Ok(Ping::Warriors),
+            "games" | "game" => Ok(Ping::Games),
             "houses" | "house" => Ok(Ping::Houses),
             "everyone" => Ok(Ping::Everyone),
             "none" | "nobody" => Ok(Ping::Nobody),
-            other => Err(format!("“{}” isn't someone to tag. Pick the houses, the Warrior role, @everyone or nobody.", other)),
+            other => Err(format!(
+                "“{}” isn't someone to tag. Pick the server games role, the houses, @everyone or nobody.",
+                other
+            )),
         }
     }
 
     fn key(self) -> &'static str {
         match self {
-            Ping::Warriors => "warriors",
+            Ping::Games => "games",
             Ping::Houses => "houses",
             Ping::Everyone => "everyone",
             Ping::Nobody => "none",
@@ -1247,7 +1564,7 @@ impl Ping {
     /// How the panel says who was tagged, as the end of "… were tagged".
     fn label(self) -> &'static str {
         match self {
-            Ping::Warriors => "the Warrior role",
+            Ping::Games => "the server games role",
             Ping::Houses => "the four houses",
             Ping::Everyone => "everyone",
             Ping::Nobody => "nobody",
@@ -1255,46 +1572,67 @@ impl Ping {
     }
 }
 
-/// Opens a lobby in the arena, waits it out, and runs the battle. The arena
-/// must already be marked busy; it is freed at the end.
-#[allow(clippy::too_many_arguments)]
-async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: ChannelId, minutes: i64, theme: Theme, ping: Ping) {
-    let ends = Utc::now().timestamp() + minutes * 60;
-    let (tag, mentions) = match ping {
-        Ping::Warriors => {
-            let role = warrior_role(ctx, guild).await;
-            let tag = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
-            (tag, CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
-        }
-        // While the Cup is paused the four house roles are not tagged by a game:
-        // the Warrior role is the arena's own, and it says the same thing.
-        Ping::Houses if super::house_cup::paused() => {
-            let role = warrior_role(ctx, guild).await;
-            let tag = role.map(|r| format!("<@&{}>", r)).unwrap_or_else(|| "Warriors".into());
-            (tag, CreateAllowedMentions::new().roles(role.into_iter().collect::<Vec<_>>()))
-        }
-        Ping::Houses => {
-            let roles = super::house::house_roles(ctx, guild).await;
-            let tag = roles.iter().map(|r| format!("<@&{}>", r)).collect::<Vec<_>>().join(" ");
-            (if tag.is_empty() { "Houses".into() } else { tag }, CreateAllowedMentions::new().roles(roles))
-        }
-        Ping::Everyone => ("@everyone".into(), CreateAllowedMentions::new().everyone(true)),
-        Ping::Nobody => ("⚔️".into(), CreateAllowedMentions::new()),
+/// The roles a lobby's heads-up may mention, as the server actually has them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Tags {
+    games: Option<RoleId>,
+    houses: Vec<RoleId>,
+}
+
+/// What a lobby's heads-up says, who it is allowed to mention, and whether it
+/// is an @everyone. `None` means no heads-up goes up at all: a role that is
+/// unset, gone from the server or switched off leaves the lobby card to go up
+/// untagged rather than tagging the wrong people or failing.
+fn heads_up(ping: Ping, tags: &Tags) -> Option<(String, Vec<RoleId>, bool)> {
+    let roles = |ids: Vec<RoleId>| {
+        (!ids.is_empty())
+            .then(|| (ids.iter().map(|r| format!("<@&{}>", r)).collect::<Vec<_>>().join(" "), ids, false))
     };
-    // The tags go in a message of their own that stays put: the lobby card moves
-    // down as chat piles up (and the old copy is deleted), which used to take
-    // the tags with it.
-    if ping != Ping::Nobody {
-        let heads_up = CreateMessage::new()
-            .content(format!("{} — a battle royale is starting! Join the lobby below 👇", tag))
-            .allowed_mentions(mentions);
-        if let Err(err) = call(arena.send_message(&ctx.http, heads_up)).await {
-            tracing::warn!("battle: lobby tags not posted in {}: {}", arena, err);
+    let (text, ids, everyone) = match ping {
+        Ping::Nobody => return None,
+        Ping::Games => roles(tags.games.into_iter().collect())?,
+        // While the Cup is paused the four house roles are not tagged by a
+        // game, so the month's own role is called instead - it says the same
+        // thing and it is who opted in.
+        Ping::Houses if super::house_cup::paused() => roles(tags.games.into_iter().collect())?,
+        Ping::Houses => roles(tags.houses.clone())?,
+        Ping::Everyone => ("@everyone".to_string(), Vec::new(), true),
+    };
+    Some((format!("{} — a melee is forming in the lists! Join the lobby below 👇", text), ids, everyone))
+}
+
+/// Opens a lobby in the lists, waits it out, and runs the melee. The arena must
+/// already be marked busy; it is freed at the end.
+async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: ChannelId, minutes: i64, ping: Ping) {
+    let ends = Utc::now().timestamp() + minutes * 60;
+    // Only look up the roles a heads-up could actually want.
+    let tags = Tags {
+        games: match ping {
+            Ping::Games | Ping::Houses => games_role(ctx, guild).await,
+            _ => None,
+        },
+        houses: match ping {
+            Ping::Houses if !super::house_cup::paused() => super::house::house_roles(ctx, guild).await,
+            _ => Vec::new(),
+        },
+    };
+    // The tags go in a message of their own that stays put: the lobby card
+    // moves down as chat piles up (and the old copy is deleted), which used to
+    // take the tags with it. No role to tag means no heads-up: the lobby below
+    // still goes up.
+    match heads_up(ping, &tags) {
+        Some((text, roles, everyone)) => {
+            let mentions = CreateAllowedMentions::new().roles(roles).everyone(everyone);
+            let msg = CreateMessage::new().content(text).allowed_mentions(mentions);
+            if let Err(err) = call(arena.send_message(&ctx.http, msg)).await {
+                tracing::warn!("battle: lobby tags not posted in {}: {}", arena, err);
+            }
         }
+        None => tracing::info!("battle: lobby in {} goes up untagged ({:?})", arena, ping),
     }
-    let embed = lobby_embed(&[], ends, minutes, theme);
+    let embed = lobby_embed(&[], ends, minutes);
     let msg = CreateMessage::new()
-        .content("⚔️ Battle royale lobby · hit Join 👇")
+        .content("⚔️ The melee · hit Join 👇")
         .allowed_mentions(CreateAllowedMentions::new())
         .embed(embed)
         .components(lobby_buttons(0, true));
@@ -1313,12 +1651,12 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
     let _ = posted.edit(&ctx.http, EditMessage::new().components(rows)).await;
     LOBBIES
         .lock()
-        .insert(lobby_id, Lobby { joined: Vec::new(), names: HashMap::new(), open: true, ends, minutes, theme });
+        .insert(lobby_id, Lobby { joined: Vec::new(), names: HashMap::new(), open: true, ends, minutes });
     if arena != here {
         let _ = here
             .send_message(
                 &ctx.http,
-                CreateMessage::new().content(format!("⚔️ The battle royale is running here → {}", posted.link())),
+                CreateMessage::new().content(format!("⚔️ The melee is running here → {}", posted.link())),
             )
             .await;
     }
@@ -1338,9 +1676,9 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
             break;
         };
         let fresh = CreateMessage::new()
-            .content("⚔️ Battle royale lobby · hit Join 👇")
+            .content("⚔️ The melee · hit Join 👇")
             .allowed_mentions(CreateAllowedMentions::new())
-            .embed(lobby_embed(&names, ends, minutes, theme))
+            .embed(lobby_embed(&names, ends, minutes))
             .components(lobby_buttons(lobby_id, true));
         match call(arena.send_message(&ctx.http, fresh)).await {
             Ok(moved) => {
@@ -1373,31 +1711,24 @@ async fn open_lobby(ctx: &Context, guild: GuildId, arena: ChannelId, here: Chann
     tracing::info!("battle: lobby {} closed with {} joined", lobby_id, joined.len());
     if joined.len() < needed {
         let _ = arena
-            .say(&ctx.http, format!("Only {} joined. Battle cancelled — {} are needed.", joined.len(), needed))
+            .say(&ctx.http, format!("Only {} came to the lists. Melee called off — {} are needed.", joined.len(), needed))
             .await;
         BUSY.lock().remove(&arena.get());
         return;
     }
-    run_battle(ctx, guild, arena, joined, theme).await;
+    run_battle(ctx, guild, arena, joined).await;
     BUSY.lock().remove(&arena.get());
 }
 
 fn lobby_buttons(id: u64, open: bool) -> Vec<CreateActionRow> {
     vec![CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("battlejoin:{}", id))
-            .label("⚔️ Join")
-            .style(ButtonStyle::Success)
-            .disabled(!open),
-        CreateButton::new(format!("battlewarrior:{}", id))
-            .label("🔔 Warrior role")
-            .style(ButtonStyle::Secondary)
-            .disabled(!open),
+        CreateButton::new(format!("battlejoin:{}", id)).label("⚔️ Join").style(ButtonStyle::Success).disabled(!open),
     ])]
 }
 
-fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> CreateEmbed {
+fn lobby_embed(names: &[String], ends: i64, minutes: i64) -> CreateEmbed {
     let list = if names.is_empty() {
-        "Nobody yet. Who's first?".to_string()
+        "Nobody yet. Who rides first?".to_string()
     } else {
         let shown = lobby_names();
         let mut list = names.iter().take(shown).map(|n| format!("• {}", n)).collect::<Vec<_>>().join("\n");
@@ -1407,13 +1738,9 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
         list
     };
     CreateEmbed::new()
-        .title(match theme {
-            Theme::Classic => "⚔️ Battle Royale".to_string(),
-            other => format!("⚔️ Battle Royale · {} edition", other.label()),
-        })
+        .title("⚔️ The Great Melee")
         .description(format!(
-            "Hit Join and get ready to fight. The winner takes the **{}** role.\n\n\
-             ⏳ Closes <t:{}:R> ({} min)\n👥 **{}** joined (at least {} needed)\n\n{}",
+            "Hit Join and ride into the lists. The last one standing takes the **{}** role and a card from the deck.\n\n             ⏳ Closes <t:{}:R> ({} min)\n👥 **{}** in the lists (at least {} needed)\n\n{}",
             CHAMPION_ROLE,
             ends,
             minutes,
@@ -1421,8 +1748,8 @@ fn lobby_embed(names: &[String], ends: i64, minutes: i64, theme: Theme) -> Creat
             min_players(),
             list
         ))
-        .colour(0xE67E22)
-        .footer(CreateEmbedFooter::new("Every fight is a coin toss — just here for the banter"))
+        .colour(0xB0742A)
+        .footer(CreateEmbedFooter::new("Every pass is a coin toss — this is banter, not a ladder"))
 }
 
 // --- the daily battle ---------------------------------------------------------
@@ -1451,18 +1778,11 @@ fn daily_due(now: i64, times: &str, done: impl Fn(&str, &str) -> bool) -> Option
     })
 }
 
-/// The theme a daily battle uses: a fixed one, or a different one at random.
-fn daily_theme(key: &str, roll: u64) -> Theme {
-    match Theme::from_key(key) {
-        Some(theme) => theme,
-        None => Theme::ALL[(roll % Theme::ALL.len() as u64) as usize],
-    }
-}
-
-/// Opens a battle royale every day at `VIZIER_BATTLE_DAILY_TIME` (India time)
-/// when `VIZIER_BATTLE_DAILY` is on - the same lobby /battle opens, so nothing
-/// about the battle itself differs. If a fight is running at that moment it
-/// tries again every half minute for up to half an hour.
+/// Opens a melee every day at `VIZIER_BATTLE_DAILY_TIME` (India time) when
+/// `VIZIER_BATTLE_DAILY` is on - the same lobby /battle opens, so nothing about
+/// the melee itself differs. If a fight is running at that moment it tries
+/// again every half minute for up to half an hour, which is also what carries a
+/// slot that came due while the bot was down.
 pub fn spawn_daily(ctx: Context) {
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1490,7 +1810,7 @@ pub fn spawn_daily(ctx: Context) {
                 continue;
             };
             let Some(fallback) = super::control::id("VIZIER_FIGHT_CHANNEL").map(ChannelId::new) else {
-                tracing::warn!("battle: daily battle is on but VIZIER_FIGHT_CHANNEL is not set");
+                tracing::warn!("battle: the daily melee is on but VIZIER_FIGHT_CHANNEL is not set");
                 meta_set(&slot_key, "skipped");
                 continue;
             };
@@ -1500,15 +1820,11 @@ pub fn spawn_daily(ctx: Context) {
             }
             meta_set(&slot_key, "opened");
             let minutes = (super::control::number("VIZIER_BATTLE_DAILY_MINUTES", 10) as i64).clamp(MIN_WAIT, max_lobby_minutes());
-            let theme = daily_theme(
-                &super::control::var("VIZIER_BATTLE_DAILY_THEME").unwrap_or_else(|| "classic".into()),
-                now as u64,
-            );
             let ping = Ping::from_key(&super::control::var("VIZIER_BATTLE_DAILY_PING").unwrap_or_default());
-            tracing::info!("battle: daily battle opening for {} {} ({} min, {:?}, {:?})", day, time, minutes, theme, ping);
+            tracing::info!("battle: daily melee opening for {} {} ({} min, {:?})", day, time, minutes, ping);
             let ctx = ctx.clone();
             tokio::spawn(async move {
-                open_lobby(&ctx, guild, arena, arena, minutes, theme, ping).await;
+                open_lobby(&ctx, guild, arena, arena, minutes, ping).await;
             });
         }
     });
@@ -1519,7 +1835,7 @@ pub fn spawn_daily(ctx: Context) {
 /// Why a panel start was refused, in words an admin can act on.
 const NO_GUILD: &str = "The bot isn't in a server right now, so there's nowhere to fight. Try again once it's back online.";
 const NO_ARENA: &str = "There's no arena to fight in. Set the fight channel in Arena → Fight channel, or make a channel called #fight-fight-fight.";
-const ARENA_BUSY: &str = "A battle or fight is already running in the arena. Wait for it to finish, or clear it with /battlestop.";
+const ARENA_BUSY: &str = "A melee or duel is already running in the arena. Wait for it to finish, or clear it with /battlestop.";
 
 /// A lobby the panel has just opened, so it can say what it did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1527,12 +1843,10 @@ pub struct StartedBattle {
     /// The arena the lobby went up in.
     pub channel: u64,
     pub minutes: i64,
-    /// `houses`, `warriors`, `everyone` or `none`.
+    /// `games`, `houses`, `everyone` or `none`.
     pub ping: &'static str,
-    /// "the four houses", for the sentence the panel shows.
+    /// "the server games role", for the sentence the panel shows.
     pub ping_label: &'static str,
-    pub theme: &'static str,
-    pub theme_label: &'static str,
 }
 
 /// Marks the arena busy. `true` means the claim is ours: it has to be handed to
@@ -1555,16 +1869,10 @@ async fn arena_or_none(ctx: &Context, guild: GuildId) -> Option<ChannelId> {
 }
 
 /// Everything a panel start settles once the arena is known: the claim on it,
-/// the lobby length, who gets tagged and the fight style. Split from the Discord
+/// the lobby length and who gets tagged. Split from the Discord
 /// half so it can be tested without a server, and it owns the claim - a start
 /// that ends up refused frees the arena again rather than wedging it.
-fn start_plan(
-    arena: ChannelId,
-    minutes: Option<i64>,
-    ping: Option<&str>,
-    theme: Option<&str>,
-    roll: u64,
-) -> Result<(StartedBattle, Ping, Theme), String> {
+fn start_plan(arena: ChannelId, minutes: Option<i64>, ping: Option<&str>) -> Result<(StartedBattle, Ping), String> {
     if !claim_arena(arena) {
         return Err(ARENA_BUSY.to_string());
     }
@@ -1572,25 +1880,13 @@ fn start_plan(
         let minutes = minutes.unwrap_or_else(default_lobby_minutes).clamp(MIN_WAIT, max_lobby_minutes());
         let ping = match ping.map(str::trim).filter(|k| !k.is_empty()) {
             Some(key) => Ping::parse(key)?,
-            // The four houses, like the daily battle: a panel start is meant to
-            // wake the whole server up.
-            None => Ping::Houses,
+            // The month's own role, like the daily melee: a panel start is
+            // meant to wake up the people who opted in.
+            None => Ping::Games,
         };
-        let theme = match theme.map(str::trim).filter(|k| !k.is_empty()) {
-            Some("random") => daily_theme("random", roll),
-            Some(key) => Theme::from_key(key)
-                .ok_or_else(|| format!("“{}” isn't a fight style. Leave it out for the daily one.", key))?,
-            None => daily_theme(&super::control::var("VIZIER_BATTLE_DAILY_THEME").unwrap_or_else(|| "classic".into()), roll),
-        };
-        let started = StartedBattle {
-            channel: arena.get(),
-            minutes,
-            ping: ping.key(),
-            ping_label: ping.label(),
-            theme: theme.key(),
-            theme_label: theme.label(),
-        };
-        Ok((started, ping, theme))
+        let started =
+            StartedBattle { channel: arena.get(), minutes, ping: ping.key(), ping_label: ping.label() };
+        Ok((started, ping))
     })();
     if plan.is_err() {
         free_arena(arena);
@@ -1598,14 +1894,13 @@ fn start_plan(
     plan
 }
 
-/// Opens a battle royale lobby this instant, with no command behind it: the web
-/// panel's "Start a battle royale now". The same lobby `/battle` and the daily
-/// battle open, in the same arena, so nothing about the battle itself differs.
+/// Opens a melee lobby this instant, with no command behind it: the web panel's
+/// "Call a melee now". The same lobby `/battle` and the daily melee open, in
+/// the same arena, so nothing about the melee itself differs.
 pub async fn start_now(
     ctx: &Context,
     minutes: Option<i64>,
     ping: Option<&str>,
-    theme: Option<&str>,
 ) -> Result<StartedBattle, String> {
     let Some(guild) = ctx.cache.guilds().first().copied() else {
         return Err(NO_GUILD.to_string());
@@ -1613,12 +1908,12 @@ pub async fn start_now(
     let Some(arena) = arena_or_none(ctx, guild).await else {
         return Err(NO_ARENA.to_string());
     };
-    let (started, tags, theme) = start_plan(arena, minutes, ping, theme, Utc::now().timestamp() as u64)?;
-    tracing::info!("battle: panel opened a lobby in {} ({} min, {:?}, {:?})", arena, started.minutes, theme, tags);
+    let (started, tags) = start_plan(arena, minutes, ping)?;
+    tracing::info!("battle: panel opened a lobby in {} ({} min, {:?})", arena, started.minutes, tags);
     let ctx = ctx.clone();
     let minutes = started.minutes;
     tokio::spawn(async move {
-        open_lobby(&ctx, guild, arena, arena, minutes, theme, tags).await;
+        open_lobby(&ctx, guild, arena, arena, minutes, tags).await;
     });
     Ok(started)
 }
@@ -1631,9 +1926,8 @@ pub(crate) fn start_plan_for_tests(
     arena: u64,
     minutes: Option<i64>,
     ping: Option<&str>,
-    theme: Option<&str>,
 ) -> Result<StartedBattle, String> {
-    start_plan(ChannelId::new(arena), minutes, ping, theme, 0).map(|(plan, _, _)| plan)
+    start_plan(ChannelId::new(arena), minutes, ping).map(|(plan, _)| plan)
 }
 
 /// Gives a test's claim on an arena back, as a finished lobby would.
@@ -1644,16 +1938,17 @@ pub(crate) fn free_arena_for_tests(arena: u64) {
 
 /// Knockout rounds until one is left, on a draw fixed at the start: winners
 /// meet the winner beside them, and the bracket goes up before every round.
-async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>, theme: Theme) {
+async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec<u64>) {
+    let season = season();
     let mut seed = Utc::now().timestamp_millis() as u64 | 1;
-    let mut fighters: Vec<Warrior> = Vec::new();
+    let mut fighters: Vec<Contender> = Vec::new();
     for id in joined {
-        if let Some(w) = warrior_named(ctx, guild, id).await {
+        if let Some(w) = contender_named(ctx, guild, id).await {
             fighters.push(w);
         }
     }
     if fighters.len() < min_players() {
-        let _ = arena.say(&ctx.http, "Not enough fighters could be loaded. Battle cancelled.").await;
+        let _ = arena.say(&ctx.http, "Not enough fighters could be loaded. Melee called off.").await;
         return;
     }
     shuffle(&mut fighters, &mut seed);
@@ -1669,7 +1964,7 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
     let full_fights_up_to = full_fights_up_to();
     for r in 0..total {
         let matches = rounds[r].len();
-        let title = title_case(&round_title(matches));
+        let title = round_title(matches);
         if r >= chart_start {
             if entrants.is_none() {
                 // Pictures for whoever is still in, fetched once.
@@ -1682,20 +1977,25 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
                 entrants = Some(Arc::new(
                     fighters
                         .iter()
-                        .map(|w| Entrant { name: w.name.clone(), avatar: w.avatar.clone(), house: w.house })
+                        .map(|w| Entrant {
+                            name: w.name.clone(),
+                            avatar: w.avatar.clone(),
+                            house: w.house.clone(),
+                            stage: w.stage,
+                        })
                         .collect(),
                 ));
             }
             if let Some(entrants) = &entrants {
-                let subtitle = format!("{} warriors · {}", started, title);
-                let caption = format!("🗺️ **{}**: here's the bracket", title);
-                post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, theme, &caption).await;
+                let subtitle = format!("{} in the lists · {}", started, title);
+                let caption = format!("🗺️ **{}**: here's the draw", title);
+                post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, season, &caption).await;
             }
         }
         if r == 0 {
             let passes: Vec<String> = rounds[0].iter().filter(|m| m.bye).filter_map(|m| m.a).map(|i| tag(&fighters[i])).collect();
             if !passes.is_empty() {
-                say_chunks(ctx, arena, &format!("☕ **Free pass to the next round** ({})", passes.len()), &passes, ", ").await;
+                say_chunks(ctx, arena, &format!("⛺ **Rode on unopposed** ({})", passes.len()), &passes, ", ").await;
             }
         }
         tokio::time::sleep(FIGHT_GAP).await;
@@ -1715,15 +2015,14 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
                 advance(&mut rounds, r, j);
                 results.push(format!("{} beat {} · {} HP", tag_bold(&fighters[winner]), tag(&fighters[loser]), hp));
             }
-            let head = format!("⚡ **{}** · quick round · {} fights", title, results.len());
+            let head = format!("⚡ **{}** · settled at once · {} passes", title, results.len());
             say_chunks(ctx, arena, &head, &results, "\n").await;
         } else {
-            let stage = stage_title(matches);
             for j in 0..matches {
                 let (Some(ai), Some(bi), false) = (rounds[r][j].a, rounds[r][j].b, rounds[r][j].bye) else {
                     continue;
                 };
-                let (winner, hp) = play(ctx, arena, &stage, &fighters[ai], &fighters[bi], &mut seed, theme, false).await;
+                let (winner, hp) = play(ctx, arena, &title, &fighters[ai], &fighters[bi], &mut seed, season).await;
                 let (side, loser) = if winner.id == fighters[ai].id { (0, fighters[bi].id) } else { (1, fighters[ai].id) };
                 record("battle", winner.id, Some(loser));
                 runner_up = Some(loser);
@@ -1742,24 +2041,36 @@ async fn run_battle(ctx: &Context, guild: GuildId, arena: ChannelId, joined: Vec
         return;
     };
     if let Some(entrants) = &entrants {
-        let subtitle = format!("{} warriors · {} rounds · 👑 {}", started, total, champion.name);
-        post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, theme, "🗺️ **The final bracket**").await;
+        let subtitle = format!("{} in the lists · {} rounds · 👑 {}", started, total, champion.name);
+        post_bracket(ctx, arena, entrants, &rounds[chart_start..], subtitle, season, "🗺️ **The final draw**").await;
     }
     record("champion", champion.id, None);
     let battle_id = award_royale(champion.id, runner_up);
-    // A Chocolate Frog card each for the champion and runner-up of a big enough royale.
+    // A card from the deck for the champion and runner-up of a big enough melee,
+    // and one for the champion from the lists themselves.
     let card_lines = super::frog_rewards::royale_cards(battle_id, champion.id, runner_up, started);
+    let prize = super::battle_prize::award("melee", battle_id, champion.id, roll(&mut seed, 10_000) as f64 / 10_000.0);
     let won = crowns(champion.id);
     crown(ctx, guild, champion.id).await;
-    let subtitle = format!("{} warriors · {} rounds · 1 champion", started, total);
-    let line = pick(theme.lines().champion, &mut seed).to_string();
-    let card = champion_card(champion.card(START_HP), subtitle, line, theme).await;
+    // The champion's house is named on the card as well as the member, once
+    // there is a house to name.
+    let whose = match (season.houses(), champion.house.as_ref()) {
+        (true, Some(house)) => format!("House {}", house.name),
+        _ => "1 champion".to_string(),
+    };
+    let subtitle = format!("{} in the lists · {} rounds · {}", started, total, whose);
+    let line = pick(lines().champion, &mut seed).to_string();
+    let card = champion_card(champion.card(START_HP), subtitle, line, season).await;
     let mut msg = CreateMessage::new()
         .content(
-            std::iter::once(format!("👑 <@{}> is the **{}**! Battles won: **{}**", champion.id, CHAMPION_ROLE, won))
-                .chain(card_lines)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            std::iter::once(format!(
+                "👑 <@{}> is the **{}**! Melees won: **{}**",
+                champion.id, CHAMPION_ROLE, won
+            ))
+            .chain(prize.as_ref().map(super::battle_prize::prize_line))
+            .chain(card_lines)
+            .collect::<Vec<_>>()
+            .join("\n"),
         )
         .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(champion.id)]));
     if let Some(png) = card {
@@ -1782,14 +2093,21 @@ fn quick_result(seed: &mut u64) -> (usize, i32) {
 }
 
 /// A name as it goes in a list: house crest first, markdown taken out.
-fn tag(w: &Warrior) -> String {
-    let crest = w.house.map(|h| format!("{} ", h.crest)).unwrap_or_default();
-    format!("{}{}", crest, plain(&w.name))
+fn tag(w: &Contender) -> String {
+    format!("{}{}", crest_of(w), plain(&w.name))
 }
 
-fn tag_bold(w: &Warrior) -> String {
-    let crest = w.house.map(|h| format!("{} ", h.crest)).unwrap_or_default();
-    format!("{}**{}**", crest, plain(&w.name))
+fn tag_bold(w: &Contender) -> String {
+    format!("{}**{}**", crest_of(w), plain(&w.name))
+}
+
+/// The crest to put before a name in chat: nothing at all before the hatch,
+/// when nobody has a house yet.
+fn crest_of(w: &Contender) -> String {
+    match (hatched(), w.house.as_ref()) {
+        (true, Some(house)) => format!("{} ", house.crest),
+        _ => String::new(),
+    }
 }
 
 /// A display name with the characters Discord would read as formatting removed.
@@ -1840,12 +2158,12 @@ async fn post_bracket(
     entrants: &Arc<Vec<Entrant>>,
     rounds: &[Vec<Slot>],
     subtitle: String,
-    theme: Theme,
+    season: Season,
     caption: &str,
 ) {
     let (entrants, rounds) = (entrants.clone(), rounds.to_vec());
     let png = tokio::task::spawn_blocking(move || {
-        battle_bracket::bracket_png(&Bracket { entrants: &entrants, rounds: &rounds, subtitle, theme })
+        battle_bracket::bracket_png(&Bracket { entrants: &entrants, rounds: &rounds, subtitle, season })
     })
     .await
     .ok()
@@ -1927,84 +2245,12 @@ fn champion_of(rounds: &[Vec<Slot>]) -> Option<usize> {
     }
 }
 
-/// The stage on a fight card, by how many matches its round has.
-fn stage_title(matches: usize) -> String {
-    match matches {
-        1 => "Final".to_string(),
-        2 => "Semi-final".to_string(),
-        4 => "Quarter-final".to_string(),
-        n => format!("Round of {}", n * 2),
-    }
-}
-
-/// "QUARTER-FINALS" as "Quarter-finals".
-fn title_case(upper: &str) -> String {
-    let lower = upper.to_lowercase();
-    let mut chars = lower.chars();
-    chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
-}
-
-/// The `type` option of /fight and /battle; classic when left out.
-fn theme_option(options: &[serenity::all::CommandDataOption]) -> Theme {
-    options
-        .iter()
-        .find_map(|o| match (o.name.as_str(), &o.value) {
-            ("type", CommandDataOptionValue::String(key)) => Theme::from_key(key),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-/// The `type` option, to add to /fight and /battle.
-pub fn theme_command_option() -> serenity::all::CreateCommandOption {
-    let mut option = serenity::all::CreateCommandOption::new(
-        serenity::all::CommandOptionType::String,
-        "type",
-        "fight style (classic if left out)",
-    );
-    for theme in Theme::ALL {
-        option = option.add_string_choice(theme.label(), theme.key());
-    }
-    option
-}
-
 fn shuffle<T>(list: &mut [T], seed: &mut u64) {
     for i in (1..list.len()).rev() {
         *seed ^= *seed << 13;
         *seed ^= *seed >> 7;
         *seed ^= *seed << 17;
         list.swap(i, (*seed % (i as u64 + 1)) as usize);
-    }
-}
-
-// --- /warrior ---------------------------------------------------------------
-
-pub async fn warrior_command(ctx: &Context, command: &CommandInteraction) {
-    let whisper = |text: String| {
-        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
-    };
-    let Some(guild) = command.guild_id else {
-        let _ = command.create_response(&ctx.http, whisper("This only works in a server.".into())).await;
-        return;
-    };
-    let text = match toggle_warrior(ctx, guild, command.user.id.get()).await {
-        Some(true) => format!("🔔 You have the {} role. You will be pinged for every battle.", WARRIOR_ROLE),
-        Some(false) => format!("🔕 {} role removed. No more battle pings.", WARRIOR_ROLE),
-        None => "Could not set the role — the bot may not have Manage Roles.".to_string(),
-    };
-    let _ = command.create_response(&ctx.http, whisper(text)).await;
-}
-
-/// Adds the warrior role, or takes it away if they already have it.
-async fn toggle_warrior(ctx: &Context, guild: GuildId, user: u64) -> Option<bool> {
-    let role = warrior_role(ctx, guild).await?;
-    let member = guild.member(&ctx.http, UserId::new(user)).await.ok()?;
-    if member.roles.contains(&role) {
-        member.remove_role(&ctx.http, role).await.ok()?;
-        Some(false)
-    } else {
-        member.add_role(&ctx.http, role).await.ok()?;
-        Some(true)
     }
 }
 
@@ -2015,7 +2261,7 @@ pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
         CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
     };
     if !super::admin_ids().contains(&command.user.id.get()) {
-        let _ = command.create_response(&ctx.http, whisper("Only admins can stop a battle.".into())).await;
+        let _ = command.create_response(&ctx.http, whisper("Only admins can clear the lists.".into())).await;
         return;
     }
     let arena = match command.guild_id {
@@ -2024,11 +2270,14 @@ pub async fn stop_command(ctx: &Context, command: &CommandInteraction) {
     };
     let freed = BUSY.lock().remove(&arena.get());
     LOBBIES.lock().clear();
+    // A scroll left open would keep taking answers for a duel nobody is
+    // watching, so the stuck duel's scrolls go with it.
+    OPEN_SCROLLS.lock().clear();
     BELOW.lock().remove(&arena.get());
     let text = if freed {
         "Cleared. A fight that was still running will stop at its next step, and `/battle` works again."
     } else {
-        "Nothing was running there."
+        "Nothing was running in the lists."
     };
     let _ = command.create_response(&ctx.http, whisper(text.into())).await;
 }
@@ -2071,7 +2320,7 @@ pub async fn board_command(ctx: &Context, command: &CommandInteraction) {
     let rows = top_fighters(10);
     let mut text = String::new();
     if rows.is_empty() {
-        text.push_str("No fights yet. Challenge someone with `/fight @name`.");
+        text.push_str("Nobody has ridden yet. Call someone out with `/fight @name`.");
     }
     for (i, (user, fights, wins, crowns)) in rows.iter().enumerate() {
         let place = match i {
@@ -2088,10 +2337,10 @@ pub async fn board_command(ctx: &Context, command: &CommandInteraction) {
         text.push_str(&format!("\n-# You: **{}** won out of **{}** fights", wins, fights));
     }
     let embed = CreateEmbed::new()
-        .title("⚔️ Arena board")
+        .title("⚔️ The lists")
         .description(text)
-        .colour(0xE67E22)
-        .footer(CreateEmbedFooter::new("👑 = battles won · every 1v1 counts, battle fights included"));
+        .colour(0xB0742A)
+        .footer(CreateEmbedFooter::new("👑 = melees won · every pass counts, the melee's own included"));
     let reply = CreateInteractionResponseMessage::new().embed(embed);
     let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
 }
@@ -2105,18 +2354,8 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     };
     if let Some(rest) = id.strip_prefix("battlejoin:") {
         join(ctx, component, rest).await;
-    } else if id.starts_with("battlewarrior:") {
-        let text = match component.guild_id {
-            Some(guild) => match toggle_warrior(ctx, guild, component.user.id.get()).await {
-                Some(true) => format!("🔔 You have the {} role.", WARRIOR_ROLE),
-                Some(false) => format!("🔕 {} role removed.", WARRIOR_ROLE),
-                None => "Could not set the role.".to_string(),
-            },
-            None => "This only works in a server.".to_string(),
-        };
-        let _ = component.create_response(&ctx.http, whisper(&text)).await;
-    } else if let Some(rest) = id.strip_prefix("fightpick:") {
-        on_pick(ctx, component, rest).await;
+    } else if let Some(rest) = id.strip_prefix(SCROLL_BUTTON) {
+        on_scroll_button(ctx, component, rest).await;
     } else if let Some(rest) = id.strip_prefix("fightyes:") {
         answer(ctx, component, rest, true).await;
     } else if let Some(rest) = id.strip_prefix("fightno:") {
@@ -2137,34 +2376,34 @@ async fn join(ctx: &Context, component: &ComponentInteraction, rest: &str) {
         .as_ref()
         .map(|m| display(m))
         .unwrap_or_else(|| component.user.name.clone());
-    let (result, names, ends, minutes, theme) = {
+    let (result, names, ends, minutes) = {
         let mut lobbies = LOBBIES.lock();
         let roster = |lobby: &Lobby| -> Vec<String> {
             lobby.joined.iter().filter_map(|u| lobby.names.get(u).cloned()).collect()
         };
         match lobbies.get_mut(&lobby_id) {
-            None => ("closed", Vec::new(), 0, 0, Theme::Classic),
-            Some(lobby) if !lobby.open => ("closed", Vec::new(), lobby.ends, lobby.minutes, lobby.theme),
-            Some(lobby) if lobby.joined.contains(&user) => ("already", roster(lobby), lobby.ends, lobby.minutes, lobby.theme),
+            None => ("closed", Vec::new(), 0, 0),
+            Some(lobby) if !lobby.open => ("closed", Vec::new(), lobby.ends, lobby.minutes),
+            Some(lobby) if lobby.joined.contains(&user) => ("already", roster(lobby), lobby.ends, lobby.minutes),
             Some(lobby) => {
                 lobby.joined.push(user);
                 lobby.names.insert(user, name);
-                ("joined", roster(lobby), lobby.ends, lobby.minutes, lobby.theme)
+                ("joined", roster(lobby), lobby.ends, lobby.minutes)
             }
         }
     };
     match result {
         "joined" => {
-            let _ = component.create_response(&ctx.http, whisper("⚔️ You are in. Get ready.")).await;
+            let _ = component.create_response(&ctx.http, whisper("⚔️ You are in the lists. Get ready.")).await;
             // Everyone should see the roster fill up, countdown untouched.
             let mut message = component.message.clone();
-            let _ = message.edit(&ctx.http, EditMessage::new().embed(lobby_embed(&names, ends, minutes, theme))).await;
+            let _ = message.edit(&ctx.http, EditMessage::new().embed(lobby_embed(&names, ends, minutes))).await;
         }
         "already" => {
             let _ = component.create_response(&ctx.http, whisper("You are already in.")).await;
         }
         _ => {
-            let _ = component.create_response(&ctx.http, whisper("That battle is closed.")).await;
+            let _ = component.create_response(&ctx.http, whisper("That melee is closed.")).await;
         }
     }
 }
@@ -2188,7 +2427,7 @@ async fn answer(ctx: &Context, component: &ComponentInteraction, rest: &str, yes
         }
     };
     if allowed {
-        let text = if yes { "⚔️ Let's go." } else { "🏃 Fine, backing out." };
+        let text = if yes { "⚔️ To the lists." } else { "🏃 Fine, backing out." };
         let _ = component.create_response(&ctx.http, whisper(text)).await;
     } else {
         let _ = component.create_response(&ctx.http, whisper("That challenge is not yours.")).await;
@@ -2200,14 +2439,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lines_fill_both_names_and_stages_read_right() {
-        let line = fill("{a} ne {b} ko chappal dikhayi", "Ravi", "Sneha");
-        assert_eq!(line, "Ravi ne Sneha ko chappal dikhayi");
-        assert_eq!(stage_title(1), "Final");
-        assert_eq!(stage_title(2), "Semi-final");
-        assert_eq!(stage_title(4), "Quarter-final");
-        assert_eq!(stage_title(8), "Round of 16");
-        assert_eq!(title_case("QUARTER-FINALS"), "Quarter-finals");
+    fn lines_fill_both_names_and_the_rounds_read_right() {
+        let line = fill("{a} ne {b} ko dhaal dikhayi", "Ravi", "Sneha");
+        assert_eq!(line, "Ravi ne Sneha ko dhaal dikhayi");
+        // One set of round names for the whole arena: the fight card's chip,
+        // the bracket's columns and the caption all say the same thing.
+        assert_eq!(round_title(1), "The Final Tilt");
+        assert_eq!(round_title(2), "The Last Four");
+        assert_eq!(round_title(4), "The Last Eight");
+        assert_eq!(round_title(8), "Round of 16");
     }
 
     #[test]
@@ -2225,10 +2465,9 @@ mod tests {
         assert_eq!(daily_due(slot + 60, "14:00,21:00", never), Some(("2026-09-14".into(), "21:00".into())));
         assert_eq!(daily_due(slot - 7 * 3600 + 60, "14:00, 21:00", never), Some(("2026-09-14".into(), "14:00".into())));
         assert_eq!(Ping::from_key("everyone"), Ping::Everyone);
-        assert_eq!(Ping::from_key("anything"), Ping::Houses);
-        assert_eq!(daily_theme("pokemon", 3), Theme::Pokemon);
-        let themes: std::collections::HashSet<_> = (0..20).map(|r| daily_theme("random", r)).collect();
-        assert!(themes.len() > 3);
+        // A word nobody recognises is the month's own role, not the houses.
+        assert_eq!(Ping::from_key("anything"), Ping::Games);
+        assert_eq!(Ping::from_key(""), Ping::Games);
     }
 
     #[test]
@@ -2294,35 +2533,6 @@ mod tests {
             }
         }
         assert!(champion_of(&rounds).is_some());
-    }
-
-    #[test]
-    fn every_clash_is_fifty_fifty_whatever_is_pressed() {
-        let mut seed = 99u64;
-        let mut tables = std::collections::HashSet::new();
-        for _ in 0..200 {
-            let clash = Clash::deal(&mut seed);
-            tables.insert((clash.left, clash.right));
-            for mine in 0..4 {
-                let left_wins = (0..4).filter(|theirs| clash.winner(mine, *theirs) == 0).count();
-                assert_eq!(left_wins, 2, "left move {} wins {} of 4", mine, left_wins);
-                let right_wins = (0..4).filter(|theirs| clash.winner(*theirs, mine) == 1).count();
-                assert_eq!(right_wins, 2, "right move {} wins {} of 4", mine, right_wins);
-            }
-        }
-        assert!(tables.len() > 50, "fights keep getting the same table: {}", tables.len());
-    }
-
-    #[test]
-    fn a_scripted_fight_ends_with_the_clash_winner_ahead() {
-        let mut seed = 31u64;
-        for i in 0..1000 {
-            let winner = i % 2;
-            let blows = script_fight(&mut seed, winner);
-            assert!(!blows.is_empty() && blows.len() <= MAX_EXCHANGES, "fight {} has {} blows", i, blows.len());
-            let hp = blows.iter().fold([START_HP; 2], |hp, (attacker, s)| land(hp, *attacker, s));
-            assert!(hp[winner] > hp[1 - winner], "fight {}: {:?} should favour side {}", i, hp, winner);
-        }
     }
 
     /// Play the exchange loop the way `play` does, without Discord in the way.
@@ -2443,8 +2653,15 @@ mod tests {
 
     #[test]
     fn fight_text_shows_both_bars_and_only_the_last_few_lines() {
-        let warrior = |id: u64, name: &str| Warrior { id, name: name.to_string(), avatar: None, house: None, face: String::new() };
-        let (a, b) = (warrior(1, "Ravi"), warrior(2, "Sneha"));
+        let fighter = |id: u64, name: &str| Contender {
+            id,
+            name: name.to_string(),
+            avatar: None,
+            house: None,
+            stage: 1,
+            face: String::new(),
+        };
+        let (a, b) = (fighter(1, "Ravi"), fighter(2, "Sneha"));
         let log: Vec<String> = (1..=6).map(|i| format!("line {}", i)).collect();
         let text = fight_text("head", &log, &a, &b, &[62, 0]);
         assert!(text.contains("Ravi") && text.contains("Sneha"), "{}", text);
@@ -2456,12 +2673,19 @@ mod tests {
 
     #[test]
     fn shuffle_keeps_everyone_and_pairs_leave_one_out_when_odd() {
-        let warriors = |n: usize| {
+        let fighters = |n: usize| {
             (0..n)
-                .map(|i| Warrior { id: i as u64, name: format!("w{}", i), avatar: None, house: None, face: String::new() })
+                .map(|i| Contender {
+                    id: i as u64,
+                    name: format!("w{}", i),
+                    avatar: None,
+                    house: None,
+                    stage: 1,
+                    face: String::new(),
+                })
                 .collect::<Vec<_>>()
         };
-        let mut list = warriors(9);
+        let mut list = fighters(9);
         let mut seed = 99u64;
         shuffle(&mut list, &mut seed);
         let ids: std::collections::HashSet<u64> = list.iter().map(|w| w.id).collect();
@@ -2470,7 +2694,435 @@ mod tests {
         assert_eq!(chunks.iter().filter(|n| **n == 1).count(), 1, "odd rounds need exactly one bye");
     }
 
-    // --- "Start a battle royale now", from the panel -------------------------
+
+
+    // --- what survives a restart ---------------------------------------------
+
+    /// A battle.db written before any of this - before the scrolls, before the
+    /// styles went - still opens, still reads, and comes back with the puzzle
+    /// table added. battle.db is a process-wide handle, so this is the one test
+    /// that opens it.
+    #[test]
+    fn an_old_store_still_opens_and_reads() {
+        let dir = std::env::temp_dir().join(format!("vizier-arena-{}", std::process::id()));
+        let runtime = dir.join(".runtime");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&runtime).expect("a workspace");
+        {
+            let conn = Connection::open(runtime.join("battle.db")).expect("the old store");
+            conn.execute_batch(
+                "CREATE TABLE wins (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
+                     beat INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL);
+                 CREATE TABLE results (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, winner INTEGER NOT NULL,
+                     loser INTEGER, ts INTEGER NOT NULL);
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO results (kind, winner, loser, ts) VALUES
+                     ('fight', 7, 8, 1000), ('fight', 8, 7, 1100), ('battle', 7, 9, 1200),
+                     ('champion', 7, NULL, 1300);
+                 -- A store that still remembers the day's melee, and a fight
+                 -- style setting nobody reads any more.
+                 INSERT INTO meta (key, value) VALUES
+                     ('daily_battle_day', '2026-09-14'), ('champion', '7'), ('battle_theme', 'pokemon');",
+            )
+            .expect("the old rows");
+        }
+        open(dir.to_str().expect("a path")).expect("an old store still opens");
+
+        // Everything it recorded is still readable, with nothing about styles.
+        assert_eq!(tally(7), (3, 2), "two wins from three fights");
+        assert_eq!(tally(8), (2, 1));
+        assert_eq!(crowns(7), 1);
+        let per_user = wins_per_user(None);
+        assert_eq!(per_user.get(&7).copied(), Some(3));
+        assert_eq!(per_user.get(&8).copied(), Some(1));
+        assert_eq!(duels_since(0).len(), 3, "the champion row is nobody's duel");
+        assert_eq!(meta_get("champion").as_deref(), Some("7"));
+
+        // The day a melee already opened is still remembered, so a restart
+        // neither re-opens it nor forgets it.
+        assert_eq!(meta_get("daily_battle_day").as_deref(), Some("2026-09-14"));
+        meta_set("daily_battle:2026-09-15:21:00", "opened");
+        assert_eq!(meta_get("daily_battle:2026-09-15:21:00").as_deref(), Some("opened"));
+
+        // The old style setting is still sitting there and nothing reads it.
+        assert_eq!(meta_get("battle_theme").as_deref(), Some("pokemon"));
+
+        // And the scrolls' own table was added on the way in, so a duel fought
+        // after the upgrade has somewhere to write its puzzles.
+        let mut rng = battle_scroll::Rng::new(5);
+        let puzzle = battle_scroll::generate(&mut rng, &[]);
+        let id = with_db(|conn| battle_scroll::record(conn, &puzzle, 1_700_000_000))
+            .expect("the store is open")
+            .expect("a scroll is written down");
+        assert!(id > 0);
+        let back = with_db(|conn| battle_scroll::read(conn, id)).flatten().expect("read back");
+        assert_eq!(back.answer, puzzle.answer);
+
+        // The duels in it count towards the anti-farm rule from the day they
+        // were fought, not from today.
+        let day = ist_midnight(1_000) + 3_600;
+        assert_eq!(duels_today(7, 8, day), 2, "both of that pair's duels, that day");
+        assert_eq!(duels_today(7, 9, day), 0, "a melee pass is not a duel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A melee that was due while the bot was down opens when it comes back,
+    /// and one that already ran does not run again. This is what "resumes
+    /// after a restart" means for the arena: a lobby and a fight in progress
+    /// live in memory and are lost, by design, but the schedule is not.
+    #[test]
+    fn the_schedule_survives_a_restart() {
+        // 2026-09-14 21:00 India time.
+        let slot = 1_789_399_800;
+        let never = |_: &str, _: &str| false;
+        // The bot was down at 21:00 and comes back ten minutes later: the
+        // melee still opens.
+        assert_eq!(daily_due(slot + 600, "21:00", never), Some(("2026-09-14".into(), "21:00".into())));
+        // It comes back an hour later: too late, and the day is let go rather
+        // than a melee turning up at a time nobody expects.
+        assert_eq!(daily_due(slot + DAILY_GRACE_SECS + 1, "21:00", never), None);
+        // It comes back having already run that slot: it does not run twice.
+        let ran = |d: &str, t: &str| d == "2026-09-14" && t == "21:00";
+        assert_eq!(daily_due(slot + 600, "21:00", ran), None);
+        // And a second slot that day is still its own.
+        assert_eq!(daily_due(slot + 600, "21:00,21:05", ran), Some(("2026-09-14".into(), "21:05".into())));
+    }
+
+    // --- the types are gone ---------------------------------------------------
+
+    /// Every file the arena owns, read at test time - the code only, with the
+    /// test module cut off. A test that bans a word has to name it, and a scan
+    /// that read its own banned list would find every word in it.
+    fn arena_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/channels/discord");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("discord sources").flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if name.starts_with("battle") && name.ends_with(".rs") {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let code = text.split("#[cfg(test)]").next().unwrap_or("").to_string();
+                assert!(code.len() > 500, "{} is all tests?", name);
+                out.push((name, code));
+            }
+        }
+        assert!(out.len() >= 5, "only found {:?}", out.iter().map(|(n, _)| n).collect::<Vec<_>>());
+        out
+    }
+
+    /// The fight styles are gone: no enum, no picker, no setting, no leftover
+    /// branch. A file that still names one of the seven worlds is the system
+    /// growing back.
+    #[test]
+    fn nothing_in_the_arena_knows_what_a_fight_style_is() {
+        // Named precisely: the month paints the houses through `month::themed`,
+        // so a bare "theme" is a word the arena is allowed to say.
+        let banned = [
+            "battle_theme", "Theme::", "enum Theme", "pokemon", "Pokemon", "harrypotter", "eldenring",
+            "Tarnished", "Saiyan", "Wrestling", "Tactical", "VIZIER_BATTLE_DAILY_THEME",
+            "theme_command_option", "daily_theme", "fight style", "fight type", "fight styles",
+        ];
+        for (name, text) in arena_sources() {
+            for word in banned {
+                assert!(!text.contains(word), "{} still knows about \u{201c}{}\u{201d}", name, word);
+            }
+        }
+    }
+
+    /// The clash buttons went with them: a duel is read, not pressed.
+    #[test]
+    fn nothing_in_the_arena_remembers_the_clash_buttons() {
+        let banned = ["Clash", "pick_moves", "on_pick", "script_fight", "fightpick", "VIZIER_FIGHT_PICK_SECS"];
+        for (name, text) in arena_sources() {
+            for word in banned {
+                assert!(!text.contains(word), "{} still has {}", name, word);
+            }
+        }
+    }
+
+    /// And so did the Contender role: the games role is the only one the arena
+    /// ever mentions.
+    #[test]
+    fn the_arena_mentions_no_role_but_the_games_one() {
+        for (name, text) in arena_sources() {
+            for word in ["WARRIOR_ROLE", "warrior_role", "toggle_warrior", "battlewarrior"] {
+                assert!(!text.contains(word), "{} still has {}", name, word);
+            }
+        }
+        assert_eq!(Ping::from_key("warriors"), Ping::Games, "an old setting value falls to the games role");
+        assert!(Ping::parse("warriors").is_err(), "the Warrior role is not something to tag any more");
+        assert_eq!(GAMES_ROLE, 1_554_720_685_514_035_241);
+    }
+
+    /// A whole fight, rolled with no types anywhere in it, still resolves - and
+    /// nothing it says names one.
+    #[test]
+    fn a_fight_with_no_types_resolves_and_says_nothing_about_one() {
+        let mut seed = 2024u64;
+        let lines = lines();
+        for _ in 0..300 {
+            let (blows, hp) = roll_fight(&mut seed);
+            assert!(!blows.is_empty(), "a fight with no types still has to happen");
+            assert!(hp[0] > 0 || hp[1] > 0, "somebody is left standing");
+            for (attacker, swing) in &blows {
+                let (x, y) = if *attacker == 0 { ("Ravi", "Sneha") } else { ("Sneha", "Ravi") };
+                let said = fill(pick(swing.blow.lines(lines), &mut seed), x, y);
+                assert!(!said.contains('{'), "a line kept its placeholder: {}", said);
+                let lower = said.to_lowercase();
+                for word in ["style", "theme", "pokemon", "classic", " type"] {
+                    assert!(!lower.contains(word), "a fight line names a style: {}", said);
+                }
+            }
+        }
+    }
+
+    // --- the two seasons ------------------------------------------------------
+
+    /// The hatch is the one thing that moves the arena from eggs to houses, and
+    /// it is the month's own moment rather than a date of the arena's.
+    #[test]
+    fn the_season_follows_the_months_hatch() {
+        let at = super::super::month::hatch_at();
+        assert!(at > 0, "the month has to know when the eggs open");
+        assert!(!hatched_at(at - 1), "a second before the hatch is still the egg week");
+        assert!(hatched_at(at), "the hatch moment is the hatch");
+        assert!(hatched_at(at + 86_400), "and it stays hatched");
+        assert!(!hatched_at(0));
+        // The season follows it, and nothing else does.
+        assert_eq!(if hatched_at(at - 1) { Season::Houses } else { Season::Eggs }, Season::Eggs);
+        assert_eq!(if hatched_at(at) { Season::Houses } else { Season::Eggs }, Season::Houses);
+        assert!(!Season::Eggs.houses() && Season::Houses.houses());
+    }
+
+    /// The egg warms with the points behind it, and nothing outside the range
+    /// can make it a stage that does not exist. It is paint only: nothing in a
+    /// fight reads it.
+    #[test]
+    fn an_egg_warms_with_the_points_behind_it() {
+        assert_eq!(egg_stage(-50), 1);
+        assert_eq!(egg_stage(0), 1);
+        assert_eq!(egg_stage(1), 2);
+        assert_eq!(egg_stage(9), 2);
+        assert_eq!(egg_stage(10), 3);
+        assert_eq!(egg_stage(29), 3);
+        assert_eq!(egg_stage(30), 4);
+        assert_eq!(egg_stage(69), 4);
+        assert_eq!(egg_stage(70), EGG_STAGES);
+        assert_eq!(egg_stage(i64::MAX), EGG_STAGES);
+        for points in [-1_000i64, 0, 7, 44, 1_000_000] {
+            assert!((1..=EGG_STAGES).contains(&egg_stage(points)), "{}", points);
+        }
+    }
+
+    /// The paint on a banner comes from the month and nowhere else: the arena
+    /// keeps no second table of names, crests or colours.
+    #[test]
+    fn a_banner_is_painted_from_the_months_own_colours() {
+        let painted: Vec<HouseLook> = super::super::house::HOUSES.iter().map(house_look).collect();
+        assert_eq!(painted.len(), 4);
+        for (house, look) in super::super::house::HOUSES.iter().zip(&painted) {
+            let themed = super::super::month::themed(house);
+            assert_eq!(look.name, themed.name, "the arena renamed a house behind the month's back");
+            assert_eq!(look.crest, themed.crest);
+            assert_eq!(look.key, house.key, "the ledger key never moves");
+            // The banner's field is the month's colour, and its trim the same
+            // colour lifted - never a second palette.
+            let c = themed.colour;
+            assert_eq!(look.colours.0, [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
+            assert_ne!(look.colours.0, look.colours.1, "{}'s banner is one flat colour", look.name);
+            // The mark is the first letter of whatever the month calls it.
+            let first = look.name.chars().find(|c| c.is_alphabetic()).unwrap().to_uppercase().to_string();
+            assert_eq!(look.initial, first);
+        }
+        // No table of the four anywhere in the arena's own source.
+        for (name, text) in arena_sources() {
+            assert!(!text.contains("MONTH_PAINT"), "{} keeps a second set of paint", name);
+        }
+    }
+
+    // --- who gets called to the lists ----------------------------------------
+
+    #[test]
+    fn a_melee_calls_the_games_role_and_a_duel_calls_nobody() {
+        let games = RoleId::new(GAMES_ROLE);
+        let houses = vec![RoleId::new(11), RoleId::new(12), RoleId::new(13), RoleId::new(14)];
+        let tags = Tags { games: Some(games), houses: houses.clone() };
+        let (text, roles, everyone) = heads_up(Ping::Games, &tags).expect("a melee calls somebody");
+        assert!(text.contains(&format!("<@&{}>", GAMES_ROLE)), "{}", text);
+        assert_eq!(roles, vec![games], "the games role, and nothing else");
+        assert!(!everyone);
+        assert!(text.contains("melee"), "{}", text);
+        // Nobody is tagged for a lobby that asked for nobody.
+        assert_eq!(heads_up(Ping::Nobody, &tags), None);
+        // @everyone is its own thing and mentions no role.
+        let (text, roles, everyone) = heads_up(Ping::Everyone, &tags).expect("everyone");
+        assert_eq!((text.contains("@everyone"), roles.is_empty(), everyone), (true, true, true));
+        // The houses tag their four.
+        let (_, roles, _) = heads_up(Ping::Houses, &tags).expect("houses");
+        assert_eq!(roles, houses);
+    }
+
+    /// A role the server hasn't got means no heads-up at all - the lobby still
+    /// goes up, it simply goes up quietly.
+    #[test]
+    fn a_missing_games_role_posts_the_lobby_without_a_ping() {
+        let nothing = Tags::default();
+        assert_eq!(heads_up(Ping::Games, &nothing), None, "a melee with no role to call goes up untagged");
+        assert_eq!(heads_up(Ping::Houses, &nothing), None, "and so does one with no houses to call");
+        // @everyone needs no role, so it still goes out.
+        assert!(heads_up(Ping::Everyone, &nothing).is_some());
+    }
+
+    /// The setting decides which role, and switching it off is a real option.
+    #[test]
+    fn the_games_role_can_be_moved_or_switched_off() {
+        // Nothing stored: the month's own role.
+        assert_eq!(games_role_from(None), Some(GAMES_ROLE));
+        for (set, want) in [
+            ("", Some(GAMES_ROLE)),
+            ("   ", Some(GAMES_ROLE)),
+            ("0", None),
+            ("none", None),
+            ("NONE", None),
+            (" None ", None),
+            ("42", Some(42)),
+            ("not a role", Some(GAMES_ROLE)),
+        ] {
+            assert_eq!(games_role_from(Some(set)), want, "set to \u{201c}{}\u{201d}", set);
+        }
+    }
+
+    // --- the scrolls ----------------------------------------------------------
+
+    /// Three scrolls, first to two; a fourth only to break a tie somebody
+    /// actually scored in.
+    #[test]
+    fn a_duel_is_best_of_three_with_a_decider_for_a_real_tie() {
+        assert!(another_scroll(0, [0, 0]), "a duel starts");
+        assert!(another_scroll(1, [1, 0]));
+        assert!(another_scroll(2, [1, 0]));
+        // Two scrolls takes it, whenever that happens.
+        assert!(!another_scroll(2, [2, 0]));
+        assert!(!another_scroll(3, [1, 2]));
+        // One each after three: a fourth decides it.
+        assert!(another_scroll(3, [1, 1]), "1-1 after three needs a decider");
+        assert!(!another_scroll(4, [1, 1]), "and only one decider");
+        // Every scroll burned: the gods decide, no fourth scroll.
+        assert!(!another_scroll(3, [0, 0]), "all three burning is a coin flip, not a fourth scroll");
+        // A duel can never run away: at most four scrolls, whatever the score.
+        for done in 0..8usize {
+            for a in 0..3u32 {
+                for b in 0..3u32 {
+                    assert!(!(done >= 4 && another_scroll(done, [a, b])), "{} scrolls at {}-{}", done, a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whoever_read_the_most_scrolls_takes_the_duel() {
+        assert_eq!(duel_winner([2, 0]), Some(0));
+        assert_eq!(duel_winner([1, 2]), Some(1));
+        assert_eq!(duel_winner([1, 0]), Some(0), "a burned decider still leaves a winner");
+        // Level means nobody read anything: the gods decide, and the duel says so.
+        assert_eq!(duel_winner([0, 0]), None);
+        assert_eq!(duel_winner([1, 1]), None);
+    }
+
+    /// A whole duel played out without Discord: the scrolls roll, nothing
+    /// repeats, the blows are real, and somebody is left standing.
+    #[test]
+    fn a_duel_runs_end_to_end_and_lands_real_blows() {
+        for seed in 1..200u64 {
+            let mut rng = battle_scroll::Rng::new(seed * 2_654_435_761);
+            let mut blow_seed = seed | 1;
+            let mut hp = [START_HP; 2];
+            let mut score = [0u32; 2];
+            let mut used: Vec<&'static str> = Vec::new();
+            let mut done = 0usize;
+            while another_scroll(done, score) {
+                done += 1;
+                let puzzle = battle_scroll::generate(&mut rng, &used);
+                assert!(!used.contains(&puzzle.kind), "{} twice in one duel", puzzle.kind);
+                used.push(puzzle.kind);
+                // Somebody reads it four times in five; the fifth burns.
+                let read = rng.upto(5) < 4;
+                if read {
+                    let side = rng.upto(2) as usize;
+                    let blow = SCROLL_BLOW.0 + roll(&mut blow_seed, SCROLL_BLOW.1) as i32;
+                    assert!((25..=35).contains(&blow), "a scroll's blow was {}", blow);
+                    hp[1 - side] = (hp[1 - side] - blow).max(0);
+                    score[side] += 1;
+                }
+            }
+            assert!((1..=4).contains(&done), "a duel ran {} scrolls", done);
+            assert!(hp.iter().all(|h| (0..=START_HP).contains(h)), "health left the bar: {:?}", hp);
+            // Two scrolls at thirty-odd each never empties a bar on its own, so
+            // the winner is always left standing on real health.
+            let side = duel_winner(score).unwrap_or(0);
+            assert!(hp[side] > 0, "the winner of {:?} was left on {:?}", score, hp);
+        }
+    }
+
+    /// The scroll's own clock and lockout: both start at the card, and a wrong
+    /// answer costs only the one who gave it.
+    #[test]
+    fn a_wrong_answer_locks_out_only_the_one_who_gave_it() {
+        let puzzle = battle_scroll::Puzzle {
+            id: 0,
+            riddle: String::new(),
+            kind: "count_swords",
+            mode: battle_scroll::Mode::Visual,
+            prompt: "How many?".into(),
+            answer: "7".into(),
+            alts: vec!["seven".into()],
+            spec: battle_scroll::Spec::default(),
+        };
+        let mut live = Live {
+            fighters: [1, 2],
+            puzzle,
+            won_by: None,
+            opened: std::time::Instant::now(),
+            locked: [None, None],
+            open: true,
+        };
+        assert_eq!(locked_for(&live, 0), None, "nobody starts locked out");
+        live.locked[0] = Some(std::time::Instant::now());
+        let left = locked_for(&live, 0).expect("a wrong answer costs six seconds");
+        assert!(left <= SCROLL_LOCKOUT && left > Duration::from_secs(4), "{:?}", left);
+        assert_eq!(locked_for(&live, 1), None, "the other fighter is not held up by it");
+        // A lockout that has run out is no lockout.
+        live.locked[0] = Some(std::time::Instant::now() - SCROLL_LOCKOUT * 2);
+        assert_eq!(locked_for(&live, 0), None);
+        assert_eq!(SCROLL_LOCKOUT, Duration::from_secs(6));
+        assert_eq!((SCROLLS, TO_WIN), (3, 2));
+    }
+
+    // --- what a duel pays -----------------------------------------------------
+
+    #[test]
+    fn the_result_says_what_the_win_paid_and_why_it_did_not() {
+        assert_eq!(Paid::Points(3).said(), " (+3 house points)");
+        let enough = Paid::Enough.said();
+        assert!(enough.contains("no points") && enough.contains("fought enough today"), "{}", enough);
+        assert_eq!(Paid::Nothing.said(), "", "points switched off is not worth a sentence");
+    }
+
+    #[test]
+    fn india_days_start_where_the_ledger_says_they_do() {
+        // 2026-09-14 21:00 India time.
+        let slot = 1_789_399_800;
+        let midnight = ist_midnight(slot);
+        assert!(midnight <= slot && slot - midnight < 86_400);
+        assert_eq!(super::super::points::ist_day(midnight), "2026-09-14");
+        assert_eq!(super::super::points::ist_day(midnight + 86_399), "2026-09-14");
+        assert_eq!(ist_midnight(midnight), midnight, "midnight is its own midnight");
+        assert_eq!(ist_midnight(midnight + 86_400), midnight + 86_400);
+    }
+
+    // --- "Call a melee now", from the panel ----------------------------------
 
     /// A channel of its own per test: BUSY is shared by the whole process.
     fn spare_arena(n: u64) -> ChannelId {
@@ -2478,24 +3130,21 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_start_defaults_to_the_four_houses_and_the_daily_style() {
+    fn a_panel_start_calls_the_games_role() {
         let arena = spare_arena(1);
-        let (plan, ping, theme) = start_plan(arena, None, None, None, 0).expect("nothing in the way");
-        assert_eq!(ping, Ping::Houses, "a panel start wakes the whole server up");
-        assert_eq!((plan.ping, plan.ping_label), ("houses", "the four houses"));
+        let (plan, ping) = start_plan(arena, None, None).expect("nothing in the way");
+        assert_eq!(ping, Ping::Games, "a panel start calls the people who opted in");
+        assert_eq!((plan.ping, plan.ping_label), ("games", "the server games role"));
         assert_eq!(plan.channel, arena.get());
         assert_eq!(plan.minutes, default_lobby_minutes());
-        assert_eq!((plan.theme, theme), ("classic", Theme::Classic));
-        assert_eq!(plan.theme_label, "Classic");
         free_arena(arena);
     }
 
     #[test]
     fn a_panel_start_reads_who_to_tag_and_refuses_anyone_else() {
         for (asked, want, label) in [
+            ("games", Ping::Games, "the server games role"),
             ("houses", Ping::Houses, "the four houses"),
-            ("warriors", Ping::Warriors, "the Warrior role"),
-            ("warrior", Ping::Warriors, "the Warrior role"),
             ("  Everyone ", Ping::Everyone, "everyone"),
             ("none", Ping::Nobody, "nobody"),
             ("nobody", Ping::Nobody, "nobody"),
@@ -2505,11 +3154,11 @@ mod tests {
             assert_eq!(Ping::parse(want.key()), Ok(want), "{} survives the round trip", asked);
         }
         let refused = Ping::parse("the mods").expect_err("an unknown word is never a silent @everyone");
-        assert!(refused.contains("the mods") && refused.contains("Warrior"), "{}", refused);
-        // Blank means "not said", which is the houses, not a refusal.
+        assert!(refused.contains("the mods") && refused.contains("games role"), "{}", refused);
+        // Blank means "not said", which is the games role, not a refusal.
         let arena = spare_arena(2);
-        let (plan, ping, _) = start_plan(arena, None, Some("   "), None, 0).expect("nothing in the way");
-        assert_eq!((ping, plan.ping), (Ping::Houses, "houses"));
+        let (plan, ping) = start_plan(arena, None, Some("   ")).expect("nothing in the way");
+        assert_eq!((ping, plan.ping), (Ping::Games, "games"));
         free_arena(arena);
     }
 
@@ -2517,7 +3166,7 @@ mod tests {
     fn a_panel_start_keeps_the_lobby_between_one_minute_and_the_longest_allowed() {
         let arena = spare_arena(3);
         let minutes = |asked| {
-            let (plan, _, _) = start_plan(arena, asked, None, None, 0).expect("nothing in the way");
+            let (plan, _) = start_plan(arena, asked, None).expect("nothing in the way");
             free_arena(arena);
             plan.minutes
         };
@@ -2530,39 +3179,20 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_start_picks_the_style_asked_for_or_the_daily_rotation() {
-        let arena = spare_arena(4);
-        let style = |asked: Option<&str>, roll| {
-            let out = start_plan(arena, None, None, asked, roll);
-            if out.is_ok() {
-                free_arena(arena);
-            }
-            out.map(|(plan, _, theme)| (plan.theme, theme))
-        };
-        assert_eq!(style(Some("wwe"), 0), Ok(("wwe", Theme::Wrestling)));
-        assert_eq!(style(Some("eldenring"), 0), Ok(("eldenring", Theme::Tarnished)));
-        // "random" is the daily rotation's own word: a different style per roll.
-        assert_eq!(style(Some("random"), 1), Ok((Theme::ALL[1].key(), Theme::ALL[1])));
-        assert_eq!(style(Some("random"), 2), Ok((Theme::ALL[2].key(), Theme::ALL[2])));
-        let refused = style(Some("kabaddi"), 0).expect_err("only real styles");
-        assert!(refused.contains("kabaddi"), "{}", refused);
-    }
-
-    #[test]
     fn a_second_panel_start_is_refused_while_the_arena_is_busy() {
         let arena = spare_arena(5);
-        let (first, _, _) = start_plan(arena, None, None, None, 0).expect("the arena was free");
+        let (first, _) = start_plan(arena, None, None).expect("the arena was free");
         assert_eq!(first.channel, arena.get());
-        let busy = start_plan(arena, None, None, None, 0).expect_err("one battle at a time");
+        let busy = start_plan(arena, None, None).expect_err("one fight at a time");
         assert_eq!(busy, ARENA_BUSY);
         assert!(busy.contains("/battlestop"), "it says how to clear a stuck one: {}", busy);
         // A second arena is untouched by the first one being busy.
         let other = spare_arena(6);
-        assert!(start_plan(other, None, None, None, 0).is_ok());
+        assert!(start_plan(other, None, None).is_ok());
         free_arena(other);
         // Only once the lobby gives the claim back does the arena open again.
         free_arena(arena);
-        assert!(start_plan(arena, None, None, None, 0).is_ok(), "free again");
+        assert!(start_plan(arena, None, None).is_ok(), "free again");
         free_arena(arena);
     }
 
@@ -2571,9 +3201,9 @@ mod tests {
         let arena = spare_arena(7);
         // Everything is settled after the arena is claimed, so a refusal there
         // must give the claim back or nothing could ever fight in it again.
-        assert!(start_plan(arena, None, Some("the mods"), None, 0).is_err());
+        assert!(start_plan(arena, None, Some("the mods")).is_err());
         assert!(!BUSY.lock().contains(&arena.get()), "a refused start never wedges the arena");
-        assert!(start_plan(arena, None, Some("houses"), None, 0).is_ok(), "and the next start works");
+        assert!(start_plan(arena, None, Some("games")).is_ok(), "and the next start works");
         free_arena(arena);
         assert!(!BUSY.lock().contains(&arena.get()));
     }

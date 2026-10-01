@@ -1,28 +1,33 @@
-//! The battle royale bracket: the whole draw as one picture, posted before each
-//! round and once more with the champion. `battle.rs` owns the tournament; this
-//! only draws what it is handed.
+//! The melee bracket: the whole draw as one picture, posted before each round
+//! and once more with the champion. `battle.rs` owns the tourney; this only
+//! draws what it is handed.
 //!
 //! The draw is split down the middle: the first half of every round climbs in
 //! from the left, the second half from the right, and the two meet at the final
-//! in the centre. Colours, floor and glows come from the fight cards' theme
-//! look, so a Pokémon bracket sits on the same ground as a Pokémon fight.
+//! in the centre. Colours, floor and glows come from the fight cards' look, so
+//! the bracket stands on the same ground the fights are fought on - and it has
+//! the fight cards' two seasons too: eggs before the hatch, houses after it.
 
 use cosmic_text::Weight;
 use tiny_skia::{FillRule, FilterQuality, LineCap, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash, Transform};
 
 use super::awards_card::{avatar_pixmap, fill_circle, paint, rrect};
 use super::battle_card::{
-    crown, dim, down, fill_shaded, floor, glow, lift, look, spaced, vignette, Pen, BG, GOLD, INK, MUTED,
+    crown, dim, down, egg, fill_shaded, floor, glow, lift, look, spaced, vignette, HouseLook, Pen, Season, BG, GOLD,
+    INK, MUTED,
 };
-use super::battle_theme::Theme;
-use super::house::House;
 
 /// Someone in the draw.
 pub struct Entrant {
     pub name: String,
     /// Raw profile picture bytes, already downloaded; `None` draws a blank.
+    /// Not drawn at all before the hatch, where everybody is an egg.
     pub avatar: Option<Vec<u8>>,
-    pub house: Option<&'static House>,
+    /// Their house as the month paints it. `None` for anyone without one, who
+    /// stays neutral rather than being handed one.
+    pub house: Option<HouseLook>,
+    /// How far along their egg is, 1..=5. Only drawn before the hatch.
+    pub stage: u8,
 }
 
 /// One match in the draw. `a` and `b` index `Bracket::entrants`; `None` is a
@@ -47,18 +52,20 @@ pub struct Bracket<'a> {
     /// draw order, so matches `2j` and `2j + 1` feed match `j` of the next round.
     /// The final is the last round, with one match.
     pub rounds: &'a [Vec<Slot>],
-    /// "16 warriors · Quarter-finals".
+    /// "16 in the lists · The Last Eight".
     pub subtitle: String,
-    pub theme: Theme,
+    pub season: Season,
 }
 
-/// What a round is called on the bracket, by how many matches it has.
+/// What a round is called, by how many matches it has. One set of names for
+/// the whole arena: the bracket's column labels, the fight card's chip and the
+/// caption all say the same thing, and the bracket shouts it in capitals.
 pub fn round_title(matches: usize) -> String {
     match matches {
-        1 => "FINAL".to_string(),
-        2 => "SEMI-FINALS".to_string(),
-        4 => "QUARTER-FINALS".to_string(),
-        n => format!("ROUND OF {}", n * 2),
+        1 => "The Final Tilt".to_string(),
+        2 => "The Last Four".to_string(),
+        4 => "The Last Eight".to_string(),
+        n => format!("Round of {}", n * 2),
     }
 }
 
@@ -282,32 +289,24 @@ fn decided(m: &Slot) -> bool {
     m.bye || matches!(m.winner, Some(0 | 1))
 }
 
-/// Pictures decoded once each: every entrant's avatar at slot size, and each
-/// house crest that appears.
+/// Pictures decoded once each: every entrant's avatar at slot size. Before the
+/// hatch no avatar is decoded at all - everybody is an egg, and the egg is
+/// painted rather than loaded.
 struct Art {
     avatars: Vec<Option<Pixmap>>,
-    crests: Vec<(&'static str, Option<Pixmap>)>,
 }
 
 impl Art {
-    fn new(entrants: &[Entrant], avatar: u32, crest: u32) -> Art {
-        let avatars = entrants.iter().map(|e| avatar_pixmap(e.avatar.as_deref(), avatar, false)).collect();
-        let mut crests: Vec<(&'static str, Option<Pixmap>)> = Vec::new();
-        for house in entrants.iter().filter_map(|e| e.house) {
-            if !crests.iter().any(|(k, _)| *k == house.key) {
-                crests.push((house.key, super::house_card::crest_art(house.key, crest)));
-            }
+    fn new(entrants: &[Entrant], avatar: u32, season: Season) -> Art {
+        if !season.houses() {
+            return Art { avatars: entrants.iter().map(|_| None).collect() };
         }
-        Art { avatars, crests }
-    }
-
-    fn crest(&self, house: &House) -> Option<&Pixmap> {
-        self.crests.iter().find(|(k, _)| *k == house.key).and_then(|(_, p)| p.as_ref())
+        Art { avatars: entrants.iter().map(|e| avatar_pixmap(e.avatar.as_deref(), avatar, false)).collect() }
     }
 }
 
 fn draw(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout) {
-    let look = look(b.theme);
+    let look = look();
     let (w, h) = (lay.w, lay.h);
     floor(&mut pen.px, w, h, look.floor);
     glow(&mut pen.px, w * 0.10, h * 0.5, w * 0.45, look.left, 20);
@@ -316,7 +315,7 @@ fn draw(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout) {
     vignette(&mut pen.px, w, h, 110);
 
     header(pen, b, lay, (look.left, look.right));
-    let art = Art::new(b.entrants, (lay.slot_h * 0.64).round() as u32, (lay.slot_h * 0.63).round() as u32);
+    let art = Art::new(b.entrants, (lay.slot_h * 0.64).round() as u32, b.season);
     let ground = |y: f32| ground_at(look.floor, y / h);
 
     // Wires first, so the slots sit over their ends.
@@ -333,23 +332,23 @@ fn draw(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout) {
             let (mid, off) = (lay.match_y(r, local), lay.slot_off(r));
             for (k, view) in views(m, b.entrants.len()).iter().enumerate() {
                 let y = if k == 0 { mid - off } else { mid + off };
-                slot(pen, &art, b.entrants, view, (x, y, lay.slot_w), lay, ground(y));
+                slot(pen, &art, b, view, (x, y, lay.slot_w), lay, ground(y));
             }
         }
         for side in [0, 1] {
             let x = lay.column_x(r, side) + lay.slot_w / 2.0;
-            let label = spaced(&round_title(1 << (lay.rounds - 1 - r)));
+            let label = spaced(&round_title(1 << (lay.rounds - 1 - r)).to_uppercase());
             pen.centered(&label, x, lay.label_y(), 13.0, Weight::EXTRA_BOLD, LABEL);
         }
     }
     final_block(pen, b, lay, &art, ground(lay.final_y()));
 
-    // No crest is drawn while the House Cup is paused, so the legend must not
-    // promise one.
-    let legend = if b.entrants.iter().any(|e| e.house.is_some()) {
-        "Gold = winner · HP left after the fight · crest = house"
-    } else {
-        "Gold = winner · HP left after the fight"
+    // The legend only promises what this season actually draws: no house mark
+    // exists before the hatch, and none is drawn for an unsorted field either.
+    let legend = match (b.season.houses(), b.entrants.iter().any(|e| e.house.is_some())) {
+        (false, _) => "Gold = winner · HP left after the fight · every fighter still an egg",
+        (true, true) => "Gold = winner · HP left after the fight · mark = house",
+        (true, false) => "Gold = winner · HP left after the fight",
     };
     pen.centered(legend, w / 2.0, h - 22.0, 14.0, Weight::MEDIUM, FAINT);
 }
@@ -378,7 +377,7 @@ fn round<'a>(b: &'a Bracket, r: usize) -> &'a [Slot] {
 /// The title with crossed swords before it, and the subtitle under it. Any
 /// part of the subtitle from a "●" on is news, and is picked out in red.
 fn header(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout, tints: ([u8; 3], [u8; 3])) {
-    let title = "BATTLE ROYALE";
+    let title = "THE MELEE";
     let (size, icon) = (38.0, 46.0);
     let tw = pen.measure(title, size, Weight::EXTRA_BOLD);
     let left = lay.w / 2.0 - (tw + icon + 14.0) / 2.0;
@@ -463,18 +462,11 @@ fn polyline(px: &mut Pixmap, points: &[(f32, f32)], c: [u8; 3]) {
     }
 }
 
-/// One slot: a rounded box with the fighter's picture, name and crest, and on
-/// the right whatever the result says - health left, LIVE or a free pass.
-/// `at` is the left edge, the middle and the width.
-fn slot(
-    pen: &mut Pen<'_>,
-    art: &Art,
-    entrants: &[Entrant],
-    v: &View,
-    at: (f32, f32, f32),
-    lay: &Layout,
-    ground: [u8; 3],
-) {
+/// One slot: a rounded box with the fighter's subject, name and house mark,
+/// and on the right whatever the result says - health left, LIVE or a free
+/// pass. `at` is the left edge, the middle and the width.
+fn slot(pen: &mut Pen<'_>, art: &Art, b: &Bracket, v: &View, at: (f32, f32, f32), lay: &Layout, ground: [u8; 3]) {
+    let entrants = b.entrants;
     let (x, cy, w) = at;
     let h = lay.slot_h;
     let Some(shape) = rrect(x, cy - h / 2.0, w, h, 9.0) else { return };
@@ -504,19 +496,15 @@ fn slot(
     let (index, entrant) = who;
     let pad = h * 0.18;
     let r = h * 0.32;
-    avatar(pen, art, index, entrant, (x + pad + r, cy, r));
+    subject(pen, art, index, entrant, (x + pad + r, cy, r), b.season);
 
-    // Right to left: crest, then the result, then whatever width is left
-    // for the name.
+    // Right to left: house mark, then the result, then whatever width is left
+    // for the name. Before the hatch there is no mark to draw.
     let mut right = x + w - 8.0;
-    if let Some(house) = entrant.house {
-        if let Some(crest) = art.crest(house) {
-            let side = crest.width() as f32;
-            let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..PixmapPaint::default() };
-            let (px, py) = ((right - side).round() as i32, (cy - side / 2.0).round() as i32);
-            pen.px.draw_pixmap(px, py, crest.as_ref(), &paint, Transform::identity(), None);
-            right -= side + 6.0;
-        }
+    if let (true, Some(house)) = (b.season.houses(), entrant.house.as_ref()) {
+        let mr = h * 0.30;
+        mark(pen, house, right - mr, cy, mr, v.mark == Mark::Loser);
+        right -= 2.0 * mr + 6.0;
     }
     let small = (h * 0.31).round().max(11.0);
     if v.mark == Mark::Live {
@@ -549,10 +537,31 @@ fn slot(
     }
 }
 
-/// The small round picture at a slot's left, or a coloured initial for anyone
-/// without one. `at` is the centre and radius.
-fn avatar(pen: &mut Pen<'_>, art: &Art, index: usize, entrant: &Entrant, at: (f32, f32, f32)) {
+/// A small house mark at a slot's right: the house's initial on its own colour,
+/// painted, so a month that renames the four never shows somebody else's crest.
+fn mark(pen: &mut Pen<'_>, house: &HouseLook, cx: f32, cy: f32, r: f32, dimmed: bool) {
+    let field = if dimmed { [56, 59, 68] } else { house.colours.0 };
+    fill_circle(&mut pen.px, cx, cy, r, field);
+    if let Some(edge) = PathBuilder::from_circle(cx, cy, r - 0.9) {
+        let keyline = if dimmed { [94, 99, 112] } else { lift(house.colours.1, 0.5) };
+        let stroke = Stroke { width: 1.6, ..Stroke::default() };
+        pen.px.stroke_path(&edge, &paint(keyline, 235), &stroke, Transform::identity(), None);
+    }
+    let letter: String = house.initial.chars().take(1).collect::<String>().to_uppercase();
+    let size = (r * 1.1).round().max(9.0);
+    let ink = if dimmed { LOSER_INK } else { lift(house.colours.1, 0.4) };
+    pen.centered(&letter, cx, cy + size * 0.36, size, Weight::EXTRA_BOLD, ink);
+}
+
+/// What stands at a slot's left: the member's own picture after the hatch, a
+/// small dragon egg before it, or a coloured initial when there is no picture.
+/// `at` is the centre and radius.
+fn subject(pen: &mut Pen<'_>, art: &Art, index: usize, entrant: &Entrant, at: (f32, f32, f32), season: Season) {
     let (cx, cy, r) = at;
+    if !season.houses() {
+        egg(pen, cx, cy, r * 2.0, entrant.stage, false);
+        return;
+    }
     if let Some(Some(pic)) = art.avatars.get(index) {
         let side = pic.width() as f32;
         let (px, py) = ((cx - side / 2.0).round() as i32, (cy - side / 2.0).round() as i32);
@@ -587,10 +596,10 @@ fn final_block(pen: &mut Pen<'_>, b: &Bracket, lay: &Layout, art: &Art, ground: 
     let bottom = fy + lay.final_off() + lay.slot_h / 2.0;
 
     trophy(&mut pen.px, mid, top - 44.0, 46.0);
-    pen.centered(&spaced("FINAL"), mid, top - 16.0, 16.0, Weight::EXTRA_BOLD, GOLD);
+    pen.centered(&spaced("THE FINAL"), mid, top - 16.0, 14.0, Weight::EXTRA_BOLD, GOLD);
     for (k, view) in views(&m, b.entrants.len()).iter().enumerate() {
         let (x, y) = lay.final_slot(k);
-        slot(pen, art, b.entrants, view, (x, y, lay.final_w), lay, ground);
+        slot(pen, art, b, view, (x, y, lay.final_w), lay, ground);
     }
     pen.centered("VS", mid, fy + 4.7, 13.0, Weight::EXTRA_BOLD, GOLD);
 
@@ -686,7 +695,26 @@ mod tests {
         "Riya", "Kunal", "Aisha", "Honoré de Balzac", "Arjun", "Priya", "Yash", "Sana", "Kian", "Tara", "Omar", "Leela",
         "Neel", "Maya", "Reza", "Ira", "Dhruv", "Esha", "Farhan", "Gia",
     ];
-    const HOUSES: [&str; 4] = ["gryffindor", "ravenclaw", "slytherin", "hufflepuff"];
+    /// The month's four, as `battle.rs` paints them: key, name, initial and
+    /// the two banner colours. Held here rather than read off `house::HOUSES`
+    /// so the bracket's tests never depend on what the four are called.
+    const PAINT: [(&str, &str, &str, ([u8; 3], [u8; 3])); 4] = [
+        ("gryffindor", "Stark", "S", ([110, 123, 139], [226, 232, 240])),
+        ("ravenclaw", "Targaryen", "T", ([44, 38, 44], [168, 34, 38])),
+        ("slytherin", "Lannister", "L", ([140, 28, 28], [200, 162, 60])),
+        ("hufflepuff", "Night's Watch", "W", ([46, 51, 60], [138, 190, 222])),
+    ];
+
+    fn house_look(i: usize) -> HouseLook {
+        let (key, name, initial, colours) = PAINT[i % PAINT.len()];
+        HouseLook {
+            key,
+            name: name.to_string(),
+            crest: "\u{1f6e1}\u{fe0f}".to_string(),
+            initial: initial.to_string(),
+            colours,
+        }
+    }
 
     /// A picture to stand in for a download: a tinted gradient with a head
     /// and shoulders on it.
@@ -716,7 +744,8 @@ mod tests {
             .map(|i| Entrant {
                 name: NAMES[i % NAMES.len()].to_string(),
                 avatar: (i % 3 != 2).then(|| fake_avatar(INITIAL_FILLS[i % INITIAL_FILLS.len()])),
-                house: (i % 7 != 6).then(|| super::super::house::house(HOUSES[i % 4])).flatten(),
+                house: (i % 7 != 6).then(|| house_look(i)),
+                stage: (i % 5 + 1) as u8,
             })
             .collect()
     }
@@ -786,49 +815,103 @@ mod tests {
         (entrants(people), rounds)
     }
 
-    fn render(entrants: &[Entrant], rounds: &[Vec<Slot>], subtitle: &str, theme: Theme) -> Vec<u8> {
-        let bracket = Bracket { entrants, rounds, subtitle: subtitle.to_string(), theme };
+    fn render(entrants: &[Entrant], rounds: &[Vec<Slot>], subtitle: &str, season: Season) -> Vec<u8> {
+        let bracket = Bracket { entrants, rounds, subtitle: subtitle.to_string(), season };
         bracket_png(&bracket).expect("bracket")
     }
 
     /// The draws the preview writes out, by file name.
-    fn scenes() -> Vec<(String, Vec<Entrant>, Vec<Vec<Slot>>, String, Theme)> {
+    fn scenes() -> Vec<(String, Vec<Entrant>, Vec<Vec<Slot>>, String, Season)> {
         let mut out = Vec::new();
         let (e, r) = tournament(4, &[], |r, _| if r == 0 { Play::Done } else { Play::Live });
-        out.push(("bracket_4.png".into(), e, r, "4 warriors · Final · ● Rohit vs Zoya fighting now".into(), Theme::Classic));
+        out.push((
+            "bracket_4.png".into(),
+            e,
+            r,
+            "4 in the lists \u{b7} The Final Tilt \u{b7} \u{25cf} Rohit vs Zoya fighting now".into(),
+            Season::Houses,
+        ));
         let (e, r) = tournament(8, &[1, 2], |_, _| Play::Open);
-        out.push(("bracket_8_start.png".into(), e, r, "6 warriors · Quarter-finals".into(), Theme::Classic));
+        out.push(("bracket_8_start.png".into(), e, r, "6 in the lists \u{b7} The Last Eight".into(), Season::Houses));
         let (e, r) = tournament(16, &[], |r, j| match (r, j) {
             (0, _) | (1, 0) | (1, 3) => Play::Done,
             (1, 2) => Play::Live,
             _ => Play::Open,
         });
-        out.push(("bracket_16_mid.png".into(), e, r, "16 warriors · Quarter-finals · ● Noor vs Dev fighting now".into(), Theme::Classic));
+        out.push((
+            "bracket_16_mid.png".into(),
+            e,
+            r,
+            "16 in the lists \u{b7} The Last Eight \u{b7} \u{25cf} Noor vs Dev fighting now".into(),
+            Season::Houses,
+        ));
         let (e, r) = tournament(32, &[3, 9, 14], |r, j| match (r, j) {
             (0, _) | (1, 0..=3) | (1, 4) | (1, 6) => Play::Done,
             (1, 5) => Play::Live,
             _ => Play::Open,
         });
-        out.push(("bracket_32_mid.png".into(), e, r, "29 warriors · Round of 16 · ● Yash vs Tara fighting now".into(), Theme::Classic));
+        out.push((
+            "bracket_32_mid.png".into(),
+            e,
+            r,
+            "29 in the lists \u{b7} Round of 16 \u{b7} \u{25cf} Yash vs Tara fighting now".into(),
+            Season::Houses,
+        ));
         let (e, r) = tournament(32, &[], |_, _| Play::Open);
-        out.push(("bracket_32_start.png".into(), e, r, "32 warriors · Round of 32".into(), Theme::Classic));
+        out.push(("bracket_32_start.png".into(), e, r, "32 in the lists \u{b7} Round of 32".into(), Season::Houses));
         let (e, r) = tournament(32, &[], |r, _| if r == 0 { Play::Done } else { Play::Open });
-        out.push(("bracket_32_round2.png".into(), e, r, "32 warriors · Round of 16".into(), Theme::Classic));
-        for theme in [Theme::Classic, Theme::Pokemon, Theme::Tarnished] {
+        out.push(("bracket_32_round2.png".into(), e, r, "32 in the lists \u{b7} Round of 16".into(), Season::Houses));
+        // The same finished draw in both seasons, so the two can be put side
+        // by side: eggs before the hatch, houses after it.
+        for (season, key) in [(Season::Eggs, "eggs"), (Season::Houses, "houses")] {
             let (e, r) = tournament(16, &[5], |_, _| Play::Done);
-            let name = format!("bracket_16_done_{}.png", theme.key());
-            out.push((name, e, r, "15 warriors · 4 rounds · 1 champion".into(), theme));
+            let name = format!("bracket_16_done_{}.png", key);
+            out.push((name, e, r, "15 in the lists \u{b7} 4 rounds \u{b7} 1 champion".into(), season));
         }
         out
     }
 
     #[test]
     fn every_size_and_state_renders() {
-        for (_, e, r, sub, theme) in scenes() {
-            assert_eq!(&render(&e, &r, &sub, theme)[..4], &PNG_MAGIC);
+        for (_, e, r, sub, season) in scenes() {
+            assert_eq!(&render(&e, &r, &sub, season)[..4], &PNG_MAGIC);
         }
         let (e, r) = tournament(8, &[0], |r, _| if r == 0 { Play::Done } else { Play::Live });
-        assert_eq!(&render(&e, &r, "", Theme::Tactical)[..4], &PNG_MAGIC);
+        assert_eq!(&render(&e, &r, "", Season::Eggs)[..4], &PNG_MAGIC);
+    }
+
+    /// Both seasons draw every size, and an unsorted field draws in either.
+    #[test]
+    fn both_seasons_draw_and_a_houseless_field_is_neutral() {
+        for season in [Season::Eggs, Season::Houses] {
+            for size in [4usize, 8, 16, 32] {
+                let (e, r) = tournament(size, &[1], |_, _| Play::Done);
+                assert_eq!(&render(&e, &r, "x", season)[..4], &PNG_MAGIC, "{size} in {season:?}");
+                // Nobody sorted at all: the draw still reads, with no mark.
+                let bare: Vec<Entrant> =
+                    e.iter().map(|x| Entrant { name: x.name.clone(), avatar: None, house: None, stage: 3 }).collect();
+                assert_eq!(&render(&bare, &r, "x", season)[..4], &PNG_MAGIC, "{size} bare in {season:?}");
+            }
+        }
+    }
+
+    /// The round names are the arena's one set, and the bracket shouts them.
+    #[test]
+    fn the_rounds_are_named_for_the_tourney() {
+        assert_eq!(round_title(1), "The Final Tilt");
+        assert_eq!(round_title(2), "The Last Four");
+        assert_eq!(round_title(4), "The Last Eight");
+        assert_eq!(round_title(8), "Round of 16");
+        assert_eq!(round_title(16), "Round of 32");
+        for matches in [1usize, 2, 4, 8, 16] {
+            let title = round_title(matches);
+            assert!(!title.is_empty() && title == title.trim());
+            // Nothing in the arena's round names mentions a style or a type.
+            let lower = title.to_lowercase();
+            for word in ["classic", "pokemon", "royale", "style", "type"] {
+                assert!(!lower.contains(word), "{} names a style", title);
+            }
+        }
     }
 
     #[test]
@@ -840,10 +923,10 @@ mod tests {
             vec![Slot { a: Some(0), b: Some(9), winner: Some(1), hp: Some(4), ..Slot::default() }, Slot::default()],
             vec![Slot { a: Some(2), b: None, winner: Some(5), ..Slot::default() }],
         ];
-        assert_eq!(&render(&e, &rounds, "x", Theme::Wizard)[..4], &PNG_MAGIC);
+        assert_eq!(&render(&e, &rounds, "x", Season::Houses)[..4], &PNG_MAGIC);
         // One round, or none, is not a draw this lays out.
         for rounds in [&rounds[..1], &[]] {
-            let bracket = Bracket { entrants: &e, rounds, subtitle: String::new(), theme: Theme::Classic };
+            let bracket = Bracket { entrants: &e, rounds, subtitle: String::new(), season: Season::Houses };
             assert!(bracket_png(&bracket).is_none());
         }
     }
@@ -864,8 +947,8 @@ mod tests {
     #[ignore = "writes files; only useful when looking at the design"]
     fn preview() {
         let Ok(dir) = std::env::var("BRACKET_PREVIEW") else { return };
-        for (name, e, r, sub, theme) in scenes() {
-            let png = render(&e, &r, &sub, theme);
+        for (name, e, r, sub, season) in scenes() {
+            let png = render(&e, &r, &sub, season);
             std::fs::write(std::path::Path::new(&dir).join(name), png).expect("writing the preview");
         }
     }

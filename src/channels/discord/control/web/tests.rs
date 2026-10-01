@@ -680,14 +680,13 @@ impl PanelData for FakeData {
     }
 
     /// The real decisions - the claim on the arena, the minutes, who is tagged -
-    /// but nothing is posted: a test must never start a battle for real.
+    /// but nothing is posted: a test must never call a melee for real.
     async fn start_battle(
         &self,
         minutes: Option<i64>,
         ping: Option<&str>,
-        theme: Option<&str>,
     ) -> Result<super::super::super::battle::StartedBattle, String> {
-        super::super::super::battle::start_plan_for_tests(FIGHT_CHANNEL, minutes, ping, theme)
+        super::super::super::battle::start_plan_for_tests(FIGHT_CHANNEL, minutes, ping)
     }
 
     fn scorers(&self, days_back: i64, now: i64) -> Option<Vec<super::scorers::ScorerData>> {
@@ -3794,15 +3793,15 @@ async fn a_battle_royale_starts_from_the_panel() {
     assert_eq!(page["max_minutes"], battle::max_lobby_minutes());
     assert_eq!(page["min_minutes"], battle::MIN_WAIT);
     let pings: Vec<&str> = page["pings"].as_array().unwrap().iter().map(|p| p["key"].as_str().unwrap()).collect();
-    assert_eq!(pings, vec!["houses", "warriors", "none"], "the houses first: they are the default");
+    assert_eq!(pings, vec!["games", "houses", "none"], "the games role first: it is the default");
 
-    // Started with nothing said: the four houses, the usual lobby length.
+    // Called with nothing said: the games role, the usual lobby length.
     let (status, started, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({})), true).await;
     assert_eq!(status, StatusCode::OK, "{started}");
     assert_eq!(started["channel"]["name"], "fight-fight-fight");
-    assert_eq!((started["ping"].as_str(), started["ping_label"].as_str()), (Some("houses"), Some("the four houses")));
+    assert_eq!((started["ping"].as_str(), started["ping_label"].as_str()), (Some("games"), Some("the server games role")));
     assert_eq!(started["minutes"], battle::default_lobby_minutes());
-    assert!(started["theme_label"].as_str().is_some_and(|t| !t.is_empty()), "{started}");
+    assert!(started.get("theme").is_none() && started.get("theme_label").is_none(), "no fight styles left: {started}");
 
     // One at a time: the arena is busy until that lobby is done.
     let (status, busy, _) = call(&app, "POST", "/api/arena/battle", Some(&session), Some(json!({ "minutes": 3 })), true).await;
@@ -3813,21 +3812,26 @@ async fn a_battle_royale_starts_from_the_panel() {
     let (_, audit, _) = call(&app, "GET", "/api/audit?limit=20", Some(&session), None, false).await;
     let key = format!("battle:now:{}", FIGHT_CHANNEL);
     let entry = audit.as_array().unwrap().iter().find(|e| e["key"] == key).cloned().expect("logged");
-    assert_eq!(entry["label"], "Battle royale");
+    assert_eq!(entry["label"], "Melee");
     assert_eq!(entry["section"], json!({ "id": "arena", "title": "Arena", "icon": "⚔️" }));
     assert_eq!(entry["user_name"], "Kabir");
     let change = entry["change"].as_str().unwrap();
-    assert!(change.starts_with("Started a battle royale in #fight-fight-fight ("), "{change}");
-    assert!(change.contains(&format!("{} min", battle::default_lobby_minutes())) && change.contains("the four houses"), "{change}");
+    assert!(change.starts_with("Called a melee in #fight-fight-fight ("), "{change}");
+    assert!(
+        change.contains(&format!("{} min", battle::default_lobby_minutes()))
+            && change.contains("the server games role"),
+        "{change}"
+    );
 
     // The lobby ends, which frees the arena, and the next start is allowed.
     battle::free_arena_for_tests(FIGHT_CHANNEL);
     let (status, again, _) = call(&app, "POST", "/api/arena/battle", Some(&session),
-        Some(json!({ "minutes": 999, "ping": "none", "theme": "wwe" })), true).await;
+        Some(json!({ "minutes": 999, "ping": "none" })), true).await;
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(again["minutes"], battle::max_lobby_minutes(), "a silly length is brought back down");
     assert_eq!((again["ping"].as_str(), again["ping_label"].as_str()), (Some("none"), Some("nobody")));
-    assert_eq!((again["theme"].as_str(), again["theme_label"].as_str()), (Some("wwe"), Some("WWE")));
+    // A style is not a thing a melee has any more, so one is never echoed back.
+    assert!(again.get("theme").is_none(), "{again}");
     battle::free_arena_for_tests(FIGHT_CHANNEL);
 
     // Nonsense in the body is refused, and refusing leaves the arena free.

@@ -1070,6 +1070,22 @@ pub fn pick_earned_card(conn: &Connection, rarity_roll: f64, card_roll: f64) -> 
 /// key already paid hands back the card it paid; `None` when there's no card
 /// to give.
 pub fn award_card(conn: &mut Connection, key: &str, user: u64, origin: &str, what: &AwardFor, rolls: (f64, f64), now: i64) -> rusqlite::Result<Option<Award>> {
+    award_card_with(conn, key, user, origin, what, |c| pick_earned_card(c, rolls.0, rolls.1), now)
+}
+
+/// [`award_card`], with the card chosen by `pick` rather than by the ordinary
+/// earned-card weights. Everything else - the key that can only pay once, the
+/// numbering, the row in `awards` - is the same, so a caller that pays at its
+/// own rarities is still one card system and not a second one.
+pub fn award_card_with(
+    conn: &mut Connection,
+    key: &str,
+    user: u64,
+    origin: &str,
+    what: &AwardFor,
+    pick: impl Fn(&Connection) -> Option<Wizard>,
+    now: i64,
+) -> rusqlite::Result<Option<Award>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let paid: Option<(i64, i64)> =
         tx.query_row("SELECT serial, points FROM awards WHERE key = ?1", params![key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
@@ -1077,7 +1093,7 @@ pub fn award_card(conn: &mut Connection, key: &str, user: u64, origin: &str, wha
         let card = tx.query_row(&format!("{} WHERE c.serial = ?1", CARD_SELECT), params![serial], card_row).optional()?;
         return Ok(card.map(|card| Award { card, points, fresh: false }));
     }
-    let Some(wizard) = pick_earned_card(&tx, rolls.0, rolls.1) else {
+    let Some(wizard) = pick(&tx) else {
         return Ok(None);
     };
     let (serial, edition) = next_numbers(&tx, wizard.id)?;
