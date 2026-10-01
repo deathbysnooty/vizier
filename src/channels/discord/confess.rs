@@ -4,11 +4,14 @@
 //! This replaces a third-party bot the server had been using, and it is built
 //! to the flow the members already know:
 //!
-//! 1. The two buttons — **Submit a confession** and **Submit a reply** — ride
-//!    on the confession cards themselves. Exactly one card carries them at any
-//!    time: the newest one, which is where everybody's eye already is. Pressing
-//!    either opens a modal: a confession is just the text, a reply is a
-//!    confession number and the text.
+//! 1. **`/confess`** opens the form from anywhere, for anybody, and answers
+//!    only the person who ran it. The two buttons — **Submit a confession**
+//!    and **Submit a reply** — ride on the confession cards as well, on the
+//!    newest card at any one time, where everybody's eye already is. Both
+//!    doors open the same form through [`open_form`] and hand back a modal
+//!    with the same custom id, so everything past the form is one path.
+//!    `/confess` is the door that is always there: the buttons cannot exist
+//!    until a confession does, and nothing else could have gone first.
 //! 2. Nothing is posted publicly by submitting. The text goes to the review
 //!    channel as an embed with the submitter on it — name, mention, id, how old
 //!    the account is, when they joined, and how many of theirs have been
@@ -697,14 +700,20 @@ pub fn new_modal(limits: &Limits) -> CreateModal {
     )])
 }
 
-pub fn reply_modal(limits: &Limits) -> CreateModal {
+/// The reply form. `prefill` fills the number box in for somebody who already
+/// said which confession they meant — `/confess number:457` — so they only have
+/// to type the reply. The box is still editable, and the number is checked when
+/// the form comes back whatever was in it.
+pub fn reply_modal(limits: &Limits, prefill: Option<i64>) -> CreateModal {
+    let mut number = CreateInputText::new(InputTextStyle::Short, "Which confession? (its number)", FIELD_NUMBER)
+        .placeholder("457")
+        .max_length(12)
+        .required(true);
+    if let Some(n) = prefill.filter(|n| *n > 0) {
+        number = number.value(n.to_string());
+    }
     CreateModal::new(MODAL_REPLY, "Submit a reply").components(vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Which confession? (its number)", FIELD_NUMBER)
-                .placeholder("457")
-                .max_length(12)
-                .required(true),
-        ),
+        CreateActionRow::InputText(number),
         CreateActionRow::InputText(
             CreateInputText::new(InputTextStyle::Paragraph, "Your reply", FIELD_TEXT)
                 .min_length(limits.min.min(1024) as u16)
@@ -712,6 +721,40 @@ pub fn reply_modal(limits: &Limits) -> CreateModal {
                 .required(true),
         ),
     ])
+}
+
+pub const OFF_SAID: &str = "Confessions are switched off right now.";
+pub const BROKEN_SAID: &str = "Confessions aren't available right now. Tell a mod.";
+
+/// The one gate to the submit form, used by both doors: the buttons on a
+/// confession card and `/confess`. Either the box to open, or the words to
+/// refuse with — and the same words either way, so which door somebody came
+/// through is never visible in what they are told.
+///
+/// Everything past the form is one path too: both doors open a modal with the
+/// same custom id, so the same handler, the same guards, the same numbering and
+/// the same review queue serve both. There is no second implementation.
+pub fn open_form(
+    kind: Kind,
+    user: u64,
+    limits: &Limits,
+    on: bool,
+    store_open: bool,
+    prefill: Option<i64>,
+) -> Result<CreateModal, String> {
+    if !on {
+        return Err(OFF_SAID.to_string());
+    }
+    if !store_open {
+        return Err(BROKEN_SAID.to_string());
+    }
+    if limits.blocked.contains(&user) {
+        return Err(BLOCKED_SAID.to_string());
+    }
+    Ok(match kind {
+        Kind::Confession => new_modal(limits),
+        Kind::Reply => reply_modal(limits, prefill),
+    })
 }
 
 pub fn reject_modal(number: i64) -> CreateModal {
@@ -1118,25 +1161,26 @@ fn db_or_whine() -> Option<&'static Mutex<Connection>> {
 
 pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let id = component.data.custom_id.clone();
+
+    // The two submit buttons, through the same gate `/confess` goes through.
+    if id == ID_NEW || id == ID_REPLY {
+        let kind = if id == ID_NEW { Kind::Confession } else { Kind::Reply };
+        let reply = match open_form(kind, component.user.id.get(), &limits(), enabled(), store::db().is_some(), None) {
+            Ok(modal) => CreateInteractionResponse::Modal(modal),
+            Err(why) => whisper(why),
+        };
+        let _ = component.create_response(&ctx.http, reply).await;
+        return;
+    }
+
     if !enabled() {
-        let _ = component.create_response(&ctx.http, whisper("Confessions are switched off right now.")).await;
+        let _ = component.create_response(&ctx.http, whisper(OFF_SAID)).await;
         return;
     }
     let Some(db) = db_or_whine() else {
-        let _ = component.create_response(&ctx.http, whisper("Confessions aren't available right now. Tell a mod.")).await;
+        let _ = component.create_response(&ctx.http, whisper(BROKEN_SAID)).await;
         return;
     };
-    let limits = limits();
-
-    if id == ID_NEW || id == ID_REPLY {
-        if limits.blocked.contains(&component.user.id.get()) {
-            let _ = component.create_response(&ctx.http, whisper(BLOCKED_SAID)).await;
-            return;
-        }
-        let modal = if id == ID_NEW { new_modal(&limits) } else { reply_modal(&limits) };
-        let _ = component.create_response(&ctx.http, CreateInteractionResponse::Modal(modal)).await;
-        return;
-    }
 
     // Approve or reject. Only a mod gets this far.
     let (approving, raw) = match (id.strip_prefix(ID_APPROVE), id.strip_prefix(ID_REJECT)) {
@@ -1192,7 +1236,7 @@ async fn take_buttons_off(ctx: &Context, component: &ComponentInteraction) {
 pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
     let id = modal.data.custom_id.clone();
     let Some(db) = db_or_whine() else {
-        let _ = modal.create_response(&ctx.http, whisper("Confessions aren't available right now. Tell a mod.")).await;
+        let _ = modal.create_response(&ctx.http, whisper(BROKEN_SAID)).await;
         return;
     };
 
@@ -1222,7 +1266,7 @@ pub async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
         return;
     }
     if !enabled() {
-        let _ = modal.create_response(&ctx.http, whisper("Confessions are switched off right now.")).await;
+        let _ = modal.create_response(&ctx.http, whisper(OFF_SAID)).await;
         return;
     }
     let kind = if id == MODAL_NEW { Kind::Confession } else { Kind::Reply };
@@ -1419,6 +1463,50 @@ pub fn on_delete(ctx: &Context, channel_id: ChannelId, message: MessageId) {
             let _ = store::set_buttons_holder(&conn, here, message, number, Utc::now().timestamp());
         }
     });
+}
+
+// --- /confess ----------------------------------------------------------------
+
+/// `/confess` — the door that is always there.
+///
+/// The buttons ride on the newest confession card, which means that until one
+/// confession exists there is no button anywhere, and a mod cannot bootstrap
+/// one either because approving needs a submission first. This command is the
+/// way out of that, and it is the better door anyway: anybody can confess from
+/// wherever they are rather than being seen typing in the confessions channel.
+///
+/// `number:` opens the reply form with that number filled in. Everyone may use
+/// it, in any channel, and the reply only they can see.
+pub fn confess_builder() -> CreateCommand {
+    CreateCommand::new("confess")
+        .description("send an anonymous confession - nothing is posted until a mod has read it")
+        .add_option(
+            CreateCommandOption::new(CommandOptionType::Integer, "number", "to reply to a confession instead: its number")
+                .required(false)
+                .min_int_value(1),
+        )
+}
+
+pub async fn confess_command(ctx: &Context, command: &CommandInteraction) {
+    let wanted = command
+        .data
+        .options
+        .iter()
+        .find(|o| o.name == "number")
+        .and_then(|o| match o.value {
+            CommandDataOptionValue::Integer(n) => Some(n),
+            _ => None,
+        })
+        .filter(|n| *n > 0);
+    let kind = if wanted.is_some() { Kind::Reply } else { Kind::Confession };
+    // Exactly the gate the buttons go through, and the modal it hands back
+    // carries the same custom id — so the form, the guards, the cooldown, the
+    // numbering and the review queue are all the one path from here on.
+    let reply = match open_form(kind, command.user.id.get(), &limits(), enabled(), store::db().is_some(), wanted) {
+        Ok(modal) => CreateInteractionResponse::Modal(modal),
+        Err(why) => whisper(why),
+    };
+    let _ = command.create_response(&ctx.http, reply).await;
 }
 
 // --- /whosent ----------------------------------------------------------------
@@ -2053,6 +2141,162 @@ mod tests {
         assert_eq!(age_words(1000, 1000 + 400 * day), "13 months");
         assert_eq!(age_words(1000, 1000 + 1000 * day), "2 years");
         assert_eq!(age_words(2000, 1000), "today", "a clock that went backwards is not a negative age");
+    }
+
+    // --- the two doors -------------------------------------------------------
+
+    /// `/confess` and the button must be the same door. The proof is the custom
+    /// id: both hand back a modal the one handler claims, so everything past
+    /// the form — the guards, the cooldown, the numbering, the review queue —
+    /// is one path with no second implementation.
+    #[test]
+    fn the_command_opens_exactly_the_box_the_button_does() {
+        let limits = open_limits();
+        let from_button = open_form(Kind::Confession, 11, &limits, true, true, None).unwrap();
+        let from_command = open_form(Kind::Confession, 11, &limits, true, true, None).unwrap();
+        let drawn = serde_json::to_value(&from_button).unwrap();
+        assert_eq!(drawn, serde_json::to_value(&from_command).unwrap(), "the same box, down to the field ids");
+        assert_eq!(drawn["custom_id"], MODAL_NEW);
+        assert!(owns_modal(drawn["custom_id"].as_str().unwrap()), "and the one handler claims it");
+        // Against the hand-built form, so a change to one cannot drift.
+        assert_eq!(drawn, serde_json::to_value(new_modal(&limits)).unwrap());
+
+        let reply = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, None).unwrap()).unwrap();
+        assert_eq!(reply["custom_id"], MODAL_REPLY);
+        assert!(owns_modal(reply["custom_id"].as_str().unwrap()));
+        assert_eq!(reply, serde_json::to_value(reply_modal(&limits, None)).unwrap());
+    }
+
+    /// `/confess number:457` fills the number in, so they only type the reply.
+    /// The box stays editable and the number is still checked on the way back.
+    #[test]
+    fn the_command_can_fill_the_confession_number_in() {
+        let limits = open_limits();
+        let prefilled = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, Some(457)).unwrap()).unwrap();
+        let text = prefilled.to_string();
+        assert!(text.contains("\"value\":\"457\""), "{text}");
+        assert_eq!(prefilled["custom_id"], MODAL_REPLY, "still the same form, so still the same handler");
+        // Without one, nothing is pre-typed.
+        let blank = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, None).unwrap()).unwrap();
+        assert!(!blank.to_string().contains("\"value\""), "{blank}");
+        // A nonsense number is not written into the box.
+        let silly = serde_json::to_value(open_form(Kind::Reply, 11, &limits, true, true, Some(0)).unwrap()).unwrap();
+        assert!(!silly.to_string().contains("\"value\""));
+    }
+
+    /// Both doors are refused in the same words, so which one somebody used is
+    /// never visible in what they are told.
+    #[test]
+    fn the_same_refusals_guard_both_doors() {
+        let limits = Limits { blocked: vec![66], ..open_limits() };
+        assert_eq!(open_form(Kind::Confession, 11, &limits, false, true, None).unwrap_err(), OFF_SAID);
+        assert_eq!(open_form(Kind::Reply, 11, &limits, false, true, None).unwrap_err(), OFF_SAID);
+        assert_eq!(open_form(Kind::Confession, 11, &limits, true, false, None).unwrap_err(), BROKEN_SAID);
+        assert_eq!(open_form(Kind::Confession, 66, &limits, true, true, None).unwrap_err(), BLOCKED_SAID);
+        assert_eq!(open_form(Kind::Reply, 66, &limits, true, true, Some(457)).unwrap_err(), BLOCKED_SAID);
+        // Switched off beats blocked: nobody is told they are on a list by a
+        // feature that is not even running.
+        assert_eq!(open_form(Kind::Confession, 66, &limits, false, true, None).unwrap_err(), OFF_SAID);
+        assert!(open_form(Kind::Confession, 11, &limits, true, true, None).is_ok());
+    }
+
+    /// The cold start, which is why this command exists: an empty channel, no
+    /// confession card anywhere, so no button anywhere — and the first
+    /// confession still goes in, is reviewed, is approved, and is the card the
+    /// buttons then appear on.
+    #[tokio::test]
+    async fn the_very_first_confession_can_be_sent_with_no_cards_in_existence() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+
+        // Nothing posted, nothing carrying buttons, nowhere to put them.
+        assert_eq!(super::store::newest_card(&db.lock(), 21), None);
+        assert_eq!(super::store::buttons_holder(&db.lock(), 21), None);
+        let nowhere = move_buttons(&fake, 21, super::store::newest_card(&db.lock(), 21), false).await;
+        assert_eq!(nowhere.on, None, "there is no button in the channel at all");
+        assert!(fake.pressable().is_empty());
+
+        // `/confess` opens the box anyway.
+        let modal = open_form(Kind::Confession, 11, &limits, true, true, None).expect("the command still opens the form");
+        assert_eq!(serde_json::to_value(&modal).unwrap()["custom_id"], MODAL_NEW);
+
+        // And the submission goes through the one path, as if a button had been
+        // pressed: the series starts where the setting says, and it waits on a
+        // mod like any other.
+        let (stored, _) = submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the very first one", 1000, 459).unwrap();
+        assert_eq!((stored.number, stored.status), (459, Status::Pending));
+        assert!(fake.channel_posts.lock().is_empty(), "still nothing public");
+
+        // A mod approves it, and that card is where the buttons appear.
+        let out = settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let card = out.posted.expect("the first card");
+        assert_eq!(out.buttons_on, Some((459, card)));
+        assert_eq!(out.buttons_off, None, "there was no card before it to strip");
+        assert_eq!(fake.pressable(), vec![card], "from here on there is a button in the channel");
+        assert_eq!(super::store::newest_card(&db.lock(), 21), Some((459, card)));
+    }
+
+    /// A reply sent by command is validated exactly as one sent by the button:
+    /// the number is checked against the store on the way back, whatever was
+    /// pre-typed in the box.
+    #[tokio::test]
+    async fn a_reply_by_command_is_checked_the_same_way_as_one_by_button() {
+        let db = sheet();
+        let fake = Fake::new();
+        let limits = open_limits();
+        submit(&db, &limits, 11, "Zoya", false, Kind::Confession, "", "the confession", 1000, 459).unwrap();
+
+        // Pre-typed or not, the form is the same and #459 is not public yet.
+        for prefill in [None, Some(459)] {
+            assert_eq!(
+                serde_json::to_value(open_form(Kind::Reply, 12, &limits, true, true, prefill).unwrap()).unwrap()["custom_id"],
+                MODAL_REPLY
+            );
+        }
+        let too_early = submit(&db, &limits, 12, "Kabir", false, Kind::Reply, "459", "same here", 1100, 459).unwrap_err();
+        assert_eq!(too_early, NOT_YET_SAID, "a confession nobody has approved cannot be replied to by either door");
+
+        // Approved: the same submission now goes through, with its own number.
+        settle_with(&db, &fake, Some(21), 459, Status::Approved, 7, "", true, 4320, 2000).await;
+        let (reply, clean) = submit(&db, &limits, 12, "Kabir", false, Kind::Reply, "459", "same here", 3000, 459).unwrap();
+        assert_eq!((reply.number, reply.answers), (460, Some(459)));
+        assert_eq!(clean.answers, Some(459));
+
+        // And every other way of typing the number is refused as before.
+        assert_eq!(submit(&db, &limits, 13, "Ira", false, Kind::Reply, "", "x y z", 4000, 459).unwrap_err(), NO_NUMBER_SAID);
+        assert_eq!(submit(&db, &limits, 13, "Ira", false, Kind::Reply, "abc", "x y z", 4000, 459).unwrap_err(), NO_NUMBER_SAID);
+        assert_eq!(submit(&db, &limits, 13, "Ira", false, Kind::Reply, "999", "x y z", 4000, 459).unwrap_err(), NO_SUCH_SAID);
+        assert_eq!(submit(&db, &limits, 13, "Ira", false, Kind::Reply, " #459 ", "x y z", 4000, 459).unwrap().0.answers, Some(459));
+    }
+
+    /// Whichever door a confession came through, what is written down and what
+    /// goes up are the same: the command cannot become a way round a guard.
+    #[tokio::test]
+    async fn a_confession_by_command_and_one_by_button_are_indistinguishable() {
+        let limits = Limits { cooldown: 600, ..open_limits() };
+        let said = "I have never seen a single Star Wars film";
+
+        // Two stores, one submission each, by the two doors. The door is not an
+        // argument to anything past the form, which is the point.
+        let by_button = sheet();
+        let by_command = sheet();
+        let one = submit(&by_button, &limits, 11, "Zoya", false, Kind::Confession, "", said, 1000, 459).unwrap().0;
+        let two = submit(&by_command, &limits, 11, "Zoya", false, Kind::Confession, "", said, 1000, 459).unwrap().0;
+        assert_eq!(one, two, "the same row, down to the number");
+
+        // The cooldown counts the same, so `/confess` is no way round it.
+        let again = submit(&by_command, &limits, 11, "Zoya", false, Kind::Confession, "", said, 1100, 459).unwrap_err();
+        assert!(again.contains("9 minutes"), "{again}");
+        // So does the length range, and so does ping stripping.
+        assert!(submit(&by_command, &limits, 12, "Kabir", false, Kind::Confession, "", "hi", 2000, 459).unwrap_err().contains("at least"));
+        let (_, clean) = submit(&by_command, &limits, 13, "Ira", false, Kind::Confession, "", "@everyone look at this", 2000, 459).unwrap();
+        assert_eq!(clean.body, "everyone look at this");
+        assert!(clean.pings_stripped);
+        assert_eq!(
+            submit(&by_command, &limits, 14, "Troll", false, Kind::Confession, "", "join discord.gg/abcd1234", 2000, 459).unwrap_err(),
+            INVITE_SAID
+        );
     }
 
     // --- the buttons, and which card carries them ----------------------------

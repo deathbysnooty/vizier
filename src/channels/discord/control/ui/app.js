@@ -2638,7 +2638,7 @@
         const body = h('div', { class: 'kalesh-rows' });
         if (!rows.length) body.appendChild(h('p', { class: 'empty-small' }, 'Nothing matches.'));
         rows.forEach((c) => body.appendChild(confessionRow(c)));
-        holder.appendChild(card('confessions-list', 'The record', 'Newest first. Gaps in the numbers are the ones a mod rejected. Replies live in their confession\u2019s thread.', body, { cls: 'kalesh-card' }));
+        holder.appendChild(card('confessions-list', 'The record', 'Newest first. Gaps in the numbers are the ones a mod rejected. Replies live in their confession\u2019s thread. Members send these with /confess or the buttons on the newest confession.', body, { cls: 'kalesh-card' }));
         refreshAudit();
       }).catch((e) => {
         if (!holder.isConnected) return;

@@ -1868,6 +1868,8 @@ impl EventHandler for Handler {
         commands.push(admin_command(announce::builder()));
         commands.push(admin_command(signup::builder()));
         commands.push(admin_command(confess::whosent_builder()));
+        // Everyone's: the door that does not depend on a card existing.
+        commands.push(confess::confess_builder());
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -2812,6 +2814,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "whosent" {
                 confess::whosent_command(&ctx, &command).await;
+                return;
+            }
+            if command.data.name == "confess" {
+                confess::confess_command(&ctx, &command).await;
                 return;
             }
             if command.data.name == "houseopt" {

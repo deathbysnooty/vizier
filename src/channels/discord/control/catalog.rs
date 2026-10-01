@@ -2346,11 +2346,15 @@ pub fn sections() -> Vec<Section> {
             id: "confessions",
             title: "Confessions",
             icon: "🤫",
-            about: "Anonymous confessions, the way the server already uses them. The two buttons - Submit a \
-                    confession and Submit a reply - ride on the confession cards themselves: the newest card in the \
-                    channel carries them, and the one before it has them taken off, so the way in is always the post \
-                    everybody is already looking at. There is no separate panel message to get buried. Pressing a \
-                    button opens a box to type in.\n\nNothing is posted by sending one: it goes to the review \
+            about: "Anonymous confessions, the way the server already uses them. There are two doors into the same \
+                    form. /confess works for anybody, from any channel, and answers only you - so nobody has to be \
+                    seen typing in the confessions channel, and it is how the very first confession gets sent before \
+                    any button exists. /confess number: opens the reply form with that number already filled in. The \
+                    two buttons - Submit a confession and Submit a reply - ride on the confession cards as well: the \
+                    newest card in the channel carries them, and the one before it has them taken off, so the way in \
+                    is always the post everybody is already looking at. There is no separate panel message to get \
+                    buried. Both doors lead to the same box, the same guards and the same review \
+                    queue.\n\nNothing is posted by sending one: it goes to the review \
                     channel first as a card showing the text and the submitter (name, mention, id, how old their \
                     account is, when they joined, and how many of theirs have been approved and rejected before), \
                     with Approve and Reject under it. Reject asks for an optional reason and posts nothing anywhere \
@@ -2466,13 +2470,22 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command(
+                    "confess",
+                    EVERYONE,
+                    "/confess  ·  /confess number:457",
+                    "Opens a box to type an anonymous confession, from any channel - only you see the reply. With \
+                     number: it opens the reply form for that confession instead, with the number already filled \
+                     in. The same box, guards and review queue as the buttons on the cards, and the only way in \
+                     before the first confession has been posted.",
+                ),
+                command(
                     "Submit a confession · Submit a reply",
                     EVERYONE,
                     "The two buttons on the newest confession in the confessions channel",
-                    "Opens a box to type in. A confession is just the text; a reply asks which confession number it \
-                     answers as well. The buttons are always on the newest confession, so there is nothing to \
-                     scroll for. Nothing is posted until a mod approves it, and what gets posted never carries your \
-                     name. Only you see the reply telling you it was sent.",
+                    "The same box /confess opens, on the card itself. A confession is just the text; a reply asks \
+                     which confession number it answers as well. The buttons are always on the newest confession, \
+                     so there is nothing to scroll for. Nothing is posted until a mod approves it, and what gets \
+                     posted never carries your name. Only you see the reply telling you it was sent.",
                 ),
                 command(
                     "Approve · Reject",
