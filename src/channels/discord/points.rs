@@ -788,6 +788,49 @@ mod tests {
         Entry { user: Some(user), house: &HOUSES[0], source, scope: None, points, reason: "", by: None, dedupe: None }
     }
 
+    /// The server-wide board the egg week is read on: before the hatch nobody
+    /// has a house, so a per-house top ten would be four empty lists.
+    #[test]
+    fn the_server_board_counts_every_house_together_and_shares_a_place() {
+        let conn = db();
+        // Three houses, so a per-house query would split these three ways.
+        for (user, house, points, at) in
+            [(1u64, 0usize, 50i64, MON), (2, 1, 90, MON + 10), (3, 2, 50, MON + 20), (4, 0, 5, MON + 30)]
+        {
+            // A source with no daily limit, so the numbers here are the numbers
+            // and not whatever today's quiz cap happens to be.
+            let e = Entry { house: &HOUSES[house], ..entry(user, Source::Royale, points) };
+            write(&conn, &e, at).expect("a row");
+        }
+        let top = top_server(&conn, MON, MON + DAY, 10).expect("the board");
+        assert_eq!(top, vec![(2, 90), (1, 50), (3, 50), (4, 5)], "biggest first, and a tie to whoever got there first");
+        assert_eq!(top_server(&conn, MON, MON + DAY, 2).expect("two").len(), 2, "the limit is honoured");
+
+        // Level members share a place, and the next place skips.
+        assert_eq!(server_rank(&conn, 2, MON, MON + DAY).unwrap(), Some(1));
+        assert_eq!(server_rank(&conn, 1, MON, MON + DAY).unwrap(), Some(2));
+        assert_eq!(server_rank(&conn, 3, MON, MON + DAY).unwrap(), Some(2), "level on points, level in place");
+        assert_eq!(server_rank(&conn, 4, MON, MON + DAY).unwrap(), Some(4), "and the place after a tie skips");
+        assert_eq!(server_rank(&conn, 99, MON, MON + DAY).unwrap(), None, "somebody who has not scored has no place");
+
+        // A window that misses the rows is empty rather than wrong.
+        assert!(top_server(&conn, MON + DAY, MON + 2 * DAY, 10).expect("nothing").is_empty());
+        assert_eq!(server_rank(&conn, 2, MON + DAY, MON + 2 * DAY).unwrap(), None);
+    }
+
+    /// A deduction can take somebody off the board, and must not leave them on
+    /// it at a negative number.
+    #[test]
+    fn the_server_board_leaves_out_anybody_at_nought_or_below() {
+        let conn = db();
+        write(&conn, &entry(1, Source::Royale, 6), MON).expect("a row");
+        write(&conn, &entry(2, Source::Royale, 4), MON).expect("a row");
+        write(&conn, &entry(2, Source::Mod, -4), MON + 10).expect("a correction");
+        let top = top_server(&conn, MON, MON + DAY, 10).expect("the board");
+        assert_eq!(top, vec![(1, 6)], "a member back at nought is off the board");
+        assert_eq!(server_rank(&conn, 2, MON, MON + DAY).unwrap(), None);
+    }
+
     #[test]
     fn top_members_ranks_one_house_in_its_window() {
         let conn = db();
