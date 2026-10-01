@@ -1349,6 +1349,19 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
 /// everything about houses, house points and Snitch drops. The card commands
 /// (`/housecards`, `/frogs`, `/frogcard`, `/trade`, `/trades`) are deliberately
 /// not here - collections and trading carry on.
+/// Commands the themed month replaces, taken off the list while it runs.
+///
+/// Discord allows a hundred global commands and the bot now builds more than
+/// that, so something has to go. These are the ones the month makes pointless:
+/// the houses are dealt by the hatch rather than drafted, drawn or assigned by
+/// hand, the Snitch is retired for the month and the ravens do the dropping.
+/// Every one of them is a mod command - members lose nothing - and they all
+/// come back by switching the month off.
+const MONTH_OFF: &[&str] = &[
+    "snitchdrop", "frogdrop", "housedraft", "housedraw", "houseroles", "housechannels", "houselist",
+    "housecaptain", "houseopt", "houseping", "sellset",
+];
+
 const PAUSED_OFF: &[&str] = &[
     "housecup", "housepoints", "housetop", "houses", "houselist", "houseping", "housecaptain",
     "housechannels", "housedraft", "housedraw", "houseroles", "houseopt", "mypoints", "today",
@@ -1988,6 +2001,24 @@ impl EventHandler for Handler {
 // entirely - a command nobody can use is worse than no command, because
 // Discord still offers it and it only answers with a refusal. The card
 // commands stay: people keep their collections and go on trading.
+// The month takes its own commands off first: Discord stops at a hundred
+// global commands and the bot builds more than that now.
+let commands = match month::running() {
+    false => commands,
+    true => {
+        let kept: Vec<CreateCommand> = commands
+            .into_iter()
+            .filter(|c| {
+                serde_json::to_value(c)
+                    .ok()
+                    .and_then(|v| v["name"].as_str().map(|n| !MONTH_OFF.contains(&n)))
+                    .unwrap_or(true)
+            })
+            .collect();
+        tracing::info!("commands: the month is running, so {} commands it replaces are off the list", MONTH_OFF.len());
+        kept
+    }
+};
 let commands = match house_cup::running() {
     true => commands,
     false => {
