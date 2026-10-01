@@ -398,10 +398,46 @@ fn named(panel: &Panel, user: u64) -> String {
     panel.cached_name(user).unwrap_or_else(|| "A member".to_string())
 }
 
-/// The key the handles are hashed under: random, made once when the bot starts,
-/// never written down and never sent anywhere.
-static HANDLE_KEY: LazyLock<std::collections::hash_map::RandomState> =
-    LazyLock::new(std::collections::hash_map::RandomState::new);
+/// The key the handles are hashed under: 256 random bits, made once and then
+/// KEPT, in the settings store under `VIZIER_HANDLE_KEY`.
+///
+/// It used to be minted fresh every time the bot started, which was fine while
+/// a handle only had to outlive an open page. It does not any more: a member's
+/// own link is whispered to them by `/egg` and the rest, and people keep those.
+/// A key that changed on every restart broke every link anybody had kept, which
+/// on a bot that is deployed several times an evening means all of them.
+///
+/// It is still a secret and still never leaves the server - it just survives a
+/// restart now.
+static HANDLE_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    if let Some(saved) = super::super::var("VIZIER_HANDLE_KEY") {
+        if let Ok(bytes) = <[u8; 32]>::try_from(hex_bytes(&saved).as_slice()) {
+            return bytes;
+        }
+    }
+    let mut fresh = [0u8; 32];
+    rand::fill(&mut fresh);
+    let written: String = fresh.iter().map(|b| format!("{:02x}", b)).collect();
+    match super::super::set("VIZIER_HANDLE_KEY", Some(&written), 0) {
+        Ok(()) => tracing::info!("panel: minted the handle key; member page links survive a restart now"),
+        // Worth saying out loud: without it the links work until the next
+        // restart and then quietly stop, which is a confusing thing to debug.
+        Err(e) => tracing::warn!("panel: could not keep the handle key, links will not survive a restart: {e}"),
+    }
+    fresh
+});
+
+/// A hex string back to bytes; anything that is not a pair of hex digits ends it.
+fn hex_bytes(raw: &str) -> Vec<u8> {
+    let digits: Vec<u8> = raw.trim().as_bytes().to_vec();
+    digits
+        .chunks(2)
+        .map_while(|pair| match pair {
+            [a, b] => u8::from_str_radix(std::str::from_utf8(&[*a, *b]).ok()?, 16).ok(),
+            _ => None,
+        })
+        .collect()
+}
 
 /// The short opaque handle the page hangs a member's panel on.
 ///
@@ -421,10 +457,12 @@ static HANDLE_KEY: LazyLock<std::collections::hash_map::RandomState> =
 /// - all three off this function, so a handle means the same thing wherever it
 /// turns up and there is never a second mechanism to keep in step.
 pub fn handle(user: u64) -> String {
-    use std::hash::{BuildHasher, Hash, Hasher};
-    let mut hasher = HANDLE_KEY.build_hasher();
-    user.hash(&mut hasher);
-    format!("m{:08x}", hasher.finish() as u32)
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(*HANDLE_KEY);
+    hasher.update(user.to_be_bytes());
+    let out = hasher.finalize();
+    format!("m{:02x}{:02x}{:02x}{:02x}", out[0], out[1], out[2], out[3])
 }
 
 /// Whether a path segment is handle-SHAPED at all: `m` and eight hex digits,

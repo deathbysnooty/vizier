@@ -359,11 +359,19 @@ pub fn card_text(card: &Card, now: i64) -> String {
         head
     };
 
-    text.push_str(&format!(
-        "\n**Craving** {} · double points until {}",
-        games_words(&card.hungry),
-        clock12(card.double_until)
-    ));
+    // Two different rules, so two different sentences. Before the hatch the
+    // craving is a GATE - nothing else scores at all - and after it a bonus on
+    // top of everything else. Telling an egg-week member "double points" sent
+    // them off to play a game that was paying them nothing.
+    text.push_str(&if card.hatched {
+        format!("\n**Craving** {} · double points until {}", games_words(&card.hungry), clock12(card.double_until))
+    } else {
+        format!(
+            "\n**Your egg only eats** {} · nothing else counts until {}",
+            games_words(&card.hungry),
+            clock12(card.double_until)
+        )
+    });
     for (label, used, limit) in &card.caps {
         let left = (limit - used).max(0);
         text.push_str(&format!(
@@ -1301,10 +1309,20 @@ mod tests {
         assert!(!card_text(&Card { hatched: true, rank: Some(9), ..a_card() }, now).contains("👑"));
         assert!(!dragon.contains("hatches in"), "nothing about hatching any more");
 
-        // The tail is the same either way, and it is most of the use of it.
+        // The craving is a gate before the hatch and a bonus after it, so the
+        // two say different things - and saying the wrong one sends somebody
+        // off to play a game that is paying them nothing.
+        assert!(
+            egg.contains("Your egg only eats") && egg.contains("nothing else counts until 8 pm"),
+            "egg week is a gate, and has to read like one: {}",
+            egg
+        );
+        assert!(!egg.contains("double points"), "nothing doubles before the hatch: {}", egg);
+        assert!(dragon.contains("double points until 8 pm"), "after the hatch it is a bonus: {}", dragon);
+
+        // The rest of the tail is the same either way, and it is most of the use of it.
         for text in [&egg, &dragon] {
             assert!(text.contains("Anagram") && text.contains("Quiz"), "what it craves: {}", text);
-            assert!(text.contains("double points until 8 pm"), "and how long the double lasts: {}", text);
             assert!(text.contains("Quick games: 12/20") && text.contains("8 left"), "{}", text);
             assert!(text.contains("Thinking games: 30/30") && text.contains("maxed"), "{}", text);
             assert!(text.contains("**7** cards · **3** of 12 kinds"), "the cards: {}", text);
