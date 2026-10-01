@@ -283,6 +283,9 @@ fn games_words(games: &[Source]) -> String {
 /// Everything `/dragon` says, whichever half of the month it is asked in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
+    /// Who it is about. Used for one thing only: the link to their own page on
+    /// the live site, which is addressed by an opaque handle and never by this.
+    pub user: u64,
     pub name: String,
     /// Empty before the hatch.
     pub dragon: String,
@@ -386,7 +389,8 @@ pub fn card_text(card: &Card, now: i64) -> String {
              exactly where you left off — same egg, same warmth, same house, same cards.",
         );
     }
-    month::with_live(text)
+    // Their own page, not the hall's front door: this reply is about one person.
+    month::with_live_for(card.user, text)
 }
 
 /// A time of day, India time, as "8 pm".
@@ -403,7 +407,7 @@ fn clock12(ts: i64) -> String {
 }
 
 /// What `/egg` says while the egg is still an egg.
-pub fn waiting_text(name: &str, points: i64, hungry: &[Source], changes_at: i64, hatch_at: i64, now: i64) -> String {
+pub fn waiting_text(user: u64, name: &str, points: i64, hungry: &[Source], changes_at: i64, hatch_at: i64, now: i64) -> String {
     let (at, next) = stage(points);
     let (icon, label) = STAGES[at];
     let mut text = format!(
@@ -422,11 +426,11 @@ pub fn waiting_text(name: &str, points: i64, hungry: &[Source], changes_at: i64,
         text.push_str(&format!("\n-# {} more to the next stage.", more));
     }
     text.push_str(&format!("\n-# It hatches in {}. Only what it is hungry for feeds it until then.", hours_words(hatch_at - now)));
-    month::with_live(text)
+    month::with_live_for(user, text)
 }
 
 /// What `/egg` says once the egg has opened: the dragon, not the egg.
-pub fn hatched_text(name: &str, dragon: &str, house: &str, points: i64, hungry: &[Source], changes_at: i64, now: i64) -> String {
+pub fn hatched_text(user: u64, name: &str, dragon: &str, house: &str, points: i64, hungry: &[Source], changes_at: i64, now: i64) -> String {
     let text = format!(
         "🐉 **{}** — {}'s dragon, of **{}**.\nCraving **{}** for the next {} · **double** points there.\n**{}** point{} this month.",
         dragon,
@@ -437,7 +441,7 @@ pub fn hatched_text(name: &str, dragon: &str, house: &str, points: i64, hungry: 
         points,
         if points == 1 { "" } else { "s" }
     );
-    month::with_live(text)
+    month::with_live_for(user, text)
 }
 
 /// The channel the Join button lives in, so the nudge can point at it.
@@ -462,7 +466,7 @@ pub const MONTH_OFF: &str = "There's no themed month running right now. The game
 
 /// What `/livepoints` says: the page, and enough of the numbers to be worth
 /// reading on its own.
-pub fn livepoints_text(name: &str, house: Option<&str>, points: i64, rank: Option<usize>, left: &[(&'static str, i64, i64)]) -> String {
+pub fn livepoints_text(user: u64, name: &str, house: Option<&str>, points: i64, rank: Option<usize>, left: &[(&'static str, i64, i64)]) -> String {
     let mut text = format!("📊 **{}** · **{}** point{} this month", name, points, if points == 1 { "" } else { "s" });
     if let Some(house) = house {
         text.push_str(&format!(" for **{}**", house));
@@ -480,7 +484,7 @@ pub fn livepoints_text(name: &str, house: Option<&str>, points: i64, rank: Optio
             if room == 0 { " · maxed".to_string() } else { format!(" · {} left", room) }
         ));
     }
-    month::with_live(text)
+    month::with_live_for(user, text)
 }
 
 // --- the commands ------------------------------------------------------------------
@@ -570,6 +574,7 @@ pub async fn egg_command(ctx: &Context, command: &CommandInteraction) {
         None => ((0, 0), 0),
     };
     let card = Card {
+        user,
         name,
         dragon: egg.dragon.clone(),
         house: super::house::house(&egg.house).map(month::name_of).unwrap_or_default(),
@@ -715,7 +720,7 @@ pub async fn livepoints_command(ctx: &Context, command: &CommandInteraction) {
         let conn = db.lock();
         ledger::server_rank(&conn, user, since, i64::MAX).ok().flatten()
     });
-    let text = livepoints_text(&name, house.as_deref(), points, rank, &left);
+    let text = livepoints_text(user, &name, house.as_deref(), points, rank, &left);
     let _ = command.create_response(&ctx.http, whisper(text)).await;
 }
 
@@ -724,12 +729,15 @@ pub fn mycards_builder() -> CreateCommand {
 }
 
 /// What `/mycards` says. `cards` is already in the order the page shows them.
-pub fn mycards_text(name: &str, cards: &[(String, &'static str, i64)]) -> String {
+pub fn mycards_text(user: u64, name: &str, cards: &[(String, &'static str, i64)]) -> String {
     if cards.is_empty() {
-        return month::with_live(format!(
-            "🃏 **{}** · no cards yet. Capture a raven when one lands and the card is yours, serial number and all.",
-            name
-        ));
+        return month::with_live_for(
+            user,
+            format!(
+                "🃏 **{}** · no cards yet. Capture a raven when one lands and the card is yours, serial number and all.",
+                name
+            ),
+        );
     }
     let mut text = format!("🃏 **{}** · **{}** card{}", name, cards.len(), if cards.len() == 1 { "" } else { "s" });
     for (card_name, rarity, serial) in cards.iter().take(25) {
@@ -738,7 +746,7 @@ pub fn mycards_text(name: &str, cards: &[(String, &'static str, i64)]) -> String
     if cards.len() > 25 {
         text.push_str(&format!("\n-# …and {} more.", cards.len() - 25));
     }
-    month::with_live(text)
+    month::with_live_for(user, text)
 }
 
 pub async fn mycards_command(ctx: &Context, command: &CommandInteraction) {
@@ -754,7 +762,7 @@ pub async fn mycards_command(ctx: &Context, command: &CommandInteraction) {
         }
         None => Vec::new(),
     };
-    let _ = command.create_response(&ctx.http, whisper(mycards_text(&name, &cards))).await;
+    let _ = command.create_response(&ctx.http, whisper(mycards_text(user, &name, &cards))).await;
 }
 
 // --- handing the eggs out ----------------------------------------------------------
@@ -1229,7 +1237,7 @@ mod tests {
     fn egg_says_the_egg_before_the_hatch_and_the_dragon_after() {
         let mut month = Month::on();
         month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
-        let before = waiting_text("Zoya", 30, &[Source::Anagram, Source::Quiz], 3_600, 86_400, 0);
+        let before = waiting_text(ZOYA, "Zoya", 30, &[Source::Anagram, Source::Quiz], 3_600, 86_400, 0);
         assert!(before.contains("stage 2 of 5"), "the stage is on it: {}", before);
         assert!(before.contains("Anagram") && before.contains("Quiz"), "what it wants is on it");
         assert!(before.contains("1h 0m"), "and when that changes");
@@ -1238,7 +1246,7 @@ mod tests {
         assert!(before.contains("https://mlci.example/live"), "and the page, always");
         assert!(!before.contains("🐉"), "there is no dragon yet");
 
-        let after = hatched_text("Zoya", "Vhagaryx", "Stark", 400, &[Source::Geo], 7_200, 0);
+        let after = hatched_text(ZOYA, "Zoya", "Vhagaryx", "Stark", 400, &[Source::Geo], 7_200, 0);
         assert!(after.contains("Vhagaryx") && after.contains("Stark"), "the dragon and the house: {}", after);
         assert!(after.contains("double"), "and that the craving pays double");
         assert!(!after.contains("hatches in"), "nothing about hatching any more");
@@ -1246,8 +1254,13 @@ mod tests {
         assert!(no_egg_text().contains("https://mlci.example/live"));
     }
 
+    /// One real-shaped Discord snowflake, so a test that says "no id reached
+    /// this reply" means something.
+    const ZOYA: u64 = 701234567890123456;
+
     fn a_card() -> Card {
         Card {
+            user: ZOYA,
             name: "Zoya".into(),
             dragon: String::new(),
             house: String::new(),
@@ -1334,11 +1347,39 @@ mod tests {
         assert_eq!(clock12(month::parse_ist("2026-10-02 14:05").unwrap()), "2:05 pm");
     }
 
+    /// Every reply that is about ONE member ends with THAT member's page, not
+    /// the hall's front door - and nothing in the link is their Discord id.
+    #[test]
+    fn every_reply_about_one_member_carries_their_own_link() {
+        let mut month = Month::on();
+        month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
+        let mine = month::live_url_for(ZOYA).expect("their page");
+        let now = month::parse_ist("2026-10-02 19:00").unwrap();
+        let replies = [
+            ("/egg", card_text(&a_card(), now)),
+            ("/dragon", card_text(&Card { hatched: true, ..a_card() }, now)),
+            ("/egg while waiting", waiting_text(ZOYA, "Zoya", 30, &[Source::Anagram], 3_600, 86_400, 0)),
+            ("/egg once hatched", hatched_text(ZOYA, "Zoya", "Vhagaryx", "Stark", 400, &[Source::Geo], 7_200, 0)),
+            ("/livepoints", livepoints_text(ZOYA, "Zoya", Some("Stark"), 412, Some(3), &[("Quick games", 12, 20)])),
+            ("/mycards", mycards_text(ZOYA, "Zoya", &[("House Stark".to_string(), "Common", 42)])),
+            ("/mycards with none", mycards_text(ZOYA, "Zoya", &[])),
+        ];
+        for (which, text) in &replies {
+            assert!(text.contains(mine.as_str()), "{} does not hand them their own page: {}", which, text);
+            assert!(!text.contains(&ZOYA.to_string()), "{} says their id out loud: {}", which, text);
+            assert!(!text.contains(&format!("{:x}", ZOYA)), "{} says their id in hex: {}", which, text);
+        }
+        // And a reply about nobody in particular keeps the hall's own link.
+        let none = no_egg_text();
+        assert!(none.contains("https://mlci.example/live"), "{}", none);
+        assert!(!none.contains("/live/u/"), "nobody's page is nobody's page: {}", none);
+    }
+
     #[test]
     fn livepoints_says_the_numbers_as_well_as_the_link() {
         let mut month = Month::on();
         month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
-        let text = livepoints_text("Zoya", Some("Stark"), 412, Some(3), &[("Quick games", 12, 20), ("Thinking games", 30, 30)]);
+        let text = livepoints_text(ZOYA, "Zoya", Some("Stark"), 412, Some(3), &[("Quick games", 12, 20), ("Thinking games", 30, 30)]);
         assert!(text.contains("**412** point") && text.contains("Stark") && text.contains("#3"), "{}", text);
         assert!(text.contains("12/20") && text.contains("8 left"), "what is left today: {}", text);
         assert!(text.contains("30/30") && text.contains("maxed"));
@@ -1349,9 +1390,9 @@ mod tests {
     fn mycards_lists_serials_and_says_so_when_there_are_none() {
         let mut month = Month::on();
         month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
-        let empty = mycards_text("Zoya", &[]);
+        let empty = mycards_text(ZOYA, "Zoya", &[]);
         assert!(empty.contains("no cards yet") && empty.contains("https://mlci.example/live"));
-        let some = mycards_text("Zoya", &[("House Stark".to_string(), "Common", 42)]);
+        let some = mycards_text(ZOYA, "Zoya", &[("House Stark".to_string(), "Common", 42)]);
         assert!(some.contains("House Stark") && some.contains("No. 0042"), "{}", some);
     }
 

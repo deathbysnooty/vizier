@@ -140,6 +140,45 @@ pub fn with_live(mut text: String) -> String {
     text
 }
 
+/// One member's OWN page on the live site, opened on their egg or dragon.
+///
+/// The page is addressed by an opaque handle - a keyed hash of the id, minted
+/// fresh at every start, see [`super::control::web::housecup::handle`] - and
+/// never by the id, so nothing the bot posts and nothing the page is given can
+/// be turned back into a Discord account. A handle only has to outlive the link
+/// somebody was just whispered, which is why a restart minting new ones costs
+/// nothing.
+///
+/// `VIZIER_LIVE_URL` is whatever address a mod pasted, which may or may not
+/// already end in `/live`, so both are joined to the same place rather than
+/// leaving one of them at `/live/live/u/...`.
+pub fn live_url_for(user: u64) -> Option<String> {
+    let url = live_url()?;
+    let key = super::control::web::housecup::handle(user);
+    let root = url.strip_suffix("/live").unwrap_or(&url);
+    Some(format!("{}/live/u/{}", root, key))
+}
+
+/// The line a reply about ONE member ends with: their own page rather than the
+/// hall's front door. Empty when no page is set, exactly as [`live_line`] is.
+pub fn live_line_for(user: u64) -> String {
+    match live_url_for(user) {
+        Some(url) => format!("\n-# 🔴 Live: {}", url),
+        None => String::new(),
+    }
+}
+
+/// Puts one member's own page on the end of a reply about them. The other door:
+/// `/egg`, `/dragon`, `/livepoints` and `/mycards` go through this one, and
+/// everything that is not about one named member goes through [`with_live`].
+pub fn with_live_for(user: u64, mut text: String) -> String {
+    let line = live_line_for(user);
+    if !line.is_empty() && !text.contains(line.trim_start_matches('\n')) {
+        text.push_str(&line);
+    }
+    text
+}
+
 // --- the paint ----------------------------------------------------------------------
 
 /// One house as this month shows it.
@@ -313,6 +352,40 @@ mod tests {
         let once = with_live("🏆 the Cup".into());
         assert!(once.contains("https://mlci.example/live"), "the reply ends with the page");
         assert_eq!(with_live(once.clone()), once, "and putting it on twice changes nothing");
+    }
+
+    /// A reply about ONE member ends with that member's own page, and nothing
+    /// in the link can be turned back into their Discord account.
+    #[test]
+    fn a_members_own_link_is_their_handle_and_never_their_id() {
+        let mut month = Month::on();
+        const ZOYA: u64 = 701234567890123456;
+        const AYAN: u64 = 701234567890123457;
+        assert_eq!(live_url_for(ZOYA), None, "nothing set, nothing said");
+        assert_eq!(live_line_for(ZOYA), "", "and no dangling line either");
+        assert_eq!(with_live_for(ZOYA, "🥚 your egg".into()), "🥚 your egg");
+
+        month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
+        let mine = live_url_for(ZOYA).expect("a page");
+        assert!(mine.starts_with("https://mlci.example/live/u/"), "{}", mine);
+        assert!(!mine.contains(&ZOYA.to_string()), "their id is in the link: {}", mine);
+        assert!(!mine.contains(&format!("{:x}", ZOYA)), "their id in hex is in the link: {}", mine);
+        // Two members never land on one page.
+        assert_ne!(mine, live_url_for(AYAN).expect("a page"));
+        // It holds still while a reply is being read, which is all it has to do.
+        assert_eq!(live_url_for(ZOYA).as_deref(), Some(mine.as_str()));
+
+        // Whatever a mod pasted, the address is the same one place: the page
+        // itself, or the host it is served from.
+        month.set("VIZIER_LIVE_URL", "https://mlci.example");
+        assert_eq!(live_url_for(ZOYA).as_deref(), Some(mine.as_str()), "a bare host lands on the same page");
+
+        // It lands once, and it is not the hall's own line.
+        month.set("VIZIER_LIVE_URL", "https://mlci.example/live");
+        let once = with_live_for(ZOYA, "🥚 your egg".into());
+        assert!(once.contains(&mine), "the reply ends with their page: {}", once);
+        assert_eq!(with_live_for(ZOYA, once.clone()), once, "putting it on twice changes nothing");
+        assert_ne!(live_line_for(ZOYA), live_line(), "a reply about one member is not the hourly post");
     }
 
     #[test]

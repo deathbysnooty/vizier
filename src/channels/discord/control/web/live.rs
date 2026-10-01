@@ -1,29 +1,36 @@
 //! The Hall of Dragons: the month's public page, and the two things it reads.
 //!
 //! ```text
-//! GET /live                     the page (the hall)
-//! GET /live/u/<discord id>      the page, opened on that person's own dragon
-//! GET /live/api/hall.json       everybody: name, avatar, points, house, rank
-//! GET /live/api/u/<id>.json     one person's whole page, in one call
-//! GET /live/<file>              the page's own art, models and textures
-//! GET /live.json                the hall's body, under its first address
+//! GET /live                       the page (the hall)
+//! GET /live/u/<handle>            the page, opened on that person's own dragon
+//! GET /live/api/hall.json         everybody: handle, name, avatar, points, house, rank
+//! GET /live/api/u/<handle>.json   one person's whole page, in one call
+//! GET /live/<file>                the page's own art, models and textures
+//! GET /live.json                  the hall's body, under its first address
 //! ```
 //!
 //! Public, no sign-in, no cookie, no token: the owner's decision is that anyone
 //! with the link can open it. Which is the whole reason the shape of what it
 //! says is decided here and not left to whatever a query happened to return.
 //!
-//! A PERSON'S PAGE IS KEYED BY THEIR DISCORD ID, by the owner's decision: the
-//! link `/egg` and `/livepoints` hand somebody is `<live url>/live/u/<their
-//! id>`. So a page for one named account can be reached by anyone who learns an
-//! id, and ids can be read in bulk out of any channel the bot posts in. What
-//! that page then says is only what the bot already says out loud in public
-//! channels - a display name, Discord's own avatar, points, a rank, cards and
-//! badges - and the id is in the ADDRESS only: it is never echoed into any
-//! body, any attribute or any query string, and the privacy test below enforces
-//! that. If the owner would rather the addresses were unguessable, the House Cup
-//! page already has the mechanism to copy - `housecup::handle`, a keyed hash of
-//! the id - and the only change needed here is what `one_json` parses.
+//! A PERSON'S PAGE IS KEYED BY AN OPAQUE HANDLE, and no longer by their Discord
+//! id: the link `/egg` and `/livepoints` hand somebody is `<live url>/live/u/<their
+//! handle>`, and `one_json` takes a handle and nothing else - a raw id in that
+//! address is simply not a member. The handle is
+//! [`super::housecup::handle`], the House Cup page's own mechanism rather than
+//! a second one: eight hex characters of a SipHash of the id under a key of 128
+//! random bits minted fresh at every start and never written down or sent
+//! anywhere. So nobody holding every id on the server can match one to a
+//! handle, an id can no longer be read in bulk out of a channel and turned into
+//! somebody's page, and a restart costs only the links whispered before it.
+//!
+//! The handle is the one key that IS in both bodies, because the page has to be
+//! able to say "that name, show me their cards" without ever holding an id. It
+//! is in the address and in the body; the id is in neither, and the privacy test
+//! below enforces both halves of that - no snowflake anywhere, and no handle
+//! that gives its id away. What a person's page then says is only what the bot
+//! already says out loud in public channels: a display name, Discord's own
+//! avatar, points, a rank, cards and badges.
 //!
 //! WHAT IT WILL AND WILL NOT SAY. It says display names, Discord's own public
 //! avatar urls, dragons, houses, points, ranks, the serial numbers of the cards
@@ -33,8 +40,8 @@
 //! cannot be joined to a Discord profile by a stranger), no message of
 //! anybody's, no message counts, no join dates, no voice minutes, no channel
 //! names, no email, and nothing whatever about who is looking. A person's own
-//! page is reached BY their id because the bot hands them that link - the id is
-//! in the address, never in the answer. The privacy test below walks the
+//! page is reached by their handle, which is a hash of an id and not an id: no
+//! row anywhere can be joined to a Discord profile. The privacy test below walks the
 //! finished JSON key by key and fails on anything that looks like one of those,
 //! so a field added carelessly in six months' time fails a test rather than
 //! reaching the web.
@@ -213,7 +220,8 @@ pub struct Live {
 /// One member, counted and ranked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
-    /// Never in a body: this is what `/live/api/u/<id>.json` looks them up by.
+    /// Never in a body, and no longer in an address either: the page asks for
+    /// one person by their handle, which this is hashed into - see [`whose`].
     pub user: u64,
     pub name: String,
     pub avatar: String,
@@ -409,6 +417,28 @@ pub fn assemble(rows: Vec<Row>, hatched: Option<i64>, now: i64) -> Live {
     }
 }
 
+// --- who the page may ask about -------------------------------------------------------
+
+/// Everybody's handle, in the order the page lists them.
+///
+/// [`super::housecup::handles_of`] is the House Cup page's mechanism, used here
+/// rather than copied: one keyed hash, one collision rule, one meaning of the
+/// word handle. The order is the ranked order both bodies are cut from, so a
+/// colliding pair is settled the same way in the hall as on a person's own
+/// page and the two can never disagree about whose handle is whose.
+fn handles(live: &Live) -> HashMap<u64, String> {
+    super::housecup::handles_of(live.members.iter().map(|m| m.user))
+}
+
+/// Who a handle belongs to, against the body the page was given.
+///
+/// None for a handle nobody on the page answers to - somebody who never claimed
+/// an egg, somebody who has opted out since the link was handed to them, or a
+/// handle minted before the last restart.
+pub fn whose(live: &Live, key: &str) -> Option<u64> {
+    handles(live).into_iter().find(|(_, mine)| mine == key).map(|(user, _)| user)
+}
+
 // --- the two bodies -------------------------------------------------------------------
 
 /// What both bodies say about the month itself.
@@ -473,11 +503,16 @@ pub fn hall(live: &Live, now: i64) -> Value {
     let mut body = head(live, now);
     body["houses"] = houses_json(live);
     body["deck"] = deck_json(live);
+    let who = handles(live);
     body["members"] = live
         .members
         .iter()
         .map(|m| {
             json!({
+                // What the page asks for one person by. A hash of an id under a
+                // key that never leaves the process, so it names a panel on this
+                // page and nothing else anywhere.
+                "handle": who.get(&m.user),
                 "name": m.name,
                 "avatar": m.avatar,
                 "house": m.house,
@@ -511,6 +546,9 @@ pub fn one(live: &Live, user: u64, now: i64) -> Option<Value> {
     body["houses"] = houses_json(live);
     body["deck"] = deck_json(live);
     body["me"] = json!({
+        // Their own handle, so the page knows which of the hall's rows this is
+        // and the address it is open at is one it can hand back out.
+        "handle": handles(live).get(&me.user),
         "name": me.name,
         "avatar": me.avatar,
         "house": me.house,
@@ -755,13 +793,19 @@ async fn one_json(State(panel): State<Panel>, Path(id): Path<String>) -> Respons
         return off();
     }
     // The address ends in `.json` so the page can be fetched by a plain link;
-    // what is in front of it is a Discord id and nothing else.
-    let Some(user) = id.strip_suffix(".json").unwrap_or(&id).parse::<u64>().ok() else {
+    // what is in front of it is a HANDLE and nothing else. A Discord id is not
+    // one - it never was shaped like one - so the old addresses are simply not
+    // members any more, which is the point of taking the ids out.
+    let key = id.strip_suffix(".json").unwrap_or(&id);
+    if !super::housecup::handle_shaped(key) {
         return json_out(StatusCode::NOT_FOUND, json!({"error": "That isn't a member."}));
-    };
+    }
     let now = chrono::Utc::now().timestamp();
     let Some(live) = cached(&panel, now, Instant::now()) else { return unavailable() };
-    match one(&live, user, now) {
+    // A handle nobody answers to gets the same friendly answer a stranger's id
+    // used to: somebody with no egg, somebody who has opted out since they were
+    // handed the link, or a handle minted before the last restart.
+    match whose(&live, key).and_then(|user| one(&live, user, now)) {
         Some(body) => json_out(StatusCode::OK, body),
         None => json_out(
             StatusCode::NOT_FOUND,
@@ -771,8 +815,9 @@ async fn one_json(State(panel): State<Panel>, Path(id): Path<String>) -> Respons
 }
 
 /// The page itself. The same HTML at every address it is served under: which
-/// person it opens on is read from the path by the page, so one cached file
-/// serves everybody.
+/// person it opens on is read from the path by the page - a handle, never an id
+/// - so one cached file serves everybody, and a bare `/live` with no handle at
+/// all is the hall and nothing missing.
 async fn page() -> Response {
     if !enabled() {
         return (StatusCode::NOT_FOUND, "The live page is switched off.").into_response();
@@ -835,13 +880,14 @@ pub fn routes() -> Router<Panel> {
     let watched = Router::new()
         .route("/live", get(page))
         .route("/live/", get(page))
-        .route("/live/u/{id}", get(page))
+        // A handle, not an id. The page reads it out of its own address.
+        .route("/live/u/{handle}", get(page))
         .route("/live/api/hall.json", get(hall_json))
         // The address the hall's body was first served under, before the page
         // had two of them. Still the hall: nothing has to be changed anywhere
         // that already reads it.
         .route("/live.json", get(hall_json))
-        .route("/live/api/u/{id}", get(one_json))
+        .route("/live/api/u/{handle}", get(one_json))
         .route_layer(middleware::from_fn(rate_limit));
     // The art is not in the bucket, and is not in the binary either.
     watched.route("/live/{*path}", get(file))
@@ -1001,8 +1047,8 @@ mod tests {
         assert_eq!(body["total"], 53);
         let member = &body["members"][0];
         for key in [
-            "name", "avatar", "house", "slot", "dragon", "points", "rank", "egg_stage", "heat", "today_used",
-            "today_limit", "days_played", "best_day",
+            "handle", "name", "avatar", "house", "slot", "dragon", "points", "rank", "egg_stage", "heat",
+            "today_used", "today_limit", "days_played", "best_day",
         ] {
             assert!(member.get(key).is_some(), "a member in the hall needs `{}`", key);
         }
@@ -1031,7 +1077,7 @@ mod tests {
         assert_eq!(body["houses"].as_array().unwrap().len(), 4);
         let me = &body["me"];
         for key in [
-            "name", "avatar", "house", "slot", "dragon", "points", "rank", "of", "heat", "egg_stage",
+            "handle", "name", "avatar", "house", "slot", "dragon", "points", "rank", "of", "heat", "egg_stage",
             "egg_stage_label", "per_game", "per_day", "today", "craving", "craving_until", "cards", "achievements",
         ] {
             assert!(me.get(key).is_some(), "a person's page needs `{}`", key);
@@ -1060,6 +1106,57 @@ mod tests {
 
         // Somebody with no egg is not on the page at all.
         assert!(one(&live, 999_999_999_999_999_999, 1_700_000_000).is_none());
+    }
+
+    /// The handle is how the page says "that person, show me their cards"
+    /// without ever holding an id, so it has to mean one person, mean the same
+    /// one in both bodies, and lead back to them.
+    #[test]
+    fn a_handle_names_one_member_in_both_bodies_and_leads_back_to_them() {
+        let _month = Month::on();
+        let live = assemble(a_server(), Some(1_000), AFTER);
+        let body = hall(&live, AFTER);
+
+        // Everybody on the page has one, and no two share it.
+        let keys: Vec<&str> =
+            body["members"].as_array().unwrap().iter().map(|m| m["handle"].as_str().expect("a handle")).collect();
+        assert_eq!(keys.len(), 53);
+        assert!(keys.iter().all(|k| super::super::housecup::handle_shaped(k)), "{:?}", keys);
+        let unique: std::collections::HashSet<&&str> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "two members would have shared one panel");
+
+        // It round-trips: the handle the hall gave out is the one the body for
+        // that person answers to, and it resolves to the member it was made
+        // from and to nobody else.
+        for (i, key) in keys.iter().enumerate() {
+            let user = whose(&live, key).unwrap_or_else(|| panic!("{} belongs to nobody", key));
+            assert_eq!(user, live.members[i].user, "{} led to the wrong member", key);
+            let mine = one(&live, user, AFTER).expect("their page");
+            assert_eq!(mine["me"]["handle"].as_str(), Some(*key), "a person's page disagreed with the hall");
+            assert_eq!(mine["me"]["name"], body["members"][i]["name"]);
+        }
+
+        // And a handle nobody answers to leads nowhere rather than to the
+        // nearest member.
+        assert_eq!(whose(&live, "m00000000"), None);
+        assert_eq!(whose(&live, ""), None);
+        assert_eq!(whose(&live, &FIRST_ID.to_string()), None, "a raw id is not a handle");
+    }
+
+    /// Two members whose handles collide must still be two people. Eight hex
+    /// characters over tens of people practically never clash, so the
+    /// collision rule is checked where it can be forced: the one mechanism
+    /// both public pages share.
+    #[test]
+    fn two_members_never_share_a_handle_even_when_the_hash_does() {
+        let keys = super::super::housecup::handles_of([FIRST_ID, FIRST_ID, FIRST_ID + 1]);
+        assert_eq!(keys.len(), 2, "the same member asked for twice is one member");
+        assert_ne!(keys[&FIRST_ID], keys[&(FIRST_ID + 1)]);
+        // Forced: the suffix rule is what keeps a clash from pointing two names
+        // at one panel, and a suffixed handle is still handle-shaped.
+        let clash = super::super::housecup::handles_of([FIRST_ID, FIRST_ID + 1]);
+        let suffixed = format!("{}-2", clash[&FIRST_ID]);
+        assert!(super::super::housecup::handle_shaped(&suffixed), "{}", suffixed);
     }
 
     /// The one that has to keep passing: nothing private may ever be on the
@@ -1106,6 +1203,29 @@ mod tests {
             for user in FIRST_ID..FIRST_ID + 53 {
                 assert!(!text.contains(&user.to_string()), "member {}'s id reached the page", user);
             }
+            // THE HANDLE IS NOT AN ID IN DISGUISE. It is the one key the page
+            // is given, so it is held to the same rule as the body it rides on:
+            // nothing in it may give the id it was made from away, in decimal,
+            // in hex, or by its first or last few digits.
+            let keys: Vec<String> = body["members"]
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![body["me"].clone()])
+                .iter()
+                .map(|m| m["handle"].as_str().unwrap_or_default().to_string())
+                .collect();
+            assert!(!keys.is_empty() && keys.iter().all(|k| !k.is_empty()), "every member is addressable");
+            for key in &keys {
+                for user in FIRST_ID..FIRST_ID + 53 {
+                    let id = user.to_string();
+                    assert_ne!(*key, id, "a handle is an id");
+                    assert!(!key.contains(&id), "{} carries an id", key);
+                    assert!(!key.contains(&format!("{:x}", user)), "{} carries an id in hex", key);
+                    assert!(!key.contains(&id[..8]), "{} carries the front of an id", key);
+                    assert!(!key.contains(&id[id.len() - 8..]), "{} carries the tail of an id", key);
+                }
+            }
+
             // And the only url on it is Discord's own public avatar CDN.
             let faces = body["members"].as_array().cloned().unwrap_or_else(|| vec![body["me"].clone()]);
             for member in faces {
@@ -1282,7 +1402,8 @@ mod tests {
     async fn the_page_is_open_to_anyone_at_both_its_addresses() {
         let _month = Month::on();
         let app = with_eggs();
-        for path in ["/live", "/live/", &format!("/live/u/{}", CLAIMED)] {
+        let key = super::super::housecup::handle(CLAIMED);
+        for path in ["/live", "/live/", &format!("/live/u/{}", key)] {
             let (status, html, headers) = get(&app, path).await;
             assert_eq!(status, StatusCode::OK, "{} needs no sign-in: {}", path, html);
             assert_eq!(headers["content-type"], "text/html; charset=utf-8");
@@ -1292,12 +1413,13 @@ mod tests {
             assert!(csp.contains("https://cdn.jsdelivr.net"), "the page's own policy is the one that reached the web: {}", csp);
             assert!(csp.contains("frame-ancestors 'none'"), "and it is still not embeddable: {}", csp);
         }
-        // One file, whatever address it came from: the page reads the id out of
-        // its own address rather than having it written into it.
+        // One file, whatever address it came from: the page reads the handle
+        // out of its own address rather than having anything written into it.
         let (_, hall, _) = get(&app, "/live").await;
-        let (_, mine, _) = get(&app, &format!("/live/u/{}", CLAIMED)).await;
+        let (_, mine, _) = get(&app, &format!("/live/u/{}", key)).await;
         assert_eq!(hall, mine);
-        assert!(!mine.contains(&CLAIMED.to_string()), "the id in the address is never written into the page");
+        assert!(!mine.contains(&CLAIMED.to_string()), "no id is written into the page, and none is in its address");
+        assert!(!mine.contains(&key), "nor is the handle the address carried");
     }
 
     #[tokio::test]
@@ -1313,7 +1435,14 @@ mod tests {
         }
         // And it reads the real thing instead.
         assert!(page.contains("api/hall.json"), "the page reads the hall");
-        assert!(page.contains("u/${MY_ID}.json"), "and a person's own page");
+        assert!(page.contains("u/${MY_HANDLE}.json"), "and a person's own page, by handle");
+        // The id is gone from the page's own reading of its address: there is
+        // nothing in it that matches a snowflake any more.
+        assert!(!page.contains("MY_ID"), "the page still thinks an id names a person");
+        assert!(page.contains("m[0-9a-f]{8}"), "and it reads a handle out of the address instead");
+        // And it fetches somebody else's page when they are clicked, rather
+        // than only ever its own.
+        assert!(page.contains("u/${p.handle}.json"), "a click has to be able to reach the whole page");
     }
 
     #[tokio::test]
@@ -1335,19 +1464,39 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(first.contains("\"members\""), "{}", first);
 
-        let (status, body, _) = get(&app, &format!("/live/api/u/{}.json", CLAIMED)).await;
+        // The page asks for one person by the handle the hall gave it, which is
+        // the only name for anybody it was given.
+        let key = hall["members"][0]["handle"].as_str().expect("a handle").to_string();
+        let (status, body, _) = get(&app, &format!("/live/api/u/{}.json", key)).await;
         assert_eq!(status, StatusCode::OK, "{}", body);
         let mine: Value = serde_json::from_str(&body).expect("json");
         assert_eq!(mine["me"]["name"], "Ayan");
+        assert_eq!(mine["me"]["handle"].as_str(), Some(key.as_str()), "the handle round-trips");
         assert_eq!(mine["houses"].as_array().map(|h| h.len()), Some(4), "the standings ride along, so one call fills the page");
         assert!(!body.contains(&CLAIMED.to_string()), "nor into their own page");
 
-        // Somebody with no egg, and something that is not a member at all.
+        // THE RAW ID IS NO LONGER AN ADDRESS. Taking it out is the point: a
+        // member's page cannot be reached by anybody who read an id out of a
+        // channel.
+        let (status, said, _) = get(&app, &format!("/live/api/u/{}.json", CLAIMED)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "an id still opens a page: {}", said);
+        assert!(said.contains("isn't a member"), "{}", said);
         let (status, _, _) = get(&app, &format!("/live/api/u/{}.json", STRANGER)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        for bad in ["/live/api/u/nobody.json", "/live/api/u/0x1.json", "/live/api/u/.json"] {
-            let (status, _, _) = get(&app, bad).await;
+
+        // A handle nobody answers to - somebody with no egg, somebody who has
+        // opted out since they were handed the link, or a handle from before
+        // the last restart - gets the friendly answer the id used to.
+        let (status, said, _) = get(&app, "/live/api/u/m00000000.json").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(said.contains("Claim one with /egg"), "{}", said);
+        assert!(said.contains("egg_week"), "{}", said);
+
+        // And something that is not a handle at all is not a member.
+        for bad in ["/live/api/u/nobody.json", "/live/api/u/0x1.json", "/live/api/u/.json", "/live/api/u/m0000000.json"] {
+            let (status, said, _) = get(&app, bad).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{} is not a member", bad);
+            assert!(said.contains("isn't a member"), "{}: {}", bad, said);
         }
     }
 
@@ -1375,10 +1524,10 @@ mod tests {
         month.set("VIZIER_LIVE", "off");
         for path in [
             "/live",
-            "/live/u/1",
+            "/live/u/m00000000",
             "/live/api/hall.json",
             "/live.json",
-            "/live/api/u/1.json",
+            "/live/api/u/m00000000.json",
             "/live/eggs/egg-1.png",
         ] {
             let (status, _, _) = get(&app, path).await;

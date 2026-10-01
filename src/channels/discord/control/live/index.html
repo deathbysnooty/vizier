@@ -221,6 +221,9 @@
     padding:10px 12px; border-bottom:1px solid #1d1726; font-size:16px; }
   .trow.head { color:var(--dim); font-size:13px; letter-spacing:.1em; text-transform:uppercase; border-bottom-color:#2e2236; }
   .trow.me { background:rgba(211,166,37,.12); border-radius:10px; }
+  /* Every row with a name on it leads to that person's own page. */
+  .trow[data-who], .brow[data-who] { cursor:pointer; }
+  .trow[data-who]:hover, .brow[data-who]:hover { background:rgba(246,234,210,.06); }
   .trow .r { color:var(--dim); text-align:right; }
   .trow .n { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .trow .num { text-align:right; font-variant-numeric:tabular-nums; }
@@ -446,6 +449,7 @@
   <p class="chart-title">Points a day, this month</p>
   <canvas id="who-chart" width="250" height="92"></canvas>
   <p class="chart-foot" id="who-foot">—</p>
+  <button id="who-full" class="wide-btn">Their full page →</button>
 </div>
 <section id="viewer">
   <button id="viewer-close" aria-label="Close">×</button>
@@ -622,28 +626,34 @@ const loadModel = async (name) => {
 // --- the people ---------------------------------------------------------------
 // Real numbers, from the bot, in at most two calls.
 //
-//   /live/api/hall.json        everybody: name, picture, points, house, rank,
-//                              how hot their egg burns, and four small totals
-//   /live/api/u/<id>.json      when the address names somebody: that person's
-//                              whole page - every game, every day, today's
-//                              limits, the cards they hold and their badges
+//   /live/api/hall.json          everybody: handle, name, picture, points,
+//                                house, rank, how hot their egg burns, and
+//                                four small totals
+//   /live/api/u/<handle>.json    one person's whole page - every game, every
+//                                day, today's limits, the cards they hold and
+//                                their badges. Asked for when the address
+//                                names somebody, and again the moment anybody
+//                                on the page is actually clicked.
 //
 // Nothing on this page is invented and nothing is a sample. The long lists ride
-// only on the one page that shows them, so the hall a hundred and fifty people
+// only on the pages that show them, so the hall a hundred and fifty people
 // open on mobile data is a few tens of kilobytes.
 //
-// The id in the address is the link /egg and /livepoints hand out. It is read
-// from the path to ask for one body and is never put back on the page, and
-// nothing the bot sends carries an id at all.
+// A HANDLE, NOT AN ID. Every member arrives with an opaque handle - a keyed
+// hash the bot mints fresh at every start - and that is the only name for a
+// person this page ever holds. It is what the address /egg and /livepoints hand
+// out carries, what one body is asked for by, and what one row is matched on.
+// There is no Discord id in the address, in any body, in any attribute or in
+// any query string, and nothing here can be turned back into one.
 const ROOT = location.pathname.replace(/\/u\/[^/]*\/?$/, '').replace(/\/+$/, '');
-const MY_ID = (location.pathname.match(/\/u\/(\d{5,25})\/?$/) || [])[1] || '';
+const MY_HANDLE = (location.pathname.match(/\/u\/(m[0-9a-f]{8}(?:-\d+)?)\/?$/) || [])[1] || '';
 const ask = (what) => fetch(`${ROOT}/api/${what}`, { headers: { accept: 'application/json' } })
   .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${what}: ${r.status}`))));
 
 const hint = document.getElementById('hint');
 const [hallBody, myBody] = await Promise.all([
   ask('hall.json').catch((err) => { console.error(err); return null; }),
-  MY_ID ? ask(`u/${MY_ID}.json`).catch((err) => { console.error(err); return null; }) : Promise.resolve(null),
+  MY_HANDLE ? ask(`u/${MY_HANDLE}.json`).catch((err) => { console.error(err); return null; }) : Promise.resolve(null),
 ]);
 const BODY = hallBody || { houses: [], members: [], deck: [], egg_week: true, total: 0, hatch_at: 0 };
 if (!hallBody) hint.textContent = 'The hall is dark just now — the bot could not be reached. Try again in a minute.';
@@ -691,6 +701,9 @@ const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g,
 
 // Everybody, already ranked and sorted by the bot.
 const people = (BODY.members || []).map((m) => ({
+  // What this page asks the bot for one person by, and the only name for them
+  // it holds. Opaque, and not an id.
+  handle: m.handle || '',
   name: m.name || 'A member',
   avatar: m.avatar || '',
   house: m.house || null,
@@ -720,23 +733,27 @@ const deckWith = (held) => (BODY.deck || []).map((k) => {
   };
 });
 
-// "You", when the address said who you are. The hall's row and the long lists
-// are the same person, so they are put together into one object.
-let ME = null;
-if (myBody && myBody.me) {
-  const me = myBody.me;
-  ME = people.find((p) => p.rank === me.rank && p.name === me.name) || null;
-  if (!ME) {
-    // A member the hall has not got to yet (a brand new egg, mid-cache).
-    ME = {
+// One person's whole page, folded onto their row in the hall. The same body and
+// the same folding whoever it is about - you, because the address said so, or
+// anybody who has just been clicked - so there is one shape of person on this
+// page and not two.
+//
+// The row is matched on the handle, which is exactly what a handle is for; a
+// member the hall's cached body has not got to yet (a brand new egg) gets a row
+// made on the spot.
+function rowFor(me) {
+  let p = me.handle ? people.find((x) => x.handle === me.handle) : null;
+  if (!p) {
+    p = {
+      handle: me.handle || '',
       name: me.name, avatar: me.avatar || '', house: me.house || null, dragon: me.dragon || '',
       points: me.points || 0, rank: me.rank || 0, heat: (me.heat || 0) / 100, stage: me.egg_stage || 0,
       got: 0, cap: 0, best: 0, daysPlayed: 0,
     };
-    people.push(ME);
+    people.push(p);
   }
   const perDay = (me.per_day || []).map((d) => d.points);
-  Object.assign(ME, {
+  Object.assign(p, {
     perDay,
     perDayFrom: (me.per_day || [])[0] && (me.per_day || [])[0].day,
     by: (me.per_game || []).map((g) => ({ game: g.label, points: g.points })),
@@ -752,12 +769,32 @@ if (myBody && myBody.me) {
     // Their own week: somebody who claimed late is not on the month's.
     eggFrom: (me.egg_from || 0) * 1000,
     eggUntil: (me.egg_until || 0) * 1000,
-    got: me.today ? me.today.reduce((n, t) => n + t.used, 0) : ME.got,
-    cap: me.today ? me.today.reduce((n, t) => n + t.limit, 0) : ME.cap,
-    best: perDay.length ? Math.max(0, ...perDay) : ME.best,
-    daysPlayed: perDay.filter((v) => v > 0).length || ME.daysPlayed,
+    got: me.today ? me.today.reduce((n, t) => n + t.used, 0) : p.got,
+    cap: me.today ? me.today.reduce((n, t) => n + t.limit, 0) : p.cap,
+    best: perDay.length ? Math.max(0, ...perDay) : p.best,
+    daysPlayed: perDay.filter((v) => v > 0).length || p.daysPlayed,
   });
+  return p;
 }
+
+// One person's long lists, asked for once and then kept. Nothing extra is in
+// the hall's body: a member's thirty-one days, every game, their cards and
+// their badges are fetched when somebody actually clicks them, and never for
+// the hundred and fifty people nobody clicks.
+const asked = new Map();
+function longLists(p) {
+  if (!p || !p.handle) return Promise.resolve(null);
+  if (!asked.has(p.handle)) {
+    asked.set(p.handle, ask(`u/${p.handle}.json`)
+      .then((body) => (body && body.me ? rowFor(body.me) : null))
+      .catch((err) => { console.error(err); asked.delete(p.handle); return null; }));
+  }
+  return asked.get(p.handle);
+}
+
+// "You", when the address said who you are.
+const ME = myBody && myBody.me ? rowFor(myBody.me) : null;
+if (ME && ME.handle) asked.set(ME.handle, Promise.resolve(ME));
 
 // --- the scene -----------------------------------------------------------------
 const scene = new THREE.Scene();
@@ -1210,13 +1247,16 @@ document.getElementById('me').onclick = findMe;
   // to go back to: those buttons lead to the hall instead, and the two that
   // only ever meant "you" are hidden. Hidden rather than taken out, because
   // everything below still hangs its handlers on them.
-  if (!MY_ID) {
+  if (!MY_HANDLE) {
     for (const el of [document.getElementById('back-mine'), document.getElementById('me'), document.querySelector('#go button.on')]) {
       if (el) el.style.display = 'none';
     }
+    // "Back" rather than "the hall": a visitor who was handed no page of
+    // their own can still be looking at somebody else's, because a click on
+    // any name opens it.
     for (const id of ['guide-back', 'houses-back', 'board-back']) {
       const el = document.getElementById(id);
-      if (el) el.textContent = '← The hall';
+      if (el) el.textContent = '← Back';
     }
     document.querySelector('#pick option[value="v:me"]')?.remove();
   }
@@ -1271,10 +1311,11 @@ renderer.domElement.addEventListener('pointermove', (e) => {
   renderer.domElement.style.cursor = hovered ? 'pointer' : '';
 });
 
-// Whoever is tapped in the hall: their name, their points and the few facts
-// the hall itself knows. The day-by-day chart is only ever your own: the hall's
-// body carries nobody's thirty-one numbers, which is what keeps it small enough
-// to open on a phone.
+// Whoever is tapped in the hall, straight away: their name, their points and
+// the few facts the hall's own body already carries. It holds the place while
+// their full page is fetched, so a phone on slow data gets an answer at once
+// instead of a blank wait - and if the bot cannot be reached, this is still an
+// answer rather than nothing.
 function openWho(p) {
   const at = document.getElementById('who-height');
   document.getElementById('who-name').textContent = p.name;
@@ -1291,7 +1332,10 @@ function openWho(p) {
   document.getElementById('who-best').textContent = p.best ? p.best.toLocaleString() : '—';
   document.getElementById('who-days').textContent = p.daysPlayed ? `${p.daysPlayed}` : '—';
   const chart = document.getElementById('who-chart'), foot = document.getElementById('who-foot');
-  const mine = p === ME && p.perDay && p.perDay.length;
+  // The chart needs the thirty-one numbers, which arrive with the full page -
+  // so it is drawn for anybody whose page has already been fetched, and that
+  // includes you.
+  const mine = p.perDay && p.perDay.length;
   chart.style.display = mine ? '' : 'none';
   chart.previousElementSibling.style.display = mine ? '' : 'none';
   foot.style.display = mine ? '' : 'none';
@@ -1299,11 +1343,37 @@ function openWho(p) {
     drawChart(p.perDay);
     foot.innerHTML = `<span>${esc(p.perDayFrom || 'day 1')}</span><span>today</span>`;
   }
+  // The way into the whole page, for a hand that would rather tap a button
+  // than wait. Somebody the bot sent no handle for has no page to open.
+  const full = document.getElementById('who-full');
+  full.style.display = p.handle ? '' : 'none';
+  full.textContent = p === ME ? 'My full page →' : `${p.name}'s full page →`;
+  full.onclick = () => openPerson(p);
   document.getElementById('who').classList.add('open');
 }
 
-// Your own page if it is you, and the quick panel if it is anybody else.
-const openPerson = (p) => (p === ME && ME.by ? openSolo(p) : openWho(p));
+// A CLICK ON ANYBODY REACHES THEIR WHOLE PAGE - their egg or dragon, their
+// points, their rank, their cards with the serial numbers on them, their
+// badges, every game and every day - and it is the same page the address gives
+// you for yourself. Wherever somebody is named on this page, in the hall, in
+// the leaderboard, in a house's table or in the search, the click lands here.
+//
+// The long lists are not in the hall's body, so they are fetched now. The quick
+// panel holds the place while that is in flight and stands on its own if the
+// fetch fails; nothing opens over the top of a click somebody has moved on
+// from.
+let wanted = null;
+function openPerson(p) {
+  wanted = p;
+  if (p.by) { closeWho(); openSolo(p); return; }
+  openWho(p);
+  longLists(p).then(() => {
+    if (wanted !== p || !p.by) return;
+    if (!document.getElementById('who').classList.contains('open')) return;
+    closeWho();
+    openSolo(p);
+  });
+}
 window.closeWho = () => document.getElementById('who').classList.remove('open');
 
 function drawChart(perDay) { drawChartOn(document.getElementById('who-chart'), perDay); }
@@ -1512,6 +1582,11 @@ function buildSoloDragon(p, template) {
 // address named.
 function dressSolo(p) {
   const h = houseOf(p);
+  // Whose page this is. It is the same page whoever it is about - that is the
+  // point of it - so the only thing that changes is the handful of sentences
+  // that say "your".
+  const own = p === ME;
+  const whose = own ? 'Your' : `${esc(p.name)}'s`;
   // Egg week shows the egg instead of the dragon, and no house at all - that is
   // the whole suspense of the week.
   solo.el.classList.toggle('egg', EGG_WEEK);
@@ -1548,8 +1623,8 @@ function dressSolo(p) {
   document.getElementById('solo-crave').innerHTML = !wants
     ? '🥚 Nothing in particular just now — every game pays as normal.'
     : EGG_WEEK
-      ? `🥚 Your egg is hungry for ${wants} — only that feeds it this week${until ? `, until <b>${esc(until)}</b>` : ''}.`
-      : `🐉 Your dragon hungers for ${wants} — double points${until ? ` until <b>${esc(until)}</b>` : ''}. Everything else pays as normal.`;
+      ? `🥚 ${whose} egg is hungry for ${wants} — only that feeds it this week${until ? `, until <b>${esc(until)}</b>` : ''}.`
+      : `🐉 ${whose} dragon hungers for ${wants} — double points${until ? ` until <b>${esc(until)}</b>` : ''}. Everything else pays as normal.`;
 
   // Today, against the limits.
   document.getElementById('solo-today').innerHTML = (p.today || []).map((t) => {
@@ -1593,6 +1668,16 @@ function dressSolo(p) {
   // The egg's five pictures are the calendar's, not the scoreboard's: nobody's
   // egg is splitting open on day one. Points only set how hot it glows.
   if (EGG_WEEK) dressEgg(p);
+  // The nav says which page you are on, and it is on the page even when the
+  // address named nobody at all: a click can land a visitor on anybody's.
+  const first = document.querySelector('#go button.on');
+  if (first) {
+    first.style.display = '';
+    first.textContent = own
+      ? (EGG_WEEK ? 'My egg' : 'My dragon')
+      : `${p.name}${EGG_WEEK ? "'s egg" : "'s dragon"}`;
+  }
+  document.getElementById('egg-img').alt = own ? 'Your egg' : `${p.name}'s egg`;
   soloPerson = p;
   solo.el.classList.add('open');
   solo.open = true;
@@ -1773,7 +1858,7 @@ function showHouses(which) {
     `<div class="trow head"><span></span><span>Member</span><span class="num month">This month</span><span class="num">Today</span><span class="cap">Left</span></div>` +
     members.map((p, i) => {
       const got = gotTotal(p), cap = capTotal(p), left = Math.max(0, cap - got);
-      return `<div class="trow ${p === ME ? 'me' : ''}">
+      return `<div class="trow ${p === ME ? 'me' : ''}" data-who="${esc(p.handle)}" title="${esc(p.name)}'s page">
         <span class="r">${i + 1}</span>
         <span class="n">${esc(p.name)}</span>
         <span class="num month">${p.points.toLocaleString()}</span>
@@ -1793,7 +1878,7 @@ document.getElementById('houses-back').onclick = () => housesEl.classList.remove
 const board = document.getElementById('board');
 document.getElementById('solo-board').onclick = () => {
   document.getElementById('board-list').innerHTML = people.map((p) => `
-    <div class="brow ${p === ME ? 'me' : ''}">
+    <div class="brow ${p === ME ? 'me' : ''}" data-who="${esc(p.handle)}" title="${esc(p.name)}'s page">
       <span class="r">${p.rank}</span>
       <span class="n"><img src="${houseOf(p).crest}" alt="">${esc(p.name)}</span>
       <span class="p">${p.points.toLocaleString()}</span>
@@ -1801,6 +1886,23 @@ document.getElementById('solo-board').onclick = () => {
   board.classList.add('open');
 };
 document.getElementById('board-back').onclick = () => board.classList.remove('open');
+
+// A NAME ANYWHERE ON THE PAGE IS A WAY INTO THAT PERSON'S PAGE. The leaderboard
+// and a house's table both hang the handle on the row, so one handler serves
+// both and anything named the same way later needs no handler of its own.
+// The list the click came from steps out of the way, because what was asked for
+// is the person and not the list.
+for (const list of [document.getElementById('board-list'), document.getElementById('houses-table')]) {
+  list.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-who]');
+    if (!row || !row.dataset.who) return;
+    const p = people.find((x) => x.handle === row.dataset.who);
+    if (!p) return;
+    board.classList.remove('open');
+    housesEl.classList.remove('open');
+    openPerson(p);
+  });
+}
 
 // --- the egg's week ---------------------------------------------------------
 // Egg week runs to the hatch, and the art moves with the days: five pictures

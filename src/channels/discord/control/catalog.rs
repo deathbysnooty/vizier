@@ -339,8 +339,11 @@ pub fn sections() -> Vec<Section> {
                     "The public Hall of Dragons, in one switch. ON serves it at `/live` with no sign-in: anyone with the \
                      link can open it, and what it shows is display names, Discord pictures, points, ranks, houses, the \
                      cards people hold and the badges earned from those same numbers - nothing else, and no member ids \
-                     anywhere in it. Each person's own page is `/live/u/<their Discord id>`, which is the link /egg and \
-                     /livepoints hand them. OFF answers every one of those addresses with a plain Not Found. The page's \
+                     anywhere in it, in a body or in an address. Each person's own page is `/live/u/<their handle>` - an \
+                     opaque key the bot mints fresh at every start, which cannot be turned back into a Discord account - \
+                     and that is the link /egg, /dragon, /livepoints and /mycards hand them. Clicking anybody named on \
+                     the page opens their whole page the same way. OFF answers every one of those addresses with a plain \
+                     Not Found. The page's \
                      own pictures and models are pushed to `<runtime>/live` (scripts/push-live.sh), so a change to the \
                      page itself needs no release.",
                 ),

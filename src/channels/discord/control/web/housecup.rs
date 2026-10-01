@@ -414,30 +414,62 @@ static HANDLE_KEY: LazyLock<std::collections::hash_map::RandomState> =
 ///
 /// Two members with the same display name get different handles, because it is
 /// the id that is hashed and not the name.
-fn handle(user: u64) -> String {
+///
+/// This is the ONE place a member's opaque page key is made. The Hall of
+/// Dragons addresses a person's own page by it too (`super::live`), and the
+/// link Discord hands somebody is built from it in [`crate::channels::discord::month::live_url_for`]
+/// - all three off this function, so a handle means the same thing wherever it
+/// turns up and there is never a second mechanism to keep in step.
+pub fn handle(user: u64) -> String {
     use std::hash::{BuildHasher, Hash, Hasher};
     let mut hasher = HANDLE_KEY.build_hasher();
     user.hash(&mut hasher);
     format!("m{:08x}", hasher.finish() as u32)
 }
 
-/// Handles for everyone the page names. Eight hex characters over tens of people
+/// Whether a path segment is handle-SHAPED at all: `m` and eight hex digits,
+/// with the collision suffix [`handles_of`] may have given it.
+///
+/// The format is owned here, so the pages that parse one out of an address
+/// (`/live/api/u/<handle>.json`) can tell "that is not a handle" - a raw
+/// Discord id, say - from "that is a handle, and nobody here answers to it".
+pub fn handle_shaped(key: &str) -> bool {
+    let (base, suffix) = match key.split_once('-') {
+        Some((base, n)) => (base, Some(n)),
+        None => (key, None),
+    };
+    let hex = base.strip_prefix('m').unwrap_or("");
+    hex.len() == 8
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        && suffix.is_none_or(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Handles for everyone a page names. Eight hex characters over tens of people
 /// practically never collide, but "practically never" is not never, so a clash
 /// is given a suffix rather than left to point two names at one panel.
-fn handles(members: &[Member]) -> HashMap<u64, String> {
+///
+/// The order the ids arrive in decides which of a colliding pair keeps the bare
+/// handle, so a caller hands them in the order its own page lists them and gets
+/// the same answer every time.
+pub fn handles_of(users: impl IntoIterator<Item = u64>) -> HashMap<u64, String> {
     let mut out: HashMap<u64, String> = HashMap::new();
     let mut taken: HashSet<String> = HashSet::new();
-    for m in members {
-        let base = handle(m.user);
+    for user in users {
+        let base = handle(user);
         let mut key = base.clone();
         let mut n = 1;
         while !taken.insert(key.clone()) {
             n += 1;
             key = format!("{}-{}", base, n);
         }
-        out.insert(m.user, key);
+        out.insert(user, key);
     }
     out
+}
+
+/// Handles for everyone this page names.
+fn handles(members: &[Member]) -> HashMap<u64, String> {
+    handles_of(members.iter().map(|m| m.user))
 }
 
 /// The state as JSON. Every id is left behind here: only names, points and
@@ -942,6 +974,22 @@ mod tests {
             assert_ne!(h[1..], format!("{:x}", id), "{} is its own handle in hex", id);
             assert_ne!(h[1..], format!("{:x}", id as u32), "{} is the bottom of its id in hex", id);
             assert!(id < 1000 || !h.contains(&id.to_string()), "{} shows through its handle {}", id, h);
+        }
+    }
+
+    /// The format is owned here, so the pages that parse a handle out of an
+    /// address can tell "that is not a handle" from "nobody answers to it".
+    #[test]
+    fn a_handle_is_recognisable_and_a_discord_id_is_not_one() {
+        assert!(handle_shaped(&handle(7)));
+        assert!(handle_shaped("m0a1b2c3d"));
+        assert!(handle_shaped("m0a1b2c3d-2"), "a clash keeps its suffix");
+        for id in [7u64, 701234567890123456] {
+            assert!(!handle_shaped(&id.to_string()), "{} must not pass for a handle", id);
+            assert!(!handle_shaped(&format!("{:x}", id)), "{:x} must not pass for a handle", id);
+        }
+        for bad in ["", "m", "m0a1b2c3", "m0a1b2c3de", "0a1b2c3de", "mzzzzzzzz", "m0a1b2c3d-", "m0a1b2c3d-x"] {
+            assert!(!handle_shaped(bad), "`{}` is not a handle", bad);
         }
     }
 
