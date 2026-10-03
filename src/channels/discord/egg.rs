@@ -189,6 +189,16 @@ pub fn decide(month_on: bool, egg: Option<&Egg>, hungry: &[Source], source: Sour
     if egg.frozen() {
         return Pay::Nothing;
     }
+    // The craving is about the SEVEN GAMES and nothing else. A raven's card, an
+    // arena win, an hour in voice - none of those is a thing an egg can ask
+    // for, so the gate has no business touching them. It did, and the result
+    // was that catching a raven paid everybody OUTSIDE the month and nobody in
+    // it: the month's own flagship mechanic, scoring nothing for the people who
+    // had joined it.
+    let craveable = ledger::Group::ALL.iter().any(|group| group.sources().contains(&source));
+    if !craveable {
+        return Pay::Once;
+    }
     let wanted = hungry.contains(&source);
     if egg.waiting(now) {
         if wanted { Pay::Once } else { Pay::Nothing }
@@ -1120,10 +1130,23 @@ mod tests {
                 assert_eq!(pay, Pay::Nothing, "{} is not, so it pays the month nothing", game.key());
             }
         }
-        // Everything that isn't one of the seven pays nothing either - it runs,
-        // it is fun, it keeps its own score, and the month doesn't count it.
-        for other in [Source::Chat, Source::Sudoku, Source::Frog, Source::Chess] {
-            assert_eq!(decide(true, Some(&egg), &hungry, other, 500), Pay::Nothing);
+        // But the gate is about the seven games and stops there. A raven's card,
+        // an arena win, an hour in voice: an egg cannot ask for any of them, so
+        // the craving has no say over them. Gating them meant a raven paid
+        // everybody OUTSIDE the month and nobody in it - eight catches and 38
+        // points lost before anyone noticed.
+        for other in [Source::Frog, Source::Arena, Source::Royale, Source::Voice, Source::Wordle] {
+            assert_eq!(
+                decide(true, Some(&egg), &hungry, other, 500),
+                Pay::Once,
+                "{} is not a craving's business, egg week or not",
+                other.key()
+            );
+        }
+        // The ones that pay nothing pay nothing because THEY say so - a zero in
+        // their own code or a cap of 0 in the panel - and not because of this.
+        for its_own_reason in [Source::Chat, Source::Sudoku, Source::Chess] {
+            assert_eq!(decide(true, Some(&egg), &hungry, its_own_reason, 500), Pay::Once);
         }
         // Except a mod's own award, which is not a game at all.
         assert_eq!(decide(true, Some(&egg), &hungry, Source::Mod, 500), Pay::Once);
