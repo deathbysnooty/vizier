@@ -235,7 +235,7 @@ fn live_embed(d: &Drop, thumb: Option<&str>) -> CreateEmbed {
 
 fn caught_embed(d: &Drop, house: Option<&House>, canonical: &str, thumb: Option<&str>) -> CreateEmbed {
     let winner = d.winner.map(|u| format!("<@{}>", u)).unwrap_or_else(|| "Someone".into());
-    let house = house.map(|h| format!(" ({} {})", h.crest, h.name)).unwrap_or_default();
+    let house = house.map(|h| format!(" ({})", super::month::label(h))).unwrap_or_default();
     let card = match (d.serial, d.edition) {
         (Some(serial), Some(edition)) => store::card_label(&d.wizard_name, edition, serial),
         (Some(serial), None) => store::serial_label(serial),
@@ -406,7 +406,7 @@ fn frogs_text(name: &str, cards: &[Card], wizards: &[Wizard], frog_points: i64, 
     let owned = |w: &Wizard| cards.iter().filter(|c| c.wizard_id == w.id).count();
     let collected = shown.iter().filter(|w| w.enabled && owned(w) > 0).count();
     let enabled = shown.iter().filter(|w| w.enabled).count();
-    let house = house.map(|h| format!(" · {} {}", h.crest, h.name)).unwrap_or_default();
+    let house = house.map(|h| format!(" · {}", super::month::label(h))).unwrap_or_default();
     let full = enabled > 0 && collected == enabled;
     let badge = if full { " · Full set ready to sell — /sellset" } else { "" };
     let mut text = format!(

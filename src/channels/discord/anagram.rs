@@ -631,7 +631,7 @@ fn badge_of(user: u64) -> String {
     if super::house::opted_out(user) {
         return "🧙 Muggle".to_string();
     }
-    super::house::house_of(user).map(|h| format!("{} {}", h.crest, h.name)).unwrap_or_default()
+    super::house::house_of(user).map(super::month::label).unwrap_or_default()
 }
 
 /// Mods are in no house, but they may still play; the ledger simply refuses

@@ -1123,7 +1123,7 @@ fn award_line(week: &str, d: &Draft, reviewer: u64) -> Award {
         at,
     ) {
         Some((house, Outcome::Granted(points))) => {
-            Award::Granted { points, house: format!("{} {}", house.crest, house.name) }
+            Award::Granted { points, house: super::month::label(house) }
         }
         Some((_, Outcome::Capped)) => Award::Capped,
         Some((_, Outcome::Duplicate)) => Award::Duplicate,

@@ -251,6 +251,25 @@ pub fn name_of(house: &House) -> String {
     themed(house).name
 }
 
+/// A house as it is shown to a member: its crest and its name, both wearing the
+/// month's paint. "🐺 Stark", not "🦁 Gryffindor".
+///
+/// This is the one that games, cards and catch messages should use. Reading
+/// `house.crest` and `house.name` straight off the struct gets the names the
+/// server retired, which is how a raven's catch card was still announcing
+/// Gryffindor a week into Westeros.
+pub fn label(house: &House) -> String {
+    let worn = themed(house);
+    format!("{} {}", worn.crest, worn.name)
+}
+
+/// The crest and the name separately, for the few places that lay them out
+/// themselves rather than printing one string.
+pub fn crest_and_name(house: &House) -> (String, String) {
+    let worn = themed(house);
+    (worn.crest, worn.name)
+}
+
 /// A house by either name - its own, or the one it is wearing this month - so a
 /// command option typed as "Stark" still finds Gryffindor's slot.
 pub fn house_by_any_name(raw: &str) -> Option<&'static House> {

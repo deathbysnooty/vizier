@@ -427,7 +427,7 @@ pub async fn housecards_command(ctx: &Context, command: &CommandInteraction) {
         );
     }
     let embed = CreateEmbed::new()
-        .title(format!("{} {} · Chocolate Frog cards", house.crest, house.name))
+        .title(format!("{} · Chocolate Frog cards", super::month::label(house)))
         .description(text)
         .colour(house.colour)
         .footer(CreateEmbedFooter::new(footer()));

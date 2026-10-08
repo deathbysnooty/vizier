@@ -333,7 +333,10 @@ fn flown_embed() -> CreateEmbed {
 }
 
 fn caught_text(points: i64, house: &House) -> String {
-    format!("Accio! **+{}** to {} **{}**", points, house.crest, house.name)
+    {
+        let (crest, name) = super::month::crest_and_name(house);
+        format!("Accio! **+{}** to {} **{}**", points, crest, name)
+    }
 }
 
 /// The same catch while the House Cup is paused: no drop is scheduled then, but

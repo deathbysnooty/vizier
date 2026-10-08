@@ -107,8 +107,10 @@ fn house_member(user: u64) -> bool {
     super::house::house_of(user).is_some() || super::admin_ids().contains(&user)
 }
 
-fn house_words(user: u64) -> Option<(&'static str, &'static str)> {
-    super::house::house_of(user).map(|h| (h.crest, h.name))
+/// The crest and name to put beside a seller, wearing the month's paint - so
+/// owned, not borrowed: a themed name is built, not a `&'static str`.
+fn house_words(user: u64) -> Option<(String, String)> {
+    super::house::house_of(user).map(super::month::crest_and_name)
 }
 
 /// The builder for a member's sale, or the reason there isn't one.
@@ -145,7 +147,9 @@ fn view(id: &str, d: &Draft) -> CreateInteractionResponseMessage {
         CreateButton::new(format!("sellgo:{}", id)).label(format!("Sell set for {} points", points())).style(ButtonStyle::Success),
         CreateButton::new(format!("sellno:{}", id)).label("Cancel").style(ButtonStyle::Secondary),
     ]));
-    base.content(plan_text(&chosen, points(), house_words(d.user))).components(rows)
+    let worn = house_words(d.user);
+    let worn = worn.as_ref().map(|(c, n)| (c.as_str(), n.as_str()));
+    base.content(plan_text(&chosen, points(), worn)).components(rows)
 }
 
 pub async fn sellset_command(ctx: &Context, command: &CommandInteraction) {
@@ -252,13 +256,15 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
                     tracing::info!("frog: {} sold a full set (sale {}, {:?}), paid {}", user, sale, chosen, granted);
                     let house = house_words(user);
                     let mine = if granted > 0 {
-                        format!("🏆 Sold! Your set is handed in · **+{}**{}", granted, house.map(|(c, n)| format!(" for {} {}", c, n)).unwrap_or_default())
+                        format!("🏆 Sold! Your set is handed in · **+{}**{}", granted, house.as_ref().map(|(c, n)| format!(" for {} {}", c, n)).unwrap_or_default())
                     } else {
                         "🏆 Sold! Your set is handed in, but no points fitted under today's frog limit.".to_string()
                     };
                     update(ctx, component, closed(mine)).await;
                     if granted > 0 {
-                        let line = CreateMessage::new().content(sold_line(user, granted, house)).allowed_mentions(CreateAllowedMentions::new());
+                        let line = CreateMessage::new()
+        .content(sold_line(user, granted, house.as_ref().map(|(c, n)| (c.as_str(), n.as_str()))))
+        .allowed_mentions(CreateAllowedMentions::new());
                         let _ = tokio::time::timeout(Duration::from_secs(20), component.channel_id.send_message(&ctx.http, line)).await;
                     }
                 }
