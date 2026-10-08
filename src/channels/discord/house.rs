@@ -443,7 +443,7 @@ async fn announce(ctx: &Context, member: &Member, house: &'static House, channel
     };
     let png = card(sorted).await;
     let mut message = CreateMessage::new()
-        .content(format!("🎩 The hat has spoken: <@{}> joins **{} {}**!\n-# {}", user, house.crest, house.name, line));
+        .content(format!("🎩 The hat has spoken: <@{}> joins **{}**!\n-# {}", user, super::month::label(house), line));
     if let Some(png) = png {
         message = message.add_file(CreateAttachment::bytes(png, "sorted.png"));
     }
@@ -461,7 +461,7 @@ fn whisper(text: impl Into<String>) -> CreateInteractionResponse {
 pub fn house_option(name: &str, about: &str) -> CreateCommandOption {
     let mut option = CreateCommandOption::new(serenity::all::CommandOptionType::String, name, about);
     for h in HOUSES {
-        option = option.add_string_choice(format!("{} {}", h.crest, h.name), h.key);
+        option = option.add_string_choice(super::month::label(h), h.key);
     }
     option
 }
@@ -491,7 +491,7 @@ pub async fn roles_command(ctx: &Context, command: &CommandInteraction) {
     for house in HOUSES {
         match role_for(ctx, guild, house).await {
             Some(role) => lines.push(format!("{} <@&{}>", house.crest, role.get())),
-            None => lines.push(format!("{} **{}** - could not be made", house.crest, house.name)),
+            None => lines.push(format!("**{}** - could not be made", super::month::label(house))),
         }
     }
     match captain_role(ctx, guild).await {
@@ -568,6 +568,7 @@ async fn award_member(
         return Err(format!("<@{}>'s points couldn't be recorded - try again.", user));
     }
     let total = totals(Some(month_start())).get(house.key).copied().unwrap_or(0);
+    let worn = super::month::crest_and_name(house);
 
     // A plain line, no card and no copy elsewhere: the hourly summary in the
     // houses channel already shows where points came from (the user's call).
@@ -575,12 +576,12 @@ async fn award_member(
     let text = if points > 0 {
         format!(
             "🛡️ <@{}> gave <@{}> **+{}** for {} **{}**{}\n-# {} now on {} points this month",
-            by, user, points, house.crest, house.name, because, house.name, total
+            by, user, points, worn.0, worn.1, because, worn.1, total
         )
     } else {
         format!(
             "🛡️ <@{}> took **{}** from <@{}> ({} **{}**){}\n-# {} now on {} points this month",
-            by, -points, user, house.crest, house.name, because, house.name, total
+            by, -points, user, worn.0, worn.1, because, worn.1, total
         )
     };
     // Only the member is pinged, never the mod who gave the points.
@@ -725,8 +726,8 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
         };
         wear_house(ctx, guild, user, house).await;
         let text = format!(
-            "Welcome back to **{} {}**. Your house role is back on, and you're no longer a Muggle.",
-            house.crest, house.name
+            "Welcome back to **{}**. Your house role is back on, and you're no longer a Muggle.",
+            super::month::label(house)
         );
         let _ = command.create_response(&ctx.http, whisper(text)).await;
         return;
@@ -743,10 +744,11 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
     set_muggle(ctx, guild, user, true).await;
     let text = match house_of(user) {
         Some(house) => format!(
-            "You're out of the houses and now a **Muggle**. Your **{} {}** role is gone, so you won't be pinged for \
+            "You're out of the houses and now a **Muggle**. Your **{}** role is gone, so you won't be pinged for \
              it and its room is hidden. The bot still remembers you as {} - run `/houseopt` again any time to step \
              back in.",
-            house.crest, house.name, house.name
+            super::month::label(house),
+            super::month::name_of(house)
         ),
         None => "You're out of the houses and now a **Muggle**. Run `/houseopt` again any time to join in.".into(),
     };
@@ -872,7 +874,7 @@ pub async fn channels_command(ctx: &Context, command: &CommandInteraction) {
     for (key, name, topic) in COMMON_ROOMS {
         let Some(house) = house(key) else { continue };
         let Some(role) = role_for(ctx, guild, house).await else {
-            lines.push(format!("{} **{}** - no role, so no room", house.crest, house.name));
+            lines.push(format!("**{}** - no role, so no room", super::month::label(house)));
             continue;
         };
 
@@ -942,7 +944,7 @@ pub async fn channels_command(ctx: &Context, command: &CommandInteraction) {
                 meta_set(&format!("room_{}", key), &id.get().to_string());
                 lines.push(format!("{} <#{}>", house.crest, id.get()));
             }
-            None => lines.push(format!("{} **{}** - could not be made", house.crest, house.name)),
+            None => lines.push(format!("**{}** - could not be made", super::month::label(house))),
         }
     }
 
@@ -1242,7 +1244,7 @@ async fn run_draft(ctx: Context, guild: GuildId, channel: ChannelId) {
     let counts = counts();
     let mut tally = String::new();
     for house in HOUSES {
-        tally.push_str(&format!("{} **{}** — {}\n", house.crest, house.name, counts.get(house.key).copied().unwrap_or(0)));
+        tally.push_str(&format!("**{}** — {}\n", super::month::label(house), counts.get(house.key).copied().unwrap_or(0)));
     }
     let finished = CreateEmbed::new()
         .title("🏰 The Sorting is done")
@@ -1629,10 +1631,11 @@ pub async fn houses_command(ctx: &Context, command: &CommandInteraction) {
             .map(|id| format!(" · 🎖️ <@{}>", id))
             .unwrap_or_default();
         let lead = if place == 0 && scoring { " 👑" } else { "" };
+        let (crest, name) = super::month::crest_and_name(h);
         text.push_str(&format!(
             "{} **{}**{} — **{}** points · {} members{}\n",
-            h.crest,
-            h.name,
+            crest,
+            name,
             lead,
             points.get(h.key).copied().unwrap_or(0),
             counts.get(h.key).copied().unwrap_or(0),
@@ -1707,7 +1710,7 @@ fn list_page(house: &'static House, page: usize) -> (CreateEmbed, usize) {
         text.push_str("Nobody yet.");
     }
     let embed = CreateEmbed::new()
-        .title(format!("{} {} - {} members", house.crest, house.name, members.len()))
+        .title(format!("{} - {} members", super::month::label(house), members.len()))
         .description(text)
         .colour(house.colour)
         .footer(CreateEmbedFooter::new(format!("Page {} of {}", page + 1, pages)));
@@ -1883,8 +1886,9 @@ pub async fn captain_command(ctx: &Context, command: &CommandInteraction) {
         .create_response(
             &ctx.http,
             CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(format!(
-                "🎖️ <@{}> is now captain of **{} {}**.",
-                target, house.crest, house.name
+                "🎖️ <@{}> is now captain of **{}**.",
+                target,
+                super::month::label(house)
             ))),
         )
         .await;
@@ -2015,9 +2019,9 @@ fn wait_words(secs: i64) -> String {
 /// abused.
 fn ping_text(role: u64, words: &str, sender: u64, house: &House, by_captain: bool) -> String {
     let who = if by_captain {
-        format!("captain of {} {}", house.crest, house.name)
+        format!("captain of {}", super::month::label(house))
     } else {
-        format!("for {} {}", house.crest, house.name)
+        format!("for {}", super::month::label(house))
     };
     format!("📣 <@&{}> — {}\n-# from <@{}>, {}", role, words, sender, who)
 }
