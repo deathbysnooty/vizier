@@ -165,6 +165,45 @@ pub fn deal(members: &[(u64, i64)], taken: &HashSet<String>) -> Split {
 
 // --- the reveal -----------------------------------------------------------------------
 
+/// Presentation order only: the approved deal and names stay untouched.
+fn ceremony_order(split: &Split) -> Vec<(&Dealt, usize)> {
+    let mut ordered: Vec<_> = split.dealt.iter().collect();
+    ordered.sort_by(|a, b| a.points.cmp(&b.points).then(a.user.cmp(&b.user)));
+    ordered
+        .into_iter()
+        .map(|one| {
+            let rank = 1 + split.dealt.iter().filter(|other| other.points > one.points).count();
+            (one, rank)
+        })
+        .collect()
+}
+
+/// A failed post is theatre lost, never an assignment lost. Keep the same
+/// cadence after failures so a bad upload cannot turn the rest into a wall.
+/// Drawing and uploading count toward the pause: 74 cards should take about
+/// five minutes, rather than adding four seconds on top of every render.
+async fn each_reveal<F, Fut>(split: &Split, pause: std::time::Duration, mut post: F)
+where
+    F: FnMut(Dealt, usize) -> Fut,
+    Fut: std::future::Future<Output = crate::Result<()>>,
+{
+    let mut previous: Option<tokio::time::Instant> = None;
+    for (one, rank) in ceremony_order(split) {
+        if let Some(started) = previous {
+            tokio::time::sleep(pause.saturating_sub(started.elapsed())).await;
+        }
+        previous = Some(tokio::time::Instant::now());
+        if let Err(err) = post(one.clone(), rank).await {
+            tracing::error!(user = one.user, error = %err, "hatch: reveal failed; continuing ceremony");
+        }
+    }
+}
+
+fn member_reveal(one: &Dealt, rank: usize, house: &super::battle_card::HouseLook) -> String {
+    format!("🔥 <@{}> — your egg breaks open! **{}** rises for **{} {}**.\n**{}** egg-week points · **Rank #{}**",
+        one.user, one.dragon, house.crest, house.name, one.points, rank)
+}
+
 /// What the hatch posts, or what a dry run shows instead of posting it.
 pub fn reveal_text(split: &Split, dry: bool) -> String {
     let head = if dry {
@@ -206,6 +245,41 @@ mod tests {
             4, 3, 2, 1, 1, 0, 0,
         ];
         heavy.iter().chain(&middle).chain(&tail).enumerate().map(|(i, n)| (100 + i as u64, *n)).collect()
+    }
+
+    #[test]
+    fn ceremony_builds_by_points_and_preserves_the_deal() {
+        let split = deal(&[(3, 40), (1, 0), (2, 40), (4, 10)], &HashSet::new());
+        let before = split.clone();
+        let order = ceremony_order(&split);
+        assert_eq!(order.iter().map(|(d, r)| (d.user, d.points, *r)).collect::<Vec<_>>(),
+            vec![(1, 0, 4), (4, 10, 3), (2, 40, 1), (3, 40, 1)]);
+        assert_eq!(split, before);
+        let house = super::super::battle::house_look(&HOUSES[0]);
+        let text = member_reveal(order[0].0, order[0].1, &house);
+        for expected in ["<@1>", &order[0].0.dragon, &house.name, "0** egg-week points", "Rank #4"] {
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_reveal_does_not_stop_the_rest_or_change_assignments() {
+        let split = deal(&[(1, 0), (2, 10), (3, 20)], &HashSet::new());
+        let before = split.clone();
+        let mut attempted = Vec::new();
+        let mut times = Vec::new();
+        let pause = std::time::Duration::from_millis(10);
+        each_reveal(&split, pause, |one, _| {
+            attempted.push(one.user);
+            times.push(std::time::Instant::now());
+            async move {
+                if one.user == 1 { Err(crate::VizierError("simulated Discord failure".into())) } else { Ok(()) }
+            }
+        }).await;
+        assert_eq!(attempted, vec![1, 2, 3]);
+        assert!(times.windows(2).all(|pair| pair[1].duration_since(pair[0]) >= pause),
+            "even a failed reveal is followed by the configured pause");
+        assert_eq!(split, before);
     }
 
     #[test]
@@ -317,7 +391,8 @@ mod tests {
 use chrono::Utc;
 use serenity::all::{
     CommandDataOptionValue, CommandInteraction, CommandOptionType, Context, CreateAllowedMentions, CreateCommand,
-    CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    CreateAttachment, CreateCommandOption, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
+    UserId,
 };
 
 use super::egg_store::{self as store};
@@ -424,15 +499,54 @@ pub async fn command(ctx: &Context, command: &CommandInteraction) {
             super::house::place(one.user, house, "hatch");
         }
     }
-    let text = reveal_text(&split, false);
-    let _ = command
-        .create_response(
-            ctx,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new().content(&text).allowed_mentions(CreateAllowedMentions::new()),
-            ),
-        )
-        .await;
+    let pause = std::time::Duration::from_secs(super::control::number("VIZIER_HATCH_REVEAL_SECS", 4).min(30));
+    if let Err(err) = command.create_response(&ctx.http, whisper("The houses are saved. The hatch ceremony is beginning here!")).await {
+        tracing::warn!(error = %err, "hatch: acknowledgement failed");
+    }
+    let channel = command.channel_id;
+    if let Err(err) = channel.send_message(&ctx.http, CreateMessage::new()
+        .content(format!("🔥 **The eggs are hatching!** {} dragons are about to rise. From the quietest embers to the greatest flames…", split.dealt.len()))
+        .allowed_mentions(CreateAllowedMentions::new())).await {
+        tracing::error!(error = %err, "hatch: opening message failed; continuing ceremony");
+    }
+    let names: HashMap<u64, String> = eggs.iter().map(|e| (e.user, e.name.clone())).collect();
+    each_reveal(&split, pause, |one, rank| {
+        let name = names.get(&one.user).cloned().unwrap_or_else(|| one.user.to_string());
+        async move {
+            let house = super::house::house(one.house)
+                .ok_or_else(|| crate::VizierError(format!("Unknown hatch house {}", one.house)))?;
+            let look = super::battle::house_look(house);
+            let text = member_reveal(&one, rank, &look);
+            let user = one.user;
+            let png = tokio::task::spawn_blocking(move || {
+                super::battle_card::hatch_png(&super::battle_card::Hatch {
+                    member: &name,
+                    dragon: &one.dragon,
+                    house: &look,
+                    points: one.points,
+                    rank,
+                })
+            })
+            .await;
+            let mut message = CreateMessage::new().content(text)
+                .allowed_mentions(CreateAllowedMentions::new().users(vec![UserId::new(user)]));
+            match png {
+                Ok(Some(bytes)) => message = message.add_file(CreateAttachment::bytes(bytes, "hatch.png")),
+                Ok(None) => tracing::warn!(user, "hatch: card unavailable; posting text reveal"),
+                Err(err) => tracing::error!(user, error = %err, "hatch: renderer failed; posting text reveal"),
+            }
+            channel
+                .send_message(&ctx.http, message)
+                .await
+                .map_err(|err| crate::VizierError(format!("Discord hatch reveal: {err}")))?;
+            Ok(())
+        }
+    })
+    .await;
+    if let Err(err) = channel.send_message(&ctx.http, CreateMessage::new()
+        .content(reveal_text(&split, false)).allowed_mentions(CreateAllowedMentions::new())).await {
+        tracing::error!(error = %err, "hatch: closing summary failed");
+    }
     // The roles come last and are allowed to fail one by one: the store is the
     // truth, and `/houseroles` can put any that didn't take right afterwards.
     if let Some(guild) = command.guild_id {
@@ -441,12 +555,6 @@ pub async fn command(ctx: &Context, command: &CommandInteraction) {
                 super::house::wear(ctx, guild, one.user, house).await;
             }
         }
-    }
-    if let Some(channel) = super::control::id("VIZIER_HOUSE_CHANNEL") {
-        let channel = serenity::all::ChannelId::new(channel);
-        let _ = channel
-            .send_message(&ctx.http, CreateMessage::new().content(&text).allowed_mentions(CreateAllowedMentions::new()))
-            .await;
     }
     tracing::info!("hatch: {} eggs opened by {}, houses within {} points", split.dealt.len(), by, split.gap());
 }

@@ -263,6 +263,77 @@ pub fn champion_png(champion: &Champion) -> Option<Vec<u8>> {
     pen.px.encode_png().ok()
 }
 
+/// A committed egg's ceremonial reveal. No scores or assignments are changed here.
+pub struct Hatch<'a> {
+    pub member: &'a str,
+    pub dragon: &'a str,
+    pub house: &'a HouseLook,
+    pub points: i64,
+    /// Competition rank in egg-week points (equal scores share a rank).
+    pub rank: usize,
+}
+
+pub fn hatch_png(hatch: &Hatch<'_>) -> Option<Vec<u8>> {
+    let mut fs = super::awards::fonts().lock();
+    if fs.db().len() == 0 {
+        return None;
+    }
+    let mut pen = Pen::new(CHAMP_W, CHAMP_H, &mut fs)?;
+    let look = look();
+    let colour = hatch.house.colours.1;
+    floor(&mut pen.px, CHAMP_W, CHAMP_H, look.floor);
+    hall(&mut pen.px, Art::Throne, CHAMP_W, CHAMP_H, 150);
+    glow(&mut pen.px, 500.0, 225.0, 390.0, colour, 130);
+    rays(&mut pen.px, 500.0, 225.0, 170.0, 700.0, &[colour, GOLD]);
+    confetti(&mut pen.px, CHAMP_W, CHAMP_H, (500.0, 225.0, 180.0), [colour, GOLD, INK, EMBER]);
+    vignette(&mut pen.px, CHAMP_W, CHAMP_H, 160);
+    if !painted_frame(&mut pen.px, Art::Frame("rare"), CHAMP_W, CHAMP_H, 46.0) {
+        frame(&mut pen.px, CHAMP_W, CHAMP_H);
+    }
+    ring(&mut pen.px, 500.0, 220.0, 158.0, hatch.house.colours);
+    if let Some(art) = battle_art::round(Art::Dragon(hatch.house.art), 300) {
+        pen.px.draw_pixmap(350, 70, art.as_ref().as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    } else {
+        // A winged silhouette when the painted dragon is absent.
+        let mut dragon = PathBuilder::new();
+        dragon.move_to(500.0, 285.0);
+        for (x, y) in [(375.0, 150.0), (400.0, 245.0), (470.0, 235.0), (490.0, 175.0),
+                       (520.0, 135.0), (552.0, 163.0), (523.0, 173.0), (530.0, 235.0),
+                       (600.0, 245.0), (625.0, 150.0)] {
+            dragon.line_to(x, y);
+        }
+        dragon.close();
+        if let Some(shape) = dragon.finish() {
+            pen.px.fill_path(&shape, &paint(colour, 255), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    // The final egg painting alongside the dragon, plus two jagged shell
+    // halves below it: this egg has OPENED, rather than merely cracked.
+    egg(&mut pen, 320.0, 295.0, 150.0, EGG_STAGES, false);
+    for offset in [-62.0, 48.0] {
+        let mut shell = PathBuilder::new();
+        shell.move_to(500.0 + offset - 48.0, 315.0);
+        shell.line_to(500.0 + offset - 24.0, 335.0);
+        shell.line_to(500.0 + offset, 318.0);
+        shell.line_to(500.0 + offset + 24.0, 338.0);
+        shell.line_to(500.0 + offset + 48.0, 320.0);
+        shell.cubic_to(500.0 + offset + 40.0, 375.0, 500.0 + offset - 40.0, 375.0, 500.0 + offset - 48.0, 315.0);
+        shell.close();
+        if let Some(shape) = shell.finish() {
+            pen.px.fill_path(&shape, &paint(SOOT, 255), FillRule::Winding, Transform::identity(), None);
+            pen.px.stroke_path(&shape, &paint(OLD_GOLD, 240), &Stroke { width: 3.0, ..Stroke::default() }, Transform::identity(), None);
+        }
+    }
+    house_mark(&mut pen, hatch.house, 682.0, 295.0, 52.0, false);
+    ribbon(&mut pen, &format!("{} · HATCHED", hatch.house.name.to_uppercase()));
+    let dragon = pen.fit(hatch.dragon, 42.0, Weight::EXTRA_BOLD, 820.0);
+    pen.centered(&dragon, 500.0, 468.0, 42.0, Weight::EXTRA_BOLD, INK);
+    let member = pen.fit(hatch.member, 26.0, Weight::BOLD, 820.0);
+    pen.centered(&member, 500.0, 505.0, 26.0, Weight::BOLD, INK);
+    pen.centered(&format!("{} egg-week points · Rank #{}", hatch.points, hatch.rank), 500.0, 540.0, 22.0, Weight::MEDIUM, [208, 197, 166]);
+    pen.px.encode_png().ok()
+}
+
 /// How a side of the fight is lit.
 #[derive(Clone, Copy)]
 enum Side {
@@ -2393,6 +2464,35 @@ mod tests {
             assert_eq!(&fight_png(&fight).expect("fight card")[..4], &PNG_MAGIC);
             let champ = Champion { who: &a, subtitle: "12 in the lists".to_string(), line: String::new(), season };
             assert_eq!(&champion_png(&champ).expect("champion card")[..4], &PNG_MAGIC);
+        }
+    }
+
+    #[test]
+    fn hatch_cards_render_all_four_dragons_and_missing_art() {
+        for art in ["stark", "lannister", "targaryen", "watch", "missing"] {
+            let mut house = stark();
+            house.art = art;
+            let png = hatch_png(&Hatch {
+                member: "A rider with a very long name — आरव", dragon: "Vhagaryx II",
+                house: &house, points: 3140, rank: 1,
+            }).expect("hatch card");
+            assert_eq!(&png[..4], &PNG_MAGIC);
+            let image = Pixmap::decode_png(&png).expect("valid PNG");
+            assert_eq!((image.width(), image.height()), (CHAMP_W as u32, CHAMP_H as u32));
+        }
+    }
+
+    #[test]
+    #[ignore = "writes files; only useful when looking at the design"]
+    fn hatch_preview() {
+        let Ok(dir) = std::env::var("BATTLE_CARD_PREVIEW") else { return };
+        for art in ["stark", "lannister", "targaryen", "watch"] {
+            let mut house = stark();
+            house.art = art;
+            house.name = art.to_uppercase();
+            let png = hatch_png(&Hatch { member: "Aarav", dragon: "Vhagaryx", house: &house, points: 3140, rank: 1 })
+                .expect("hatch card");
+            std::fs::write(std::path::Path::new(&dir).join(format!("hatch_{art}.png")), png).expect("write preview");
         }
     }
 

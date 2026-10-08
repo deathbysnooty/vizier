@@ -196,7 +196,7 @@ fn art_slug(key: &str) -> &'static str {
 /// month's own paint, so a server that renames the four renames them here too.
 /// The banner's trim is the same colour lifted, because a banner needs two and
 /// the month only names one - one source, two shades of it.
-fn house_look(house: &'static super::house::House) -> HouseLook {
+pub(super) fn house_look(house: &'static super::house::House) -> HouseLook {
     let themed = super::month::themed(house);
     let colour = themed.colour;
     let field = [(colour >> 16) as u8, (colour >> 8) as u8, colour as u8];

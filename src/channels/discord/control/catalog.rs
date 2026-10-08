@@ -195,6 +195,13 @@ pub fn sections() -> Vec<Section> {
                     "2026-10-08 12:00",
                 ),
                 setting(
+                    "VIZIER_HATCH_REVEAL_SECS",
+                    "Pause between hatch reveals",
+                    "Seconds between each member's hatch reveal, quietest first and biggest dragons last. 4 seconds makes 74 reveals a ceremony of about five minutes. Read once when the ceremony starts.",
+                    number(0, 30, "seconds"),
+                    "4",
+                ),
+                setting(
                     "VIZIER_MONTH_WATCH_DAYS",
                     "A late egg's watch",
                     "How long an egg claimed AFTER the hatch waits before it opens. Everybody who was on the sheet at the \
