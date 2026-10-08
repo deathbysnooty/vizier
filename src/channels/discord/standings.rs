@@ -79,7 +79,8 @@ fn summary_text(
     let mut text = format!("📊 **House points · {} – {}**\n", hour12(start_hour), hour12(start_hour + 1));
     for (h, total, sources) in gains {
         let parts: Vec<String> = sources.iter().map(|(s, n)| format!("{} {}", s.label(), signed(*n))).collect();
-        text.push_str(&format!("{} **{} {}** — {}\n", h.crest, h.name, signed(total), parts.join(" · ")));
+        let (crest, name) = super::month::crest_and_name(h);
+        text.push_str(&format!("{} **{} {}** — {}\n", crest, name, signed(total), parts.join(" · ")));
     }
     let mut standing: Vec<&House> = HOUSES.iter().collect();
     standing.sort_by(|a, b| month.get(b.key).cmp(&month.get(a.key)).then(a.name.cmp(b.name)));
@@ -159,12 +160,13 @@ fn lead_embed(house: &House, points: i64, margin: i64, previous: Option<&House>,
         .enumerate()
         .map(|(i, h)| {
             let n = month.get(h.key).copied().unwrap_or(0);
-            if h.key == house.key { format!("**{}. {} {} — {}**", i + 1, h.crest, h.name, n) } else { format!("{}. {} {} — {}", i + 1, h.crest, h.name, n) }
+            let worn = super::month::label(h);
+            if h.key == house.key { format!("**{}. {} — {}**", i + 1, worn, n) } else { format!("{}. {} — {}", i + 1, worn, n) }
         })
         .collect();
     let title = match previous {
-        Some(p) => format!("{} {} takes the lead from {} {}!", house.crest, house.name, p.crest, p.name),
-        None => format!("{} {} takes the early lead!", house.crest, house.name),
+        Some(p) => format!("{} takes the lead from {}!", super::month::label(house), super::month::label(p)),
+        None => format!("{} takes the early lead!", super::month::label(house)),
     };
     serenity::all::CreateEmbed::new()
         .title(title)
@@ -219,7 +221,16 @@ pub fn spawn_lead_watch(ctx: Context) {
                     let (Some((h, points, margin)), Some(channel)) = (current, houses_channel()) else { continue };
                     let previous = house::house(&announced);
                     let mut msg = CreateMessage::new().embed(lead_embed(h, points, margin, previous, &month)).allowed_mentions(CreateAllowedMentions::new());
-                    if let Some(png) = super::house_card::crest_png(h.key) {
+                    // The month's painted crest where there is one - the built-in
+                    // crests are the old houses' artwork, so a Westeros month was
+                    // putting a Slytherin snake on a card that said Lannister.
+                    let painted = super::battle_art::sized(
+                        super::battle_art::Art::Crest(super::battle::house_look(h).art),
+                        320,
+                        320,
+                    )
+                    .and_then(|art| art.encode_png().ok());
+                    if let Some(png) = painted.or_else(|| super::house_card::crest_png(h.key).map(|b| b.to_vec())) {
                         msg = msg.add_file(serenity::all::CreateAttachment::bytes(png, format!("{}.png", h.key)));
                     }
                     match channel.send_message(&ctx.http, msg).await {
@@ -820,12 +831,12 @@ fn draw_text(month_label: &str, result: &DrawResult) -> String {
         DrawResult::Empty => format!("No house earned any points in {}.", month_label),
         DrawResult::Tie(keys) => {
             let names: Vec<String> =
-                keys.iter().filter_map(|k| house::house(k)).map(|h| format!("{} {}", h.crest, h.name)).collect();
+                keys.iter().filter_map(|k| house::house(k)).map(super::month::label).collect();
             format!("**{}** ended in a tie at the top: {}. That one's a call for the mods.", month_label, names.join(", "))
         }
         DrawResult::Winner { house: key, points, captain, member, pool } => {
             let h = house::house(key);
-            let name = h.map(|h| format!("{} {}", h.crest, h.name)).unwrap_or_else(|| key.to_string());
+            let name = h.map(super::month::label).unwrap_or_else(|| key.to_string());
             let captain = captain.map(|c| format!("<@{}>", c)).unwrap_or_else(|| "no captain named".into());
             let member = match member {
                 Some(m) => format!("<@{}> (drawn from {} eligible)", m, pool),

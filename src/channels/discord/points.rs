@@ -665,22 +665,43 @@ pub fn breakdown_between(conn: &Connection, user: u64, since: i64, until: i64) -
 
 /// One house's points between `since` and `until`, house-only awards included.
 pub fn house_total(conn: &Connection, house_key: &str, since: i64, until: i64) -> rusqlite::Result<i64> {
-    conn.query_row(
-        "SELECT COALESCE(SUM(points), 0) FROM ledger WHERE house = ?1 AND ts >= ?2 AND ts < ?3",
+    // By where the member is NOW, like house_totals: the hatch moves everybody
+    // at once, and the stamp on the row is where they used to be. A row with no
+    // member behind it is a mod's award to a house and keeps its own stamp.
+    let joined = conn.query_row(
+        "SELECT COALESCE(SUM(l.points), 0) FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
+         WHERE COALESCE(m.house, l.house) = ?1 AND l.ts >= ?2 AND l.ts < ?3",
         params![house_key, since, until],
         |r| r.get(0),
-    )
+    );
+    match joined {
+        Ok(total) => Ok(total),
+        // A ledger with no roll beside it still totals, by the stamp.
+        Err(_) => conn.query_row(
+            "SELECT COALESCE(SUM(points), 0) FROM ledger WHERE house = ?1 AND ts >= ?2 AND ts < ?3",
+            params![house_key, since, until],
+            |r| r.get(0),
+        ),
+    }
 }
 
 /// Everyone who scored for a house between `since` and `until`, highest first,
 /// with their total. Ties go to whoever got there first. Anyone at zero or below
 /// (a deduction can do that) is left out.
 pub fn top_members(conn: &Connection, house_key: &str, since: i64, until: i64) -> rusqlite::Result<Vec<(u64, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT user_id, SUM(points) AS total FROM ledger
-         WHERE house = ?1 AND user_id IS NOT NULL AND ts >= ?2 AND ts < ?3
-         GROUP BY user_id HAVING total > 0 ORDER BY total DESC, MAX(ts) ASC",
-    )?;
+    // Whose house a member is in now, for the same reason.
+    let mut stmt = match conn.prepare(
+        "SELECT l.user_id, SUM(l.points) AS total FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id
+         WHERE COALESCE(m.house, l.house) = ?1 AND l.user_id IS NOT NULL AND l.ts >= ?2 AND l.ts < ?3
+         GROUP BY l.user_id HAVING total > 0 ORDER BY total DESC, MAX(l.ts) ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => conn.prepare(
+            "SELECT user_id, SUM(points) AS total FROM ledger
+             WHERE house = ?1 AND user_id IS NOT NULL AND ts >= ?2 AND ts < ?3
+             GROUP BY user_id HAVING total > 0 ORDER BY total DESC, MAX(ts) ASC",
+        )?,
+    };
     let rows = stmt.query_map(params![house_key, since, until], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)))?;
     rows.collect()
 }

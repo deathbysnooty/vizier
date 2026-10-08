@@ -184,7 +184,7 @@ fn top_sources(moved: &HashMap<(&'static str, Source), i64>) -> Vec<(Source, i64
 fn hottest(rows: &[&'static House], hour: &HashMap<&'static str, i64>) -> String {
     let best = rows.iter().map(|h| (*h, hour.get(h.key).copied().unwrap_or(0))).filter(|(_, n)| *n > 0).max_by(|a, b| a.1.cmp(&b.1).then(std::cmp::Ordering::Greater));
     match best {
-        Some((h, n)) => format!("{} {} +{}", h.crest, h.name, n),
+        Some((h, n)) => format!("{} {} +{}", super::month::crest_and_name(h).0, super::month::crest_and_name(h).1, n),
         None => "Quiet hour".into(),
     }
 }
@@ -213,7 +213,10 @@ pub fn card(d: &CardData) -> CreateEmbed {
     let second = rows.get(1).and_then(|h| d.month.get(h.key)).copied().unwrap_or(0);
     let left = days_words(days_left(d.end - 1));
     let lead = match rows.first() {
-        Some(h) if best > second => format!("{} **{}** lead by **{}** · {}", h.crest, h.name, thousands(best - second), left),
+        Some(h) if best > second => {
+            let (crest, name) = super::month::crest_and_name(h);
+            format!("{} **{}** lead by **{}** · {}", crest, name, thousands(best - second), left)
+        }
         _ => format!("It's neck and neck at the top · {}", left),
     };
     let today: Vec<String> = rows.iter().map(|h| format!("{} {}", h.crest, thousands(d.today.get(h.key).copied().unwrap_or(0)))).collect();
@@ -435,7 +438,7 @@ fn my_house_text(
     };
     let mut lines = if cup {
         vec![
-            format!("{} **{}** · {} · {}", h.crest, h.name, ordinal(pos + 1), place),
+            format!("{} **{}** · {} · {}", super::month::crest_and_name(h).0, super::month::crest_and_name(h).1, ordinal(pos + 1), place),
             format!("Today **{}** · this hour **{}**", signed(today), signed(hour)),
             "**Top this month**".to_string(),
         ]
@@ -444,7 +447,7 @@ fn my_house_text(
         // nothing has moved and nothing will until the Cup is back.
         vec![
             "🏆 **The House Cup is paused** · these are the final numbers".to_string(),
-            format!("{} **{}** · {} · {}", h.crest, h.name, ordinal(pos + 1), place),
+            format!("{} **{}** · {} · {}", super::month::crest_and_name(h).0, super::month::crest_and_name(h).1, ordinal(pos + 1), place),
             "**Top scorers**".to_string(),
         ]
     };
