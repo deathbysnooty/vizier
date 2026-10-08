@@ -942,6 +942,53 @@ pub fn join(user: u64, name: &str, now: i64) -> Joined {
     Joined::Hatched { house: key, dragon }
 }
 
+/// Opens any egg whose moment has passed and which the ceremony never reached.
+///
+/// The hatch deals the eggs that exist WHEN IT RUNS. Somebody who claims after
+/// that - between the ceremony and their own egg's moment - is left holding an
+/// egg nothing will ever open: the ceremony has been and gone, and `join` only
+/// opens an egg on the spot when the month's moment is already past. One member
+/// was stuck that way within three hours of the first hatch.
+///
+/// Each is dealt to the lightest house, exactly as a late joiner is. Returns
+/// who was opened, so the caller can put their house role on.
+pub fn open_overdue(now: i64) -> Vec<(u64, &'static str, String)> {
+    let Some(db) = store::db() else { return Vec::new() };
+    if !month::running() {
+        return Vec::new();
+    }
+    let waiting: Vec<_> = {
+        let conn = db.lock();
+        store::all(&conn)
+            .into_iter()
+            .filter(|egg| !egg.frozen() && egg.hatched_ts.is_none() && now >= egg.hatch_ts)
+            .collect()
+    };
+    let mut opened = Vec::new();
+    for egg in waiting {
+        let weights = house_weights(now);
+        let Some(key) = lightest(&weights) else { continue };
+        let taken = {
+            let conn = db.lock();
+            store::dragons(&conn)
+        };
+        let names = super::hatch::name_dragons(&[egg.user], &taken);
+        let dragon = names.get(&egg.user).cloned().unwrap_or_default();
+        {
+            let conn = db.lock();
+            if store::hatch(&conn, egg.user, key, &dragon, now).is_err() {
+                continue;
+            }
+        }
+        if let Some(house) = super::house::house(key) {
+            super::house::place(egg.user, house, "late hatch");
+        }
+        tracing::info!("egg: {}'s egg was overdue and opened as {} for {}", egg.user, dragon, key);
+        opened.push((egg.user, key, dragon));
+    }
+    opened
+}
+
 /// What opting out does about the month: freeze, never delete.
 pub fn leave(user: u64) -> bool {
     let Some(db) = store::db() else { return false };
@@ -968,6 +1015,13 @@ pub fn spawn(ctx: serenity::all::Context) {
         loop {
             if month::running() {
                 let fresh = hand_out(&role_holders(&ctx).await, Utc::now().timestamp());
+                // And open anything the ceremony never reached, so nobody is
+                // left holding an egg that cannot hatch.
+                for (user, key, _) in open_overdue(Utc::now().timestamp()) {
+                    if let (Some(guild), Some(house)) = (ctx.cache.guilds().first().copied(), super::house::house(key)) {
+                        super::house::wear(&ctx, guild, user, house).await;
+                    }
+                }
                 if fresh > 0 {
                     tracing::info!("egg: {} new egg{} handed out to the games role", fresh, if fresh == 1 { "" } else { "s" });
                 }

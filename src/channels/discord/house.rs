@@ -2296,6 +2296,15 @@ pub async fn on_join(ctx: &Context, member: &Member, welcome: ChannelId) {
     if !sorting_open() {
         return;
     }
+    // A themed month deals the houses itself, to the people who joined it. The
+    // hat sorting an arrival puts somebody in a house with no egg, no games
+    // role and no idea they are in it - and their points start counting for a
+    // house that never chose them. They are invited in by the Join button like
+    // everybody else.
+    if super::month::running() {
+        tracing::info!("house: {} arrived during the month, left for the games button", member.user.name);
+        return;
+    }
     if is_mod(ctx, member.guild_id, member).await {
         tracing::info!("house: {} is a mod, left unsorted", member.user.name);
         return;
