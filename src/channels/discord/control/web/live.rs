@@ -200,8 +200,9 @@ pub struct Live {
     pub on: bool,
     /// A mod has run `/hatch`.
     pub hatched: bool,
-    /// Eggs, not dragons: the hatch moment is still ahead, or it has passed and
-    /// nobody has run `/hatch` yet.
+    /// Eggs, not dragons: nobody has run `/hatch` yet. The clock does not decide
+    /// this - the ceremony does - so an early hatch shows dragons at once and a
+    /// hatch nobody runs keeps the eggs.
     pub egg_week: bool,
     pub hatch_at: i64,
     pub hatched_at: Option<i64>,
@@ -403,9 +404,12 @@ pub fn assemble(rows: Vec<Row>, hatched: Option<i64>, now: i64) -> Live {
         month: month::title(),
         on: month::running(),
         hatched: hatched.is_some(),
-        // The clock decides, and a hatch nobody has run keeps the eggs on the
-        // page rather than showing dragons with no names.
-        egg_week: now < hatch_at || hatched.is_none(),
+        // THE CEREMONY DECIDES, and the clock does not come into it. Run it
+        // early and the page shows dragons, because every dragon has just been
+        // named in front of the whole server. Do not run it at all and the page
+        // keeps the eggs however late it gets, because dragons with no names
+        // and no houses are worse than eggs.
+        egg_week: hatched.is_none(),
         hatch_at,
         hatched_at: hatched,
         egg_week_days: month::watch_days(),
@@ -1258,9 +1262,13 @@ mod tests {
         month.set("VIZIER_MONTH_HATCH", "2026-10-08 12:00");
         let hatch = month::hatch_at();
 
-        // Before the moment: eggs, hatch run or not.
+        // Before the moment, with no ceremony: eggs.
         assert!(assemble(a_server(), None, hatch - 1).egg_week);
-        assert!(assemble(a_server(), Some(hatch), hatch - 1).egg_week);
+        // Before the moment, but the ceremony HAS run: dragons. A mod who
+        // starts early has already named every dragon and dealt every house in
+        // front of the whole server, and the page showing eggs for the rest of
+        // the morning is the page arguing with what everybody just watched.
+        assert!(!assemble(a_server(), Some(hatch), hatch - 1).egg_week);
         // After it, with the hatch run: dragons.
         assert!(!assemble(a_server(), Some(hatch), hatch + 1).egg_week);
         // After it, with nobody having run /hatch: still eggs, because dragons

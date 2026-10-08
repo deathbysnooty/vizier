@@ -593,7 +593,21 @@ pub fn last_played_month(conn: &Connection) -> Option<i64> {
 /// Points per house since `since`.
 pub fn house_totals(conn: &Connection, since: i64) -> rusqlite::Result<HashMap<&'static str, i64>> {
     let mut out: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
-    let mut stmt = conn.prepare("SELECT house, SUM(points) FROM ledger WHERE ts >= ?1 GROUP BY house")?;
+    // A member's points belong to the house they are in NOW, not the one they
+    // were in when they earned them. The hatch moves everybody at once, and
+    // grouping by the stamp on the row showed the pre-hatch shape wearing the
+    // new names - four houses dealt level reading 3,842 to 999. A row with no
+    // member behind it is a mod's award to a house, so it keeps its own stamp.
+    let mut stmt = match conn.prepare(
+        "SELECT COALESCE(m.house, l.house) AS whose, SUM(l.points) \
+         FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
+         WHERE l.ts >= ?1 GROUP BY whose",
+    ) {
+        Ok(stmt) => stmt,
+        // A ledger opened without the roll beside it - which is every one of
+        // this module's own tests - still totals, by the stamp on the row.
+        Err(_) => conn.prepare("SELECT house, SUM(points) FROM ledger WHERE ts >= ?1 GROUP BY house")?,
+    };
     let rows = stmt.query_map(params![since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     for (key, sum) in rows.flatten() {
         if let Some(slot) = house(&key).and_then(|h| out.get_mut(h.key)) {
@@ -607,9 +621,17 @@ pub fn house_totals(conn: &Connection, since: i64) -> rusqlite::Result<HashMap<&
 /// summary's "where this hour's points came from".
 pub fn by_source(conn: &Connection, since: i64, until: i64) -> rusqlite::Result<HashMap<(&'static str, Source), i64>> {
     let mut out = HashMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT house, source, SUM(points) FROM ledger WHERE ts >= ?1 AND ts < ?2 GROUP BY house, source",
-    )?;
+    // Current house, for the same reason house_totals uses it.
+    let mut stmt = match conn.prepare(
+        "SELECT COALESCE(m.house, l.house) AS whose, l.source, SUM(l.points) \
+         FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
+         WHERE l.ts >= ?1 AND l.ts < ?2 GROUP BY whose, l.source",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => conn.prepare(
+            "SELECT house, source, SUM(points) FROM ledger WHERE ts >= ?1 AND ts < ?2 GROUP BY house, source",
+        )?,
+    };
     let rows = stmt.query_map(params![since, until], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
     })?;
