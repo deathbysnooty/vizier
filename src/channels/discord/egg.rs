@@ -945,8 +945,18 @@ pub fn join(user: u64, name: &str, now: i64) -> Joined {
 /// What opting out does about the month: freeze, never delete.
 pub fn leave(user: u64) -> bool {
     let Some(db) = store::db() else { return false };
-    let conn = db.lock();
-    store::freeze(&conn, user, Utc::now().timestamp()).unwrap_or(false)
+    let frozen = {
+        let conn = db.lock();
+        store::freeze(&conn, user, Utc::now().timestamp()).unwrap_or(false)
+    };
+    // Off the house roll as well as frozen. The roll is what every house total
+    // counts from, so leaving somebody on it means their points go on feeding a
+    // house they have stepped out of. The egg keeps the house's name, so
+    // `join` puts them back in the same one.
+    if frozen {
+        super::house::unplace(user);
+    }
+    frozen
 }
 
 /// How often the job looks for somebody new to give an egg to.

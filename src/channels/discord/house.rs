@@ -246,6 +246,19 @@ fn remember(user: u64, house: &House, sorted_by: &str) {
     }
 }
 
+/// Takes a member off the roll entirely, so nothing they do counts for a house.
+///
+/// Opting out of the month uses it. The roll is what every total counts from, so
+/// somebody left on it while frozen went on feeding a house they had stepped out
+/// of - and the Discord card and the live page disagreed about the score,
+/// because the page already left them out. Their egg remembers the house, so
+/// coming back puts them straight back where they were.
+pub(super) fn unplace(user: u64) {
+    if let Some(db) = DB.get() {
+        let _ = db.lock().execute("DELETE FROM members WHERE user_id = ?1", params![user as i64]);
+    }
+}
+
 /// Puts a member in a house and writes it down - the hatch's door into the
 /// house store, so a dealt member is in a house everywhere the bot looks.
 pub(super) fn place(user: u64, house: &'static House, sorted_by: &str) {

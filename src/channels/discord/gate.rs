@@ -288,6 +288,22 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
             None
         }
     };
+    // The HOUSE role, which place() does not touch: it writes the roll and
+    // nothing else, so a late joiner scored for a house while wearing no
+    // colour, grouped nowhere in the member list and locked out of a room
+    // their own house owns. The hatch gives the role to everybody at once;
+    // somebody arriving afterwards has to be given theirs here.
+    if let (Some(guild), Some(joined)) = (component.guild_id, joined.as_ref()) {
+        let house = match joined {
+            egg::Joined::Hatched { house, .. } => super::house::house(house),
+            // A returner goes back to the house they left, so put the role back on.
+            egg::Joined::Resumed { hatched: true } => super::house::house_of(user),
+            _ => None,
+        };
+        if let Some(house) = house {
+            super::house::wear(ctx, guild, user, house).await;
+        }
+    }
     if let Some(eggs) = store::db() {
         let conn = eggs.lock();
         let _ = store::note_toggle(&conn, user, now);

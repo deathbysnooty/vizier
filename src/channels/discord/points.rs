@@ -594,14 +594,15 @@ pub fn last_played_month(conn: &Connection) -> Option<i64> {
 pub fn house_totals(conn: &Connection, since: i64) -> rusqlite::Result<HashMap<&'static str, i64>> {
     let mut out: HashMap<&'static str, i64> = HOUSES.iter().map(|h| (h.key, 0)).collect();
     // A member's points belong to the house they are in NOW, not the one they
-    // were in when they earned them. The hatch moves everybody at once, and
+    // were in when they earned them - and only while they are ON the roll, so
+    // the Discord card and the live page cannot disagree about the score. The hatch moves everybody at once, and
     // grouping by the stamp on the row showed the pre-hatch shape wearing the
     // new names - four houses dealt level reading 3,842 to 999. A row with no
     // member behind it is a mod's award to a house, so it keeps its own stamp.
     let mut stmt = match conn.prepare(
         "SELECT COALESCE(m.house, l.house) AS whose, SUM(l.points) \
          FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
-         WHERE l.ts >= ?1 GROUP BY whose",
+         WHERE l.ts >= ?1 AND (l.user_id IS NULL OR m.house IS NOT NULL) GROUP BY whose",
     ) {
         Ok(stmt) => stmt,
         // A ledger opened without the roll beside it - which is every one of
@@ -625,7 +626,8 @@ pub fn by_source(conn: &Connection, since: i64, until: i64) -> rusqlite::Result<
     let mut stmt = match conn.prepare(
         "SELECT COALESCE(m.house, l.house) AS whose, l.source, SUM(l.points) \
          FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
-         WHERE l.ts >= ?1 AND l.ts < ?2 GROUP BY whose, l.source",
+         WHERE l.ts >= ?1 AND l.ts < ?2 AND (l.user_id IS NULL OR m.house IS NOT NULL) \
+         GROUP BY whose, l.source",
     ) {
         Ok(stmt) => stmt,
         Err(_) => conn.prepare(
@@ -670,7 +672,8 @@ pub fn house_total(conn: &Connection, house_key: &str, since: i64, until: i64) -
     // member behind it is a mod's award to a house and keeps its own stamp.
     let joined = conn.query_row(
         "SELECT COALESCE(SUM(l.points), 0) FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id \
-         WHERE COALESCE(m.house, l.house) = ?1 AND l.ts >= ?2 AND l.ts < ?3",
+         WHERE COALESCE(m.house, l.house) = ?1 AND (l.user_id IS NULL OR m.house IS NOT NULL) \
+           AND l.ts >= ?2 AND l.ts < ?3",
         params![house_key, since, until],
         |r| r.get(0),
     );
@@ -691,8 +694,8 @@ pub fn house_total(conn: &Connection, house_key: &str, since: i64, until: i64) -
 pub fn top_members(conn: &Connection, house_key: &str, since: i64, until: i64) -> rusqlite::Result<Vec<(u64, i64)>> {
     // Whose house a member is in now, for the same reason.
     let mut stmt = match conn.prepare(
-        "SELECT l.user_id, SUM(l.points) AS total FROM ledger l LEFT JOIN members m ON m.user_id = l.user_id
-         WHERE COALESCE(m.house, l.house) = ?1 AND l.user_id IS NOT NULL AND l.ts >= ?2 AND l.ts < ?3
+        "SELECT l.user_id, SUM(l.points) AS total FROM ledger l JOIN members m ON m.user_id = l.user_id
+         WHERE m.house = ?1 AND l.ts >= ?2 AND l.ts < ?3
          GROUP BY l.user_id HAVING total > 0 ORDER BY total DESC, MAX(l.ts) ASC",
     ) {
         Ok(stmt) => stmt,

@@ -768,8 +768,15 @@ mod tests {
         conn
     }
 
+    /// Places a member, or moves one already placed - the roll holds one house
+    /// per member, exactly as `house::remember` writes it.
     fn sort(conn: &Connection, user: u64, house: &str) {
-        conn.execute("INSERT INTO members (user_id, house) VALUES (?1, ?2)", rusqlite::params![user as i64, house]).unwrap();
+        conn.execute(
+            "INSERT INTO members (user_id, house) VALUES (?1, ?2) \
+             ON CONFLICT(user_id) DO UPDATE SET house = excluded.house",
+            rusqlite::params![user as i64, house],
+        )
+        .unwrap();
     }
 
     fn score(conn: &Connection, user: Option<u64>, house: &str, source: &str, pts: i64, ts: i64) {
@@ -778,6 +785,13 @@ mod tests {
             rusqlite::params![user.map(|u| u as i64), house, source, pts, points::ist_day(ts), ts],
         )
         .unwrap();
+        // A member who scores for a house is ON that house's roll - there is no
+        // other way to score for one - and the totals count the roll, so a
+        // fixture that writes a row without a member behind it is a server that
+        // cannot exist. A house-only award (no user) stays as it is.
+        if let Some(user) = user {
+            sort(conn, user, house);
+        }
     }
 
     /// One owned card of `wizard` for `user`.
