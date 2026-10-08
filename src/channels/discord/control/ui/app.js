@@ -7116,9 +7116,10 @@
     page.appendChild(cupTabs('scorers'));
     const live = h('span', { class: 'live-pill', 'aria-live': 'polite' });
     const search = h('input', { type: 'search', placeholder: 'Find a member', 'aria-label': 'Find a member', value: st.q });
-    const houseOpts = [['all', 'All houses']].concat(((cup.data && cup.data.houses) || [
-      { key: 'gryffindor', crest: '🦁', name: 'Gryffindor' }, { key: 'slytherin', crest: '🐍', name: 'Slytherin' },
-      { key: 'ravenclaw', crest: '🦅', name: 'Ravenclaw' }, { key: 'hufflepuff', crest: '🦡', name: 'Hufflepuff' }]).map((x) => [x.key, x.crest + ' ' + x.name]));
+    // No hardcoded four: a themed month renames them, and a stale list here is
+    // how the retired names kept turning up in the filter. Until the Cup's own
+    // data lands, the filter offers only "All houses".
+    const houseOpts = [['all', 'All houses']].concat((((cup.data && cup.data.houses) || []).map((x) => [x.key, x.crest + ' ' + x.name])));
     const houseSel = h('select', { class: 'select', 'aria-label': 'House' }, houseOpts.map(([v, t]) => h('option', { value: v, selected: v === st.house }, t)));
     const body = h('div', { class: 'card scorers-card' });
     page.appendChild(h('div', { class: 'toolbar scorers-toolbar' },

@@ -526,7 +526,12 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
         .houses
         .iter()
         .map(|s| {
+            // The month's paint, not the house's own name: while a themed month
+            // runs these are Stark, Lannister, Targaryen and the Night's Watch,
+            // and the panel was the one place still calling them by the names
+            // the server retired.
             let meta = house::house(s.key);
+            let worn = meta.map(super::super::super::month::themed);
             let held: Vec<Value> = s
                 .held
                 .iter()
@@ -535,10 +540,10 @@ pub fn render(panel: &Panel, cup: &Cup, generated: i64) -> Value {
                 .collect();
             json!({
                 "key": s.key,
-                "name": meta.map(|h| h.name).unwrap_or(s.key),
-                "crest": meta.map(|h| h.crest).unwrap_or(""),
-                "colour": meta.map(|h| format!("#{:06x}", h.colour)),
-                "secondary": meta.map(|h| format!("#{:02x}{:02x}{:02x}", h.colours.1[0], h.colours.1[1], h.colours.1[2])),
+                "name": worn.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| s.key.to_string()),
+                "crest": worn.as_ref().map(|w| w.crest.clone()).unwrap_or_default(),
+                "colour": worn.as_ref().map(|w| format!("#{:06x}", w.colour)),
+                "secondary": worn.as_ref().map(|w| format!("#{:06x}", w.secondary)),
                 "total": s.total,
                 // Level houses share a place.
                 "rank": totals.iter().position(|t| *t == s.total).map(|i| i + 1).unwrap_or(1),
