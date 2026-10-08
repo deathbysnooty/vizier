@@ -1357,9 +1357,12 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
 /// hand, the Snitch is retired for the month and the ravens do the dropping.
 /// Every one of them is a mod command - members lose nothing - and they all
 /// come back by switching the month off.
+///
+/// `houseopt` is NOT one of them, though it was at first: it is a member's own
+/// way out of the houses and back in, which a themed month does not replace.
 const MONTH_OFF: &[&str] = &[
     "snitchdrop", "frogdrop", "housedraft", "housedraw", "houseroles", "housechannels", "houselist",
-    "housecaptain", "houseopt", "houseping", "sellset",
+    "housecaptain", "houseping", "sellset",
 ];
 
 const PAUSED_OFF: &[&str] = &[
