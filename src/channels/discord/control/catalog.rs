@@ -2606,8 +2606,16 @@ pub fn sections() -> Vec<Section> {
                 setting(
                     "VIZIER_REELS_CHANNELS",
                     "Quiet reels: channels",
-                    "Where quiet reels applies. Empty means nowhere, so it can be tried in one room before the \
-                     whole server.",
+                    "Limit quiet reels to these channels. Empty means the whole server, so this is for trying it \
+                     in one room before turning it loose.",
+                    Kind::Channels,
+                    "",
+                ),
+                setting(
+                    "VIZIER_REELS_EXCEPT",
+                    "Quiet reels: except",
+                    "Channels quiet reels is kept out of, even when it is on everywhere - a room where the big \
+                     player is the whole point.",
                     Kind::Channels,
                     "",
                 ),

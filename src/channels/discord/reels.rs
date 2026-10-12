@@ -30,10 +30,18 @@ use serenity::all::{
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, EditMessage, Message,
 };
 
-/// Channels this runs in, `VIZIER_REELS_CHANNELS`. Empty means nowhere: it is
-/// off until somebody names a channel, so it can be tried in one room first.
-fn channels() -> Vec<u64> {
-    super::control::ids("VIZIER_REELS_CHANNELS")
+/// Channels this runs in, `VIZIER_REELS_CHANNELS`, and the ones it is kept out
+/// of, `VIZIER_REELS_EXCEPT`.
+///
+/// Naming channels limits it to those, which is how it was tried in one room
+/// first. Naming NONE means the whole server - the on/off switch is the real
+/// one - and the exceptions are for a room where the big player is the point.
+fn applies_here(channel: u64) -> bool {
+    let only = super::control::ids("VIZIER_REELS_CHANNELS");
+    if !only.is_empty() && !only.contains(&channel) {
+        return false;
+    }
+    !super::control::ids("VIZIER_REELS_EXCEPT").contains(&channel)
 }
 
 /// Whether to do anything at all, `VIZIER_REELS`.
@@ -188,7 +196,7 @@ pub async fn on_message(ctx: &Context, msg: &Message) {
         return;
     }
     let here = msg.channel_id.get();
-    if !channels().contains(&here) {
+    if !applies_here(here) {
         return;
     }
     let Some(reel) = find(&msg.content) else { return };
@@ -317,6 +325,24 @@ mod tests {
         let two = find("https://www.ddinstagram.com/reel/ABC123/").unwrap();
         assert_eq!(one.mirror, two.mirror);
         assert_eq!(one.mirror.as_deref(), Some("https://www.kkinstagram.com/reel/ABC123/"));
+    }
+
+    #[test]
+    fn naming_no_channel_means_the_whole_server_and_an_exception_is_still_kept_out() {
+        // The month harness is just a serialised settings guard, which is what
+        // this needs: these two keys are read live on every message.
+        let mut settings = super::super::month::testing::Month::off();
+        // Nothing named: everywhere.
+        assert!(applies_here(1), "with no channels named it runs server-wide");
+        // One named: only there.
+        settings.set("VIZIER_REELS_CHANNELS", "1");
+        assert!(applies_here(1));
+        assert!(!applies_here(2), "a named list is a limit, not a hint");
+        // And an exception wins either way.
+        settings.set("VIZIER_REELS_CHANNELS", "");
+        settings.set("VIZIER_REELS_EXCEPT", "3");
+        assert!(applies_here(2));
+        assert!(!applies_here(3), "the room where the big player is the point");
     }
 
     #[test]
