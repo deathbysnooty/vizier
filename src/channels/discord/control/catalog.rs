@@ -2597,44 +2597,6 @@ pub fn sections() -> Vec<Section> {
                     who sent it, who decided and the text.",
             settings: vec![
                 toggle(
-                    "VIZIER_REELS",
-                    "Quiet reels",
-                    "A reel link in a watched channel loses its big player: the preview on the member's own \
-                     message is silenced and one line goes up in its place, with a Watch button that plays the \
-                     reel privately to whoever presses it. Needs Manage Messages in those channels.",
-                ),
-                setting(
-                    "VIZIER_REELS_CHANNELS",
-                    "Quiet reels: channels",
-                    "Limit quiet reels to these channels. Empty means the whole server, so this is for trying it \
-                     in one room before turning it loose.",
-                    Kind::Channels,
-                    "",
-                ),
-                setting(
-                    "VIZIER_REELS_EXCEPT",
-                    "Quiet reels: except",
-                    "Channels quiet reels is kept out of, even when it is on everywhere - a room where the big \
-                     player is the whole point.",
-                    Kind::Channels,
-                    "",
-                ),
-                setting(
-                    "VIZIER_REELS_MAX_MB",
-                    "Quiet reels: largest to play",
-                    "A reel bigger than this is handed over as a link instead. Discord refuses more than 10 MB \
-                     from a bot on an unboosted server; a reel is usually two to four.",
-                    number(1, 25, "MB"),
-                    "9",
-                ),
-                setting(
-                    "VIZIER_REELS_FETCH_SECS",
-                    "Quiet reels: give up after",
-                    "How long to wait for the site to hand over the video before offering the link instead.",
-                    number(3, 60, "seconds"),
-                    "20",
-                ),
-                toggle(
                     "VIZIER_CONFESS",
                     "Confessions on",
                     "Off stops the buttons answering and nothing new can be submitted. Anything already approved \

@@ -77,7 +77,6 @@ mod signup;
 mod signup_store;
 // Anonymous confessions: the panel, the review queue, and the numbered posts.
 pub(crate) mod confess;
-pub(crate) mod reels;
 mod confess_store;
 // The themed month: the switch, the clock, the paint and the live link.
 pub(crate) mod month;
@@ -2161,12 +2160,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 confess::on_component(&ctx, component).await;
                 return;
             }
-            // Watching a reel privately, so the channel keeps one line instead
-            // of a player two hundred pixels tall.
-            if reels::owns_component(&id) {
-                reels::on_component(&ctx, component).await;
-                return;
-            }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
                 quote::on_component(&ctx, &self.1.storage, component).await;
                 return;
@@ -3674,9 +3667,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         automod::on_message(&ctx, &msg);
         // Koto, Anagram and Cat Bot results pay house points; these come from bots.
         games::on_message(&ctx, &msg);
-        // A reel link becomes one line and a button, and the preview on the
-        // member's own message is silenced.
-        reels::on_message(&ctx, &msg).await;
         // Anything new in the scoreboard channel - bots and announcements
         // included - moves the House Cup card back to the bottom.
         scoreboard::on_message(&ctx, &msg);
