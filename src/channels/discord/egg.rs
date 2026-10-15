@@ -905,12 +905,17 @@ pub fn join(user: u64, name: &str, now: i64) -> Joined {
             let conn = db.lock();
             let _ = store::thaw(&conn, user);
         }
+        // Back in by the month's door is back in by the older one as well.
+        // `/houseopt` and this button used to write different records, so a
+        // member could be in by one and out by the other.
+        super::house::step_back_in(user);
         // Back to the house they left, by name, so a returner is never re-sorted.
         if let Some(house) = super::house::house(&had.house) {
             super::house::place(user, house, "rejoined");
         }
         return Joined::Resumed { hatched: had.open() };
     }
+    super::house::step_back_in(user);
     let hatches_at = hatch_for(now, month::hatch_at(), month::watch_days());
     let fresh = {
         let conn = db.lock();
@@ -1002,6 +1007,9 @@ pub fn leave(user: u64) -> bool {
     // `join` puts them back in the same one.
     if frozen {
         super::house::unplace(user);
+        // And out by the older door too, so /today, the awards and the houses
+        // all say the same thing about them.
+        super::house::step_out(user);
     }
     frozen
 }

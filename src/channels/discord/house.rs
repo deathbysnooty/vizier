@@ -253,6 +253,22 @@ fn remember(user: u64, house: &House, sorted_by: &str) {
 /// of - and the Discord card and the live page disagreed about the score,
 /// because the page already left them out. Their egg remembers the house, so
 /// coming back puts them straight back where they were.
+pub(super) fn step_back_in(user: u64) {
+    set_opted_out(user, false);
+}
+
+/// Marks somebody as out of the houses - what `/houseopt` writes, and now what
+/// the month's own Opt out button writes too.
+///
+/// There used to be two ways out that did not know about each other: this one,
+/// from before the month, and the games button. Somebody could be out by one
+/// and in by the other, which is how a member holding the games role with a
+/// live dragon was told they had stepped out of the houses and were earning
+/// nothing. One door now writes both sides.
+pub(super) fn step_out(user: u64) {
+    set_opted_out(user, true);
+}
+
 pub(super) fn unplace(user: u64) {
     if let Some(db) = DB.get() {
         let _ = db.lock().execute("DELETE FROM members WHERE user_id = ?1", params![user as i64]);
