@@ -261,13 +261,51 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
             return;
         }
     }
-    // The same door the sign-up buttons use: one place decides what a yes and a
-    // no do to the role and to the record, so the two can never drift apart -
-    // and so there is only ever one games role, whichever message was pressed.
+    let done = answer(ctx, component.guild_id, db, user, &name, pressed, now).await;
+    let _ = component
+        .create_response(&ctx.http, whisper(gate_reply(pressed, done.changed, done.worn, done.joined.as_ref())))
+        .await;
+    let press = Press { changed: done.changed };
+    // The count on the post follows, quietly and at most once in a while.
+    if press.changed {
+        refresh_gate(ctx.clone());
+    }
+}
+
+/// What saying yes or no actually did.
+pub struct Answered {
+    pub changed: bool,
+    pub worn: bool,
+    pub joined: Option<egg::Joined>,
+}
+
+/// Only the part the reply needs after the work is done.
+struct Press {
+    changed: bool,
+}
+
+/// Everything a yes or a no does, in one place.
+///
+/// The buttons call it and so does `/houseopt`, because two doors into the
+/// month that each did their own thing is exactly how a member came to be
+/// holding the games role, with a hatched dragon, while being told they had
+/// stepped out of the houses and were earning nothing.
+///
+/// It moves the games role, claims or freezes the egg, puts the house role on
+/// a returner, and writes the toggle down.
+pub async fn answer(
+    ctx: &Context,
+    guild: Option<serenity::all::GuildId>,
+    db: &parking_lot::Mutex<rusqlite::Connection>,
+    user: u64,
+    name: &str,
+    pressed: Answer,
+    now: i64,
+) -> Answered {
     // Judged per press, exactly as the sign-up buttons judge it: a mod who
     // fills the setting in or drags the role down should not have to restart
     // the bot for the next press to work.
-    let holder = match component.guild_id {
+    let holder = match guild {
         Some(guild) => signup::role_state(ctx, guild)
             .await
             .role()
@@ -275,14 +313,14 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         None => None,
     };
     let wardrobe: Option<&dyn signup::Wardrobe> = holder.as_ref().map(|h| h as &dyn signup::Wardrobe);
-    let press = signup::press(db, wardrobe, user, &name, pressed, now).await;
+    let press = signup::press(db, wardrobe, user, name, pressed, now).await;
     if let Some(note) = &press.note {
         tracing::warn!("gate: {}", note);
     }
     // The egg follows the role: a yes claims one (or thaws the one they left),
     // a no freezes it. Nothing is ever deleted by a no.
     let joined = match pressed {
-        Answer::In => Some(egg::join(user, &name, now)),
+        Answer::In => Some(egg::join(user, name, now)),
         Answer::Out => {
             egg::leave(user);
             None
@@ -291,12 +329,10 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     // The HOUSE role, which place() does not touch: it writes the roll and
     // nothing else, so a late joiner scored for a house while wearing no
     // colour, grouped nowhere in the member list and locked out of a room
-    // their own house owns. The hatch gives the role to everybody at once;
-    // somebody arriving afterwards has to be given theirs here.
-    if let (Some(guild), Some(joined)) = (component.guild_id, joined.as_ref()) {
+    // their own house owns.
+    if let (Some(guild), Some(joined)) = (guild, joined.as_ref()) {
         let house = match joined {
             egg::Joined::Hatched { house, .. } => super::house::house(house),
-            // A returner goes back to the house they left, so put the role back on.
             egg::Joined::Resumed { hatched: true } => super::house::house_of(user),
             _ => None,
         };
@@ -308,12 +344,7 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
         let conn = eggs.lock();
         let _ = store::note_toggle(&conn, user, now);
     }
-    let worn = press.role_moved || (pressed == Answer::Out);
-    let _ = component.create_response(&ctx.http, whisper(gate_reply(pressed, press.changed, worn, joined.as_ref()))).await;
-    // The count on the post follows, quietly and at most once in a while.
-    if press.changed {
-        refresh_gate(ctx.clone());
-    }
+    Answered { changed: press.changed, worn: press.role_moved || pressed == Answer::Out, joined }
 }
 
 // --- one message, found again -----------------------------------------------------------

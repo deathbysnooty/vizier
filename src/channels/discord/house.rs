@@ -740,6 +740,33 @@ pub async fn opt_command(ctx: &Context, command: &CommandInteraction) {
     };
     let user = command.user.id.get();
 
+    // While a themed month runs, this IS the games button - the same code, so
+    // the two can never say different things about the same member. Stepping
+    // out here freezes the egg and gives up the games role exactly as pressing
+    // Opt out does; stepping back in thaws it and returns the house.
+    if super::month::running() {
+        let Some(db) = super::signup_store::db() else {
+            let _ = command.create_response(&ctx.http, whisper("Something's wrong at my end - try again in a minute.")).await;
+            return;
+        };
+        let name = command.user.global_name.clone().unwrap_or_else(|| command.user.name.clone());
+        let now = Utc::now().timestamp();
+        let going_out = !opted_out(user);
+        let answer = if going_out { super::signup_store::Answer::Out } else { super::signup_store::Answer::In };
+        let done = super::gate::answer(ctx, Some(guild), db, user, &name, answer, now).await;
+        set_muggle(ctx, guild, user, going_out).await;
+        if going_out {
+            if let Some(captained) = captain_of(user) {
+                meta_clear(&format!("captain_{}", captained.key));
+                strip_captain_role(ctx, guild, user).await;
+            }
+            take_off_houses(ctx, guild, user).await;
+        }
+        let text = super::gate::gate_reply(answer, done.changed, done.worn, done.joined.as_ref());
+        let _ = command.create_response(&ctx.http, whisper(text)).await;
+        return;
+    }
+
     if opted_out(user) {
         set_opted_out(user, false);
         set_muggle(ctx, guild, user, false).await;
