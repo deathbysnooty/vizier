@@ -692,7 +692,32 @@ pub async fn place_reply(
                     out.notes.push(format!("a new thread was opened on #{} but would not take the reply: {}", parent.number, err));
                 }
             },
-            Err(err) => out.notes.push(format!("no thread could be opened on #{}: {}", parent.number, err)),
+            Err(err) => {
+                // "A thread has already been created for this message" means
+                // the card HAS a thread and this bot's record does not know -
+                // an older confession, or one whose thread was opened before
+                // the number was written down. A thread started from a message
+                // carries that message's own id, so it can be used directly,
+                // and writing it down stops the next reply going through all
+                // this again. Without it a reply to an older confession landed
+                // in the channel.
+                if err.to_string().to_lowercase().contains("already been created") {
+                    match poster.say_in_thread(parent.posted_message, card.clone()).await {
+                        Ok(id) => {
+                            out.message = id;
+                            out.thread = Some(parent.posted_message);
+                            out.opened = Some(parent.posted_message);
+                            return out;
+                        }
+                        Err(again) => out.notes.push(format!(
+                            "#{} already had a thread but it would not take the reply: {}",
+                            parent.number, again
+                        )),
+                    }
+                } else {
+                    out.notes.push(format!("no thread could be opened on #{}: {}", parent.number, err));
+                }
+            }
         }
     }
 
@@ -2088,6 +2113,8 @@ mod tests {
         /// does and does not touch.
         pub(super) deleted: Mutex<Vec<(u64, u64)>>,
         no_threads: bool,
+        /// Discord refuses a second thread on a card that already has one.
+        thread_exists: bool,
         no_revive: bool,
         /// The channel refuses every post.
         no_channel: bool,
@@ -2137,6 +2164,10 @@ mod tests {
 
         async fn open_thread(&self, channel: u64, message: u64, name: &str, minutes: u16) -> anyhow::Result<u64> {
             self.opened.lock().push((channel, message, name.to_string(), minutes));
+            if self.thread_exists {
+                // Discord's own words when a card already has one.
+                return Err(anyhow::anyhow!("A thread has already been created for this message"));
+            }
             if self.no_threads {
                 return Err(anyhow::anyhow!("Max active threads reached"));
             }
@@ -2776,6 +2807,23 @@ mod tests {
         assert_eq!(out.buttons_off, None, "there was nothing left to edit");
         assert!(out.notes[0].contains("may still show it"), "{:?}", out.notes);
         assert_eq!(super::store::buttons_holder(&db.lock(), 21), Some((second, 460)));
+    }
+
+    #[tokio::test]
+    async fn a_card_that_already_has_a_thread_gets_the_reply_in_it_not_in_the_channel() {
+        // The card has a thread; this bot's record does not know, because the
+        // thread was opened before the number was written down. Discord refuses
+        // the second thread, and a reply to an older confession was landing in
+        // the channel for everybody to read out of context.
+        let mut fake = Fake::new();
+        fake.thread_exists = true;
+        let parent = approved(412);
+        assert_eq!(parent.thread_id, 0, "this bot's record does not know about the thread");
+        let out = place_reply(&fake, 21, &parent, &reply_embed(412, "A", "a reply", 1000), true, 4320).await;
+        assert_eq!(out.thread, Some(parent.posted_message), "a thread started from a message carries that message's id");
+        assert_eq!(out.opened, Some(parent.posted_message), "and it is written down, so the next reply goes straight there");
+        assert!(!out.fell_back, "nothing should land in the channel: {:?}", out.notes);
+        assert_eq!(fake.thread_posts.lock().len(), 1, "the reply went into the thread");
     }
 
     #[test]
