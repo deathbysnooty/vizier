@@ -517,7 +517,7 @@ pub trait Poster: Send + Sync {
     ///
     /// Only ever called with a message id this bot wrote into its own store,
     /// so the old bot's messages cannot be harmed even by a bug.
-    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()>;
+    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, which: OnCard) -> anyhow::Result<()>;
     /// Deletes one review card.
     ///
     /// The only delete on this trait, and the only one this feature has. It is
@@ -562,12 +562,16 @@ pub async fn post_confession(poster: &dyn Poster, channel: u64, c: &Confession, 
         }
     }
     if let Some((old, old_number)) = was_on.filter(|(id, _)| *id != out.message) {
-        match poster.set_card_buttons(channel, old, old_number, false).await {
+        // Not off: down to its reply button. The submit button moves to the
+        // newest card, and #old_number stays answerable for as long as it is
+        // in the channel.
+        match poster.set_card_buttons(channel, old, old_number, OnCard::ReplyOnly).await {
             Ok(()) => out.buttons_off = Some(old),
             // The old card has gone, or the bot cannot edit it. Harmless: two
-            // cards show buttons and both press through to the same place.
+            // cards show the submit button and both press through to the same
+            // place.
             Err(err) => out.notes.push(format!(
-                "the buttons were not taken off the card before #{} ({}) - it may still show them",
+                "the submit button was not taken off the card before #{} ({}) - it may still show it",
                 c.number, err
             )),
         }
@@ -600,7 +604,7 @@ pub async fn move_buttons(poster: &dyn Poster, channel: u64, newest: Option<(i64
         );
         return out;
     };
-    match poster.set_card_buttons(channel, message, number, true).await {
+    match poster.set_card_buttons(channel, message, number, OnCard::Both).await {
         Ok(()) => out.on = Some((number, message)),
         Err(err) => out.notes.push(format!("the buttons could not be put on #{} ({})", number, err)),
     }
@@ -807,9 +811,9 @@ impl Poster for Live<'_> {
         Ok(ChannelId::new(channel).send_message(self.http, post).await?.id.get())
     }
 
-    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()> {
+    async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, which: OnCard) -> anyhow::Result<()> {
         // A components-only edit: the embed on the card is left exactly as it is.
-        let rows = if on { vec![card_buttons(number)] } else { vec![] };
+        let rows = vec![buttons_for(number, which)];
         ChannelId::new(channel).edit_message(self.http, MessageId::new(message), EditMessage::new().components(rows)).await?;
         Ok(())
     }
@@ -820,19 +824,43 @@ impl Poster for Live<'_> {
     }
 }
 
-/// The two buttons that ride on the newest confession card. There is no panel
-/// message: these, and `/confess`, are the whole of the way in.
+/// What a confession card carries.
 ///
-/// The reply button carries `number` — the confession the card is — so pressing
-/// it answers that one. A button on a card cannot sensibly ask which confession
-/// it is about.
+/// EVERY card keeps its reply button, for ever. Replying to #412 three weeks
+/// and forty confessions later should be one press on the card itself, and the
+/// reply still lands in that confession's own thread - which it always could,
+/// since the button carries the number and `place_reply` goes by the parent's
+/// thread. What the card lost was the button, not the ability.
+///
+/// Only "Submit a confession" moves, and only because a channel wants one
+/// obvious way in rather than one per card going back to the beginning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnCard {
+    /// The newest card: submit, and reply to this one.
+    Both,
+    /// Every older card: reply to this one.
+    ReplyOnly,
+}
+
+/// The buttons a confession card carries. The reply button carries `number` —
+/// the confession the card is — so pressing it answers that one. A button on a
+/// card cannot sensibly ask which confession it is about.
 pub fn card_buttons(number: i64) -> CreateActionRow {
-    CreateActionRow::Buttons(vec![
-        CreateButton::new(ID_NEW).label("Submit a confession").style(ButtonStyle::Primary),
-        CreateButton::new(format!("{}{}", ID_REPLY, number))
-            .label(format!("Reply to #{}", number))
-            .style(ButtonStyle::Secondary),
-    ])
+    buttons_for(number, OnCard::Both)
+}
+
+/// The buttons for a card, by what it should carry.
+pub fn buttons_for(number: i64, which: OnCard) -> CreateActionRow {
+    let reply = CreateButton::new(format!("{}{}", ID_REPLY, number))
+        .label(format!("Reply to #{}", number))
+        .style(ButtonStyle::Secondary);
+    match which {
+        OnCard::Both => CreateActionRow::Buttons(vec![
+            CreateButton::new(ID_NEW).label("Submit a confession").style(ButtonStyle::Primary),
+            reply,
+        ]),
+        OnCard::ReplyOnly => CreateActionRow::Buttons(vec![reply]),
+    }
 }
 
 // --- the modals --------------------------------------------------------------
@@ -2126,13 +2154,14 @@ mod tests {
             Ok(id)
         }
 
-        async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, on: bool) -> anyhow::Result<()> {
-            self.edits.lock().push((channel, message, on));
+        async fn set_card_buttons(&self, channel: u64, message: u64, number: i64, which: OnCard) -> anyhow::Result<()> {
+            let submit = which == OnCard::Both;
+            self.edits.lock().push((channel, message, submit));
             if self.gone.lock().contains(&message) {
                 return Err(anyhow::anyhow!("Unknown Message"));
             }
             self.buttons.lock().retain(|(id, _, _)| *id != message);
-            self.buttons.lock().push((message, number, on));
+            self.buttons.lock().push((message, number, submit));
             Ok(())
         }
 
@@ -2745,8 +2774,33 @@ mod tests {
         let second = out.posted.expect("the new card went up anyway");
         assert_eq!(out.buttons_on, Some((460, second)));
         assert_eq!(out.buttons_off, None, "there was nothing left to edit");
-        assert!(out.notes[0].contains("may still show them"), "{:?}", out.notes);
+        assert!(out.notes[0].contains("may still show it"), "{:?}", out.notes);
         assert_eq!(super::store::buttons_holder(&db.lock(), 21), Some((second, 460)));
+    }
+
+    #[test]
+    fn an_older_card_keeps_its_reply_button_and_only_the_submit_one_moves() {
+        // What a card carries once it is no longer the newest: the reply
+        // button, so #412 can still be answered forty confessions later.
+        let older = buttons_for(412, OnCard::ReplyOnly);
+        let newest = buttons_for(500, OnCard::Both);
+        let ids = |row: &CreateActionRow| {
+            let json = serde_json::to_value(row).expect("a row serialises");
+            json["components"]
+                .as_array()
+                .map(|all| {
+                    all.iter()
+                        .map(|b| b["custom_id"].as_str().unwrap_or_default().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(ids(&older), vec!["confess:reply:412"], "an older card can still be answered");
+        assert_eq!(
+            ids(&newest),
+            vec!["confess:new".to_string(), "confess:reply:500".to_string()],
+            "the newest card is also the way to start one"
+        );
     }
 
     /// A channel that will not take the card leaves everything as it was: the
