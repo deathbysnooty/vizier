@@ -59,6 +59,7 @@ pub fn builders() -> Vec<CreateCommand> {
         .add_option(sub("matchmake", "who the numbers say suits you"))
         .add_option(sub("anniversary", "how long you have been married"))
         .add_option(sub("couples", "the longest, the biggest and the newest"))
+        .add_option(sub("tree", "everybody's family tree, as a page"))
         .add_option(sub("refuse", "stop somebody proposing to you").add_sub_option(who("who", "the one to stop")));
 
     vec![
@@ -383,6 +384,46 @@ async fn on_love(
                     .join("\n")
             };
             let _ = command.create_response(&ctx.http, whisper(marriage::with_tree(me, text))).await;
+        }
+        "tree" | "couples" => {
+            let (unions, kin) = {
+                let conn = db.lock();
+                (store::all_unions(&conn), store::all_kin(&conn))
+            };
+            let board = marriage::standing(&unions, &kin);
+            let pair = |p: Option<((u64, u64), i64)>| {
+                p.map(|((a, b), since)| {
+                    format!("**{}** and **{}** · {}", called(ctx, a), called(ctx, b), marriage::how_long(since, now))
+                })
+            };
+            let mut text = if board.married == 0 {
+                "Nobody has married yet. Somebody has to go first.".to_string()
+            } else {
+                let mut lines = vec![format!(
+                    "💒 **{}** married · **{}** household{} · the biggest is **{}** strong",
+                    board.married,
+                    board.households,
+                    if board.households == 1 { "" } else { "s" },
+                    board.biggest
+                )];
+                if let Some(line) = pair(board.oldest) {
+                    lines.push(format!("🥇 Longest: {}", line));
+                }
+                if let Some(line) = pair(board.newest) {
+                    lines.push(format!("🆕 Newest: {}", line));
+                }
+                if let Some((who, n)) = board.most_spouses {
+                    lines.push(format!("💍 Most spouses: **{}** with **{}**", called(ctx, who), n));
+                }
+                lines.join("\n")
+            };
+            // The whole map, not one household: this is the command for
+            // everybody's tree at once.
+            if let Some(base) = super::month::live_url() {
+                let root = base.strip_suffix("/live").unwrap_or(&base);
+                text.push_str(&format!("\n-# 🌳 Everybody: {}/love", root));
+            }
+            let _ = command.create_response(&ctx.http, whisper(text)).await;
         }
         _ => {
             let _ = command.create_response(&ctx.http, whisper("That part isn't built yet.")).await;

@@ -236,6 +236,49 @@ pub fn households(unions: &[(u64, u64, i64)], kin: &[(u64, u64)]) -> Vec<Vec<u64
     out
 }
 
+/// What the server looks like, for `/love tree` and `/love couples`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Standing {
+    pub married: usize,
+    pub households: usize,
+    pub biggest: usize,
+    /// The longest-running marriage, as (pair, when it started).
+    pub oldest: Option<((u64, u64), i64)>,
+    pub newest: Option<((u64, u64), i64)>,
+    /// Whoever has the most spouses, and how many.
+    pub most_spouses: Option<(u64, usize)>,
+}
+
+/// Reads the whole board in one pass.
+pub fn standing(unions: &[(u64, u64, i64)], kin: &[(u64, u64)]) -> Standing {
+    let houses = households(unions, kin);
+    let mut counts: HashMap<u64, usize> = HashMap::new();
+    let mut married: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for (a, b, _) in unions {
+        *counts.entry(*a).or_default() += 1;
+        *counts.entry(*b).or_default() += 1;
+        married.insert(*a);
+        married.insert(*b);
+    }
+    // Ties go to the pair named first, so the board does not shuffle itself
+    // between two marriages made in the same second.
+    let oldest = unions.iter().min_by_key(|(a, b, since)| (*since, *a, *b)).map(|(a, b, s)| ((*a, *b), *s));
+    let newest = unions.iter().max_by_key(|(a, b, since)| (*since, *a, *b)).map(|(a, b, s)| ((*a, *b), *s));
+    let most_spouses = counts
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .max_by_key(|(who, n)| (**n, std::cmp::Reverse(**who)))
+        .map(|(who, n)| (*who, *n));
+    Standing {
+        married: married.len(),
+        households: houses.len(),
+        biggest: houses.first().map(Vec::len).unwrap_or(0),
+        oldest,
+        newest,
+        most_spouses,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +340,24 @@ mod tests {
         // Nobody else to name.
         assert_eq!(rival(&[(1, 60)], 1, 100), None);
         assert_eq!(rival(&[], 1, 100), None);
+    }
+
+    #[test]
+    fn the_board_reads_the_whole_server_in_one_pass() {
+        // 1 is married to both 2 and 3; 4 and 5 are married; 1 and 2 have a child 6.
+        let unions = vec![(1, 2, 100), (1, 3, 300), (4, 5, 200)];
+        let kin = vec![(1, 6), (2, 6)];
+        let board = standing(&unions, &kin);
+        assert_eq!(board.married, 5, "everybody in a marriage, counted once");
+        assert_eq!(board.households, 2);
+        assert_eq!(board.biggest, 4, "1, 2, 3 and the child");
+        assert_eq!(board.oldest.map(|(p, s)| (p, s)), Some(((1, 2), 100)));
+        assert_eq!(board.newest.map(|(p, s)| (p, s)), Some(((1, 3), 300)));
+        assert_eq!(board.most_spouses, Some((1, 2)), "only somebody with more than one counts");
+        // An empty server is an empty board, not a panic.
+        let nothing = standing(&[], &[]);
+        assert_eq!((nothing.married, nothing.households, nothing.biggest), (0, 0, 0));
+        assert!(nothing.oldest.is_none() && nothing.most_spouses.is_none());
     }
 
     #[test]
