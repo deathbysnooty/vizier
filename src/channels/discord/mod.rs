@@ -77,6 +77,10 @@ mod signup;
 mod signup_store;
 // Anonymous confessions: the panel, the review queue, and the numbered posts.
 pub(crate) mod confess;
+pub(crate) mod love_bank;
+pub(crate) mod marriage;
+pub(crate) mod marriage_cmd;
+pub(crate) mod marriage_store;
 mod confess_store;
 // The themed month: the switch, the clock, the paint and the live link.
 pub(crate) mod month;
@@ -302,6 +306,12 @@ impl VizierChannel for DiscordChannelReader {
         if let Err(err) = confess_store::open(&self.deps.config.workspace) {
             tracing::error!("confess: store not opened ({}) - the confession buttons will refuse every press", err);
         }
+        // Marriages and the pictures the gestures post. A missing bank is not
+        // an error: the gestures work and post words only.
+        if let Err(err) = marriage_store::open(&self.deps.config.workspace) {
+            tracing::error!("love: store not opened ({}) - every proposal will refuse", err);
+        }
+        love_bank::open(&self.deps.config.workspace);
         // The themed month's eggs: the seats, the hunger each slot was judged
         // against, and the houses and dragons the hatch deals. Not opening
         // means the month cannot run at all, so it is loud: every point would
@@ -1999,6 +2009,10 @@ impl EventHandler for Handler {
                 .required(true),
             );
         commands.push(admin_command(trace));
+        // Marriages, adoptions and the gestures: four commands, because /love
+        // carries the other dozen as subcommands and those cost nothing against
+        // Discord's hundred.
+        commands.extend(marriage_cmd::builders());
         
 // While the Cup is paused the house and Snitch commands come off the list
 // entirely - a command nobody can use is worse than no command, because
@@ -2158,6 +2172,12 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if confess::owns_component(&id) {
                 confess::on_component(&ctx, component).await;
+                return;
+            }
+            // A proposal answered: the asker and the asked both ride in the
+            // button's own id, so a restart cannot orphan an offer.
+            if marriage_cmd::owns_component(&id) {
+                marriage_cmd::on_component(&ctx, component).await;
                 return;
             }
             if id.starts_with("qstyle:") || id.starts_with("qsave:") {
@@ -2436,6 +2456,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             let agent_id = self.0.clone();
 
             // Control panel: /panel sends an admin a one-use sign-in link.
+            if matches!(command.data.name.as_str(), "marry" | "divorce" | "family" | "love") {
+                marriage_cmd::on_command(&ctx, &command).await;
+                return;
+            }
             if command.data.name == "panel" {
                 control::web::on_command(&ctx, &command).await;
                 return;

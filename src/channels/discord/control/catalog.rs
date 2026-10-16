@@ -2597,6 +2597,35 @@ pub fn sections() -> Vec<Section> {
                     who sent it, who decided and the text.",
             settings: vec![
                 toggle(
+                    "VIZIER_LOVE",
+                    "Marriages on",
+                    "Marriages, adoptions and the gestures: /marry, /divorce, /family and /love. It pays no house \
+                     points and never can. Off stops every command answering; nothing already written down is lost.",
+                ),
+                setting(
+                    "VIZIER_LOVE_CHANNEL",
+                    "Marriages: channel",
+                    "Where the cards go. The commands work in any channel; the cards land in one room, so a busy \
+                     channel is never buried in hearts. Empty posts them where the command was used.",
+                    Kind::Channel,
+                    "",
+                ),
+                setting(
+                    "VIZIER_LOVE_REMARRY_HOURS",
+                    "Marriages: wait before remarrying",
+                    "How long the same two must wait after a divorce before marrying again, so a pair cannot \
+                     marry and divorce twenty times in an evening.",
+                    number(0, 720, "hours"),
+                    "24",
+                ),
+                setting(
+                    "VIZIER_LOVE_GESTURE_SECS",
+                    "Marriages: between gestures",
+                    "How long one member must wait between hugs, kisses and the rest.",
+                    number(0, 3600, "seconds"),
+                    "20",
+                ),
+                toggle(
                     "VIZIER_CONFESS",
                     "Confessions on",
                     "Off stops the buttons answering and nothing new can be submitted. Anything already approved \
