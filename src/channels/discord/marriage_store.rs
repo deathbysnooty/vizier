@@ -40,6 +40,7 @@ pub const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS blocks (
         who INTEGER NOT NULL, blocked INTEGER NOT NULL, ts INTEGER NOT NULL,
         PRIMARY KEY (who, blocked));
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS past (
         id INTEGER PRIMARY KEY AUTOINCREMENT, low INTEGER NOT NULL, high INTEGER NOT NULL,
         since INTEGER NOT NULL, until INTEGER NOT NULL, ended_by INTEGER NOT NULL);
@@ -238,6 +239,19 @@ pub fn is_refused(conn: &Connection, asker: u64, target: u64) -> bool {
         |_| Ok(()),
     )
     .is_ok()
+}
+
+/// The one message this feature keeps in the channel: its id, remembered so a
+/// restart adopts it rather than posting a second one.
+pub fn meta_get(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).ok()
+}
+
+pub fn meta_set(conn: &Connection, key: &str, value: &str) {
+    let _ = conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    );
 }
 
 #[cfg(test)]

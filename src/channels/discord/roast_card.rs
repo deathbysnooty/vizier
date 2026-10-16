@@ -187,7 +187,7 @@ fn family_like(fs: &FontSystem, words: &[&str], not: &[&str]) -> Option<String> 
 
 /// The three faces the card draws with: the ship name, the number and names,
 /// and the small lines. Any of them may come out the same as another.
-fn faces(fs: &FontSystem) -> (String, String, String) {
+pub(super) fn faces(fs: &FontSystem) -> (String, String, String) {
     let plain = installed(fs, PLAIN).or_else(|| family_like(fs, &["sans", "helvetica", "arial"], &[])).unwrap_or_else(|| "sans-serif".to_string());
     let serif = installed(fs, SERIF)
         .or_else(|| family_like(fs, &["serif", "roman", "georgia", "garamond", "didone"], &["sans"]))
@@ -196,8 +196,8 @@ fn faces(fs: &FontSystem) -> (String, String, String) {
     (script, serif, plain)
 }
 
-struct Ink<'a> {
-    px: Pixmap,
+pub(super) struct Ink<'a> {
+    pub(super) px: Pixmap,
     fs: &'a mut FontSystem,
     cache: SwashCache,
     /// Every face each family has, to snap a wanted weight onto a real one: ask
@@ -207,7 +207,7 @@ struct Ink<'a> {
 }
 
 impl<'a> Ink<'a> {
-    fn new(fs: &'a mut FontSystem, families: &[&str]) -> Option<Ink<'a>> {
+    pub(super) fn new(fs: &'a mut FontSystem, families: &[&str]) -> Option<Ink<'a>> {
         let mut faces = HashMap::new();
         for family in families {
             let list: Vec<(FontStyle, Stretch, Weight)> =
@@ -244,13 +244,13 @@ impl<'a> Ink<'a> {
         buf
     }
 
-    fn measure(&mut self, text: &str, family: &str, size: f32, weight: Weight) -> f32 {
+    pub(super) fn measure(&mut self, text: &str, family: &str, size: f32, weight: Weight) -> f32 {
         let buf = self.layout(text, family, size, weight);
         buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
     /// One line centred on `cx`, with its baseline at `baseline`.
-    fn centred(&mut self, text: &str, family: &str, cx: f32, baseline: f32, size: f32, weight: Weight, colour: [u8; 3]) {
+    pub(super) fn centred(&mut self, text: &str, family: &str, cx: f32, baseline: f32, size: f32, weight: Weight, colour: [u8; 3]) {
         let buf = self.layout(text, family, size, weight);
         let (line_y, w) = buf.layout_runs().next().map(|r| (r.line_y, r.line_w)).unwrap_or((size, 0.0));
         let (ox, oy) = ((cx - w / 2.0).round() as i32, (baseline - line_y).round() as i32);
@@ -289,7 +289,7 @@ impl<'a> Ink<'a> {
 /// shapes the text once per character it drops, so a name someone pasted a
 /// novel into would be shaped a thousand times over; nothing this card draws is
 /// ever longer than a line anyway.
-fn clip(text: &str, max: usize) -> String {
+pub(super) fn clip(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((at, _)) => text[..at].to_string(),
         None => text.to_string(),
@@ -456,7 +456,7 @@ fn garland(px: &mut Pixmap, l: &Look) {
     }
 }
 
-fn initial(name: &str) -> String {
+pub(super) fn initial(name: &str) -> String {
     name.chars().find(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase().to_string()).unwrap_or_else(|| "?".to_string())
 }
 

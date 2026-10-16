@@ -367,7 +367,9 @@ fn add_face(out: &mut Vec<String>, url: String) {
 
 /// Every picture worth trying for this member, best first, ending with
 /// Discord's default so there is always something to fall back to.
-fn face_urls(ctx: &Context, command: &CommandInteraction, user: u64) -> Vec<String> {
+/// Where a member's picture might be, best first. Shared with the family
+/// cards, which draw a household of them.
+pub(super) fn face_urls(ctx: &Context, command: &CommandInteraction, user: u64) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let small = |u: &User| u.face().replace("size=1024", "size=256");
     if command.user.id.get() == user {
@@ -386,7 +388,11 @@ fn face_urls(ctx: &Context, command: &CommandInteraction, user: u64) -> Vec<Stri
 }
 
 /// The first of those that comes back. `None` means the card draws an initial.
-async fn avatar_of(urls: Vec<String>) -> Option<Vec<u8>> {
+///
+/// Shared with the family cards, which want exactly this and the same cache:
+/// a household of eight is eight pictures, and drawing it twice in a minute
+/// should cost nothing the second time.
+pub(super) async fn avatar_of(urls: Vec<String>) -> Option<Vec<u8>> {
     for url in urls {
         if let Some(bytes) = fetch_avatar(url).await {
             return Some(bytes.as_ref().clone());

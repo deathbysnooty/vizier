@@ -79,6 +79,7 @@ mod signup_store;
 pub(crate) mod confess;
 pub(crate) mod love_bank;
 pub(crate) mod marriage;
+pub(crate) mod marriage_card;
 pub(crate) mod marriage_cmd;
 pub(crate) mod marriage_store;
 mod confess_store;
@@ -1643,6 +1644,10 @@ impl EventHandler for Handler {
         // The hourly post, and the join/opt-out buttons kept last in their
         // channel. Both adopt the post they already own rather than adding one.
         gate::spawn(ctx.clone());
+        // One message in the love channel carrying the link to the family
+        // tree, kept and pinned, so the page is findable without knowing a
+        // command.
+        marriage_cmd::spawn_link(ctx.clone());
         // The hourly house points summary in the houses channel.
         standings::spawn(ctx.clone());
         // The House Cup channel: welcome, rules, and the scoreboard card kept last.

@@ -223,6 +223,38 @@ async fn end_it(
     let _ = command.create_response(&ctx.http, whisper("Done.")).await;
 }
 
+/// Everybody's picture, fetched at once and given a short budget: a household
+/// of eight is eight downloads, and a card is better late by a second than
+/// missing because one avatar was slow.
+async fn faces_for(
+    ctx: &Context,
+    command: &CommandInteraction,
+    people: &[(u64, String)],
+) -> Vec<super::marriage_card::Face> {
+    let jobs = people.iter().map(|(id, note)| {
+        let urls = super::roast::face_urls(ctx, command, *id);
+        let name = called(ctx, *id);
+        let note = note.clone();
+        async move {
+            let avatar = super::roast::avatar_of(urls).await;
+            super::marriage_card::Face { name, avatar, note }
+        }
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(8), futures::future::join_all(jobs)).await {
+        Ok(faces) => faces,
+        // Whatever did not arrive is drawn as an initial, which is what the
+        // renderer does for anybody with no picture anyway.
+        Err(_) => people
+            .iter()
+            .map(|(id, note)| super::marriage_card::Face {
+                name: called(ctx, *id),
+                avatar: None,
+                note: note.clone(),
+            })
+            .collect(),
+    }
+}
+
 async fn show_family(
     ctx: &Context,
     command: &CommandInteraction,
@@ -251,21 +283,57 @@ async fn show_family(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let card = CreateEmbed::new()
-        .title(format!("🏡 {}'s family", called(ctx, me)))
-        .description(marriage::with_tree(me, String::new()).trim_start().to_string())
-        .field("Married to", spouses, false)
-        .field("Parents", names(&family.parents), true)
-        .field("Children", names(&family.children), true)
-        .colour(0xe0729f);
-    let _ = command
-        .create_response(
-            &ctx.http,
-            CreateInteractionResponse::Message(
-                CreateInteractionResponseMessage::new().embed(card).ephemeral(true),
-            ),
-        )
-        .await;
+    let _ = spouses;
+    let _ = names(&family.parents);
+    // Drawing takes longer than the three seconds Discord allows for a first
+    // answer, so the reply is opened and filled in.
+    if command.defer_ephemeral(&ctx.http).await.is_err() {
+        return;
+    }
+    let mut who = vec![(me, String::new())];
+    let spouse_faces: Vec<(u64, String)> =
+        family.spouses.iter().map(|u| (u.other, marriage::since_words(u.since))).collect();
+    let parent_faces: Vec<(u64, String)> = family.parents.iter().map(|id| (*id, String::new())).collect();
+    let child_faces: Vec<(u64, String)> = family.children.iter().map(|id| (*id, String::new())).collect();
+    who.extend(spouse_faces.iter().cloned());
+    who.extend(parent_faces.iter().cloned());
+    who.extend(child_faces.iter().cloned());
+    let faces = faces_for(ctx, command, &who).await;
+    let (mut at, mut take) = (0usize, |n: usize, at: &mut usize| {
+        let out = faces.get(*at..*at + n).map(<[_]>::to_vec).unwrap_or_default();
+        *at += n;
+        out
+    });
+    let mine = take(1, &mut at).into_iter().next().unwrap_or_default();
+    let house = super::marriage_card::House {
+        who: mine,
+        spouses: take(spouse_faces.len(), &mut at),
+        parents: take(parent_faces.len(), &mut at),
+        children: take(child_faces.len(), &mut at),
+        note: household_words(&family),
+    };
+    let png = tokio::task::spawn_blocking(move || {
+        let mut fs = super::awards::fonts().lock();
+        super::marriage_card::house_png(&mut fs, &house)
+    })
+    .await
+    .ok()
+    .flatten();
+    let line = marriage::with_tree(me, String::new()).trim_start().to_string();
+    let mut follow = serenity::all::CreateInteractionResponseFollowup::new().ephemeral(true).content(line);
+    match png {
+        Some(bytes) => {
+            follow = follow.add_file(serenity::all::CreateAttachment::bytes(bytes, "family.png"));
+        }
+        None => {
+            follow = follow.content(format!(
+                "{}\n-# The card could not be drawn, so here are the words: {}",
+                marriage::with_tree(me, String::new()).trim_start(),
+                spouses_line(ctx, &family, now)
+            ));
+        }
+    }
+    let _ = command.create_followup(&ctx.http, follow).await;
 }
 
 async fn on_love(
@@ -546,11 +614,155 @@ async fn on_love(
                 let root = base.strip_suffix("/live").unwrap_or(&base);
                 text.push_str(&format!("\n-# 🌳 Everybody: {}/love", root));
             }
-            let _ = command.create_response(&ctx.http, whisper(text)).await;
+            // And a picture of the BIGGEST household, drawn properly. Twenty
+            // households on one card makes every face a smudge, which is what
+            // the page is for; one drawn well is worth looking at.
+            let biggest = marriage::households(&unions, &kin).into_iter().next().unwrap_or_default();
+            if biggest.len() < 2 || command.defer(&ctx.http).await.is_err() {
+                let _ = command.create_response(&ctx.http, whisper(text)).await;
+                return;
+            }
+            // Whoever in it has the most spouses is the head of the picture.
+            let head = {
+                let conn = db.lock();
+                biggest
+                    .iter()
+                    .copied()
+                    .max_by_key(|id| store::spouses(&conn, *id).len())
+                    .unwrap_or(biggest[0])
+            };
+            let family = {
+                let conn = db.lock();
+                marriage::family_of(&conn, head)
+            };
+            let mut who = vec![(head, String::new())];
+            let sp: Vec<(u64, String)> =
+                family.spouses.iter().map(|u| (u.other, marriage::since_words(u.since))).collect();
+            let pa: Vec<(u64, String)> = family.parents.iter().map(|id| (*id, String::new())).collect();
+            let ch: Vec<(u64, String)> = family.children.iter().map(|id| (*id, String::new())).collect();
+            who.extend(sp.iter().cloned());
+            who.extend(pa.iter().cloned());
+            who.extend(ch.iter().cloned());
+            let faces = faces_for(ctx, command, &who).await;
+            let (mut at, mut take) = (0usize, |n: usize, at: &mut usize| {
+                let out = faces.get(*at..*at + n).map(<[_]>::to_vec).unwrap_or_default();
+                *at += n;
+                out
+            });
+            let house = super::marriage_card::House {
+                who: take(1, &mut at).into_iter().next().unwrap_or_default(),
+                spouses: take(sp.len(), &mut at),
+                parents: take(pa.len(), &mut at),
+                children: take(ch.len(), &mut at),
+                note: format!("the biggest household · {} people", biggest.len()),
+            };
+            let png = tokio::task::spawn_blocking(move || {
+                let mut fs = super::awards::fonts().lock();
+                super::marriage_card::house_png(&mut fs, &house)
+            })
+            .await
+            .ok()
+            .flatten();
+            let mut follow = serenity::all::CreateInteractionResponseFollowup::new().content(text);
+            if let Some(bytes) = png {
+                follow = follow.add_file(serenity::all::CreateAttachment::bytes(bytes, "houses.png"));
+            }
+            let _ = command.create_followup(&ctx.http, follow).await;
         }
         _ => {
             let _ = command.create_response(&ctx.http, whisper("That part isn't built yet.")).await;
         }
+    }
+}
+
+/// "3 generations · 8 people", or what is true of a smaller family.
+fn household_words(family: &marriage::Family) -> String {
+    let people = 1 + family.spouses.len() + family.parents.len() + family.children.len();
+    let generations = 1
+        + usize::from(!family.parents.is_empty())
+        + usize::from(!family.children.is_empty());
+    if people == 1 {
+        return "just you, for now".to_string();
+    }
+    format!(
+        "{} generation{} · {} people",
+        generations,
+        if generations == 1 { "" } else { "s" },
+        people
+    )
+}
+
+/// The words when the picture could not be drawn.
+fn spouses_line(ctx: &Context, family: &marriage::Family, now: i64) -> String {
+    if family.spouses.is_empty() {
+        return "nobody yet".to_string();
+    }
+    family
+        .spouses
+        .iter()
+        .map(|u| format!("{} ({})", called(ctx, u.other), marriage::how_long(u.since, now)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The job that keeps the link up, for as long as the bot is running.
+pub fn spawn_link(ctx: Context) {
+    tokio::spawn(async move {
+        loop {
+            keep_link(&ctx).await;
+            tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+        }
+    });
+}
+
+/// Keeps one message in the love channel carrying the link, and pins it.
+///
+/// Without it the page is reachable only by somebody who already knows a
+/// command, which is no way to discover a page. One message, adopted after a
+/// restart rather than posted again, and pinned so it is findable however far
+/// the channel has scrolled.
+pub async fn keep_link(ctx: &Context) {
+    if !marriage::on() {
+        return;
+    }
+    let (Some(channel), Some(db)) = (marriage::channel(), store::db()) else { return };
+    let Some(base) = super::month::live_url() else { return };
+    let root = base.strip_suffix("/live").unwrap_or(&base).to_string();
+    let channel = serenity::all::ChannelId::new(channel);
+    let text = format!(
+        "🌳 **The family tree**\n{}/love\n-# `/marry` to ask · `/family` for your own · `/love` for everything else",
+        root
+    );
+    let known = {
+        let conn = db.lock();
+        store::meta_get(&conn, "link_message").and_then(|v| v.parse::<u64>().ok())
+    };
+    // Edit the one we have; only post when there is none to edit.
+    if let Some(id) = known {
+        let edited = channel
+            .edit_message(&ctx.http, serenity::all::MessageId::new(id), serenity::all::EditMessage::new().content(&text))
+            .await;
+        if edited.is_ok() {
+            return;
+        }
+        tracing::info!("love: the pinned link has gone; putting a new one up");
+    }
+    match channel
+        .send_message(&ctx.http, CreateMessage::new().content(&text).allowed_mentions(CreateAllowedMentions::new()))
+        .await
+    {
+        Ok(posted) => {
+            {
+                let conn = db.lock();
+                store::meta_set(&conn, "link_message", &posted.id.get().to_string());
+            }
+            // Pinning is allowed to fail - a full pin list is not worth a
+            // warning every half hour, and the message is still there.
+            if let Err(err) = posted.pin(&ctx.http).await {
+                tracing::info!("love: the link was posted but not pinned: {}", err);
+            }
+        }
+        Err(err) => tracing::warn!("love: the link could not be posted: {}", err),
     }
 }
 

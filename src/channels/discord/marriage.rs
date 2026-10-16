@@ -130,6 +130,13 @@ pub fn gesture_wait(last: Option<i64>, now: i64) -> i64 {
     }
 }
 
+/// The day a marriage started, as a card writes it: "12 Oct".
+pub fn since_words(since: i64) -> String {
+    chrono::DateTime::from_timestamp(since, 0)
+        .map(|t| (t + chrono::Duration::minutes(330)).format("since %-d %b").to_string())
+        .unwrap_or_default()
+}
+
 /// How long two people have been married, in the words a card uses.
 pub fn how_long(since: i64, now: i64) -> String {
     let days = ((now - since).max(0)) / 86_400;
