@@ -13,6 +13,21 @@ use std::collections::HashMap;
 
 use super::marriage_store::{self as store, Union};
 
+/// The line a reply ends with: that member's own household on the page.
+///
+/// One door, like the Cup's: a command cannot forget the link, and the handle
+/// means a link somebody pastes carries nothing about their account.
+pub fn with_tree(user: u64, mut text: String) -> String {
+    let Some(base) = super::month::live_url() else { return text };
+    let root = base.strip_suffix("/live").unwrap_or(&base);
+    let handle = super::control::web::housecup::handle(user);
+    let line = format!("\n-# 🌳 Your family: {}/love/u/{}", root, handle);
+    if !text.contains("/love/u/") {
+        text.push_str(&line);
+    }
+    text
+}
+
 /// Where the cards go, `VIZIER_LOVE_CHANNEL`. The commands work anywhere; the
 /// cards land in one room, so a busy channel is never buried in hearts.
 pub fn channel() -> Option<u64> {

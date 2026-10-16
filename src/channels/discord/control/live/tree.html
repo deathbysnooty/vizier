@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hall of Houses</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Jost:wght@400;500;600&display=swap">
+<style>
+  :root { --ink:#f3ecf6; --dim:#a08cae; --faint:#6e5f7c; --panel:#171020; --edge:#2b1f36; --love:#e0729f; --blood:#4f7f6d; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: radial-gradient(1200px 700px at 50% -10%, #2a1830 0%, #150f1c 45%, #0d0a12 100%);
+         color: var(--ink); font-family: Jost, system-ui, sans-serif; overflow: hidden; height: 100vh; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  header { position: fixed; top: 0; left: 0; right: 0; padding: 17px 20px; z-index: 3;
+           display: flex; align-items: baseline; gap: 13px; flex-wrap: wrap;
+           background: linear-gradient(#0d0a12cc, #0d0a1200); pointer-events: none; }
+  h1 { font-family: Cinzel, serif; font-size: 24px; }
+  .meta { color: var(--dim); font-size: 14px; }
+  .controls { position: fixed; top: 14px; right: 18px; z-index: 4; display: flex; gap: 7px; }
+  button, input { font: inherit; font-size: 14px; color: var(--ink); background: #1d1428;
+                  border: 1px solid var(--edge); border-radius: 999px; padding: 7px 14px; }
+  button { cursor: pointer; } button:hover { border-color: #46324f; }
+  button.on { background: rgba(224,114,159,.2); border-color: var(--love); }
+  input { width: 150px; }
+  .legend { position: fixed; left: 18px; bottom: 16px; z-index: 3; display: flex; gap: 16px;
+            font-size: 13px; color: var(--dim); align-items: center; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 20px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .card { position: fixed; right: 18px; bottom: 16px; width: 285px; z-index: 5; background: var(--panel);
+          border: 1px solid var(--edge); border-radius: 16px; padding: 15px 17px; display: none; }
+  .card.open { display: block; }
+  .card h2 { font-family: Cinzel, serif; font-size: 20px; }
+  .card .since { color: var(--dim); font-size: 13px; margin-bottom: 11px; }
+  .card section { margin-top: 10px; }
+  .card h3 { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--faint);
+             margin-bottom: 4px; font-weight: 500; }
+  .card p { font-size: 14.5px; line-height: 1.5; }
+  .card .none { color: var(--faint); }
+  .shut { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: var(--faint);
+          font-size: 18px; padding: 0 4px; }
+  .empty { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+           text-align: center; padding: 30px; z-index: 2; }
+  .empty.show { display: flex; }
+  .empty p { color: var(--dim); font-size: 17px; line-height: 1.6; max-width: 46ch; }
+  @media (max-width: 720px) { h1 { font-size: 19px; } .card { left: 10px; right: 10px; width: auto; }
+    .legend { display: none; } input { width: 104px; } }
+</style>
+</head>
+<body>
+<canvas id="sky"></canvas>
+<header><h1>Hall of Houses</h1><span class="meta" id="count"></span></header>
+<div class="controls">
+  <button id="mine" class="on">My household</button>
+  <button id="all">Everyone</button>
+  <input id="find" type="search" placeholder="Find someone" aria-label="Find someone">
+</div>
+<div class="legend">
+  <span><i style="background:var(--love)"></i>married</span>
+  <span><i style="background:var(--blood)"></i>parent and child</span>
+  <span>drag to move &middot; scroll to zoom &middot; tap anyone</span>
+</div>
+<div class="empty" id="empty"><p id="emptywords"></p></div>
+<div class="card" id="card">
+  <button class="shut" id="shut" aria-label="Close">&times;</button>
+  <h2 id="who"></h2><p class="since" id="standing"></p>
+  <section><h3>Married to</h3><p id="spouses"></p></section>
+  <section><h3>Parents</h3><p id="parents"></p></section>
+  <section><h3>Children</h3><p id="children"></p></section>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+// Whose page this is, out of the address: /love/u/<handle>. A bare /love opens
+// on everybody, which is the right landing page for a visitor and the wrong one
+// for a member, hence the two buttons.
+const MINE = (location.pathname.match(/\/love\/u\/(m[0-9a-f]{8}(?:-\d+)?)/) || [])[1] || null;
+let people = [], links = [], byHandle = new Map();
+const spouses = new Map(), parents = new Map(), kids = new Map();
+const push = (m, k, v) => { if (!m.has(k)) m.set(k, []); m.get(k).push(v); };
+
+const canvas = document.getElementById('sky');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0; const dpr = Math.min(devicePixelRatio || 1, 2);
+function size() { W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+size();
+addEventListener('resize', () => { size(); if (sim) sim.alpha(0.3).restart(); });
+
+let sim = null, view = { x: 0, y: 0, k: 1 }, picked = null, hovered = null, showAll = !MINE;
+const faces = new Map();
+
+function household(handle) {
+  const seen = new Set(); const q = [handle];
+  while (q.length) { const at = q.pop(); if (!at || seen.has(at)) continue; seen.add(at);
+    for (const s of spouses.get(at) || []) q.push(s.other);
+    for (const k of kids.get(at) || []) q.push(k);
+    for (const p of parents.get(at) || []) q.push(p); }
+  return seen;
+}
+
+function build() {
+  const keep = showAll || !MINE ? null : household(MINE);
+  const shown = people.filter(p => !keep || keep.has(p.handle));
+  const shownSet = new Set(shown.map(p => p.handle));
+  const edges = links.filter(l => shownSet.has(l.a) && shownSet.has(l.b))
+                     .map(l => ({ source: l.a, target: l.b, kind: l.kind, since: l.since }));
+  const nodes = shown.map(p => ({ ...p, id: p.handle }));
+  document.getElementById('empty').classList.toggle('show', nodes.length === 0);
+  document.getElementById('emptywords').textContent = MINE && !showAll
+    ? 'You have no family yet. Someone has to say yes first — try /marry, or /love adopt.'
+    : 'Nobody on the server has married or adopted yet. Somebody has to go first.';
+  if (sim) sim.stop();
+  sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(edges).id(d => d.id)
+      .distance(l => (l.kind === 'marriage' ? 92 : 126))
+      .strength(l => (l.kind === 'marriage' ? 1 : 0.45)))
+    .force('charge', d3.forceManyBody().strength(-420))
+    .force('collide', d3.forceCollide(40))
+    .force('x', d3.forceX(() => W / 2).strength(0.045))
+    .force('y', d3.forceY(() => H / 2).strength(0.06))
+    .alphaDecay(0.015);
+  drawn = { nodes, edges };
+}
+let drawn = { nodes: [], edges: [] };
+
+const nameOf = h => (byHandle.get(h) || {}).name || 'someone';
+const list = hs => (hs && hs.length) ? hs.map(x => nameOf(x.other || x)).join(' · ') : null;
+
+function openCard(p) {
+  picked = p;
+  document.getElementById('who').textContent = p.name;
+  const m = spouses.get(p.handle) || [];
+  document.getElementById('standing').textContent = m.length
+    ? (m.length === 1 ? 'Married' : m.length + ' spouses') : 'Unmarried';
+  const fill = (id, text) => { const el = document.getElementById(id);
+    el.textContent = text || 'nobody'; el.className = text ? '' : 'none'; };
+  fill('spouses', list(m)); fill('parents', list(parents.get(p.handle))); fill('children', list(kids.get(p.handle)));
+  document.getElementById('card').classList.add('open');
+}
+document.getElementById('shut').onclick = () => { picked = null; document.getElementById('card').classList.remove('open'); };
+
+function worldAt(ev) { const r = canvas.getBoundingClientRect();
+  return { x: (ev.clientX - r.left - view.x) / view.k, y: (ev.clientY - r.top - view.y) / view.k }; }
+function nearest(pt) { let best = null, d = 34;
+  for (const p of drawn.nodes) { const dd = Math.hypot(p.x - pt.x, p.y - pt.y); if (dd < d) { d = dd; best = p; } }
+  return best; }
+
+let dragging = null, panning = null;
+canvas.addEventListener('pointerdown', ev => {
+  const hit = nearest(worldAt(ev));
+  if (hit) { dragging = hit; hit.fx = hit.x; hit.fy = hit.y; sim.alphaTarget(0.25).restart(); openCard(hit); }
+  else { panning = { x: ev.clientX - view.x, y: ev.clientY - view.y }; canvas.classList.add('dragging'); }
+  canvas.setPointerCapture(ev.pointerId);
+});
+canvas.addEventListener('pointermove', ev => {
+  if (dragging) { const pt = worldAt(ev); dragging.fx = pt.x; dragging.fy = pt.y; return; }
+  if (panning) { view.x = ev.clientX - panning.x; view.y = ev.clientY - panning.y; return; }
+  hovered = nearest(worldAt(ev));
+});
+const letGo = () => { if (dragging) { dragging.fx = null; dragging.fy = null; sim.alphaTarget(0); dragging = null; }
+  panning = null; canvas.classList.remove('dragging'); };
+canvas.addEventListener('pointerup', letGo);
+canvas.addEventListener('pointercancel', letGo);
+canvas.addEventListener('wheel', ev => { ev.preventDefault();
+  const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  const k = Math.max(0.4, Math.min(2.6, view.k * (ev.deltaY < 0 ? 1.1 : 0.9)));
+  view.x = mx - (mx - view.x) * (k / view.k); view.y = my - (my - view.y) * (k / view.k); view.k = k;
+}, { passive: false });
+
+const mineBtn = document.getElementById('mine'), allBtn = document.getElementById('all');
+function setView(all) { showAll = all; mineBtn.classList.toggle('on', !all); allBtn.classList.toggle('on', all); build(); }
+mineBtn.onclick = () => setView(false); allBtn.onclick = () => setView(true);
+if (!MINE) { mineBtn.style.display = 'none'; allBtn.classList.add('on'); }
+document.getElementById('find').addEventListener('input', ev => {
+  const q = ev.target.value.trim().toLowerCase();
+  const hit = q && drawn.nodes.find(p => (p.name || '').toLowerCase().includes(q));
+  if (!hit) return;
+  openCard(hit); view.k = 1.5; view.x = W / 2 - hit.x * view.k; view.y = H / 2 - hit.y * view.k;
+});
+
+const kin = new Set();
+function kinOf(p) { kin.clear(); if (!p) return; kin.add(p.handle);
+  for (const s of spouses.get(p.handle) || []) kin.add(s.other);
+  for (const k of kids.get(p.handle) || []) kin.add(k);
+  for (const f of parents.get(p.handle) || []) kin.add(f); }
+
+let beat = 0;
+function draw() {
+  beat += 0.016;
+  ctx.clearRect(0, 0, W, H);
+  ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.k, view.k);
+  const focus = picked || hovered; kinOf(focus);
+  for (const l of drawn.edges) {
+    const near = !focus || (kin.has(l.source.handle) && kin.has(l.target.handle));
+    ctx.globalAlpha = near ? 1 : 0.13;
+    ctx.strokeStyle = l.kind === 'marriage' ? '#e0729f' : '#4f7f6d';
+    ctx.lineWidth = l.kind === 'marriage' ? 2.4 : 1.5;
+    ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); ctx.stroke();
+    if (l.kind === 'marriage') {
+      const mx = (l.source.x + l.target.x) / 2, my = (l.source.y + l.target.y) / 2;
+      const pulse = 1 + Math.sin(beat * 2 + mx) * 0.12;
+      ctx.save(); ctx.translate(mx, my); ctx.scale(pulse, pulse);
+      ctx.fillStyle = '#e0729f'; ctx.font = '13px Jost, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('♥', 0, 0); ctx.restore();
+    }
+  }
+  for (const p of drawn.nodes) {
+    const married = (spouses.get(p.handle) || []).length;
+    const r = married ? 26 : 21;
+    const near = !focus || kin.has(p.handle);
+    ctx.globalAlpha = near ? 1 : 0.18;
+    if (married) { ctx.beginPath(); ctx.arc(p.x, p.y, r + 7, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(224,114,159,' + (0.1 + (0.5 + Math.sin(beat * 1.6 + r) * 0.18) * 0.12).toFixed(3) + ')';
+      ctx.fill(); }
+    ctx.save(); ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.closePath(); ctx.clip();
+    const im = faces.get(p.handle);
+    if (im && im.complete && im.naturalWidth) ctx.drawImage(im, p.x - r, p.y - r, r * 2, r * 2);
+    else { ctx.fillStyle = '#3a2f44'; ctx.fillRect(p.x - r, p.y - r, r * 2, r * 2);
+      ctx.fillStyle = '#efe6f3'; ctx.font = '600 ' + Math.round(r) + 'px Jost, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText((p.name || '?')[0].toUpperCase(), p.x, p.y + 1); }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = married ? '#e0729f' : '#53465e'; ctx.lineWidth = married ? 2.5 : 1.5; ctx.stroke();
+    if (near && view.k > 0.72) { ctx.fillStyle = '#efe6f3'; ctx.font = '500 12px Jost, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(p.name || '', p.x, p.y + r + 6); }
+  }
+  ctx.restore();
+  requestAnimationFrame(draw);
+}
+
+fetch('/love/api/tree.json').then(r => r.json()).then(data => {
+  people = data.people || []; links = data.links || [];
+  byHandle = new Map(people.map(p => [p.handle, p]));
+  for (const l of links) {
+    if (l.kind === 'marriage') { push(spouses, l.a, { other: l.b, since: l.since });
+                                 push(spouses, l.b, { other: l.a, since: l.since }); }
+    else { push(kids, l.a, l.b); push(parents, l.b, l.a); }
+  }
+  for (const p of people) {
+    if (!p.avatar) continue;
+    const im = new Image(); im.crossOrigin = 'anonymous'; im.src = p.avatar; faces.set(p.handle, im);
+  }
+  document.getElementById('count').textContent =
+    people.length + ' people · ' + (data.households || 0) + ' households';
+  build();
+  draw();
+}).catch(() => {
+  document.getElementById('empty').classList.add('show');
+  document.getElementById('emptywords').textContent = 'The tree could not be loaded. Try again in a minute.';
+});
+</script>
+</body>
+</html>

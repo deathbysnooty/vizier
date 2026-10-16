@@ -374,6 +374,7 @@ mod deepdives;
 mod kalesh;
 mod left;
 mod live;
+mod lovetree;
 mod media;
 mod members;
 mod memos;
@@ -1290,6 +1291,7 @@ pub fn router(panel: Panel) -> Router {
         .merge(housecup::routes())
         // The month's live page reads one public endpoint: /live.json.
         .merge(live::routes())
+        .merge(lovetree::routes())
         .merge(chess::routes())
         .merge(puzzle::routes())
         .merge(duel::routes())

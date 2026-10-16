@@ -252,6 +252,7 @@ async fn show_family(
     };
     let card = CreateEmbed::new()
         .title(format!("🏡 {}'s family", called(ctx, me)))
+        .description(marriage::with_tree(me, String::new()).trim_start().to_string())
         .field("Married to", spouses, false)
         .field("Parents", names(&family.parents), true)
         .field("Children", names(&family.children), true)
@@ -381,7 +382,7 @@ async fn on_love(
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            let _ = command.create_response(&ctx.http, whisper(text)).await;
+            let _ = command.create_response(&ctx.http, whisper(marriage::with_tree(me, text))).await;
         }
         _ => {
             let _ = command.create_response(&ctx.http, whisper("That part isn't built yet.")).await;

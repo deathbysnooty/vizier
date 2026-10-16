@@ -32,6 +32,11 @@ pub const INDEX_HTML: &str = include_str!("live/index.html");
 /// The file name the page is served under, in the runtime directory and here.
 pub const PAGE: &str = "index.html";
 
+/// The family tree, a second page served out of the same directory - so an
+/// edit to either needs no build and no restart.
+pub const TREE_HTML: &str = include_str!("live/tree.html");
+pub const TREE_PAGE: &str = "tree.html";
+
 /// The biggest file we will read into memory to answer one request. The dragon
 /// is under two megabytes and the largest texture under one; this is a ceiling
 /// against somebody dropping a video in the directory, not a budget.
@@ -98,6 +103,14 @@ pub fn page() -> Cow<'static, str> {
     match PAGE_FILE.get() {
         Some(files) => files.get(PAGE, INDEX_HTML, Instant::now()),
         None => Cow::Borrowed(INDEX_HTML),
+    }
+}
+
+/// The family tree page, from disk if there is a usable copy.
+pub fn tree_page() -> Cow<'static, str> {
+    match PAGE_FILE.get() {
+        Some(files) => files.get(TREE_PAGE, TREE_HTML, Instant::now()),
+        None => Cow::Borrowed(TREE_HTML),
     }
 }
 
