@@ -385,6 +385,129 @@ async fn on_love(
             };
             let _ = command.create_response(&ctx.http, whisper(marriage::with_tree(me, text))).await;
         }
+        "jealous" => {
+            let Some(them) = target else { return };
+            // Only about somebody you are actually married to: "who is my
+            // spouse talking to" is a question, "who is that person talking
+            // to" is surveillance.
+            let theirs = {
+                let conn = db.lock();
+                store::married(&conn, me, them)
+            };
+            if !theirs {
+                let _ = command.create_response(&ctx.http, whisper("You're not married to them.")).await;
+                return;
+            }
+            let sheet = super::ship_sheet::db().and_then(|db| {
+                let conn = db.lock();
+                super::ship_sheet::get(&conn, them)
+            });
+            let Some(sheet) = sheet else {
+                let _ = command
+                    .create_response(&ctx.http, whisper("No sheet for them yet - the numbers are built overnight."))
+                    .await;
+                return;
+            };
+            let roll = (now as u64).wrapping_mul(2_654_435_761).wrapping_add(me);
+            let words = match marriage::rival(&sheet.reply_partners, me, sheet.replies_sent) {
+                Some((who, _, share)) => format!(
+                    "👀 **{}** has been replying to **{}** more than anybody else — **{}%** of everything they say.",
+                    called(ctx, them),
+                    called(ctx, who),
+                    share
+                ),
+                None => format!(
+                    "💘 Nothing to report: **{}** replies to <@{}> more than to anybody else.",
+                    called(ctx, them),
+                    me
+                ),
+            };
+            let mut post = CreateMessage::new()
+                .content(words)
+                .allowed_mentions(CreateAllowedMentions::new().users(vec![serenity::all::UserId::new(me)]));
+            if let Some(gif) = super::love_bank::gif("jealous", roll) {
+                post = post.embed(CreateEmbed::new().image(gif).colour(0xe0729f));
+            }
+            let _ = stage(command).send_message(&ctx.http, post).await;
+            let _ = command.create_response(&ctx.http, whisper("Posted.")).await;
+        }
+        "papers" => {
+            let Some(them) = target else { return };
+            let theirs = {
+                let conn = db.lock();
+                store::married(&conn, me, them)
+            };
+            if !theirs {
+                let _ = command.create_response(&ctx.http, whisper("You're not married to them.")).await;
+                return;
+            }
+            // Served, not executed: the papers are theatre, /divorce is the act.
+            let roll = (now as u64).wrapping_mul(6_364_136_223_846_793_005).wrapping_add(them);
+            let card = CreateEmbed::new()
+                .title("📜 Divorce papers, served")
+                .description(format!(
+                    "**{}** has served papers on <@{}>.\n-# Nothing is final: `/divorce` is what ends it.",
+                    called(ctx, me),
+                    them
+                ))
+                .colour(0x6e5f7c);
+            let card = match super::love_bank::gif("papers", roll) {
+                Some(gif) => card.image(gif),
+                None => card,
+            };
+            let _ = stage(command)
+                .send_message(
+                    &ctx.http,
+                    CreateMessage::new().embed(card).allowed_mentions(
+                        CreateAllowedMentions::new().users(vec![serenity::all::UserId::new(them)]),
+                    ),
+                )
+                .await;
+            let _ = command.create_response(&ctx.http, whisper("Served.")).await;
+        }
+        "matchmake" => {
+            let mine = super::ship_sheet::db().and_then(|db| {
+                let conn = db.lock();
+                super::ship_sheet::get(&conn, me)
+            });
+            let Some(sheet) = mine else {
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        whisper("No sheet for you yet - the numbers are built overnight. Try tomorrow."),
+                    )
+                    .await;
+                return;
+            };
+            // Who the numbers actually point at: the person they reply to most
+            // who is not already their spouse. Real figures, so the card can
+            // say WHY rather than inventing a percentage.
+            let married: Vec<u64> = {
+                let conn = db.lock();
+                store::spouses(&conn, me).into_iter().map(|u| u.other).collect()
+            };
+            let best = sheet
+                .reply_partners
+                .iter()
+                .filter(|(id, _)| *id != me && !married.contains(id))
+                .max_by_key(|(_, n)| *n)
+                .copied();
+            let text = match best {
+                Some((who, n)) if sheet.replies_sent > 0 => {
+                    let share = ((n as f64 / sheet.replies_sent as f64) * 100.0).round() as i64;
+                    let vc = sheet.vc_with(who);
+                    let extra = if vc > 0 { format!(", and **{}** minutes in voice together", vc) } else { String::new() };
+                    format!(
+                        "💞 The numbers point at **{}**.\n**{}%** of everything you say is to them{}.\n-# Not a prophecy. `/marry` is still your own doing.",
+                        called(ctx, who),
+                        share,
+                        extra
+                    )
+                }
+                _ => "Nothing to go on yet — talk to more people and ask again tomorrow.".to_string(),
+            };
+            let _ = command.create_response(&ctx.http, whisper(text)).await;
+        }
         "tree" | "couples" => {
             let (unions, kin) = {
                 let conn = db.lock();
