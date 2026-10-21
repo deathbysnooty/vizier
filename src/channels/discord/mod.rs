@@ -2013,6 +2013,11 @@ impl EventHandler for Handler {
                 )
                 .required(true),
             );
+        // The panel's own sign-in command. It has had a handler since the
+        // panel was built and was never once registered, so /panel has never
+        // appeared in Discord - the only way in was a cookie from an older
+        // session.
+        commands.push(admin_command(control::web::command()));
         commands.push(admin_command(trace));
         // Marriages, adoptions and the gestures: four commands, because /love
         // carries the other dozen as subcommands and those cost nothing against
