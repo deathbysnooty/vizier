@@ -1380,6 +1380,11 @@ const PAUSED_OFF: &[&str] = &[
     "housecup", "housepoints", "housetop", "houses", "houselist", "houseping", "housecaptain",
     "housechannels", "housedraft", "housedraw", "houseroles", "houseopt", "mypoints", "today",
     "snitchdrop", "frogdrop", "sellset", "modgive", "modpoints",
+    // Sorting someone by hand is house furniture too: with nothing being
+    // scored it moves a member between houses that no longer play.
+    // `housecards` is NOT here - it reads collections people keep, and the
+    // cards outlive the Cup.
+    "sort",
 ];
 
 /// Slash commands the owner retired (2026-09-15), deleted from Discord on start.
@@ -1929,15 +1934,22 @@ impl EventHandler for Handler {
         commands.push(admin_command(confess::whosent_builder()));
         // Everyone's: the door that does not depend on a card existing.
         commands.push(confess::confess_builder());
-        // The themed month. All five are registered whatever the month's switch
-        // says: with it off each one answers "there's no themed month running"
-        // rather than vanishing, which is far easier to explain to a member.
-        commands.push(egg::dragon_builder());
-        commands.push(egg::egg_builder());
-        commands.push(egg::livepoints_builder());
-        commands.push(egg::mycards_builder());
-        commands.push(admin_command(hatch::builder()));
-        commands.push(admin_command(egg::craving_builder()));
+        // The themed month, and only while one is running. These were once
+        // registered whatever the switch said, so that an off month answered
+        // "there's no themed month running" rather than vanishing. A month
+        // that has ENDED is a different thing from one that never started:
+        // Fire & Blood finished on 31 October and six commands went on sitting
+        // in everyone's / menu with nothing behind them. They come back with
+        // the next month, the same way the house commands come back with the
+        // Cup.
+        if month::running() {
+            commands.push(egg::dragon_builder());
+            commands.push(egg::egg_builder());
+            commands.push(egg::livepoints_builder());
+            commands.push(egg::mycards_builder());
+            commands.push(admin_command(hatch::builder()));
+            commands.push(admin_command(egg::craving_builder()));
+        }
 
         let house_opt = CreateCommand::new("houseopt")
             .description("step out of the houses and become a Muggle - or back in to your own house");
@@ -4271,11 +4283,29 @@ mod paused_commands_tests {
         for kept in ["housecards", "frogs", "frogcard", "trade", "trades"] {
             assert!(!PAUSED_OFF.contains(&kept), "/{} must stay while the Cup is paused", kept);
         }
-        for gone in ["housecup", "housepoints", "housetop", "snitchdrop", "frogdrop", "modgive"] {
+        for gone in ["housecup", "housepoints", "housetop", "snitchdrop", "frogdrop", "modgive", "sort"] {
             assert!(PAUSED_OFF.contains(&gone), "/{} should come off the list", gone);
         }
         for name in PAUSED_OFF {
             assert!(!RETIRED_COMMANDS.contains(name), "/{} is retired already", name);
+        }
+    }
+
+    /// The month's own commands are registered inside `if month::running()`,
+    /// so a month that has ended takes them out of the / menu rather than
+    /// leaving six commands that answer "there's no themed month running".
+    /// This reads the registration itself: a command moved out of that block
+    /// by a later edit fails here rather than in front of the server.
+    #[test]
+    fn the_months_commands_are_registered_only_while_a_month_runs() {
+        let source = include_str!("mod.rs");
+        let block = source
+            .split_once("if month::running() {")
+            .expect("the month's commands are registered behind the month switch")
+            .1;
+        let block = block.split_once("\n        }").expect("that block ends").0;
+        for name in ["dragon_builder", "egg_builder", "livepoints_builder", "mycards_builder", "hatch::builder", "craving_builder"] {
+            assert!(block.contains(name), "{} must be registered only while a month runs", name);
         }
     }
 }
