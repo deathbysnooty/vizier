@@ -1980,8 +1980,9 @@
   }
 
   /** Every stretch of a period together. `go` starts the summary as soon as it opens. */
-  function kaleshPeriodHref(people, from, to, go) {
+  function kaleshPeriodHref(people, from, to, go, only) {
     const p = new URLSearchParams({ people: kaleshIds(people), from: String(from), to: String(to) });
+    if (only) p.set('in', only);
     if (go) p.set('go', '1');
     return '#/kalesh/period?' + p.toString();
   }
@@ -2055,18 +2056,30 @@
       period: rq.get('from') && rq.get('to') ? 'custom' : (KALESH_PERIODS.some((x) => x[0] === hours && x[0] !== 'custom') ? hours : '24'),
       from: /^\d{1,12}$/.test(rq.get('from') || '') ? +rq.get('from') : 0,
       to: /^\d{1,12}$/.test(rq.get('to') || '') ? +rq.get('to') : 0,
+      only: idOk(rq.get('in')) ? rq.get('in') : '',
     };
     const hashFor = (s) => {
       const p = new URLSearchParams();
       if (s.people.length) p.set('people', s.people.join(','));
       if (s.period === 'custom' && s.from && s.to) { p.set('from', String(s.from)); p.set('to', String(s.to)); }
       else if (s.period !== '24' && s.period !== 'custom') p.set('hours', s.period);
+      if (s.only) p.set('in', s.only);
       const qs = p.toString();
       return '#/kalesh' + (qs ? '?' + qs : '');
     };
 
     // --- the finder: two to six members -------------------------------------------------
-    const draft = { people: st.people.slice(), period: st.period, from: st.from, to: st.to };
+    const draft = { people: st.people.slice(), period: st.period, from: st.from, to: st.to, only: st.only };
+    // One channel only, or every channel they talked in (the default).
+    const onlyBtn = h('button', { class: 'picker-btn', type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Channel' });
+    const drawOnly = () => {
+      clear(onlyBtn);
+      const c = draft.only ? chan(draft.only) : null;
+      append(onlyBtn, [h('span', { class: 'glyph' }, '#'), h('span', { class: 'value' + (draft.only ? '' : ' placeholder') }, draft.only ? (c ? c.name : 'channel ' + draft.only) : 'All channels'), icon('chevron')]);
+    };
+    onlyBtn.addEventListener('click', () => openPicker(onlyBtn, { title: 'Only in this channel', placeholder: 'Search channels',
+      load: searchChannelItems(draft.only), onPick: (it) => { draft.only = it.id; drawOnly(); } }));
+    drawOnly();
     const chosen = h('div', { class: 'kalesh-chosen', role: 'list', 'aria-label': 'Members to look at' });
     const addBtn = h('button', { class: 'picker-btn kalesh-add', type: 'button', 'aria-haspopup': 'listbox' });
     const drawChosen = () => {
@@ -2120,7 +2133,7 @@
     page.appendChild(h('form', { class: 'card msg-search kalesh-finder', onsubmit: (e) => { e.preventDefault(); go(); } },
       h('div', { class: 'kalesh-finder-label' }, h('b', null, 'Who was in it'), h('span', { class: 'hint' }, 'Two to six members. Everyone else who spoke shows as a bystander.')),
       chosen,
-      h('div', { class: 'msg-search-filters' }, period, h('span', { class: 'grow' }), h('button', { class: 'btn primary', type: 'submit' }, icon('search'), 'Find')),
+      h('div', { class: 'msg-search-filters' }, period, onlyBtn, h('span', { class: 'grow' }), h('button', { class: 'btn primary', type: 'submit' }, icon('search'), 'Find')),
       custom, problem));
 
     // --- what was found ---------------------------------------------------------------
@@ -2130,6 +2143,7 @@
       found.appendChild(h('div', { class: 'card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Looking through their messages…')));
       const p = new URLSearchParams({ people: st.people.join(',') });
       if (st.period === 'custom' && st.from && st.to) { p.set('from', String(st.from)); p.set('to', String(st.to)); } else p.set('hours', st.period);
+      if (st.only) p.set('only', st.only);
       api('GET', '/kalesh/find?' + p.toString()).then((data) => {
         if (!found.isConnected) return;
         clear(found);
@@ -2189,8 +2203,8 @@
     const facts = [h('span', { class: 'kalesh-count' }, h('b', null, numberFmt.format(per.messages || 0)), ' messages in ', h('b', null, plural(per.stretches || list.length, 'stretch', 'stretches'))),
       kaleshCounts(people, per.per_person)].concat(kaleshGoneFacts(per));
     const sumBtn = per.summarised
-      ? h('a', { class: 'btn primary lg', href: kaleshPeriodHref(people, range.from, range.to) }, icon('check'), 'Open the summary')
-      : h('a', { class: 'btn primary lg', href: kaleshPeriodHref(people, range.from, range.to, true) }, icon('spark'), 'Summarise the whole period');
+      ? h('a', { class: 'btn primary lg', href: kaleshPeriodHref(people, range.from, range.to, false, data.only) }, icon('check'), 'Open the summary')
+      : h('a', { class: 'btn primary lg', href: kaleshPeriodHref(people, range.from, range.to, true, data.only) }, icon('spark'), 'Summarise the whole period');
     append(whole, h('div', { class: 'kalesh-whole-body' },
       h('div', { class: 'grow' },
         h('h2', null, 'Everything between ', kaleshVersus(people), ' in the ' + data.label),
@@ -2199,7 +2213,7 @@
           ? 'All ' + numberFmt.format(per.messages) + ' messages together, in time order. The model will see ' + numberFmt.format(per.max_messages) + ' of them — how it started, the busiest part and how it ended — and the summary will say so.'
           : 'All of it together, in time order, deleted and blocked messages included — one neutral summary of the whole thing.')),
       h('div', { class: 'kalesh-whole-actions' }, sumBtn,
-        h('a', { class: 'btn', href: kaleshPeriodHref(people, range.from, range.to) }, icon('eye'), 'Read it all'))));
+        h('a', { class: 'btn', href: kaleshPeriodHref(people, range.from, range.to, false, data.only) }, icon('eye'), 'Read it all'))));
     out.push(whole);
 
     const body = h('div', { class: 'kalesh-rows' });
@@ -2301,6 +2315,7 @@
     let path;
     if (scope === 'period') {
       ['from', 'to', 'hours'].forEach((k) => { if (rq.get(k)) p.set(k, rq.get(k)); });
+      if (rq.get('in')) p.set('only', rq.get('in'));
       path = '/kalesh/period?';
     } else {
       ['channel', 'start', 'end'].forEach((k) => p.set(k, rq.get(k) || ''));
@@ -2312,6 +2327,7 @@
     api('GET', path + p.toString()).then((ex) => {
       if (!holder.isConnected) return;
       clear(holder);
+      if (scope === 'period' && rq.get('in')) ex.only = rq.get('in');
       const range = rq.get('pf') && rq.get('pt') ? { from: +rq.get('pf'), to: +rq.get('pt') } : null;
       drawKaleshView(holder, ex, { autostart: rq.get('go') === '1', range });
       if (rq.get('go') === '1') history.replaceState(null, '', location.hash.replace(/&go=1/, ''));
@@ -2416,7 +2432,7 @@
       tick();
       timer = setInterval(() => { if (!section.isConnected) { clearInterval(timer); return; } tick(); }, 1000);
       const body = { people: kaleshIds(ex.people) };
-      if (period) Object.assign(body, { scope: 'period', from: String(ex.start_ts), to: String(ex.end_ts) });
+      if (period) Object.assign(body, { scope: 'period', from: String(ex.start_ts), to: String(ex.end_ts), only: ex.only || undefined });
       else Object.assign(body, { scope: 'stretch', channel: ex.channel.id, start: ex.start_ms, end: ex.end_ms, detection: ex.detection_id ? String(ex.detection_id) : undefined });
       try {
         const got = await api('POST', '/kalesh/summarise', body);

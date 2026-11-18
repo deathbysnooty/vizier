@@ -255,6 +255,9 @@ pub struct FindQuery {
     from: Option<String>,
     #[serde(default)]
     to: Option<String>,
+    /// Only this channel (an id); none means every channel they talked in.
+    #[serde(default)]
+    only: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -328,8 +331,22 @@ struct Found {
 /// Every stretch of the chosen members over the period, newest first, each
 /// with its messages; the members' own rows; and whether more were found than
 /// are listed.
-async fn search_period(panel: &Panel, people: &[u64], per: &Period, sensitive: &[u64]) -> Result<(Vec<Found>, Vec<SaidRow>, bool), ApiError> {
-    let mut own = panel.data.kalesh_authors(people.to_vec(), per.since_ms, per.until_ms, None).await.map_err(unavailable)?;
+/// The one channel a search is narrowed to, if any, with the period's label
+/// saying so ("last 24 hours in #chatting"). A channel that is never shown is
+/// refused rather than searched.
+fn narrow(panel: &Panel, only: &Option<String>, per: &mut Period, sensitive: &[u64]) -> Result<Option<u64>, ApiError> {
+    let Some(raw) = blank(only) else { return Ok(None) };
+    let channel = parse_id(&raw).ok_or_else(|| ApiError::bad("That isn't a channel id."))?;
+    let name = panel.data.channels().iter().find(|c| c.id == channel.to_string()).map(|c| c.name.clone()).unwrap_or_default();
+    if sensitive.contains(&channel) || weekly::is_safe_corner(channel, &name) {
+        return Err(ApiError::bad("That channel is never kept."));
+    }
+    per.label = format!("{} in #{}", per.label, if name.is_empty() { channel.to_string() } else { name });
+    Ok(Some(channel))
+}
+
+async fn search_period(panel: &Panel, people: &[u64], per: &Period, only: Option<u64>, sensitive: &[u64]) -> Result<(Vec<Found>, Vec<SaidRow>, bool), ApiError> {
+    let mut own = panel.data.kalesh_authors(people.to_vec(), per.since_ms, per.until_ms, only).await.map_err(unavailable)?;
     own.retain(|r| place_json(panel, r, sensitive).is_some());
     let found = k::find_stretches(&own, people);
     let more = found.len() > MAX_STRETCHES;
@@ -356,9 +373,10 @@ fn merged(found: &[Found]) -> (Vec<SaidRow>, bool) {
 pub async fn find(State(panel): State<Panel>, axum::Extension(Caller(user)): axum::Extension<Caller>, Query(q): Query<FindQuery>) -> ApiResult {
     let people = people_of(&q.people, &q.a, &q.b)?;
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let per = period(&q.hours, &q.from, &q.to, now_ms)?;
+    let mut per = period(&q.hours, &q.from, &q.to, now_ms)?;
     let sensitive = never_shown(&panel);
-    let (found, own, more) = search_period(&panel, &people, &per, &sensitive).await?;
+    let only = narrow(&panel, &q.only, &mut per, &sensitive)?;
+    let (found, own, more) = search_period(&panel, &people, &per, only, &sensitive).await?;
     let names = names_of(&panel, &people, &own).await;
     search::log_quietly("kalesh:find", user, &format!("{} · {}", versus(&names), per.label));
 
@@ -408,6 +426,7 @@ pub async fn find(State(panel): State<Panel>, axum::Extension(Caller(user)): axu
         "since_ts": per.since_ms / 1000,
         "until_ts": per.until_ms / 1000,
         "label": per.label,
+        "only": only.map(|c| c.to_string()),
         "stretches": out,
         "more": more,
         "read": own.len(),
@@ -454,6 +473,9 @@ pub struct ExchangeQuery {
     from: Option<String>,
     #[serde(default)]
     to: Option<String>,
+    /// Only this channel (an id); none means every channel they talked in.
+    #[serde(default)]
+    only: Option<String>,
 }
 
 enum What {
@@ -513,8 +535,9 @@ async fn load(panel: &Panel, q: &ExchangeQuery) -> Result<Loaded, ApiError> {
     };
     let sensitive = never_shown(panel);
     if blank(&q.channel).is_none() {
-        let per = period(&q.hours, &q.from, &q.to, chrono::Utc::now().timestamp_millis())?;
-        let (found, own, _) = search_period(panel, &people, &per, &sensitive).await?;
+        let mut per = period(&q.hours, &q.from, &q.to, chrono::Utc::now().timestamp_millis())?;
+        let only = narrow(panel, &q.only, &mut per, &sensitive)?;
+        let (found, own, _) = search_period(panel, &people, &per, only, &sensitive).await?;
         let (rows, truncated) = merged(&found);
         let names = names_of(panel, &people, &own).await;
         let mut stretches: Vec<(i64, Value)> = found
@@ -763,6 +786,9 @@ pub struct SummariseBody {
     from: Option<String>,
     #[serde(default)]
     to: Option<String>,
+    /// Only this channel (an id); none means every channel they talked in.
+    #[serde(default)]
+    only: Option<String>,
 }
 
 /// Summaries being written right now, so two mods pressing at once pay once.
@@ -803,6 +829,7 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
         hours: body.hours,
         from: body.from,
         to: body.to,
+        only: if whole { body.only } else { None },
     };
     let loaded = load(&panel, &q).await?;
     let lines = loaded.lines();
