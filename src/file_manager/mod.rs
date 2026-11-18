@@ -1,3 +1,5 @@
+pub mod sweep;
+
 use std::path::PathBuf;
 
 use anyhow::Result;

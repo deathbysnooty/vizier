@@ -64,6 +64,13 @@ impl VizierDependencies {
             fm.run(file_transport).await;
         });
 
+        // Old uploads are deleted so they can't fill the disk again.
+        let sweep_storage = storage.clone();
+        let sweep_workspace = config.workspace.clone();
+        tokio::spawn(async move {
+            crate::file_manager::sweep::run(sweep_workspace, sweep_storage).await;
+        });
+
         Ok(Self {
             config: Arc::new(config.clone()),
             storage: Arc::new(storage),
