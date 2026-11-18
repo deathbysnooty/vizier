@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -505,6 +505,16 @@ static BELOW: LazyLock<Mutex<HashMap<u64, u32>>> = LazyLock::new(|| Mutex::new(H
 /// True while the gate is being posted, so its own message isn't counted as
 /// having buried it.
 static POSTING: AtomicBool = AtomicBool::new(false);
+/// A gate channel Discord says no longer exists. The gate is re-checked every
+/// five seconds, and a deleted channel used to log a warning every time
+/// (15,000 a day by Nov 2026); now it warns once and waits until the setting
+/// names another channel.
+static GONE: AtomicU64 = AtomicU64::new(0);
+
+/// Discord's answer for a channel that has been deleted.
+fn is_unknown_channel(err: &impl std::fmt::Display) -> bool {
+    err.to_string().contains("Unknown Channel")
+}
 
 /// Counts chat under the gate. Called for every message the bot sees.
 pub fn on_message(ctx: &Context, msg: &Message) {
@@ -527,6 +537,9 @@ async fn keep_gate(ctx: &Context) {
         return;
     }
     let Some(channel) = gate_channel() else { return };
+    if GONE.load(Ordering::SeqCst) == channel.get() {
+        return;
+    }
     let counts = super::signup_store::db().map(|db| super::signup_store::counts(&db.lock())).unwrap_or((0, 0));
     let text = gate_text(counts);
     let rows = vec![gate_buttons()];
@@ -549,6 +562,13 @@ async fn keep_gate(ctx: &Context) {
                     if let Some(old) = existing {
                         let _ = channel.delete_message(&ctx.http, old.id).await;
                     }
+                }
+                Err(err) if is_unknown_channel(&err) => {
+                    GONE.store(channel.get(), Ordering::SeqCst);
+                    tracing::warn!(
+                        "gate: channel {} no longer exists, so the join post is paused; set VIZIER_GAMES_GATE_CHANNEL to a real channel, or turn VIZIER_GAMES_GATE off",
+                        channel.get()
+                    );
                 }
                 Err(err) => tracing::warn!("gate: the join post was not sent: {}", err),
             }
@@ -603,6 +623,12 @@ pub fn spawn(ctx: Context) {
 mod tests {
     use super::super::month::testing::Month;
     use super::*;
+
+    #[test]
+    fn a_deleted_channel_is_recognised_and_other_errors_are_not() {
+        assert!(is_unknown_channel(&"Unknown Channel"));
+        assert!(!is_unknown_channel(&"Missing Permissions"));
+    }
 
     /// 2026-10-02, 4pm India time: the hour from 3 to 4.
     fn four_pm() -> i64 {

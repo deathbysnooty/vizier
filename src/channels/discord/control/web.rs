@@ -402,6 +402,14 @@ fn guild_id(ctx: &Context) -> Option<GuildId> {
     ctx.cache.guilds().first().copied()
 }
 
+/// A member id from a page or a stored row. `UserId::new` panics on 0, and a
+/// 0 does reach here (an empty or unknown author in an old row), which took
+/// down the request four times on 16-17 Nov 2026; nobody has id 0, so it is
+/// simply nobody.
+fn user_id(id: u64) -> Option<UserId> {
+    (id != 0).then(|| UserId::new(id))
+}
+
 fn member_info(m: &serenity::all::Member) -> MemberInfo {
     MemberInfo {
         id: m.user.id.get().to_string(),
@@ -509,7 +517,7 @@ impl PanelData for LiveData {
     async fn member(&self, id: u64) -> Option<MemberInfo> {
         let ctx = CTX.get()?;
         let gid = guild_id(ctx)?;
-        let user = UserId::new(id);
+        let user = user_id(id)?;
         let cached = ctx.cache.guild(gid).and_then(|g| g.members.get(&user).map(member_info));
         match cached {
             Some(m) => Some(m),
@@ -545,7 +553,7 @@ impl PanelData for LiveData {
     fn cached_member(&self, id: u64) -> Option<MemberInfo> {
         let ctx = CTX.get()?;
         let g = ctx.cache.guild(guild_id(ctx)?)?;
-        g.members.get(&UserId::new(id)).map(member_info)
+        g.members.get(&user_id(id)?).map(member_info)
     }
 
     fn house_cup(&self, period: houses::Period, now: i64) -> Option<houses::HouseCup> {
@@ -583,7 +591,7 @@ impl PanelData for LiveData {
     async fn member_detail(&self, id: u64) -> Option<members::MemberDetail> {
         let ctx = CTX.get()?;
         let gid = guild_id(ctx)?;
-        let user = UserId::new(id);
+        let user = user_id(id)?;
         let cached = ctx.cache.guild(gid).and_then(|g| g.members.get(&user).cloned());
         let member = match cached {
             Some(m) => m,
@@ -867,7 +875,7 @@ impl PanelData for LiveData {
 
     async fn user(&self, id: u64) -> Option<MemberInfo> {
         let ctx = CTX.get()?;
-        let user = tokio::time::timeout(Duration::from_secs(10), UserId::new(id).to_user(ctx)).await.ok()?.ok()?;
+        let user = tokio::time::timeout(Duration::from_secs(10), user_id(id)?.to_user(ctx)).await.ok()?.ok()?;
         Some(MemberInfo {
             id: user.id.get().to_string(),
             name: user.display_name().to_string(),
