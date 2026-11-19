@@ -185,7 +185,7 @@ pub fn render(shot: &Shot, fs: &mut FontSystem) -> Option<Vec<u8>> {
         let name_w = pen.line(&format!("@{}", r.name), x, top, REPLY_SIZE, Weight::SEMIBOLD, r.colour.unwrap_or(NAME_DEFAULT), 260.0);
         x += name_w + 8.0;
         let snippet = if r.text.trim().is_empty() {
-            if r.picture.is_some() { "📷 Click to see attachment".to_string() } else { "…".to_string() }
+            if r.picture.is_some() { "🖼️ GIF / picture".to_string() } else { "…".to_string() }
         } else {
             r.text.replace('\n', " ")
         };

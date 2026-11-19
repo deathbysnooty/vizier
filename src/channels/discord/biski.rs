@@ -73,8 +73,90 @@ fn is_picture(a: &serenity::all::Attachment) -> bool {
     by_type || [".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|e| name.ends_with(e))
 }
 
-/// One message as the card draws it.
-async fn said(ctx: &Context, guild: GuildId, m: &Message, bot_id: u64) -> Said {
+/// A moving picture to post under the card, so the GIF actually plays.
+pub struct Moving {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Discord takes 8 MB per file from a bot without boosts; stay well under.
+const MAX_MOVING: usize = 7 * 1024 * 1024;
+
+fn ext_of(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url).to_lowercase();
+    path.rsplit('.').next().filter(|e| e.len() <= 4).unwrap_or("gif").to_string()
+}
+
+/// The message's picture: an attached image, a sticker, or the preview of a
+/// GIF link (Tenor, Giphy, Klipy...). Returns the still the card draws, the
+/// animation to post beside it if there is one, and whether the message's
+/// words were only the link (Discord hides those, so the card does too).
+async fn media(m: &Message) -> (Option<Vec<u8>>, Option<Moving>, bool) {
+    if let Some(a) = m.attachments.iter().find(|a| is_picture(a)) {
+        let bytes = fetch(&a.url).await;
+        let moving = (a.filename.to_lowercase().ends_with(".gif"))
+            .then(|| bytes.clone())
+            .flatten()
+            .filter(|b| b.len() <= MAX_MOVING)
+            .map(|b| Moving { filename: "biski.gif".into(), bytes: b });
+        return (bytes, moving, false);
+    }
+    if let Some(st) = m.sticker_items.first() {
+        use serenity::all::StickerFormatType as F;
+        let ext = match st.format_type {
+            F::Gif => Some("gif"),
+            F::Png | F::Apng => Some("png"),
+            _ => None,
+        };
+        if let Some(ext) = ext {
+            let bytes = fetch(&format!("https://media.discordapp.net/stickers/{}.{}?size=320", st.id.get(), ext)).await;
+            let moving = (ext == "gif")
+                .then(|| bytes.clone())
+                .flatten()
+                .map(|b| Moving { filename: "biski-sticker.gif".into(), bytes: b });
+            return (bytes, moving, false);
+        }
+    }
+    let only_link = {
+        let t = m.content.trim();
+        !t.is_empty() && !t.contains(char::is_whitespace) && t.starts_with("http")
+    };
+    for e in &m.embeds {
+        let still = e
+            .image
+            .as_ref()
+            .map(|i| i.proxy_url.clone().unwrap_or_else(|| i.url.clone()))
+            .or_else(|| e.thumbnail.as_ref().map(|t| t.proxy_url.clone().unwrap_or_else(|| t.url.clone())));
+        let Some(still_url) = still else { continue };
+        let Some(bytes) = fetch(&still_url).await else { continue };
+        let moving_url = e
+            .video
+            .as_ref()
+            .map(|v| v.proxy_url.clone().unwrap_or_else(|| v.url.clone()))
+            .or_else(|| (ext_of(&still_url) == "gif").then(|| still_url.clone()));
+        let moving = match moving_url {
+            Some(u) => fetch(&u)
+                .await
+                .filter(|b| b.len() <= MAX_MOVING)
+                .map(|b| Moving { filename: format!("biski.{}", ext_of(&u)), bytes: b }),
+            None => None,
+        };
+        let gifv = e.kind.as_deref() == Some("gifv") || moving.is_some();
+        return (Some(bytes), moving, only_link && gifv);
+    }
+    // No preview from Discord (yet): read the share page ourselves.
+    if let Some(link) = m.content.split_whitespace().find(|w| w.starts_with("http")) {
+        if let Some((name, bytes)) = super::fetch_embedded_media(link).await {
+            let moving = (name.to_lowercase().ends_with(".gif") && bytes.len() <= MAX_MOVING)
+                .then(|| Moving { filename: "biski.gif".into(), bytes: bytes.clone() });
+            return (Some(bytes), moving, only_link);
+        }
+    }
+    (None, None, false)
+}
+
+/// One message as the card draws it, and its animation if it has one.
+async fn said(ctx: &Context, guild: GuildId, m: &Message, bot_id: u64) -> (Said, Option<Moving>) {
     let member = guild.member(ctx, m.author.id).await.ok();
     let name = member
         .as_ref()
@@ -85,11 +167,9 @@ async fn said(ctx: &Context, guild: GuildId, m: &Message, bot_id: u64) -> Said {
     let when = DateTime::from_timestamp(m.timestamp.unix_timestamp(), 0)
         .map(|t| t.with_timezone(&stats::ist()).format("%-d %b %Y, %-I:%M %p").to_string().replace("AM", "am").replace("PM", "pm"))
         .unwrap_or_default();
-    let picture = match m.attachments.iter().find(|a| is_picture(a)) {
-        Some(a) => fetch(&a.url).await,
-        None => None,
-    };
-    Said { name, colour, avatar: fetch(&face).await, text: words(m, bot_id), when, picture }
+    let (picture, moving, only_link) = media(m).await;
+    let text = if only_link { String::new() } else { words(m, bot_id) };
+    (Said { name, colour, avatar: fetch(&face).await, text, when, picture }, moving)
 }
 
 /// The message `m` replied to, if it replied to one that still exists.
@@ -118,10 +198,11 @@ pub async fn run(ctx: &Context, storage: &Storage, original: &Message, by: UserI
 
     let bot_id = ctx.cache.current_user().id.get();
     let reply = match replied_to(ctx, original).await {
-        Some(r) => Some(said(ctx, guild, &r, bot_id).await),
+        Some(r) => Some(said(ctx, guild, &r, bot_id).await.0),
         None => None,
     };
-    let shot = Shot { replied_to: reply, said: said(ctx, guild, original, bot_id).await };
+    let (main, moving) = said(ctx, guild, original, bot_id).await;
+    let shot = Shot { replied_to: reply, said: main };
     let png = tokio::task::spawn_blocking(move || {
         let mut fs = awards::fonts().lock();
         if fs.db().len() == 0 {
@@ -133,14 +214,15 @@ pub async fn run(ctx: &Context, storage: &Storage, original: &Message, by: UserI
     .map_err(|e| e.to_string())??;
 
     let jump = original.link();
+    let mut post = CreateMessage::new()
+        .content(format!("📸 <@{}> ne biski kiya · {}", by.get(), jump))
+        .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles())
+        .add_file(CreateAttachment::bytes(png, "biski.png"));
+    if let Some(m) = moving {
+        post = post.add_file(CreateAttachment::bytes(m.bytes, m.filename));
+    }
     let posted = channel()
-        .send_message(
-            &ctx.http,
-            CreateMessage::new()
-                .content(format!("📸 <@{}> ne biski kiya · {}", by.get(), jump))
-                .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles())
-                .add_file(CreateAttachment::bytes(png, "biski.png")),
-        )
+        .send_message(&ctx.http, post)
         .await
         .map_err(|e| e.to_string())?;
     let url = posted.link();

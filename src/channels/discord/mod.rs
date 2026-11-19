@@ -653,7 +653,7 @@ fn filename_for(url: &str) -> String {
 }
 
 /// Resolve one Tenor/Giphy link to real image bytes, or None if anything is off.
-async fn fetch_embedded_media(link: &str) -> Option<(String, Vec<u8>)> {
+pub(super) async fn fetch_embedded_media(link: &str) -> Option<(String, Vec<u8>)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
