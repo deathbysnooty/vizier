@@ -156,6 +156,8 @@ mod awards_card;
 mod quiz;
 mod quote;
 mod quote_card;
+mod biski;
+mod biski_card;
 mod stats;
 
 pub struct DiscordChannelReader {
@@ -1778,6 +1780,9 @@ impl EventHandler for Handler {
         let quote_cmd = CreateCommand::new("Quote").kind(serenity::all::CommandType::Message);
         commands.push(quote_cmd);
 
+        // Right-click a message -> Apps -> Biski: a screenshot of it in the biski channel.
+        commands.push(CreateCommand::new("Biski").kind(serenity::all::CommandType::Message));
+
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
 
@@ -2641,6 +2646,25 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                             Err(err) => {
                                 tracing::warn!("quote failed: {}", err);
                                 "Quote nahi ban paaya. Thodi der mein try kar.".to_string()
+                            }
+                        }
+                    }
+                    _ => "Ye sirf server ke messages pe chalta hai.".to_string(),
+                };
+                let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
+            }
+
+            if command.data.name == "Biski" {
+                let _ = command.defer_ephemeral(&ctx.http).await;
+                let text = match (command.guild_id, command.data.target()) {
+                    (Some(guild), Some(serenity::all::ResolvedTarget::Message(original))) => {
+                        match biski::run(&ctx, &self.1.storage, original, command.user.id, guild).await {
+                            Ok(biski::Done::Posted(url)) => format!("📸 Biski ho gaya: {}", url),
+                            Ok(biski::Done::Already(url)) => format!("Ye pehle hi biski ho chuka hai: {}", url),
+                            Err(err) if err == "safe-corner" => "Safe-corner se biski nahi hota.".to_string(),
+                            Err(err) => {
+                                tracing::warn!("biski failed: {}", err);
+                                "Biski nahi ho paaya. Thodi der mein try kar.".to_string()
                             }
                         }
                     }
