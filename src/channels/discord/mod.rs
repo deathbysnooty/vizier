@@ -2655,22 +2655,36 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
 
             if command.data.name == "Biski" {
-                let _ = command.defer_ephemeral(&ctx.http).await;
-                let text = match (command.guild_id, command.data.target()) {
+                // Public, so the room sees the biski and its link; anything
+                // that isn't a fresh post is swapped for a private note.
+                let _ = command.defer(&ctx.http).await;
+                let (public, text) = match (command.guild_id, command.data.target()) {
                     (Some(guild), Some(serenity::all::ResolvedTarget::Message(original))) => {
                         match biski::run(&ctx, &self.1.storage, original, command.user.id, guild).await {
-                            Ok(biski::Done::Posted(url)) => format!("📸 Biski ho gaya: {}", url),
-                            Ok(biski::Done::Already(url)) => format!("Ye pehle hi biski ho chuka hai: {}", url),
-                            Err(err) if err == "safe-corner" => "Safe-corner se biski nahi hota.".to_string(),
+                            Ok(biski::Done::Posted(url)) => (
+                                true,
+                                format!("📸 <@{}> ne <@{}> ka message biski kiya → {}", command.user.id.get(), original.author.id.get(), url),
+                            ),
+                            Ok(biski::Done::Already(url)) => (false, format!("Ye pehle hi biski ho chuka hai: {}", url)),
+                            Err(err) if err == "safe-corner" => (false, "Safe-corner se biski nahi hota.".to_string()),
                             Err(err) => {
                                 tracing::warn!("biski failed: {}", err);
-                                "Biski nahi ho paaya. Thodi der mein try kar.".to_string()
+                                (false, "Biski nahi ho paaya. Thodi der mein try kar.".to_string())
                             }
                         }
                     }
-                    _ => "Ye sirf server ke messages pe chalta hai.".to_string(),
+                    _ => (false, "Ye sirf server ke messages pe chalta hai.".to_string()),
                 };
-                let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
+                if public {
+                    let edit = serenity::all::EditInteractionResponse::new()
+                        .content(text)
+                        .allowed_mentions(serenity::all::CreateAllowedMentions::new().empty_users().empty_roles());
+                    let _ = command.edit_response(&ctx.http, edit).await;
+                } else {
+                    let _ = command.delete_response(&ctx.http).await;
+                    let note = serenity::all::CreateInteractionResponseFollowup::new().ephemeral(true).content(text);
+                    let _ = command.create_followup(&ctx.http, note).await;
+                }
             }
 
             if command.data.name == "awards" {
