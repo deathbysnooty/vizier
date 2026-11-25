@@ -22,13 +22,17 @@ cargo test        # run tests (very few exist today — see below)
 cargo clippy       # lint
 ```
 
-There is no `just test` or `just lint` target — use `cargo test` / `cargo clippy` directly. Tests are sparse (`src/agents/agent/model/registry.rs`, `src/storage/memory.rs`, `src/skill/context.rs`); most correctness is exercised by running the binary, not by a test suite.
+There is no `just test` or `just lint` target — use `cargo test` / `cargo clippy` directly. There are about 1,650 tests, most of them around the Discord channel (`src/channels/discord/`, including the mod panel under `control/`); run the area you touched, e.g. `cargo test kalesh`.
 
 WebUI typecheck: `cd webui && npm run typecheck` (runs `react-router typegen && tsc`).
 
 ### Build gotcha: `build.rs` runs the WebUI build
 
 `build.rs` shells out to `npm run build` in `webui/` on every `cargo build` **if** `webui/node_modules/` exists. If `node_modules/` is absent and `webui/build/client/` doesn't already exist, the build panics. Run `just install` first, or make sure `webui/build/client/` is pre-populated (this is how crates.io publishes work — see `include` in `Cargo.toml`).
+
+## Production: read `docs/OPERATIONS.md` before shipping
+
+This repo also runs the live MLCI Discord bot ("Loduchand") on a Hetzner VPS. **Never run `vizier run` with the live token on a dev machine.** How to build, deploy (which restarts the live bot and needs the owner's yes), the gotchas, and the house rules are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 ## CLI subcommands
 
