@@ -426,8 +426,8 @@ pub fn templates(now: i64) -> Vec<Template> {
             about: "A cheerful morning line with a picture from your library. Add a few and they take turns.",
             reminder: Reminder {
                 lines: vec![
-                    "Good morning, legends! ☀️ {day} is here. Chai ready hai?".into(),
-                    "Suprabhat, {date}! Aaj ka plan kya hai? ☕".into(),
+                    "Good morning, legends! ☀️ Happy {day}. Got your tea ready?".into(),
+                    "Good morning! It's {date}. What's the plan for today? ☕".into(),
                     "Rise and shine! It's {day}. {random:Be kind|Drink water|Touch some grass} today. 🌼".into(),
                 ],
                 reactions: vec!["☀️".into()],
@@ -449,7 +449,7 @@ pub fn templates(now: i64) -> Vec<Template> {
                             films, cricket, college life or games. One question only, a short emoji is fine."
                     .into(),
                 lines: vec![
-                    "Chai or coffee, and why is it chai?".into(),
+                    "Tea or coffee, and why is it tea?".into(),
                     "What's one song you've had on repeat this week?".into(),
                     "Would you rather have unlimited Swiggy or unlimited data?".into(),
                 ],
@@ -499,7 +499,7 @@ pub fn templates(now: i64) -> Vec<Template> {
             about: "A gentle nudge every two hours in the day. Upload a few GIFs; one is picked at random each time.",
             reminder: Reminder {
                 lines: vec![
-                    "💧 {random:Pani pee lo, doston|Hydration check|Sip sip, hooray} — it's {time}.".into(),
+                    "💧 {random:Drink some water, friends|Hydration check|Sip sip, hooray} — it's {time}.".into(),
                     "🧘 Break time! {random:Stretch your back|Look away from the screen for a minute|Stand up and walk around}.".into(),
                 ],
                 order: Order::Random,

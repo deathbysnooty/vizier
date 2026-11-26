@@ -10,7 +10,7 @@
 //! next melee.
 //!
 //! The arena has **one world and no styles**: Westeros, spoken in the server's
-//! own Hinglish (see [`super::battle_lines`]). There used to be a `type` option
+//! own English commentary (see [`super::battle_lines`]). There used to be a `type` option
 //! that picked between seven of them; it is gone, along with every branch that
 //! read it.
 //!
@@ -1161,7 +1161,7 @@ async fn duel(ctx: &Context, channel: ChannelId, a: &Contender, b: &Contender, s
     let (winner, loser) = if side == 0 { (a, b) } else { (b, a) };
     let lines = lines();
     let finish = if gods {
-        format!("Na {} padh paaya, na {} — so the gods decided. 🎲", a.name, b.name)
+        format!("Neither {} nor {} solved a scroll — so the gods decided. 🎲", a.name, b.name)
     } else {
         fill(pick(lines.finish, seed), &winner.name, &loser.name)
     };
@@ -2478,8 +2478,8 @@ mod tests {
 
     #[test]
     fn lines_fill_both_names_and_the_rounds_read_right() {
-        let line = fill("{a} ne {b} ko dhaal dikhayi", "Ravi", "Sneha");
-        assert_eq!(line, "Ravi ne Sneha ko dhaal dikhayi");
+        let line = fill("{a} showed {b} the shield", "Ravi", "Sneha");
+        assert_eq!(line, "Ravi showed Sneha the shield");
         // One set of round names for the whole arena: the fight card's chip,
         // the bracket's columns and the caption all say the same thing.
         assert_eq!(round_title(1), "The Final Tilt");

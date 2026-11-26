@@ -77,24 +77,24 @@ struct Def {
 
 const CATALOGUE: &[Def] = &[
     Def { key: "night", section: "time", label: "NIGHT OWL", emoji: "🦉" },
-    Def { key: "morning", section: "time", label: "SUBAH KA MURGA", emoji: "🐓" },
-    Def { key: "office", section: "time", label: "OFFICE MEIN FREE", emoji: "💼" },
+    Def { key: "morning", section: "time", label: "EARLY BIRD", emoji: "🐓" },
+    Def { key: "office", section: "time", label: "CHATTING ON THE CLOCK", emoji: "💼" },
     Def { key: "weekend", section: "time", label: "WEEKEND WARRIOR", emoji: "🏖️" },
-    Def { key: "vcshare", section: "vc", label: "VC KA KIDA", emoji: "🎙️" },
-    Def { key: "nvc", section: "vc", label: "HAR MEHFIL MEIN", emoji: "🦘" },
-    Def { key: "voicehrs", section: "vc", label: "SABSE ZYADA VC", emoji: "🔊" },
-    Def { key: "voiceratio", section: "vc", label: "BOLTA HAI, LIKHTA NAHI", emoji: "🗣️" },
-    Def { key: "avgsess", section: "vc", label: "LAMBI BAITHAK", emoji: "🛋️" },
-    Def { key: "afkhrs", section: "vc", label: "KUMBHKARAN", emoji: "😴" },
-    Def { key: "spread", section: "chat", label: "GHUMAKKAD", emoji: "🧭" },
-    Def { key: "perday", section: "chat", label: "EK DIN MEIN PURA SAAL", emoji: "💣" },
-    Def { key: "bestday", section: "chat", label: "EK HI DIN MEIN", emoji: "🔥" },
-    Def { key: "days", section: "chat", label: "ROZ AATA HAI", emoji: "📅" },
-    Def { key: "quiet", section: "chat", label: "GAYAB", emoji: "👻" },
-    Def { key: "msgs", section: "chat", label: "BAKCHODI SAMRAT", emoji: "👑" },
+    Def { key: "vcshare", section: "vc", label: "VOICE CHAT REGULAR", emoji: "🎙️" },
+    Def { key: "nvc", section: "vc", label: "IN EVERY ROOM", emoji: "🦘" },
+    Def { key: "voicehrs", section: "vc", label: "MOST TIME IN VOICE", emoji: "🔊" },
+    Def { key: "voiceratio", section: "vc", label: "ALL TALK, NO TYPING", emoji: "🗣️" },
+    Def { key: "avgsess", section: "vc", label: "THE LONG HAUL", emoji: "🛋️" },
+    Def { key: "afkhrs", section: "vc", label: "HEAVY SLEEPER", emoji: "😴" },
+    Def { key: "spread", section: "chat", label: "THE WANDERER", emoji: "🧭" },
+    Def { key: "perday", section: "chat", label: "A YEAR'S WORTH IN A DAY", emoji: "💣" },
+    Def { key: "bestday", section: "chat", label: "BIGGEST CHAT DAY", emoji: "🔥" },
+    Def { key: "days", section: "chat", label: "THE DAILY REGULAR", emoji: "📅" },
+    Def { key: "quiet", section: "chat", label: "THE VANISHING ACT", emoji: "👻" },
+    Def { key: "msgs", section: "chat", label: "BANTER ROYALTY", emoji: "👑" },
 ];
 
-const SECTIONS: &[(&str, &str)] = &[("time", "RAAT DIN KA HISAAB"), ("vc", "VC WALE"), ("chat", "CHAT KE SHER")];
+const SECTIONS: &[(&str, &str)] = &[("time", "AROUND THE CLOCK"), ("vc", "VOICE REGULARS"), ("chat", "CHAT CHAMPIONS")];
 
 #[derive(Clone)]
 struct MemberInfo {
@@ -574,10 +574,10 @@ pub async fn card_png(ctx: &Context, guild: GuildId, view: View) -> Result<(Arc<
     let (done, total) = stats::history_progress();
     let mut note = String::new();
     if total > 0 && done < total {
-        note.push_str(&format!("Purana hisaab abhi gin raha hoon ({}/{} channels) - numbers badlenge.\n", done, total));
+        note.push_str(&format!("I'm still counting older messages ({}/{} channels). These numbers will change.\n", done, total));
     }
     if !stats::voice_caught_up() {
-        note.push_str("VC ka purana record abhi padh raha hoon.\n");
+        note.push_str("I'm still reading older voice logs.\n");
     }
     let png = Arc::new(png);
     // Only a finished picture is worth holding on to.

@@ -2192,7 +2192,7 @@
     }).catch((e) => {
       if (!lists.isConnected) return;
       clear(lists);
-      lists.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the kalesh log'), h('p', null, e.message))));
+      lists.appendChild(h('div', { class: 'card' }, h('div', { class: 'empty' }, icon('alert'), h('h3', null, 'Couldn’t load the fight log'), h('p', null, e.message))));
     });
   }
 
@@ -2269,9 +2269,9 @@
     const body = h('div', { class: 'kalesh-rows' });
     if (!list.length) {
       let why = 'The detector only keeps fights it calls from the day this page went live, so older ones aren’t listed here.';
-      if (!set.detector_on) why = 'The kalesh detector is switched off, so nothing is being caught.';
+      if (!set.detector_on) why = 'Fight detection is turned off.';
       else if (!set.watched_channels) why = 'The detector isn’t watching any channels yet.';
-      else if (!set.role_set) why = 'The detector only asks the AI — and so only records a fight — once a kalesh role is set to ping.';
+      else if (!set.role_set) why = 'Set a notification role before the detector can check for and record fights.';
       body.appendChild(h('div', { class: 'empty' }, icon('shield'), h('h3', null, 'No fights caught yet'), h('p', null, why),
         looking ? null : h('p', null, h('b', null, 'You don’t need one to summarise: '), 'pick the members above and press Find. Everything they said to each other in the message log — up to a week back — can be read and summarised.'),
         h('p', { class: 'hint' }, h('a', { href: '#/s/kalesh' }, 'Kalesh detector settings'))));
@@ -2290,7 +2290,7 @@
           d.line ? h('div', { class: 'kalesh-row-how' }, '“' + d.line + '”') : null),
         icon('right', 'kalesh-row-go')));
     });
-    return card('kalesh-detections', 'Caught by the detector', 'Fights the kalesh detector called and pinged for, newest first. Open one to see the whole stretch.', body, { cls: 'kalesh-card' });
+    return card('kalesh-detections', 'Caught by the detector', 'Fights the bot flagged and sent alerts for, newest first. Open one to see the whole exchange.', body, { cls: 'kalesh-card' });
   }
 
   function iso(ts) { return new Date(ts * 1000).toISOString(); }
@@ -2596,7 +2596,7 @@
 
   // --- deep dives: every dive that has been run ------------------------------------------
 
-  const DIVE_WHY = { kalesh: 'Kalesh', automod: 'AutoMod', deleted: 'Deletions', drop: 'Gone quiet', jump: 'Much louder', newly_active: 'New and active' };
+  const DIVE_WHY = { kalesh: 'Fight detected', automod: 'AutoMod', deleted: 'Deletions', drop: 'Gone quiet', jump: 'Much louder', newly_active: 'New and active' };
 
   function divesHref(st) {
     const p = new URLSearchParams();
@@ -5441,7 +5441,7 @@
       // message
       const lines = h('div', { class: 'lines' });
       d.lines.forEach((line, i) => {
-        const ta = h('textarea', { class: 'textarea', rows: '2', 'aria-label': 'Version ' + (i + 1), placeholder: i === 0 ? 'e.g. 🎉 {mention} wapas aa gaya! {away} ho gaye the. Welcome home ❤️' : 'Another version', maxlength: '1600' });
+        const ta = h('textarea', { class: 'textarea', rows: '2', 'aria-label': 'Version ' + (i + 1), placeholder: i === 0 ? 'e.g. 🎉 {mention} is back after {away}! Welcome home ❤️' : 'Another version', maxlength: '1600' });
         ta.value = line;
         const counter = h('div', { class: 'line-count' + (line.length > 1500 ? ' over' : ''), 'aria-live': 'polite' }, line.length > 1200 ? line.length + ' / 1500' : '');
         const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(240, ta.scrollHeight + 2) + 'px'; };
@@ -6079,7 +6079,7 @@
     ['whole_word', 'Whole word or phrase', 'The trigger on its own, not inside a longer word.', '“hi” matches “hi there”, not “this”'],
     ['contains', 'Anywhere', 'Anywhere in the message, even inside a longer word.', '“hi” matches “this”'],
     ['exact', 'The whole message', 'The message is the trigger and nothing else.', '“gm” matches “gm”, not “gm all”'],
-    ['starts_with', 'Starts with', 'The message begins with the trigger.', '“bhai” matches “bhai sun”, not “sun bhai”'],
+    ['starts_with', 'Starts with', 'The message begins with the trigger.', '“hey” matches “hey friend” but skips “friend, hey”'],
     ['pattern', 'Pattern', 'A regular expression, for advanced rules.', '^when.*quiz matches “when is quiz?”'],
   ];
   const matchMode = (m) => MATCH_MODES.find((x) => x[0] === m) || MATCH_MODES[0];
@@ -6665,7 +6665,7 @@
   // --- bot behaviour ----------------------------------------------------------------------
 
   const TONE_PRESETS = [
-    ['Friendly Hinglish banter', 'Tone: friendly Hinglish banter. Talk like a friend in the group chat, mixing Hindi and English the way members do ("haan bhai", "scene kya hai"). Light teasing is fine; keep it warm, never mean.'],
+    ['Friendly banter', 'Reply in plain English and talk like a friend in the group chat. Light teasing is fine. Keep it warm and kind.'],
     ['Calm and helpful', 'Tone: calm and helpful. Be patient and clear, explain step by step when someone asks, and keep a steady, kind voice even when a chat gets heated.'],
     ['Short replies', 'Keep replies short: one to three sentences unless someone asks for detail. No long lists or essays in casual chat.'],
     ['No roasting', "Don't roast, insult or make fun of members, even if they ask for it or others are doing it. Joke with people, not about them."],

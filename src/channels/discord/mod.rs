@@ -556,7 +556,7 @@ async fn classify_kalesh(window: &[SeenMessage]) -> Option<String> {
          Loud is not a fight. Swearing is not a fight. Friends roasting each other is not \
          a fight. Only say yes if someone actually seems angry or hurt.\n\n\
          Reply with JSON only: {{\"kalesh\": true|false, \"line\": \"...\"}}\n\
-         If kalesh is true, `line` is one short playful Hinglish line announcing the drama, \
+         If kalesh is true, `line` is one short playful line in plain English announcing the drama, \
          popcorn energy, taking nobody's side and naming no winner. If false, `line` is \"\".\n\n\
          Messages:\n{}",
         transcript
@@ -585,7 +585,7 @@ async fn classify_kalesh(window: &[SeenMessage]) -> Option<String> {
     }
     let line = parsed["line"].as_str().unwrap_or("").trim().to_string();
     Some(if line.is_empty() {
-        "Kalesh detected 🍿".to_string()
+        "Drama detected 🍿".to_string()
     } else {
         line
     })
@@ -896,24 +896,24 @@ async fn save_letter(storage: &Arc<crate::storage::VizierStorage>, letter: &Lett
 /// Public announcements. The shout is loud on purpose - the whole fun is the
 /// channel knowing somebody got one - while the letter itself stays private.
 const LETTER_SHOUTS: &[&str] = &[
-    "Oye Lodu <@{}>, tere naam ki gumnaam chitthi aayi hai 📬",
-    "📬 <@{}> ko kisi ne anonymous letter bheja hai. Kaun? Pata nahi. Suspense.",
-    "Breaking news: <@{}> ke naam ek gumnaam chitthi. Popcorn nikaalo 🍿",
-    "Postman aaya hai <@{}> ke liye. Sender ka naam nahi likha 👀",
-    "<@{}>, koi tumhe yaad kar raha hai... anonymously.",
-    "Kisi ne <@{}> ko dil ki baat likhi hai. Ya gaali. Khol ke pata karo.",
-    "<@{}> tere liye kuch aaya hai. Sirf tu padh sakta hai, baaki sab tadapenge.",
-    "Attention <@{}>: gumnaam chitthi mili hai. Ab raat bhar sochna kaun tha.",
+    "Hey, troublemaker <@{}>, you've got an anonymous letter 📬",
+    "📬 Someone sent <@{}> an anonymous letter. Who could it be?",
+    "Breaking news! An anonymous letter for <@{}>. Get the popcorn 🍿",
+    "Mail for <@{}>. The sender left their name off 👀",
+    "<@{}>, someone's thinking about you... anonymously.",
+    "Someone poured their heart out to <@{}>. Or sent a roast. Open it and see.",
+    "<@{}>, you've got mail. Only you can read it, so the rest of us get to wonder.",
+    "An anonymous letter for <@{}>. Good luck guessing who sent it before bedtime.",
 ];
 
 /// Rejections in the bot's own voice - it is the same character here as
 /// anywhere else, and a flat error reads like a different bot.
 const SELF_LETTER_LINES: &[&str] = &[
-    "Kya bhai? Itna self obsessed mat ho, BC.",
-    "Khud ko letter? Bhai therapy sasti hai isse.",
-    "Apne aap ko chitthi bhej raha hai? Sach me itne akele ho?",
-    "Nahi. Khud se pyaar ghar pe kar, yahan nahi.",
-    "Bhai kam se kam ek dost bana le pehle.",
+    "A letter to your own biggest fan? Pick someone else.",
+    "A letter to yourself? A diary is cheaper.",
+    "Feeling lonely? Try sending a letter to someone else.",
+    "Save the love notes to yourself for your diary.",
+    "Make a friend first, then send them a letter.",
 ];
 
 fn pick<'a>(pool: &'a [&'a str]) -> &'a str {
@@ -1000,12 +1000,12 @@ async fn post_reply_in_thread(
 
     // Tag only the person the parent notice already named.
     let content = if reply.to_id == root.to_id {
-        format!("<@{}> ek aur jawab aaya hai.", reply.to_id)
+        format!("<@{}>, you've got another reply.", reply.to_id)
     } else {
-        "Ek jawab aaya hai. Jiska hai, wahi khol paayega.".to_string()
+        "A reply came in. Only the recipient can open it.".to_string()
     };
     let button = serenity::all::CreateButton::new(format!("lopen:{}", reply.id))
-        .label("Kholo")
+        .label("Open")
         .style(serenity::all::ButtonStyle::Primary);
     let sent = ChannelId::new(thread_id)
         .send_message(
@@ -1028,9 +1028,9 @@ async fn post_reply_in_thread(
                 .send_message(
                     &http,
                     CreateMessage::new().content(format!(
-                        "Tumhari gumnaam chitthi ka jawab aa gaya hai.\n\
-                         Jaake kholo: <#{}> (<#{}> ke andar)\n\
-                         Ya kahin bhi `/letterbox` likh do.",
+                        "You got a reply to your anonymous letter.\n\
+                         Open it in <#{}> (under <#{}>).\n\
+                         You can also use `/letterbox` anywhere.",
                         thread_id, channel
                     )),
                 )
@@ -1054,7 +1054,7 @@ async fn post_letter_notice(http: Arc<Http>, channel: u64, letter: &Letter) -> O
         .colour(serenity::all::Colour::new(0x9B59B6));
 
     let button = serenity::all::CreateButton::new(format!("lopen:{}", letter.id))
-        .label("Kholo")
+        .label("Open")
         .style(serenity::all::ButtonStyle::Primary);
 
     let msg = CreateMessage::new()
@@ -1096,28 +1096,28 @@ async fn handle_letter_command(
         .unwrap_or_default();
 
     let Some(to_id) = recipient else {
-        return "Kisko bhejna hai? Naam toh bata.".to_string();
+        return "Who should get the letter? Pick a recipient.".to_string();
     };
     if body.is_empty() {
-        return "Khaali chitthi? Kuch likh toh sahi.".to_string();
+        return "Your letter is empty. Write a message first.".to_string();
     }
     if body.chars().count() > 1500 {
-        return "Novel likh raha hai kya? 1500 characters se kam mein nipta.".to_string();
+        return "Writing a novel? Keep your letter to 1,500 characters or fewer.".to_string();
     }
     let from_id = command.user.id.get();
     if to_id.get() == from_id {
         return pick(SELF_LETTER_LINES).to_string();
     }
     if to_id.get() == ctx.cache.current_user().id.get() {
-        return "Mujhe letter bhej ke kya milega? Kisi insaan ko bhej.".to_string();
+        return "A letter for me? Send it to a member instead.".to_string();
     }
     if letters_off(storage, to_id.get()).await {
         // Said plainly on purpose: the sender needs to know it will not arrive,
         // and it reveals nothing beyond a preference they set themselves.
-        return "Unhone gumnaam chitthiyan band kar rakhi hain. Kuch nahi jaayega.".to_string();
+        return "They've turned off anonymous letters, so yours wasn't sent.".to_string();
     }
     if !letter_rate_ok(from_id) {
-        return "Bas kar bhai, postman thak gaya. Ek ghante baad aana.".to_string();
+        return "Give the mail carrier a break. Try again in an hour.".to_string();
     }
 
     let to_name = to_id
@@ -1305,19 +1305,19 @@ fn welcome_channel() -> Option<u64> {
 
 /// Lines for someone arriving for the first time.
 const WELCOME_FIRST: &[&str] = &[
-    "Aa gaya ek aur. Welcome to **Midlyf Crisis India**, {u}. Bakchodi shuru karo.",
-    "Welcome {u}. Yahan sab pagal hain, tum bhi adjust kar loge.",
-    "{u} joined. Naya shikaar. Welcome to **MLCI** 🎉",
-    "Welcome {u}! Rules padh lena, phir bhool jaana, sab yahi karte hain.",
+    "Another new face! Welcome to **Midlyf Crisis India**, {u}. Let the banter begin.",
+    "Welcome, {u}. We're all a little weird here. You'll fit right in.",
+    "{u} joined. Fresh meat! Welcome to **MLCI** 🎉",
+    "Welcome, {u}! Read the rules, then forget them like everyone else.",
 ];
 
 /// Lines for a returner. `{n}` is the number of times they have now joined.
 const WELCOME_BACK: &[&str] = &[
-    "{u} is back. {n}th time. Is server ka koi chakkar hai kya?",
-    "Wapas aa gaya {u}. Ye {n}th entry hai. Ab ke baar ruk jaana.",
-    "{u} returns for round {n}. Kahin aur mann nahi laga?",
-    "Dekho kaun laut aaya. {u}, {n}th baar. Hum gin rahe hain.",
-    "{u} ne {n}th baar join kiya hai. Rishta toh mazboot hai, bas confusing hai.",
+    "{u} is back for the {n} time. What is it about this server?",
+    "Welcome back, {u}! This is your {n} visit. Stick around this time.",
+    "{u} returns for their {n} round. Missed us already?",
+    "Look who's back! That's your {n} visit, {u}. We're counting.",
+    "{u} joined for the {n} time. This relationship is getting complicated.",
 ];
 
 fn ordinal(n: u32) -> String {
@@ -1799,7 +1799,7 @@ impl EventHandler for Handler {
         let fight_cmd = CreateCommand::new("fight")
             .description("call someone out for a duel - the fight happens in the fight channel")
             .add_option(
-                CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "kisse ladna hai")
+                CreateCommandOption::new(serenity::all::CommandOptionType::User, "who", "Who to challenge")
                     .required(true),
             );
         commands.push(fight_cmd);
@@ -2204,10 +2204,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                     None => ("That letter has gone missing.".to_string(), false),
                     Some(l) if l.to_id != clicker => {
                         // Say nothing about who it is for beyond that it is not them.
-                        ("Ye teri chitthi nahi hai. Chal nikal.".to_string(), false)
+                        ("This letter is for someone else.".to_string(), false)
                     }
                     Some(l) if l.opened => (
-                        "Ek baar khol chuka hai. Dobara nahi milegi.".to_string(),
+                        "You've already opened this letter. You can only open it once.".to_string(),
                         false,
                     ),
                     Some(mut l) => {
@@ -2286,17 +2286,17 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         if let Some(ref orig_id) = l.in_reply_to {
                             if let Some(orig) = load_letter(&self.1.storage, orig_id).await {
                                 text.push_str(&format!(
-                                    "**Tumne likha tha:**\n> {}\n\n",
+                                    "**You wrote:**\n> {}\n\n",
                                     orig.body.replace('\n', "\n> ")
                                 ));
                             }
-                            text.push_str("**Jawab:**\n");
+                            text.push_str("**Reply:**\n");
                         } else {
-                            text.push_str("**Gumnaam chitthi**\n\n");
+                            text.push_str("**Anonymous letter**\n\n");
                         }
                         text.push_str(&l.body);
                         text.push_str(&format!(
-                            "\n\n-# id `{}` - dobara nahi khulegi",
+                            "\n\n-# id `{}` - opens only once",
                             l.id
                         ));
                         (text, true)
@@ -2392,11 +2392,11 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                     (_, None) => "That letter has gone missing.".to_string(),
                     (Some(channel), Some(orig)) => {
                         if orig.to_id != sender {
-                            "Ye chitthi teri thi hi nahi, jawab kya dega.".to_string()
+                            "Only the recipient can reply to this letter.".to_string()
                         } else if body.trim().is_empty() {
-                            "Khaali jawab? Rehne de.".to_string()
+                            "Your reply is empty. Write a message first.".to_string()
                         } else if !letter_rate_ok(sender) {
-                            "Bas kar bhai, ek ghante baad aana.".to_string()
+                            "You've sent too many letters. Try again in an hour.".to_string()
                         } else {
                             let reply = Letter {
                                 id: nanoid::nanoid!(8),
@@ -2551,14 +2551,14 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 let text = match (command.guild_id, command.data.target()) {
                     (Some(guild), Some(serenity::all::ResolvedTarget::Message(original))) => {
                         match quote::start(&ctx, &self.1.storage, original, command.user.id, guild).await {
-                            Ok(()) => "Quote ban gaya - style chuno aur Save dabao.".to_string(),
+                            Ok(()) => "Your quote is ready. Pick a style and press Save.".to_string(),
                             Err(err) => {
                                 tracing::warn!("quote failed: {}", err);
-                                "Quote nahi ban paaya. Thodi der mein try kar.".to_string()
+                                "Couldn't make the quote. Try again in a bit.".to_string()
                             }
                         }
                     }
-                    _ => "Ye sirf server ke messages pe chalta hai.".to_string(),
+                    _ => "This only works on server messages.".to_string(),
                 };
                 let _ = command.edit_response(&ctx.http, serenity::all::EditInteractionResponse::new().content(text)).await;
             }
@@ -2572,17 +2572,17 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         match biski::run(&ctx, &self.1.storage, original, command.user.id, guild).await {
                             Ok(biski::Done::Posted(url)) => (
                                 true,
-                                format!("📸 <@{}> ne <@{}> ka message biski kiya → {}", command.user.id.get(), original.author.id.get(), url),
+                                format!("📸 <@{}> took a screenshot of <@{}>'s message → {}", command.user.id.get(), original.author.id.get(), url),
                             ),
-                            Ok(biski::Done::Already(url)) => (false, format!("Ye pehle hi biski ho chuka hai: {}", url)),
-                            Err(err) if err == "safe-corner" => (false, "Safe-corner se biski nahi hota.".to_string()),
+                            Ok(biski::Done::Already(url)) => (false, format!("This message already has a screenshot: {}", url)),
+                            Err(err) if err == "safe-corner" => (false, "Biski screenshots are off in Safe Corner.".to_string()),
                             Err(err) => {
                                 tracing::warn!("biski failed: {}", err);
-                                (false, "Biski nahi ho paaya. Thodi der mein try kar.".to_string())
+                                (false, "Couldn't make the screenshot. Try again in a bit.".to_string())
                             }
                         }
                     }
-                    _ => (false, "Ye sirf server ke messages pe chalta hai.".to_string()),
+                    _ => (false, "This only works on server messages.".to_string()),
                 };
                 if public {
                     let edit = serenity::all::EditInteractionResponse::new()
@@ -2600,7 +2600,7 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 // Counting and drawing take longer than Discord waits for a reply.
                 let _ = command.defer(&ctx.http).await;
                 let reply = match command.guild_id {
-                    None => serenity::all::EditInteractionResponse::new().content("Ye server mein chalta hai."),
+                    None => serenity::all::EditInteractionResponse::new().content("Use this in a server."),
                     Some(guild) => match awards::card_png(&ctx, guild, awards::View::Overall).await {
                         Ok((png, note)) => serenity::all::EditInteractionResponse::new()
                             .content(note)
@@ -2609,7 +2609,7 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         Err(err) => {
                             tracing::warn!("awards failed: {}", err);
                             serenity::all::EditInteractionResponse::new()
-                                .content("Awards abhi nahi ban paaye. Thodi der mein try kar.")
+                                .content("Couldn't make the awards card. Try again in a bit.")
                         }
                     },
                 };
@@ -2933,21 +2933,21 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 let all = joinlog_all(&self.1.storage).await;
                 let repeat: Vec<_> = all.iter().filter(|(_, l)| l.joins >= 2).collect();
                 let text = if repeat.is_empty() {
-                    "Abhi tak koi wapas nahi aaya. Sab pehli baar mein tik gaye. Boring server.".to_string()
+                    "No returning members yet. Everyone stuck around the first time. How boring.".to_string()
                 } else {
                     let mut lines = vec![format!(
-                        "**Ghar wapsi board** - {} log aise hain jo gaye aur phir laut aaye.\n",
+                        "**Rejoin leaderboard** - {} members left and came back.\n",
                         repeat.len()
                     )];
                     for (rank, (uid, log)) in repeat.iter().take(15).enumerate() {
                         let jibe = match log.joins {
-                            2 => "ek baar mann badla",
-                            3..=4 => "aadat ho gayi hai",
-                            5..=7 => "ye toh revolving door hai",
-                            _ => "bhai yahin ka kiraya de do",
+                            2 => "changed their mind once",
+                            3..=4 => "it's becoming a habit",
+                            5..=7 => "it's a revolving door",
+                            _ => "might as well pay rent here",
                         };
                         lines.push(format!(
-                            "`{:>2}.` <@{}> - **{}** baar aaya, **{}** baar gaya  ·  _{}_",
+                            "`{:>2}.` <@{}> - joined **{}** times, left **{}** times  ·  _{}_",
                             rank + 1,
                             uid,
                             log.joins,
@@ -2956,7 +2956,7 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         ));
                     }
                     if repeat.len() > 15 {
-                        lines.push(format!("\n...aur {} log.", repeat.len() - 15));
+                        lines.push(format!("\n...and {} more.", repeat.len() - 15));
                     }
                     lines.join("\n")
                 };
@@ -2983,9 +2983,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                     .save_state(optout_key(me), serde_json::Value::Bool(now_off))
                     .await;
                 let text = if now_off {
-                    "Ab tumhe koi gumnaam chitthi nahi aayegi. Wapas chalu karne ke liye phir se `/nochitthi` likho."
+                    "Anonymous letters are off. Use `/nochitthi` again to turn them back on."
                 } else {
-                    "Gumnaam chitthiyan wapas chalu. Ab log tumhe likh sakte hain."
+                    "Anonymous letters are back on. Members can write to you again."
                 };
                 let _ = command
                     .create_response(
@@ -3026,11 +3026,11 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 }
 
                 let (text, buttons) = if unopened.is_empty() && read.is_empty() {
-                    ("Koi chitthi nahi hai. Sannata hai.".to_string(), vec![])
+                    ("Your letterbox is empty. All quiet here.".to_string(), vec![])
                 } else if unopened.is_empty() {
                     (
                         format!(
-                            "Koi nayi chitthi nahi hai.\n\n**Padhi hui {} — jawab de sakte ho:**",
+                            "No new letters.\n\n**Already read: {}. You can still reply below.**",
                             read.len()
                         ),
                         vec![],
@@ -3040,16 +3040,16 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         .iter()
                         .map(|l| {
                             let kind = if l.in_reply_to.is_some() {
-                                "jawab"
+                                "reply"
                             } else {
-                                "chitthi"
+                                "letter"
                             };
-                            format!("- ek {} (`{}`)", kind, l.id)
+                            format!("- {} (`{}`)", kind, l.id)
                         })
                         .collect();
                     (
                         format!(
-                            "**Tumhare {} unopened:**\n{}\n\nKholne ke liye niche button dabao.",
+                            "**Unopened mail: {}**\n{}\n\nUse the buttons below to open it.",
                             unopened.len(),
                             lines.join("\n")
                         ),
@@ -3058,9 +3058,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                             .map(|l| {
                                 serenity::all::CreateButton::new(format!("lopen:{}", l.id))
                                     .label(if l.in_reply_to.is_some() {
-                                        "Jawab kholo"
+                                        "Open reply"
                                     } else {
-                                        "Chitthi kholo"
+                                        "Open letter"
                                     })
                                     .style(serenity::all::ButtonStyle::Primary)
                             })
@@ -3077,7 +3077,7 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                         read.iter()
                             .map(|l| {
                                 serenity::all::CreateButton::new(format!("lreply:{}", l.id))
-                                    .label(format!("Jawab do ({})", l.id))
+                                    .label(format!("Reply ({})", l.id))
                                     .style(serenity::all::ButtonStyle::Secondary)
                             })
                             .collect::<Vec<_>>(),
@@ -3702,11 +3702,11 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 (Some(guild), Some(original)) => {
                     if let Err(err) = quote::start(&ctx, &self.1.storage, &original, msg.author.id, guild).await {
                         tracing::warn!("quote failed: {}", err);
-                        let _ = msg.reply(&ctx.http, "Quote nahi ban paaya. Thodi der mein try kar.").await;
+                        let _ = msg.reply(&ctx.http, "Couldn't make the quote. Try again in a bit.").await;
                     }
                 }
                 _ => {
-                    let _ = msg.reply(&ctx.http, "Kisko quote karun? Us message pe reply karke bol.").await;
+                    let _ = msg.reply(&ctx.http, "Who should I quote? Reply to the message you want to quote.").await;
                 }
             }
             return;

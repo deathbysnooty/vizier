@@ -49,7 +49,7 @@ pub use super::super::super::kalesh::{TRIES, why_failed};
 const HOUR_MS: i64 = 3_600_000;
 
 fn store_db() -> Result<&'static Mutex<rusqlite::Connection>, ApiError> {
-    store::db().ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "The kalesh store isn't open. Restart the bot.".into()))
+    store::db().ok_or_else(|| ApiError(StatusCode::SERVICE_UNAVAILABLE, "Fight history is unavailable. Restart the bot.".into()))
 }
 
 fn db_error(err: rusqlite::Error) -> ApiError {
@@ -907,9 +907,9 @@ pub async fn summarise(State(panel): State<Panel>, axum::Extension(Caller(user))
 pub fn audit_entry(e: &super::super::AuditEntry) -> serde_json::Map<String, Value> {
     let mut obj = serde_json::Map::new();
     let label = match e.key.as_str() {
-        "kalesh:summary" => "Summarised a kalesh",
-        "kalesh:find" => "Looked for a kalesh",
-        _ => "Read a kalesh",
+        "kalesh:summary" => "Summarised a fight",
+        "kalesh:find" => "Looked for a fight",
+        _ => "Read a fight transcript",
     };
     obj.insert("label".into(), json!(label));
     obj.insert("section".into(), json!({ "id": "kalesh", "title": "Kalesh", "icon": "🍿" }));
@@ -1649,7 +1649,7 @@ mod tests {
             .filter(|e| e["key"] == "kalesh:summary" && e["change"].as_str().is_some_and(|c| c.starts_with("@Nikhil vs @Aisha · #memes · ")))
             .collect();
         assert_eq!(entries.len(), 1, "{audit}");
-        assert_eq!(entries[0]["label"], "Summarised a kalesh");
+        assert_eq!(entries[0]["label"], "Summarised a fight");
         assert_eq!(entries[0]["section"]["id"], "kalesh");
         assert_eq!(entries[0]["user_id"], ADMIN.to_string());
         // Looking for them is logged too, with who and when.

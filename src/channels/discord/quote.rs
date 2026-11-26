@@ -113,7 +113,7 @@ fn escape(s: &str) -> String {
 }
 
 fn prompt_line(rec: &Record) -> String {
-    format!("📜 Quote by <@{}> — style chuno, phir **Save** dabao. Sirf wahi kar sakta hai.", rec.quoter_id)
+    format!("📜 Quote by <@{}> — only they can pick a style and press **Save**.", rec.quoter_id)
 }
 
 fn controls(id: &str, current: Style) -> Vec<CreateActionRow> {
@@ -124,7 +124,7 @@ fn controls(id: &str, current: Style) -> Vec<CreateActionRow> {
     vec![
         CreateActionRow::SelectMenu(
             CreateSelectMenu::new(format!("qstyle:{}", id), CreateSelectMenuKind::String { options })
-                .placeholder("Style chuno"),
+                .placeholder("Pick a style"),
         ),
         CreateActionRow::Buttons(vec![CreateButton::new(format!("qsave:{}", id)).label("Save ✓").style(ButtonStyle::Success)]),
     ]
@@ -250,15 +250,15 @@ async fn deny(ctx: &Context, component: &ComponentInteraction, text: &str) {
 pub async fn on_component(ctx: &Context, storage: &Storage, component: &ComponentInteraction) {
     let Some((action, id)) = component.data.custom_id.split_once(':') else { return };
     let Some(mut rec) = load(storage, id).await else {
-        deny(ctx, component, "Ye quote ab mere paas nahi hai.").await;
+        deny(ctx, component, "I can't find this quote anymore.").await;
         return;
     };
     if component.user.id.get() != rec.quoter_id {
-        deny(ctx, component, &format!("Ye quote <@{}> ne banaya hai. Style bhi wahi chunega.", rec.quoter_id)).await;
+        deny(ctx, component, &format!("Only <@{}>, who made this quote, can pick its style.", rec.quoter_id)).await;
         return;
     }
     if rec.saved {
-        deny(ctx, component, "Ye already save ho chuka hai.").await;
+        deny(ctx, component, "This quote is already saved.").await;
         return;
     }
     // Acknowledge at once; drawing takes longer than Discord waits.
@@ -306,7 +306,7 @@ async fn save(ctx: &Context, storage: &Storage, mut rec: Record, via: Option<&Co
                 &ctx.http,
                 CreateMessage::new()
                     .content(format!(
-                        "📜 **{}** ne kaha in <#{}> · quoted by <@{}> · [original](<{}>)",
+                        "📜 **{}** said this in <#{}> · quoted by <@{}> · [original](<{}>)",
                         escape(&rec.author),
                         rec.channel_id,
                         rec.quoter_id,

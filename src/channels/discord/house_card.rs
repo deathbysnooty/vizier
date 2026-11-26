@@ -752,11 +752,11 @@ mod tests {
         let long = "Aaravpreet Singh Chaudhary the Third Jr.";
         assert_eq!(long.chars().count(), 40, "the long-name case must be the 40-character one");
         let cases = [
-            card(0, "Koi nahi", None, "Bina photo bhi Gryffindor!"),
-            card(1, long, Some(fake_avatar([90, 190, 160])), "Naam lamba, chaal tedhi"),
+            card(0, "Nobody", None, "Gryffindor, even without a photo!"),
+            card(1, long, Some(fake_avatar([90, 190, 160])), "Long name, sneaky moves"),
             card(2, "Meera", Some(fake_avatar([112, 104, 220])), ""),
-            card(3, "🦡🐍🦁🦅✨🔥", Some(fake_avatar([240, 199, 94])), "Emoji hi emoji"),
-            card(0, "Broken", Some(b"not an image at all".to_vec()), "Photo toot gayi"),
+            card(3, "🦡🐍🦁🦅✨🔥", Some(fake_avatar([240, 199, 94])), "Emojis everywhere"),
+            card(0, "Broken", Some(b"not an image at all".to_vec()), "The photo broke"),
             card(1, "", Some(Vec::new()), ""),
         ];
         for s in cases {
@@ -769,7 +769,7 @@ mod tests {
     /// shrink-to-fit nor the badge may panic on them.
     #[test]
     fn odd_houses_still_draw() {
-        let mut s = card(2, "Ishaan", Some(fake_avatar([60, 80, 160])), "Kitaabein hi dost hain");
+        let mut s = card(2, "Ishaan", Some(fake_avatar([60, 80, 160])), "Books are my only friends");
         s.house = String::new();
         s.crest = String::new();
         assert_eq!(&sorting_png(&s).expect("sorting card")[..4], &PNG_MAGIC);

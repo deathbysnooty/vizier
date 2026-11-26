@@ -250,7 +250,7 @@ impl Ctx<'_> {
         let ew = self.text(&a.emoji, tx, y + 44.0, 22.0, Weight::NORMAL, INK);
         let label = self.fit(&a.label, 18.0, Weight::SEMIBOLD, textmax - ew - 8.0);
         self.text(&label, tx + ew + 8.0, y + 43.0, 18.0, Weight::SEMIBOLD, accent);
-        let name = self.fit(a.winner.as_deref().unwrap_or("Koi nahi"), 32.0, Weight::BOLD, textmax);
+        let name = self.fit(a.winner.as_deref().unwrap_or("No winner"), 32.0, Weight::BOLD, textmax);
         self.text(&name, tx, y + 90.0, 32.0, Weight::BOLD, if won { INK } else { MUTED });
         let sub = if a.departed { format!("left the server · {}", a.sub) } else { a.sub.clone() };
         let sub = self.fit(&sub, 18.0, Weight::MEDIUM, x + w - 28.0 - tx);

@@ -171,9 +171,9 @@ impl Together {
         out.push(format!("{} times one of them pinged the other.", self.mentions));
         out.push(format!("{} separate back-and-forths in the period looked at.", self.stretches));
         out.push(match self.fights {
-            0 => "The kalesh detector has never called a fight with both of them in it.".to_string(),
-            1 => "The kalesh detector has called one fight with both of them in it.".to_string(),
-            n => format!("The kalesh detector has called {} fights with both of them in them.", n),
+            0 => "The bot has detected no fights involving both of them.".to_string(),
+            1 => "The bot has detected one fight involving both of them.".to_string(),
+            n => format!("The bot has detected {} fights involving both of them.", n),
         });
         out.push(match self.vc_minutes {
             0 => "They have not once been in a voice room together.".to_string(),
@@ -200,9 +200,8 @@ impl Together {
 const VOICE: &str = "You are Loduchand, the house bot of MLCI, an Indian Discord server of friends who roast each other \
 all day (bakchodi). Everyone there writes Hinglish - Hindi typed in Roman letters, mixed freely with English, full of \
 Indian slang and short forms (\"bhai\", \"yaar\", \"scene kya hai\", \"op\", \"sahi hai\", \"bakchodi\", \"lmao\"). Read \
-their messages the way a fluent member of that server would: it is not broken English and not typos. Write the same \
-way they talk - mostly English sentences with the Hinglish thrown in where it lands - so it sounds like a friend in \
-the channel, not a stand-up set and not a greeting card.";
+their messages the way a fluent member of that server would: it is not broken English and not typos. Write your verdict \
+in plain English and keep it casual, like a friend in the channel.";
 
 /// The lines the prompt is held to.
 const LIMITS: &str = "HARD LIMITS - break one and this is thrown away:
@@ -249,7 +248,7 @@ because they never stop replying, the verdict knows that instead.
 
 Write the verdict: two or three short lines about how these two actually behave around each other, drawn only from the \
 record below - who replies to whom, the channels they share, the games they both play, the fights they have had, the \
-way each of them talks. Funny and sharp, the way the server talks to itself. It is a joke about their chat history and \
+way each of them talks. Keep it funny and sharp. It is a joke about their chat history and \
 nothing more: no romance, no claims about anyone's real relationships, no advice.
 {nothing}
 {limits}
@@ -924,8 +923,9 @@ pub mod tests {
             "it is a bit, not a claim about anybody's real life",
             "no romance, no claims about anyone's real relationships",
             "No slur of any kind",
+            "Write your verdict in plain English",
             "arjun replied to riya 214 times; riya replied to arjun 198 times",
-            "The kalesh detector has called 3 fights with both of them in them",
+            "The bot has detected 3 fights involving both of them",
             "Both turn up in: #chatting-hori, #chess",
             "Both play: Chess",
             "Chess: 58 games, 41 won, 3 drawn",

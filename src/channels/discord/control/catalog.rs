@@ -1528,7 +1528,7 @@ pub fn sections() -> Vec<Section> {
             icon: "💘",
             about: "One joke command. /ship @a @b gives a \
                     pair a percentage, a mashed-up name and a short verdict on how they really behave around each \
-                    other, from their replies, shared channels and any fights the kalesh detector has called. \
+                    other, from their replies, shared channels and any fights the bot has detected. \
                     The percentage is not a random roll and it is not a count of anything. Each pair has a number of \
                     their own, worked out from their two member ids, that never changes and nobody can reroll; about a \
                     sixth of the answer stays that number and the rest is what the two of them actually do - \
@@ -1539,7 +1539,7 @@ pub fn sections() -> Vec<Section> {
                     It goes up when they give each other a real share of their replies, spend a real share of their \
                     voice time together, keep going back and forth, are around at the same hours, live in the same \
                     channels and play the same games. It goes down when they ignore each other while talking to \
-                    everyone else, when the kalesh detector has called fights between them, and when one of them does \
+                    everyone else, when the bot has detected fights between them, and when one of them does \
                     nearly all the replying - a one-sided crush is capped and can never read high. A small sample is \
                     pulled back towards the pair's own number, so two replies each way proves nothing, and anything \
                     the bot has no evidence for simply leaves that number showing. It moves only in steps of 3, so it \
@@ -1635,7 +1635,7 @@ pub fn sections() -> Vec<Section> {
                      you. The score is the pair's own number from their two ids, moved by the SHARE of each one's \
                      replies and voice time that goes to the other (the smaller share counts, not the totals), by \
                      whether they are around at the same hours, in the same channels and playing the same games, and \
-                     by their back-and-forths against their kalesh. One-sided replying is docked and capped, a tiny \
+                     by how often they reply to each other and how often they fight. One-sided replying is docked and capped, a tiny \
                      sample barely moves it, and it only moves in steps of 3 - so it changes when something real \
                      changed, never at random. Nothing else is read into it.",
                 ),
@@ -1740,7 +1740,7 @@ pub fn sections() -> Vec<Section> {
             icon: "🔎",
             about: "Every morning a mod should be able to open the panel and see who needs a look. This does the \
                     picking. First, from counts alone - no AI, no tokens - it flags members whose day stood out: a \
-                    fight the kalesh detector called, AutoMod stopping them over and over, a pile of deleted \
+                    fight the bot detected, AutoMod stopping them over and over, a pile of deleted \
                     messages, a day far quieter or far louder than their own fortnight, or a new member who has just \
                     become properly active. Then, for only those few, it runs the ordinary deep-dive summary and \
                     puts it on the Deep dives page marked with why they were picked. A flag says \"their day stands \
@@ -1783,7 +1783,7 @@ pub fn sections() -> Vec<Section> {
             icon: "🍿",
             about: "Watches chosen channels for a real argument. First a free check on the shape of the chat - a fast \
                     burst from only a few people, full of replies - and only when that trips, the AI is asked \
-                    whether it is a genuine fight or just loud banter. If it says fight, the bot pings the kalesh \
+                    whether it is a genuine fight or just loud banter. If it says fight, the bot pings the Kalesh \
                     role with a playful line, then waits out the cooldown before it can ping again in that channel. \
                     It works even while the bot is in admin-only mode. Every fight it calls is listed on the panel's \
                     Kalesh page, where a mod can also look up two members and ask for a neutral summary.",
@@ -2125,7 +2125,7 @@ pub fn sections() -> Vec<Section> {
                     "Repeats before it's spam",
                     "How many near-identical messages from one member inside the window below count as spam - the \
                      classic posting of the same thing in ten channels. All of them are deleted, not just the last. \
-                     Messages under 12 characters never count, because \"haan\", \"same\" and \"lol\" repeat \
+                     Messages under 12 characters never count, because \"yes\", \"same\" and \"lol\" repeat \
                      perfectly innocently. 0 switches this rule off.",
                     number(0, 50, "messages"),
                     "3",

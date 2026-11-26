@@ -55,7 +55,7 @@ impl Style {
     pub fn label(self) -> &'static str {
         match self {
             Style::Noir => "🖤 Noir",
-            Style::Rang => "🎨 Rang",
+            Style::Rang => "🎨 Colour",
             Style::Spotlight => "🔦 Spotlight",
             Style::Scroll => "📜 Scroll",
         }
@@ -454,7 +454,7 @@ fn footer(p: &mut Pen<'_>, q: &Quote, color: [u8; 3]) {
     if !q.when.is_empty() {
         parts.push(q.when.clone());
     }
-    parts.push("MLCI · GYAAN".to_string());
+    parts.push("MLCI · QUOTES".to_string());
     let s = parts.join("  ·  ");
     let w = p.measure(&s, 15.0, Face::Sans, Weight::MEDIUM);
     p.line(&s, W - 28.0 - w, H - 24.0, 15.0, Face::Sans, Weight::MEDIUM, color);

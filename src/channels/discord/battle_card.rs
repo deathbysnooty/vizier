@@ -107,7 +107,7 @@ pub struct Fight<'a> {
     pub stage: String,
     pub left: &'a Fighter,
     pub right: &'a Fighter,
-    /// The Hinglish line for this exchange.
+    /// The commentary line for this exchange.
     pub line: String,
     pub outcome: Outcome,
     /// The exchange just shown: which side was hit (0 left, 1 right) and the
@@ -2415,7 +2415,7 @@ mod tests {
                 stage: "The Last Eight".to_string(),
                 left: &a,
                 right: &b,
-                line: "Gaali nahi, bas ek dhaal".to_string(),
+                line: "Just a shield between them".to_string(),
                 outcome,
                 hit,
                 season: Season::Houses,
@@ -2502,7 +2502,7 @@ mod tests {
         let champ = Champion {
             who: &a,
             subtitle: "12 in the lists · 4 rounds · House Stark".to_string(),
-            line: "Rohit ne Meera ko reth mein gira diya, aur taaj utha liya".to_string(),
+            line: "Rohit knocked Meera into the sand and took the crown".to_string(),
             season: Season::Houses,
         };
         let png = champion_png(&champ).expect("champion card");
@@ -2675,7 +2675,7 @@ mod tests {
                 stage: "Challenge".to_string(),
                 left: &a,
                 right: &b,
-                line: "Rohit ne Meera ko dhaal pe aisa maara ki poore lists mein goonj gaya".to_string(),
+                line: "Rohit hit Meera's shield so hard it rang across the arena".to_string(),
                 outcome: Outcome::Open,
                 hit: Some((1, -27)),
                 season,
@@ -2684,7 +2684,7 @@ mod tests {
                 stage: "The Last Eight".to_string(),
                 left: &a,
                 right: &b,
-                line: "Meera ne Rohit ka helm tedha kar diya, ab kuch dikh hi nahi raha".to_string(),
+                line: "Meera knocked Rohit's helm sideways, blocking his view".to_string(),
                 outcome: Outcome::Open,
                 hit: None,
                 season,
@@ -2693,7 +2693,7 @@ mod tests {
                 stage: "The Final Tilt".to_string(),
                 left: &a,
                 right: &done,
-                line: "Meera gir gayi, Rohit ne talwaar hawa mein ghuma di".to_string(),
+                line: "Meera went down. Rohit swung a sword in the air".to_string(),
                 outcome: Outcome::Won(0),
                 hit: None,
                 season,
@@ -2705,7 +2705,7 @@ mod tests {
                 } else {
                     "12 in the lists · 4 rounds · House Stark".to_string()
                 },
-                line: "Sab dekh rahe hain, Rohit taaj ghuma raha hai".to_string(),
+                line: "The crowd watched Rohit show off the crown".to_string(),
                 season,
             };
             let cards = [

@@ -404,15 +404,15 @@ const MAHOGANY: &str = "1453059765692272765";
 
 /// The welcome asked for on 12 Sep: Lucky, and who missed him.
 pub fn lucky() -> Welcome {
-    let both = format!("<@{}> aur <@{}>", KOHLI, MAHOGANY);
+    let both = format!("<@{}> and <@{}>", KOHLI, MAHOGANY);
     Welcome {
         user_id: "459076776266694670".into(),
         user_name: "Lucky".into(),
         channel_id: "1516492867642593443".into(),
         lines: vec![
-            format!("🎉 {{mention}} wapas aa gaya! **{{away}}** ho gaye the. {} ne tujhe sabse zyada miss kiya — roz poochte the kab aayega. Welcome home ❤️", both),
-            format!("Dekho kaun laut aaya! 🥹 {{mention}}, poore **{{away}}** baad. {} toh roz tera naam le rahe the — ab jaake unko chain milega. Welcome back, bhai ❤️", both),
-            format!("{{mention}} is BACK 🎊 **{{away}}** ka break bahut lamba tha yaar. Sach bolein toh {} ne tujhe sabse zyada miss kiya. Ab kahin mat jaana, teri seat khaali rakhi thi 🪑❤️", both),
+            format!("🎉 {{mention}} is back after **{{away}}**! {} missed you most and asked every day when you'd be back. Welcome home ❤️", both),
+            format!("Look who's back! 🥹 It's been **{{away}}**, {{mention}}. {} brought you up every day. They'll be glad you're back ❤️", both),
+            format!("{{mention}} is BACK 🎊 **{{away}}** was way too long. {} missed you most. Stick around, we saved your seat 🪑❤️", both),
         ],
         also_ping: vec![KOHLI.into(), MAHOGANY.into()],
         ping_member: true,

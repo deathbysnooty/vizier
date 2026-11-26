@@ -75,7 +75,7 @@ const SHIP_Y: f32 = 88.0;
 const NAME_Y: f32 = 392.0;
 const LINE_Y: f32 = 444.0;
 const CAPTION_Y: f32 = 484.0;
-const CAPTION: &str = "Loduchand ke dil se";
+const CAPTION: &str = "With love from Loduchand";
 
 fn outer() -> f32 {
     AV / 2.0 + RING + GAP

@@ -444,7 +444,7 @@ async fn post(ctx: &Context, command: &CommandInteraction, embed: CreateEmbed, p
         (true, Some(guild)) => build::posted_elsewhere(home, &build::message_link(guild.get(), home, posted.id.get())),
         // A DM: no link to give, so just say where it went.
         (true, None) => format!("Posted in <#{}>", home),
-        (false, _) => "Ho gaya 🔥".to_string(),
+        (false, _) => "Posted 🔥".to_string(),
     };
     let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(note).allowed_mentions(CreateAllowedMentions::new())).await;
     Ok(())
@@ -500,8 +500,8 @@ pub fn ship_builder() -> CreateCommand {
         // people will read: say plainly that it is shares, not a count and not
         // a roll. The whole of it is in /help and on the panel.
         .description("ship two members - the share of each other's replies and time, not who talks most")
-        .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "pehla banda").required(true))
-        .add_option(CreateCommandOption::new(CommandOptionType::User, "with", "doosra banda - khaali chhoda to tum ho").required(false))
+        .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "The first member").required(true))
+        .add_option(CreateCommandOption::new(CommandOptionType::User, "with", "The second member. Leave blank to pick yourself.").required(false))
 }
 
 pub async fn ship_command(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierStorage>, command: &CommandInteraction) {

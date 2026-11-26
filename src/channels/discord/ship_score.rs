@@ -384,7 +384,7 @@ person, and how much of everything they say comes back - the smaller of the two 
 replies out of thousands each are less of a pair than two who barely reply to anyone else. It goes up when they give \
 each other a real share of their replies, spend a real share of their voice time together, keep going back and forth, \
 are around at the same hours, live in the same channels and play the same games. It goes down when they ignore each \
-other while talking to everyone else, when the kalesh detector has called fights between them, and when one of them \
+other while talking to everyone else, when the bot has detected fights between them, and when one of them \
 does nearly all the replying - a one-sided crush is capped and can never read high. A small sample is pulled back \
 towards their own number, so two replies each way proves nothing, and anything the bot has no evidence for simply \
 leaves the pair's own number showing. It moves only in steps of 3, so it drifts when something real changed rather \
@@ -702,7 +702,7 @@ pub mod tests {
             "smaller of the two",
             "never changes",
             "member ids",
-            "kalesh",
+            "the bot has detected fights",
             "one-sided",
             "capped",
             "steps of 3",

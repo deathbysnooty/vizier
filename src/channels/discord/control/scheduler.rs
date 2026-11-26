@@ -435,20 +435,20 @@ async fn post(ctx: &Context, channel: ChannelId, text: String, user: Option<u64>
 
 /// The jokes the hourly nudge rotated through, one per hour.
 const NUDGE_LINES: &[&str] = &[
-    "Lagta hai gaon chhod ke chala gaya.",
-    "Uski kursi ab bhi khaali hai. 🪑",
-    "Ab tak ek reply bhi nahi, bade aadmi ban gaye hain.",
-    "Lagta hai WiFi ka bill nahi bhara.",
-    "Kisi ne uska last seen dekha hai?",
-    "Ghar wapsi ka muhurat nikalwa raha hai shayad.",
-    "Hum toh chai leke baithe hain, aa jaaye bhai.",
-    "Ek din aayega aur kahega 'kuch miss kiya?'",
-    "Server suna suna lag raha hai. 🥲",
-    "Shayad abhi bhi loading screen pe atka hai.",
-    "Uske bina kalesh bhi thanda pad gaya.",
-    "Maybe aeroplane mode on chhod diya.",
-    "Itna time lag raha hai, lagta hai paidal aa raha hai.",
-    "Bhai, block nahi kiya na humne? 👀",
+    "Looks like he skipped town.",
+    "His chair is still empty. 🪑",
+    "Still no reply. He's a big shot now.",
+    "Maybe he forgot to pay his Wi-Fi bill.",
+    "When did anyone last see him online?",
+    "Maybe he's waiting for the stars to align.",
+    "We've got the tea ready. Come on back.",
+    "One day he'll show up and ask, 'Did I miss anything?'",
+    "The server feels quiet without him. 🥲",
+    "Maybe he's still stuck on the loading screen.",
+    "Even the drama died down without him.",
+    "Maybe he left airplane mode on.",
+    "At this rate, he must be walking here.",
+    "We didn't block him, did we? 👀",
 ];
 
 /// The nudge that used to be built in, as a reminder, switched off.
@@ -460,7 +460,7 @@ fn old_nudge() -> Reminder {
         channel_id: "1516492867642593443".to_string(),
         lines: NUDGE_LINES
             .iter()
-            .map(|line| format!("**{{name}}** abhi tak wapas nahi aaya - **{{hours}} ghante** ho gaye.\n{}", line))
+            .map(|line| format!("**{{name}}** has been away for **{{hours}} hours**.\n{}", line))
             .collect(),
         order: Order::Rotate,
         schedule: Schedule::Every { minutes: 60 },
@@ -470,7 +470,7 @@ fn old_nudge() -> Reminder {
         user_name: "Lucky".to_string(),
         since: "2026-09-07T09:54:54Z".to_string(),
         stop_when_back: true,
-        welcome_line: "🎉 {mention} wapas aa gaya! Poore **{hours} ghante** lagaye. Sabne miss kiya, seriously."
+        welcome_line: "🎉 {mention} is back! It took a whole **{hours} hours**. We really missed you."
             .to_string(),
         ends: String::new(),
         last_sent: 0,
@@ -613,14 +613,14 @@ mod tests {
     }
 
     #[test]
-    fn the_old_nudge_reads_as_it_did() {
+    fn the_old_nudge_renders_its_messages() {
         let r = old_nudge();
         assert!(!r.enabled && r.stop_when_back && r.schedule == every(60));
         assert_eq!(r.lines.len(), NUDGE_LINES.len());
         let now = moment("2026-09-12T11:00:05Z").unwrap();
         let first = render(pick_line(&r.lines, r.order, 0, 0.0).unwrap(), &r.user_name, Some(1), &r.since, now);
-        assert_eq!(first, "**Lucky** abhi tak wapas nahi aaya - **121 ghante** ho gaye.\nLagta hai gaon chhod ke chala gaya.");
+        assert_eq!(first, "**Lucky** has been away for **121 hours**.\nLooks like he skipped town.");
         let welcome = render(&r.welcome_line, &r.user_name, Some(459076776266694670), &r.since, now);
-        assert_eq!(welcome, "🎉 <@459076776266694670> wapas aa gaya! Poore **121 ghante** lagaye. Sabne miss kiya, seriously.");
+        assert_eq!(welcome, "🎉 <@459076776266694670> is back! It took a whole **121 hours**. We really missed you.");
     }
 }

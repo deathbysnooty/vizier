@@ -215,7 +215,7 @@ pub async fn run(ctx: &Context, storage: &Storage, original: &Message, by: UserI
 
     let jump = original.link();
     let mut post = CreateMessage::new()
-        .content(format!("📸 <@{}> ne biski kiya · {}", by.get(), jump))
+        .content(format!("📸 <@{}> took a screenshot · {}", by.get(), jump))
         .allowed_mentions(CreateAllowedMentions::new().empty_users().empty_roles())
         .add_file(CreateAttachment::bytes(png, "biski.png"));
     if let Some(m) = moving {

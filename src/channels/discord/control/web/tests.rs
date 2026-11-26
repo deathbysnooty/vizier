@@ -5060,8 +5060,8 @@ async fn demo_server() {
             name: "Good morning".into(),
             channel_id: "21".into(),
             lines: vec![
-                "Good morning, legends! ☀️ **{day}** is here. Chai ready hai?".into(),
-                "Suprabhat, {date}! Aaj ka plan kya hai? ☕".into(),
+                "Good morning, legends! ☀️ Happy **{day}**. Got your tea ready?".into(),
+                "Good morning! It's {date}. What's the plan for today? ☕".into(),
             ],
             schedule: Schedule::Daily { times: vec!["08:00".into()] },
             images: [pic("good-morning.png"), pic("chai-time.jpg")].concat(),
@@ -5095,7 +5095,7 @@ async fn demo_server() {
             colour: "#e0a43a".into(),
             footer: "Answer below 👇".into(),
             ai_prompt: "A fun, easy question for everyone to answer in chat: this-or-that, food, films, cricket or games. One question only.".into(),
-            lines: vec!["Chai or coffee, and why is it chai?".into(), "What's one song you've had on repeat this week?".into()],
+            lines: vec!["Tea or coffee, and why is it tea?".into(), "What's one song you've had on repeat this week?".into()],
             order: Order::Random,
             schedule: Schedule::Daily { times: vec!["18:00".into()] },
             reactions: vec!["👀".into()],
@@ -5105,9 +5105,9 @@ async fn demo_server() {
             ..base.clone()
         };
         let hydrate = Reminder {
-            name: "Pani break".into(),
+            name: "Water break".into(),
             channel_id: "23".into(),
-            lines: vec!["💧 {random:Pani pee lo, doston|Hydration check|Sip sip, hooray} — it's {time}.".into()],
+            lines: vec!["💧 {random:Drink some water, friends|Hydration check|Sip sip, hooray} — it's {time}.".into()],
             schedule: Schedule::Every { minutes: 120 },
             active_from: "10:00".into(),
             active_to: "23:00".into(),
@@ -5127,7 +5127,7 @@ async fn demo_server() {
         let rule = |v: Value| serde_json::from_value::<super::super::autoreplies::AutoReply>(v).unwrap();
         let gm = rule(json!({
             "name": "Good morning", "enabled": true, "triggers": ["gm", "good morning", "suprabhat"],
-            "match_mode": "whole_word", "channels": ["21", "23"], "replies": ["gm {user} ☀️", "Good morning {name}! Chai ready hai?"],
+            "match_mode": "whole_word", "channels": ["21", "23"], "replies": ["gm {user} ☀️", "Good morning, {name}! Got your tea ready?"],
             "reactions": ["☀️"], "chance": 60, "cooldown_secs": 300, "hits": 412, "last_hit": now - 2400
         }));
         let bruh = rule(json!({
@@ -5170,8 +5170,8 @@ async fn demo_server() {
                 user_id: "1007".into(),
                 user_name: "Dev".into(),
                 lines: vec![
-                    "{mention} is back. **{n}** time. Ek fight haar ke gaya tha, {hours} ghante mein wapas 😂".into(),
-                    "Dekho kaun aaya! {mention}, entry number **{n}**. <@1005> ready rehna, rematch hoga.".into(),
+                    "{mention} is back for the **{n}** time. Lost one fight, left, and came back {hours} hours later 😂".into(),
+                    "Look who's back! {mention}, visit number **{n}**. <@1005>, get ready for a rematch.".into(),
                 ],
                 also_ping: vec!["1005".into()],
                 mode: Mode::Every,
@@ -5188,7 +5188,7 @@ async fn demo_server() {
                 user_id: "1008".into(),
                 user_name: "Tanvi".into(),
                 channel_id: "21".into(),
-                lines: vec!["Tanvi is back from exam jail! 📚➡️🎉 {mention}, <@1004> aur <@1006> ne tera spot sambhal ke rakha tha.".into()],
+                lines: vec!["Tanvi is back from exam jail! 📚➡️🎉 {mention}, <@1004> and <@1006> saved your spot.".into()],
                 also_ping: vec!["1004".into(), "1006".into()],
                 enabled: false,
                 created_by: ADMIN_TWO.to_string(),

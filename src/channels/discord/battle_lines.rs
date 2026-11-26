@@ -1,4 +1,4 @@
-//! What the arena says, in one voice: Westeros, spoken Hinglish.
+//! What the arena says, in one voice: Westeros in plain English.
 //!
 //! There is one world and one set of lines. There used to be a picker that
 //! chose between seven of them; the tourney has no styles to pick between, so
@@ -48,135 +48,135 @@ pub fn lines() -> &'static Lines {
 // Roasts stay on the fight itself: nothing about looks, family, caste or faith.
 
 const EXCHANGE: &[&str] = &[
-    "{a} ne {b} ko dhaal pe aisa maara ki poore lists mein goonj gaya 🛡️",
-    "{b} ne {a} ka helm tedha kar diya, ab kuch dikh hi nahi raha",
-    "{a} ne {b} ko kehni maari aur bola 'yeh Winterfell ka tareeka hai'",
-    "{b} ne {a} ki talwaar pe talwaar rakh di, chingari ud gayi ⚔️",
-    "{a} ne {b} ko ghode se utaar diya, bina kuch bole",
-    "{b} ne {a} ke paanv pe apna lohe wala boot rakh diya",
-    "{a} ne {b} ka cloak kheench liya, saari hawa nikal gayi",
-    "{b} ne {a} ko lists ke railing tak dhakel diya",
-    "{a} ne {b} ke kandhe pe lance ka sira laga diya",
-    "{b} ne {a} ko 'tu to Wall pe hi theek tha' bol diya",
-    "{a} ne {b} ki dhaal ka crest ragad ke mita diya",
-    "{b} ne {a} ko peeche se maara, maester bhi chup rahe",
-    "{a} ne {b} ko reth mein ghasit diya, pura maidan dekh raha tha",
-    "{b} ne {a} ka gauntlet nikal ke door feink diya",
-    "{a} ne {b} ko ek hi vaar mein ghutne tak jhuka diya",
-    "{b} ne {a} ki belt kaat di, armour latak gaya",
-    "{a} ne {b} ko 'yeh tera naam gaane mein nahi aayega' bol diya 🎵",
-    "{b} ne {a} ke helm pe itna thoka ki ghanti baj gayi",
+    "{a} hit {b}'s shield so hard it rang across the arena 🛡️",
+    "{b} knocked {a}'s helm sideways, blocking their view",
+    "{a} elbowed {b} and said, 'That's how we do it in Winterfell'",
+    "{b}'s sword met {a}'s, and sparks flew ⚔️",
+    "{a} knocked {b} off the horse without a word",
+    "{b} planted an iron boot on {a}'s foot",
+    "{a} yanked {b}'s cloak and left them gasping",
+    "{b} drove {a} back against the arena rail",
+    "{a} clipped {b}'s shoulder with the tip of a lance",
+    "{b} told {a}, 'You should've stayed at the Wall'",
+    "{a} scraped the crest right off {b}'s shield",
+    "{b} struck {a} from behind. Even the maester stayed quiet",
+    "{a} dragged {b} through the sand with the whole arena watching",
+    "{b} pulled off {a}'s gauntlet and flung it away",
+    "{a} brought {b} to one knee with a single blow",
+    "{b} cut {a}'s belt, and the armour hung loose",
+    "{a} told {b}, 'The bards won't be singing your name' 🎵",
+    "{b} struck {a}'s helm so hard it rang like a bell",
 ];
 
 const FINISH: &[&str] = &[
-    "{w} jeeta. {l} ne yield bol diya 🏆",
-    "{l} reth mein pada hai — {w} ne haath tak nahi jhaada",
-    "{w} ki jeet, aur {l} ke paas bahaana pehle se taiyaar hai",
-    "{l} ne natak karke exit liya, {w} ne haath hila diya",
-    "{w} khada hai. {l} ab stands se dekhega",
-    "Ghanti baj gayi {l} ke liye. {w} ne talwaar hawa mein ghumaayi",
-    "{w} ne aakhri vaar kiya: bilkul chuppi. {l} khatam",
-    "{l} ne haar maan li, {w} ne apna chalice wapas utha liya 🍷",
-    "{w} jeet gaya. {l} ab commentary karega",
-    "{w} ne {l} ko lists ka darwaaza dikha diya 🚪",
+    "{w} wins. {l} yields 🏆",
+    "{l} is down in the sand. {w} barely broke a sweat",
+    "{w} wins, and {l} already has an excuse ready",
+    "{l} made a dramatic exit. {w} waved goodbye",
+    "{w} is still standing. {l} can watch from the stands",
+    "The bell rang for {l}. {w} swung a sword in the air",
+    "{w} landed the final blow. The arena went quiet. {l} was done",
+    "{l} admitted defeat. {w} picked up the chalice again 🍷",
+    "{w} wins. {l} can do the commentary now",
+    "{w} showed {l} the arena door 🚪",
 ];
 
 const CRIT: &[&str] = &[
-    "{a} ne {b} pe aisa combo chalaya ki armour hi bikhar gaya 💥",
-    "{a} ka Valyrian steel wala vaar — {b} ki dhaal do tukde 🗡️",
-    "{a} ne {b} ko ek hi taane mein ghode se giraa diya",
-    "{a} ne {b} ka visor khol ke seedha aankh mein dekh liya 😳",
-    "{a} ne {b} ko uske hi gharaane ke naare se maara",
+    "{a} landed a combo that tore {b}'s armour apart 💥",
+    "{a}'s Valyrian steel split {b}'s shield in two 🗡️",
+    "{a} knocked {b} off the horse with a single taunt",
+    "{a} flipped up {b}'s visor and looked them right in the eye 😳",
+    "{a} hit {b} with their own house motto",
 ];
 
 const MISS: &[&str] = &[
-    "{a} ne lance ghumaayi... aur hawa mein hi reh gaya",
-    "{a} ka vaar miss, {b} ne jhuk ke bacha liya",
-    "{a} ko laga yeh landega — reth ke alawa kuch nahi laga",
+    "{a} swung a lance... and hit thin air",
+    "{a} missed as {b} ducked",
+    "{a} thought that would land. It only hit sand",
 ];
 
 const HEAL: &[&str] = &[
-    "{a} ne maester ka kaadha pee liya, thodi jaan aayi 🧪",
-    "{a} ne visor uthaya aur lambi saans li, dum wapas",
-    "{a} ne Seven ke aage sar jhuka diya, thodi power aayi 🕯️",
+    "{a} drank the maester's brew and got some strength back 🧪",
+    "{a} lifted the visor, took a deep breath and got a second wind",
+    "{a} bowed to the Seven and found a little more strength 🕯️",
 ];
 
 /// A sip, a bite, a deep breath: barely anything, purely for the joke.
 const SIP: &[&str] = &[
-    "{a} ne ek ghoont sharaab maari. Bas itna hi 🍷",
-    "{a} ko kahin se lemon cake mil gaya 🍰",
-    "{a} ne belt kas li aur collar theek kiya",
-    "{a} ne apna crest chamka diya, confidence +1",
+    "{a} took one sip of wine. That's it 🍷",
+    "{a} found a lemon cake somewhere 🍰",
+    "{a} tightened their belt and straightened their collar",
+    "{a} polished the crest, confidence +1",
 ];
 
 /// The swing comes back at whoever threw it.
 const BACKFIRE: &[&str] = &[
-    "{a} ne gauntlet feka, wapas aake khud ke helm pe lagi 🪃",
-    "{a} apni hi cloak mein ulajh ke gir gaya",
-    "{a} ne lance uthaayi, apne hi ghode ko dara diya",
-    "{a} ne naara lagaaya aur apni hi awaaz se dar gaya",
+    "{a} threw a gauntlet. It bounced back and hit their helm 🪃",
+    "{a} tripped over their own cloak",
+    "{a} raised a lance and scared their own horse",
+    "{a} shouted a battle cry and startled themself",
 ];
 
 /// {b} loses, {a} gains: the fight's only real comeback move.
 const DRAIN: &[&str] = &[
-    "{a} ne {b} ki plate se roast le liya 🍗",
-    "{a} ne {b} ki dhaal chheen li — ab {a} bacha hai, {b} khula 🛡️",
-    "{a} ne {b} ka chalice khaali kar diya, seedha energy transfer 🍷",
-    "{a} ne {b} ke ghode ki lagaam pakad li",
+    "{a} stole the roast off {b}'s plate 🍗",
+    "{a} took {b}'s shield and left them wide open 🛡️",
+    "{a} drained {b}'s chalice for a quick energy boost 🍷",
+    "{a} grabbed the reins of {b}'s horse",
 ];
 
 /// Two in a row, before anyone can answer.
 const DOUBLE: &[&str] = &[
-    "{a} ne do vaar kiye — ek dhaal pe, ek izzat pe ⚔️⚔️",
-    "{a} ne back to back do baar ghode se utaara",
-    "{a} ne {b} ko lists mein aur stands ke saamne, dono jagah suna diya",
-    "{a} ne double lance combo laga diya",
+    "{a} struck twice — once at a shield, once at an opponent's pride ⚔️⚔️",
+    "{a} knocked their opponent off the horse twice in a row",
+    "{a} roasted {b} twice, once in the ring and once for the crowd",
+    "{a} landed a double lance combo",
 ];
 
 /// Everyone in the frame suffers.
 const CHAOS: &[&str] = &[
-    "Septa beech mein aa gayi, dono ko daant padi 🕯️",
-    "Mashaal bujh gayi — dono andhere mein gir gaye 🔥",
-    "Dono ek hi geeli reth pe phisal gaye",
-    "Kisi ne dono ki shikayat Lord ke paas kar di 📜",
+    "A septa stepped in and scolded them both 🕯️",
+    "The torch went out — both fell in the dark 🔥",
+    "Both slipped on the same patch of wet sand",
+    "Someone reported them both to the lord 📜",
 ];
 
 /// A proper feed: the biggest ordinary heal.
 const SNACK: &[&str] = &[
-    "{a} ne garam pie khaayi, shakti aa gayi 🥧",
-    "{a} ne roast ka pura dabba khol liya, ab mood set hai 🍖",
-    "{a} ne shahad wala doodh gatak liya 🍯",
-    "{a} ne thandi beer ek saans mein khatam ki 🍺",
-    "{a} ne stew ka ek aur katora maanga 🥣",
+    "{a} ate a hot pie and got their strength back 🥧",
+    "{a} opened a whole box of roast meat. That's more like it 🍖",
+    "{a} gulped down some milk with honey 🍯",
+    "{a} finished a cold beer in one gulp 🍺",
+    "{a} asked for another bowl of stew 🥣",
 ];
 
 /// Rare, and worth it.
 const BLESSING: &[&str] = &[
-    "{a} ke gharaane ne naam pukaar diya — poori jaan wapas 🛡️",
-    "{a} ko kisi ne 'jeete raho' bol diya, full power up ✨",
-    "{a} ne weirwood ke saamne sar jhuka liya, ab kaun rokega 🌲",
-    "{a} ke Lord ne kandha thapthapaya — motivation overload",
+    "{a}'s house chanted their name — full strength restored 🛡️",
+    "Someone blessed {a} with a long life. Full power restored ✨",
+    "{a} bowed before a weirwood. Who can stop them now? 🌲",
+    "{a}'s lord gave them a pat on the shoulder. Instant morale boost",
 ];
 
 /// Both sides gain: the fight pauses for something nicer.
 const CROWD: &[&str] = &[
-    "Stands ne dono ke liye taali bajaayi, dono ka mann bhar aaya 📣",
-    "Kisi ne dono ko sharaab pila di, ladai thodi der ke liye band 🍷",
-    "Dono ne ek hi thaali se kha liya, dosti ho gayi 🍽️",
-    "Septa ne dono ko lemon cake pakda diya 🍰",
+    "The crowd cheered for both fighters. They were both touched 📣",
+    "Someone poured them both wine. The fight can wait 🍷",
+    "They shared a plate of food and made friends 🍽️",
+    "A septa handed them both lemon cake 🍰",
 ];
 
 const BYE: &[&str] = &[
-    "{a} ka is round mein koi saamna hi nahi tha, seedha pavilion chala gaya ⛺",
-    "{a} ko agle round ka free pass mil gaya",
-    "{a} ka challenger aaya hi nahi — walkover",
+    "{a} had no opponent this round and went straight to the pavilion ⛺",
+    "{a} got a free pass to the next round",
+    "{a}'s challenger never showed up — walkover",
 ];
 
 const CHAMPION_LINE: &[&str] = &[
-    "Poore lists ko haraya aur taaj utha liya 👑",
-    "Aakhri tak khada raha, taaj ke saath",
-    "Aaj ka champion. Baaki sab stands mein hain",
-    "Bina shak. Baaki agle melee ka intezaar karein",
+    "Beat the whole field and claimed the crown 👑",
+    "Still standing at the end, crown in hand",
+    "Today's champion. Everyone else is in the stands",
+    "A clear win. Everyone else can wait for the next melee",
 ];
 
 const WESTEROS: Lines = Lines {

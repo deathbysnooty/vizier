@@ -137,7 +137,7 @@ pub const DESKS: &[DeskInfo] = &[
         title: "Poetry",
         channel_label: "Poetry: channel",
         times_label: "Poetry: times",
-        banner: "🪶 Sher of the moment",
+        banner: "🪶 A moment for poetry",
         on_key: "VIZIER_DAILY_POETRY",
         channel_key: "VIZIER_DAILY_POETRY_CHANNEL",
         times_key: "VIZIER_DAILY_POETRY_TIMES",
