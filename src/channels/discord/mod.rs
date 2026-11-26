@@ -158,6 +158,7 @@ mod quote;
 mod quote_card;
 mod biski;
 mod biski_card;
+mod dragme;
 mod stats;
 
 pub struct DiscordChannelReader {
@@ -1549,9 +1550,10 @@ impl EventHandler for Handler {
         msglog::on_delete(&ctx, channel_id, &multiple_deleted_messages_ids, guild_id, true);
     }
 
-    async fn voice_state_update(&self, ctx: Context, _old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
+    async fn voice_state_update(&self, ctx: Context, old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
         // Deafened stretches, for voice points: Dyno's log has no deafen lines.
         stats::on_voice_state(&ctx, &new);
+        dragme::on_voice_state(&ctx, old.as_ref(), &new).await;
     }
 
     async fn cache_ready(&self, ctx: Context, _guilds: Vec<serenity::all::GuildId>) {
@@ -1782,6 +1784,8 @@ impl EventHandler for Handler {
 
         // Right-click a message -> Apps -> Biski: a screenshot of it in the biski channel.
         commands.push(CreateCommand::new("Biski").kind(serenity::all::CommandType::Message));
+        commands.push(dragme::invite_command());
+        commands.push(dragme::command());
 
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
@@ -2109,6 +2113,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
+            if dragme::owns_component(&id) {
+                dragme::on_component(&ctx, component).await;
+                return;
+            }
             if id.starts_with("quiz") {
                 quiz::on_component(&ctx, component).await;
                 return;
@@ -2480,6 +2488,10 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         }
 
         if let Interaction::Command(command) = interaction {
+            if matches!(command.data.name.as_str(), dragme::COMMAND | dragme::INVITE_COMMAND) {
+                dragme::on_command(&ctx, &command).await;
+                return;
+            }
             let agent_id = self.0.clone();
 
             // Control panel: /panel sends an admin a one-use sign-in link.

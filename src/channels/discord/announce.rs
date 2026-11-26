@@ -563,6 +563,12 @@ pub struct News {
 }
 
 pub const NEWS: &[News] = &[News {
+    id: "dragme-2026-11",
+    title: "🎙️ VC mein aana hai?",
+    body: "Kisi VC mein ho? `/dragme member:@someone` se unke VC ke chat mein request jayegi. Wahan jo bhi VC mein hai, woh **Approve** ya **Deny** daba sakta hai. Request 10 minute tak khuli rahegi.\n\n\
+           Apne VC mein kisi ko bulana hai? Unpe right-click karo, phir **Apps → Invite to my VC**. Unke paas **Join** ya **No thanks** dabane ke liye 30 minute hain. **Join** dabane se pehle woh kisi VC mein hon. Tum apne VC se nikle toh invite cancel.\n\n\
+           VC full hai? Approve ya Join se Loduchand phir bhi move kar sakta hai.",
+}, News {
     id: "geo-world-2026-09",
     title: "\u{1F30D} Geo goes worldwide \u{2014} vote India, World or Mix",
     body: "Geo in {geo} isn't only India any more.\n\n\
