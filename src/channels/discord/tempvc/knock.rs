@@ -117,7 +117,9 @@ async fn target_voice(
     if let Some(voice) = fetch_voice(ctx, guild, channel).await? {
         return Ok(voice);
     }
-    forget_room(channel, state)?;
+    if let Some(room) = lookup(guild, channel)? {
+        forget_room(ctx, room, state)?;
+    }
     Err(user_error("Ye temp VC ab nahi hai."))
 }
 
@@ -218,6 +220,14 @@ pub(in super::super) async fn answer_knock(
     }
     access::record_allow(channel, user, Permissions::CONNECT)?;
     state.knocks.pending.remove(&request_id);
+    audit::post(
+        ctx,
+        guild,
+        audit::Action::KnockApproved,
+        Some(actor.id),
+        Some(channel),
+        Some(user),
+    );
 
     let mut result = format!("✅ <@{user}> ka knock approve kar diya.");
     // Move Members lets the bot admit an approved user even at the room limit.

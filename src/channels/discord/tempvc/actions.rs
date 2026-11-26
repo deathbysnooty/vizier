@@ -3,7 +3,7 @@
 use serenity::all::{CreateAllowedMentions, CreateEmbed, CreateMessage, EditChannel, PremiumTier};
 
 use super::*;
-use crate::channels::discord::tempvc_panel::{Action, MeAction, Reply, RoomTarget};
+use crate::channels::discord::tempvc_panel::{Action, ForceAction, MeAction, Reply, RoomTarget};
 use crate::channels::discord::tempvc_store::{Access, Rename};
 use serenity::all::{Guild, PermissionOverwrite};
 
@@ -301,6 +301,20 @@ pub(in super::super) async fn execute(
 ) -> Result<Reply> {
     check_enabled()?;
     let actor = actor(ctx, guild, member)?;
+    let (action, force) = match action {
+        Action::Force(force) => {
+            if !actor.staff {
+                return Err(user_error("Room manager sirf staff ke liye hai."));
+            }
+            let action = match force {
+                ForceAction::Claim => Action::Claim,
+                ForceAction::Transfer(user) => Action::Transfer(user),
+                ForceAction::Delete => Action::Delete,
+            };
+            (action, true)
+        }
+        action => (action, false),
+    };
     match action {
         Action::Me(action) => return me(ctx, guild, member, actor, action).await,
         Action::Knock(channel) => return knock::request(ctx, guild, member, channel).await,
@@ -320,10 +334,12 @@ pub(in super::super) async fn execute(
             return Err(user_error(format!("Tera room pehle se hai <#{existing}>.")));
         }
         let options = RoomOptions {
-            hub,
+            hub: Some(hub),
             name: name.as_deref(),
             limit,
             locked,
+            schedule_id: None,
+            invite_role: None,
         };
         let channel = create_room(ctx, guild, member, actor.voice, options).await?;
         return Ok(Reply::Text(format!("🎙️ Tera room ready hai <#{channel}>.")));
@@ -340,6 +356,9 @@ pub(in super::super) async fn execute(
     }
     let room = lookup(guild, channel)?.ok_or_else(|| user_error("Ye temp VC ab nahi hai."))?;
     let owner = UserId::new(room.owner_id);
+    if force && !actor.staff {
+        return Err(user_error("Room manager sirf staff ke liye hai."));
+    }
     match action {
         Action::Info | Action::Claim => {}
         Action::Drag(_) => {
@@ -353,16 +372,39 @@ pub(in super::super) async fn execute(
         _ => {}
     }
     let Some(ch) = fetch_voice(ctx, guild, channel).await? else {
-        forget_room(channel, &mut state)?;
+        forget_room(ctx, room, &mut state)?;
         return Err(user_error("Ye temp VC ab nahi hai."));
     };
 
+    let log =
+        |action, target| audit::post(ctx, guild, action, Some(actor.id), Some(channel), target);
+    let staff_action = force || (actor.staff && actor.id != owner);
     let result = match action {
-        Action::Create { .. } | Action::Me(_) | Action::Knock(_) => {
+        Action::Create { .. } | Action::Me(_) | Action::Knock(_) | Action::Force(_) => {
             unreachable!("handled before selecting a room")
         }
-        Action::Lock(value) => toggle(ctx, &ch, owner, Toggle::Connect, value).await?,
-        Action::Hide(value) => toggle(ctx, &ch, owner, Toggle::View, value).await?,
+        Action::Lock(value) | Action::Hide(value) => {
+            let is_lock = matches!(action, Action::Lock(_));
+            let toggle_type = if is_lock {
+                Toggle::Connect
+            } else {
+                Toggle::View
+            };
+            let previous = room_restricted(&ch, toggle_type.bits());
+            let restricted = value.unwrap_or(!previous);
+            let result = toggle(ctx, &ch, owner, toggle_type, Some(restricted)).await?;
+            if restricted != previous {
+                log(
+                    if is_lock {
+                        audit::Action::Lock(restricted)
+                    } else {
+                        audit::Action::Hide(restricted)
+                    },
+                    None,
+                );
+            }
+            result
+        }
         Action::Chat(value) => {
             toggle(ctx, &ch, owner, Toggle::Chat, value.map(|enabled| !enabled)).await?
         }
@@ -378,29 +420,32 @@ pub(in super::super) async fn execute(
         }
         Action::Rename(pattern) => {
             let name = expand_name(&pattern, member.display_name(), 1);
-            rename(ctx, &ch, &mut state, &room_lock, name).await?
+            rename(ctx, &ch, &mut state, &room_lock, name, actor.id).await?
         }
         Action::Limit(limit) => {
             if limit > 99 {
                 return Err(user_error("Limit 0 se 99 tak rakh. 0 matlab unlimited."));
             }
+            let applied = caps::for_member(ctx, guild, member, actor.staff)?.limit(limit);
             channel
-                .edit(&ctx.http, EditChannel::new().user_limit(limit))
+                .edit(&ctx.http, EditChannel::new().user_limit(applied))
                 .await?;
-            if limit == 0 {
+            if applied == 0 {
                 "Room limit hata di.".into()
+            } else if applied != limit {
+                format!("Room limit {applied} kar di. Ye tera max hai.")
             } else {
-                format!("Room limit {limit} kar di.")
+                format!("Room limit {applied} kar di.")
             }
         }
         Action::Bitrate(kbps) => {
-            let cap = bitrate_cap(ctx, guild)?;
+            let cap = caps::for_member(ctx, guild, member, actor.staff)?.bitrate_kbps;
             let applied = kbps.clamp(8, cap);
             channel
                 .edit(&ctx.http, EditChannel::new().bitrate(applied * 1_000))
                 .await?;
             if kbps > cap {
-                format!("Bitrate {applied} kbps kar di. Ye server ka max hai.")
+                format!("Bitrate {applied} kbps kar di. Ye tera max hai.")
             } else {
                 format!("Bitrate {applied} kbps kar di.")
             }
@@ -426,16 +471,23 @@ pub(in super::super) async fn execute(
             checked_member(ctx, guild, member, actor.staff, owner, target).await?;
             if matches!(action, Action::Kick(_)) {
                 save_kick_ban(&*db()?, room, target)?;
+                log(audit::Action::Kick, Some(target));
                 drop(state);
                 access::sync_owner_rooms(ctx, guild, owner).await?;
                 return Ok(Reply::Text(format!(
                     "<@{target}> ko owner ki ban list mein daal diya."
                 )));
             }
-            member_action(ctx, &ch, owner, target, &action).await?
+            let result = member_action(ctx, &ch, owner, target, &action).await?;
+            match action {
+                Action::Drag(_) => log(audit::Action::Drag, Some(target)),
+                Action::Deny(_) => log(audit::Action::Deny, Some(target)),
+                _ => {}
+            }
+            result
         }
         Action::Claim => {
-            if store::is_banned(&*db()?, room.guild_id, room.owner_id, actor.id.get())? {
+            if !force && store::is_banned(&*db()?, room.guild_id, room.owner_id, actor.id.get())? {
                 return Err(user_error("Tu is room ki ban list mein hai."));
             }
             let owner_inside = voice(ctx, guild, owner) == Some(channel);
@@ -453,6 +505,14 @@ pub(in super::super) async fn execute(
                 checked_member(ctx, guild, member, actor.staff, owner, owner).await?;
             }
             give_ownership(ctx, &ch, room, actor.id).await?;
+            log(
+                if staff_action {
+                    audit::Action::StaffClaim
+                } else {
+                    audit::Action::Claim
+                },
+                Some(owner),
+            );
             state.cancel_handoff();
             reconcile(
                 ctx,
@@ -477,6 +537,14 @@ pub(in super::super) async fn execute(
                 return Err(user_error("Naya owner room mein hona chahiye."));
             }
             give_ownership(ctx, &ch, room, target).await?;
+            log(
+                if staff_action {
+                    audit::Action::StaffTransfer
+                } else {
+                    audit::Action::Transfer
+                },
+                Some(target),
+            );
             state.cancel_handoff();
             reconcile(
                 ctx,
@@ -497,6 +565,8 @@ pub(in super::super) async fn execute(
                 room,
                 &mut state,
                 "Temp voice room deleted by owner or staff",
+                Some(actor.id),
+                staff_action,
             )
             .await?;
             "Room delete kar diya.".into()
@@ -538,24 +608,30 @@ async fn me(
             let ch = fetch_voice(ctx, guild, channel)
                 .await?
                 .ok_or_else(save_error)?;
+            let caps = caps::for_member(ctx, guild, member, actor.staff)?;
             let profile = Profile {
                 name: Some(ch.name.clone()),
-                limit: Some(ch.user_limit.unwrap_or_default()),
+                limit: Some(caps.limit(ch.user_limit.unwrap_or_default())),
                 locked: Some(room_restricted(&ch, Permissions::CONNECT)),
                 hidden: Some(room_restricted(&ch, Permissions::VIEW_CHANNEL)),
-                bitrate: ch.bitrate,
+                bitrate: ch.bitrate.map(|bitrate| caps.bitrate(bitrate)),
             };
             store::save_profile(&*db()?, guild_id, user_id, &profile)?;
             "Room ki settings save kar di. Naye rooms mein apply hongi."
         }
-        MeAction::Set(profile) => {
+        MeAction::Set(mut profile) => {
             if profile == Profile::default() {
                 return Err(user_error("Badalne ke liye kam se kam ek option de."));
             }
+            let caps = caps::for_member(ctx, guild, member, actor.staff)?;
+            profile.limit = profile.limit.map(|limit| caps.limit(limit));
+            profile.bitrate = profile.bitrate.map(|bitrate| caps.bitrate(bitrate));
             store::save_profile(&*db()?, guild_id, user_id, &profile)?;
             "Tere room defaults update ho gaye."
         }
         MeAction::Profile => return profile_reply(guild_id, user_id),
+        MeAction::Stats(target) => return usage::execute_stats(guild, target.unwrap_or(actor.id)),
+        MeAction::Top => return usage::execute_top(guild),
         MeAction::Clear => {
             store::clear_profile(&*db()?, guild_id, user_id)?;
             "Saved defaults hata diye."
@@ -587,6 +663,14 @@ async fn me(
                 }
             }
             store::set_access(&*db()?, guild_id, user_id, user.get(), access, add)?;
+            if access == Access::Banned {
+                let action = if add {
+                    audit::Action::Ban
+                } else {
+                    audit::Action::Unban
+                };
+                audit::post(ctx, guild, action, Some(actor.id), None, Some(user));
+            }
             access::sync_owner_rooms(ctx, guild, actor.id).await?;
             return Ok(Reply::Text(format!("<@{user}> ko {message}")));
         }
@@ -981,17 +1065,20 @@ async fn rename(
     state: &mut RoomState,
     lock: &RoomLock,
     name: String,
+    actor: UserId,
 ) -> Result<String> {
     let id = channel.id;
     let mut record = load_rename(id)?;
     if channel.name == name {
         if record.pending.take().is_some() {
+            record.actor_id = None;
             save_rename(id, &record)?;
         }
         return Ok("Room ka naam already yahi hai.".into());
     }
     let delay = rename_delay(&record, chrono::Utc::now().timestamp_millis());
     record.pending = Some(name);
+    record.actor_id = Some(actor.get());
     save_rename(id, &record)?;
     if delay.is_zero() {
         apply_rename(ctx, id, record).await?;
@@ -1015,12 +1102,21 @@ async fn apply_rename(ctx: &Context, channel: ChannelId, mut record: Rename) -> 
     record.latest_ms = Some(chrono::Utc::now().timestamp_millis());
     save_rename(channel, &record)?;
     let result = channel.edit(&ctx.http, EditChannel::new().name(name)).await;
-    if result.is_ok() {
+    if let Ok(edited) = &result {
         record.latest_ms = Some(chrono::Utc::now().timestamp_millis());
+        audit::post(
+            ctx,
+            edited.guild_id,
+            audit::Action::Rename,
+            record.actor_id.map(UserId::new),
+            Some(channel),
+            None,
+        );
     } else {
         record = before;
     }
     record.pending = None;
+    record.actor_id = None;
     save_rename(channel, &record)?;
     result?;
     Ok(())
@@ -1216,6 +1312,7 @@ mod tests {
             previous_ms: first.latest_ms,
             latest_ms: Some(12_000),
             pending: Some("last".into()),
+            actor_id: None,
         };
         assert_eq!(rename_delay(&second, 610_000), Duration::from_secs(1));
         assert_eq!(rename_delay(&second, 611_000), Duration::ZERO);

@@ -572,7 +572,8 @@ pub const NEWS: &[News] = &[News {
     body: "Join-to-create voice channel mein jao aur Loduchand tumhare liye ek room bana dega. Chat mein controls milenge. Panel dobara chahiye? `/vc panel` chalao. `/vc lock` aur `/vc hide` ke `state` mein `on` ya `off` choose karo.\n\n\
            Apne room ki settings agli baar bhi chahiye? `/vc me save` karo, `/vc me set` se badlo, aur `/vc me profile` mein dekho. `/vc me trust` se dost locked ya hidden room mein bhi aa sakte hain. Kick ya `/vc me ban` se member tumhare rooms se ban ho jayega. `/vc me unban` se ban hata sakte ho.\n\n\
            Locked room join karna hai? `/vc knock` se owner ko request bhejo. Owner ya staff 10 minute ke andar approve kar sakte hain. Hidden room ke liye owner se invite maango.\n\n\
-           Owner nikle toh thodi der baad room mein sabse pehle aaya member owner ban jayega. Sab nikal gaye toh room khud band ho jayega.",
+           Owner nikle toh room mein sabse pehle aaya member owner ban sakta hai. Khaali room khud band ho jayega.\n\n\
+           `/vc me stats` mein apna voice time aur rooms dekh. `/vc me top` mein is mahine aur all-time top 10 hain. `/vc event schedule` se `in 2h` ya India time mein room book kar. Role ping staff ke liye hai.",
 }, News {
     id: "geo-world-2026-09",
     title: "\u{1F30D} Geo goes worldwide \u{2014} vote India, World or Mix",

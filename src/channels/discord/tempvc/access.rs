@@ -189,11 +189,11 @@ pub(super) async fn sync_owned_room(
 ) -> Result<()> {
     let room_lock = room_state(id);
     let mut state = room_lock.lock().await;
-    if !lookup(guild, id)?.is_some_and(|room| room.owner_id == owner.get()) {
+    let Some(room) = lookup(guild, id)?.filter(|room| room.owner_id == owner.get()) else {
         return Ok(());
-    }
+    };
     let Some(channel) = fetch_voice(ctx, guild, id).await? else {
-        return forget_room(id, &mut state);
+        return forget_room(ctx, room, &mut state);
     };
     sync(ctx, &channel, owner, channel.permission_overwrites.clone()).await
 }

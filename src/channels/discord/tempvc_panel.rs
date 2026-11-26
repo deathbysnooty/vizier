@@ -53,6 +53,13 @@ pub(super) enum Action {
     Drag(UserId),
     Knock(ChannelId),
     Me(MeAction),
+    Force(ForceAction),
+}
+
+pub(super) enum ForceAction {
+    Delete,
+    Claim,
+    Transfer(UserId),
 }
 
 pub(super) enum MeAction {
@@ -64,6 +71,8 @@ pub(super) enum MeAction {
     Untrust(UserId),
     Ban(UserId),
     Unban(UserId),
+    Stats(Option<UserId>),
+    Top,
 }
 
 pub(super) enum Reply {
@@ -115,7 +124,7 @@ pub(super) fn command() -> CreateCommand {
     let list_action = |name, description| {
         sub(name, description).add_sub_option(user("Which member").required(true))
     };
-    let me = CreateCommandOption::new(SubCommandGroup, "me", "Manage your room defaults and lists")
+    let me = CreateCommandOption::new(SubCommandGroup, "me", "Your room defaults, lists and stats")
         .add_sub_option(sub("save", "Save settings from your current room"))
         .add_sub_option(
             sub("set", "Edit your saved defaults")
@@ -139,10 +148,12 @@ pub(super) fn command() -> CreateCommand {
             "Remove a member from your trusted list",
         ))
         .add_sub_option(list_action("ban", "Block a member from your rooms"))
-        .add_sub_option(list_action("unban", "Remove a member from your ban list"));
+        .add_sub_option(list_action("unban", "Remove a member from your ban list"))
+        .add_sub_option(tempvc::stats_command())
+        .add_sub_option(tempvc::top_command());
 
     CreateCommand::new(COMMAND)
-        .description("Manage temporary voice rooms")
+        .description("Manage, schedule and check stats for temporary voice rooms")
         .contexts(vec![InteractionContext::Guild])
         .set_options(vec![
             sub("create", "Create your own temp room")
@@ -212,10 +223,12 @@ pub(super) fn command() -> CreateCommand {
                     .required(true),
             ),
             me,
+            tempvc::admin::command(),
+            tempvc::event_command(),
         ])
 }
 
-fn option_value<'a>(
+pub(super) fn option_value<'a>(
     options: &'a [CommandDataOption],
     name: &str,
 ) -> Option<&'a CommandDataOptionValue> {
@@ -268,6 +281,10 @@ fn me_request(options: &[CommandDataOption]) -> anyhow::Result<MeAction> {
         "untrust" => MeAction::Untrust(user()?),
         "ban" => MeAction::Ban(user()?),
         "unban" => MeAction::Unban(user()?),
+        "stats" => MeAction::Stats(
+            option_value(options, "member").and_then(CommandDataOptionValue::as_user_id),
+        ),
+        "top" => MeAction::Top,
         _ => return Err(UserError("Ye `/vc me` action ab available nahi hai.".into()).into()),
     })
 }
@@ -358,11 +375,27 @@ pub(super) async fn on_command(ctx: &Context, command: &CommandInteraction) {
     }
     let result = async {
         let (guild, member) = actor(command.guild_id, command.member.as_deref())?;
+        if let [group] = command.data.options.as_slice()
+            && let CommandDataOptionValue::SubCommandGroup(options) = &group.value
+        {
+            match group.name.as_str() {
+                "admin" => return tempvc::admin::command_reply(ctx, guild, member, options),
+                "event" => {
+                    return Ok(edit_reply(tempvc::execute_event(
+                        ctx, guild, member, options,
+                    )));
+                }
+                _ => {}
+            }
+        }
         let (target, action) = slash_request(&command.data.options)?;
-        tempvc::execute(ctx, guild, member, target, action).await
+        Ok(edit_reply(
+            tempvc::execute(ctx, guild, member, target, action).await,
+        ))
     }
     .await;
-    if let Err(err) = command.edit_response(&ctx.http, edit_reply(result)).await {
+    let edit = result.unwrap_or_else(|err| edit_reply(Err(err)));
+    if let Err(err) = command.edit_response(&ctx.http, edit).await {
         tracing::warn!(%err, "temp voice: could not respond to command");
     }
 }
@@ -376,7 +409,7 @@ fn edit_reply(result: anyhow::Result<Reply>) -> EditInteractionResponse {
     }
 }
 
-fn error_text(err: anyhow::Error) -> String {
+pub(super) fn error_text(err: anyhow::Error) -> String {
     if let Some(err) = err.downcast_ref::<UserError>() {
         return err.0.clone();
     }
@@ -606,6 +639,9 @@ pub(super) async fn on_component(ctx: &Context, component: &ComponentInteraction
     let Some(id) = component.data.custom_id.strip_prefix(PREFIX) else {
         return;
     };
+    if let Some(action) = id.strip_prefix(tempvc::admin::PREFIX) {
+        return tempvc::admin::component(ctx, component, action).await;
+    }
     let target = RoomTarget::Panel(component.channel_id);
     if let Some(form) = panel_form(id) {
         let result = match actor(component.guild_id, component.member.as_ref()) {
@@ -698,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn vc_is_guild_only_and_leaves_room_for_three_subcommand_groups() {
+    fn vc_is_guild_only_and_fits_discords_option_budget() {
         let serialized = serde_json::to_value(command()).unwrap();
         assert_eq!(serialized["name"], "vc");
         assert_eq!(
@@ -706,7 +742,7 @@ mod tests {
             serde_json::to_value([InteractionContext::Guild]).unwrap()
         );
         let options = serialized["options"].as_array().unwrap();
-        assert!(options.len() <= 25 - 3);
+        assert_eq!(options.len(), 24);
         let names: Vec<_> = options
             .iter()
             .map(|option| option["name"].as_str().unwrap())
@@ -736,12 +772,16 @@ mod tests {
                 "drag",
                 "knock",
                 "me",
+                "admin",
+                "event",
             ]
         );
-        for option in options
-            .iter()
-            .filter(|option| !matches!(option["name"].as_str(), Some("create" | "knock" | "me")))
-        {
+        for option in options.iter().filter(|option| {
+            !matches!(
+                option["name"].as_str(),
+                Some("create" | "knock" | "me" | "admin" | "event")
+            )
+        }) {
             let children = option["options"].as_array().unwrap();
             let channel = children.last().unwrap();
             assert_eq!(channel["name"], "channel");
@@ -772,9 +812,32 @@ mod tests {
         assert_eq!(
             names,
             [
-                "save", "set", "profile", "clear", "trust", "untrust", "ban", "unban"
+                "save", "set", "profile", "clear", "trust", "untrust", "ban", "unban", "stats",
+                "top"
             ]
         );
+        let member = &option_named(children, "stats")["options"][0];
+        assert_eq!(member["name"], "member");
+        assert_eq!(member["required"], false);
+        for (name, count) in [("me", 10), ("admin", 7), ("event", 3)] {
+            let group = option_named(options, name);
+            assert_eq!(group["type"], json!(CommandOptionType::SubCommandGroup));
+            let children = group["options"].as_array().unwrap();
+            assert_eq!(children.len(), count);
+            for child in children {
+                assert_eq!(child["type"], json!(CommandOptionType::SubCommand));
+                if let Some(params) = child["options"].as_array() {
+                    assert!(params.len() <= 25);
+                    assert!(params.iter().all(|param| {
+                        ![
+                            json!(CommandOptionType::SubCommand),
+                            json!(CommandOptionType::SubCommandGroup),
+                        ]
+                        .contains(&param["type"])
+                    }));
+                }
+            }
+        }
         let settings = option_named(children, "set")["options"].as_array().unwrap();
         assert_eq!(settings.len(), 5);
         for name in ["name", "limit", "locked", "hidden", "bitrate"] {

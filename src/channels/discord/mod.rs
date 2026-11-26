@@ -1547,8 +1547,8 @@ impl EventHandler for Handler {
         dragme::on_voice_state(&ctx, old.as_ref(), &new).await;
     }
 
-    async fn channel_delete(&self, _ctx: Context, channel: serenity::all::GuildChannel, _messages: Option<Vec<serenity::all::Message>>) {
-        tempvc::on_channel_delete(&channel);
+    async fn channel_delete(&self, ctx: Context, channel: serenity::all::GuildChannel, _messages: Option<Vec<serenity::all::Message>>) {
+        tempvc::on_channel_delete(&ctx, &channel);
     }
 
     async fn cache_ready(&self, ctx: Context, _guilds: Vec<serenity::all::GuildId>) {

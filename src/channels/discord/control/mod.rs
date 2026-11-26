@@ -165,6 +165,28 @@ pub(crate) fn set_for_test(key: &str, value: Option<&str>) {
 pub fn set(key: &str, value: Option<&str>, by: u64) -> anyhow::Result<()> {
     let db = DB.get().ok_or_else(|| anyhow::anyhow!("control store not open"))?;
     let conn = db.lock();
+    set_locked(&conn, key, value, by)
+}
+
+/// Edits one ID using the effective setting while holding the normal write lock.
+pub(super) fn edit_ids(key: &str, by: u64, id: u64, enabled: bool) -> anyhow::Result<bool> {
+    let db = DB.get().ok_or_else(|| anyhow::anyhow!("control store not open"))?;
+    let conn = db.lock();
+    let mut ids = ids(key);
+    if enabled == ids.contains(&id) {
+        return Ok(false);
+    }
+    if enabled {
+        ids.push(id);
+    } else {
+        ids.retain(|value| *value != id);
+    }
+    let value = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+    set_locked(&conn, key, Some(&value), by)?;
+    Ok(true)
+}
+
+fn set_locked(conn: &Connection, key: &str, value: Option<&str>, by: u64) -> anyhow::Result<()> {
     let old = VALUES.read().get(key).cloned();
     let now = Utc::now().timestamp();
     match value {

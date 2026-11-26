@@ -2558,12 +2558,15 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_TEMPVC_CATEGORY", "Room category", "Where temporary rooms are created. Leave empty to use the hub's category.", Kind::Category, ""),
                 setting("VIZIER_TEMPVC_NAME", "Room name pattern", "{user} is the member's display name. {count} is the number of active rooms from that hub including the new one.", Kind::Text, "{user}'s room"),
                 setting("VIZIER_TEMPVC_LIMIT", "Default room limit", "Maximum number of members in a new room. Use 0 for unlimited.", number(0, 99, "members"), "0"),
+                setting("VIZIER_TEMPVC_MAX_LIMIT", "Member room size cap", "The largest room limit members can set. Use 0 for no cap. Role perks can raise the cap, and temp voice staff are exempt.", number(0, 99, "members"), "0"),
+                setting("VIZIER_TEMPVC_MAX_BITRATE_KBPS", "Member bitrate cap", "Maximum audio bitrate members can set. The default is the server maximum. Reset to .env to clear a panel cap. Role perks can raise the cap, and staff can always use the server maximum.", number(8, 384, "kbps"), ""),
+                setting("VIZIER_TEMPVC_LOG_CHANNEL", "Temp voice audit channel", "Posts one line per room or moderation action, including blocked hub joins. Leave empty to turn it off.", Kind::Channel, ""),
                 setting("VIZIER_TEMPVC_STAFF_ROLES", "Temp voice staff roles", "These roles can manage temporary rooms alongside Discord administrators.", Kind::Roles, ""),
                 setting("VIZIER_TEMPVC_GRACE_SECONDS", "Empty room grace", "How long an empty room stays open. The countdown stops if someone joins.", number(0, 86400, "seconds"), "20"),
                 setting("VIZIER_TEMPVC_HANDOFF_SECONDS", "Ownership handoff delay", "How long the owner can be away before the longest-present member takes over.", number(0, 86400, "seconds"), "60"),
             ],
             commands: vec![
-                command("vc", EVERYONE, "/vc", "Manage your temporary room. Use /vc panel to repost the controls, /vc lock or /vc hide with state on or off, and /vc me to manage saved defaults, trusted friends and bans. Kick bans the member from the owner's rooms. Use /vc knock to ask to join a locked, visible room. Staff can specify a channel for room controls and use /vc drag."),
+                command("vc", EVERYONE, "/vc", "Manage temp rooms with /vc panel, lock, hide or knock. Kick bans a member from the owner's rooms. /vc me has saved defaults, trusted friends, bans, stats and the top 10. /vc event schedules rooms using India time. Staff can ping a role, use /vc drag, or manage rooms, hubs and perks under /vc admin."),
             ],
         },
         Section {

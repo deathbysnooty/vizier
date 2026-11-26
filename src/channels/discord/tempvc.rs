@@ -2,7 +2,12 @@
 
 mod access;
 mod actions;
+pub(super) mod admin;
+mod audit;
+mod caps;
+mod events;
 mod knock;
+mod usage;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,11 +29,14 @@ use super::tempvc_panel;
 use super::tempvc_store::{self as store, Profile, Room};
 
 pub(super) use actions::{can_control, execute};
+pub(super) use events::{event_command, execute_event};
 pub(super) use knock::answer_knock;
+pub(super) use usage::{stats_command, top_command};
 
 const DEFAULT_NAME: &str = "{user}'s room";
 const COOLDOWN: Duration = Duration::from_secs(10);
 const RETRY: Duration = Duration::from_secs(15);
+const EVENT_GRACE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug)]
 pub(super) struct UserError(pub String);
@@ -188,24 +196,72 @@ async fn fetch_voice(
     }
 }
 
-fn forget_room(channel: ChannelId, state: &mut RoomState) -> Result<()> {
-    store::delete(&*db()?, channel.get())?;
+fn remove_room(room: Room, state: &mut RoomState) -> Result<bool> {
+    let channel = ChannelId::new(room.channel_id);
+    let removed = store::delete(&*db()?, room.channel_id)?;
+    usage::close(GuildId::new(room.guild_id), channel);
     state.cancel_lifecycle();
     if let Some(task) = state.rename.take() {
         task.abort();
     }
     ROOMS.lock().remove(&channel);
+    Ok(removed)
+}
+
+fn forget_room(ctx: &Context, room: Room, state: &mut RoomState) -> Result<()> {
+    log_deletion(ctx, room, state, None, false)
+}
+
+fn log_deletion(
+    ctx: &Context,
+    room: Room,
+    state: &mut RoomState,
+    actor: Option<UserId>,
+    staff: bool,
+) -> Result<()> {
+    if remove_room(room, state)? {
+        audit::post(
+            ctx,
+            GuildId::new(room.guild_id),
+            if staff {
+                audit::Action::StaffDelete
+            } else {
+                audit::Action::Deleted
+            },
+            actor,
+            Some(ChannelId::new(room.channel_id)),
+            Some(UserId::new(room.owner_id)),
+        );
+    }
     Ok(())
 }
 
-async fn delete_room(ctx: &Context, room: Room, state: &mut RoomState, reason: &str) -> Result<()> {
+async fn delete_room(
+    ctx: &Context,
+    room: Room,
+    state: &mut RoomState,
+    reason: &str,
+    actor: Option<UserId>,
+    staff: bool,
+) -> Result<()> {
     let channel = ChannelId::new(room.channel_id);
     match ctx.http.delete_channel(channel, Some(reason)).await {
         Ok(_) => (),
         Err(err) if unknown_channel(&err) => (),
         Err(err) => return Err(err.into()),
     }
-    forget_room(channel, state)
+    log_deletion(ctx, room, state, actor, staff)
+}
+
+fn scheduled_grace(room: Room) -> Result<Duration> {
+    let opened = store::room_schedule_opened_at(&*db()?, room.guild_id, room.channel_id)?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(opened.map_or(Duration::ZERO, |opened| {
+        let remaining = opened
+            .saturating_add(EVENT_GRACE.as_secs() as i64)
+            .saturating_sub(now);
+        Duration::from_secs(remaining.clamp(0, EVENT_GRACE.as_secs() as i64) as u64)
+    }))
 }
 
 fn reconcile(
@@ -218,7 +274,7 @@ fn reconcile(
 ) {
     let guild = GuildId::new(room.guild_id);
     let channel = ChannelId::new(room.channel_id);
-    let Some(occupants) = occupants(ctx, guild, channel) else {
+    let Some(occupants) = usage::observe(ctx, guild, channel) else {
         return;
     };
     let now = Instant::now();
@@ -248,6 +304,13 @@ fn reconcile(
                 empty_delay
             } else {
                 job.delay()
+            };
+            let delay = match scheduled_grace(room) {
+                Ok(grace) => delay.max(grace),
+                Err(err) => {
+                    tracing::warn!(%channel, %err, "tempvc: could not read scheduled room grace");
+                    delay
+                }
             };
             let ctx = ctx.clone();
             let room_lock = room_lock.clone();
@@ -298,10 +361,10 @@ async fn finish_job(
         return Ok(());
     }
     match job {
-        Job::Delete => delete_room(ctx, room, state, "Temp voice room empty").await,
+        Job::Delete => delete_room(ctx, room, state, "Temp voice room empty", None, false).await,
         Job::Handoff => {
             let Some(ch) = fetch_voice(ctx, guild, channel).await? else {
-                return forget_room(channel, state);
+                return forget_room(ctx, room, state);
             };
             // Check again after the REST lookup, in case someone just returned.
             let current =
@@ -315,6 +378,14 @@ async fn finish_job(
                 )?;
                 if let Some(next) = longest_present(&current.humans, &state.joined, &bans) {
                     actions::give_ownership(ctx, &ch, room, next).await?;
+                    audit::post(
+                        ctx,
+                        guild,
+                        audit::Action::Handoff,
+                        None,
+                        Some(channel),
+                        Some(next),
+                    );
                     actions::announce_owner(ctx, channel, next).await;
                 } else {
                     for user in current.humans {
@@ -330,6 +401,34 @@ async fn finish_job(
 pub(super) fn on_cache_ready(ctx: &Context, guilds: Vec<GuildId>) {
     static WATCHING: AtomicBool = AtomicBool::new(false);
     let start_watch = !WATCHING.swap(true, Ordering::Relaxed);
+    if start_watch {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(15));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                if enabled() {
+                    events::tick(&ctx).await;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(30));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                let result = if enabled() {
+                    usage::flush()
+                } else {
+                    usage::clear()
+                };
+                if let Err(err) = result {
+                    tracing::warn!(%err, "tempvc: usage flush failed");
+                }
+            }
+        });
+    }
     let ctx = ctx.clone();
     tokio::spawn(async move {
         if enabled() {
@@ -340,6 +439,8 @@ pub(super) fn on_cache_ready(ctx: &Context, guilds: Vec<GuildId>) {
                 ENABLE_CHANGED.notified().await;
                 if enabled() {
                     recover(&ctx, ctx.cache.guilds()).await;
+                } else if let Err(err) = usage::clear() {
+                    tracing::warn!(%err, "tempvc: could not close active usage spans");
                 }
             }
         }
@@ -371,11 +472,11 @@ async fn recover_room(ctx: &Context, guild: GuildId, channel: ChannelId) -> Resu
     let Some(room) = lookup(guild, channel)? else {
         return Ok(());
     };
+    reconcile(ctx, room, &mut state, &room_lock, None, Duration::ZERO);
     let fetched = fetch_voice(ctx, guild, channel).await;
     if matches!(fetched, Ok(None)) {
-        return forget_room(channel, &mut state);
+        return forget_room(ctx, room, &mut state);
     }
-    reconcile(ctx, room, &mut state, &room_lock, None, Duration::ZERO);
     actions::restore_rename(ctx, channel, &mut state, &room_lock)?;
     if let Some(ch) = fetched? {
         access::sync(
@@ -436,23 +537,25 @@ pub(super) fn on_voice_state(ctx: &Context, old: Option<&VoiceState>, new: &Voic
         if let Some(hub) =
             new_channel.filter(|id| control::ids("VIZIER_TEMPVC_HUBS").contains(&id.get()))
             && let Err(err) = join_hub(&ctx, guild, hub, user).await
+            && !err.is::<UserError>()
         {
             tracing::warn!(%hub, %user, %err, "tempvc: hub join failed");
         }
     });
 }
 
-pub(super) fn on_channel_delete(channel: &GuildChannel) {
+pub(super) fn on_channel_delete(ctx: &Context, channel: &GuildChannel) {
     let id = channel.id;
     let guild = channel.guild_id;
     if channel.kind != ChannelType::Voice || !matches!(lookup(guild, id), Ok(Some(_))) {
         return;
     }
+    let ctx = ctx.clone();
     tokio::spawn(async move {
         let room_lock = room_state(id);
         let mut state = room_lock.lock().await;
-        if matches!(lookup(guild, id), Ok(Some(_)))
-            && let Err(err) = forget_room(id, &mut state)
+        if let Ok(Some(room)) = lookup(guild, id)
+            && let Err(err) = forget_room(&ctx, room, &mut state)
         {
             tracing::warn!(%id, %err, "tempvc: could not remove deleted room");
         }
@@ -547,10 +650,12 @@ async fn join_hub(ctx: &Context, guild: GuildId, hub: ChannelId, user: UserId) -
         && voice(ctx, guild, user) == Some(hub)
     {
         let options = RoomOptions {
-            hub,
+            hub: Some(hub),
             name: None,
             limit: None,
             locked: None,
+            schedule_id: None,
+            invite_role: None,
         };
         create_room(ctx, guild, &member, Some(hub), options).await?;
     }
@@ -590,15 +695,17 @@ async fn find_owned(
             }
             return Ok(Some(channel));
         }
-        forget_room(channel, &mut state)?;
+        forget_room(ctx, room, &mut state)?;
     }
 }
 
 struct RoomOptions<'a> {
-    hub: ChannelId,
+    hub: Option<ChannelId>,
     name: Option<&'a str>,
     limit: Option<u32>,
     locked: Option<bool>,
+    schedule_id: Option<i64>,
+    invite_role: Option<RoleId>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -615,6 +722,7 @@ fn room_defaults<'a>(
     profile: &'a Profile,
     panel_name: &'a str,
     panel_limit: u32,
+    panel_bitrate: Option<u32>,
 ) -> RoomDefaults<'a> {
     RoomDefaults {
         name: options
@@ -624,7 +732,7 @@ fn room_defaults<'a>(
         limit: options.limit.or(profile.limit).unwrap_or(panel_limit),
         locked: options.locked.or(profile.locked),
         hidden: profile.hidden,
-        bitrate: profile.bitrate,
+        bitrate: profile.bitrate.or(panel_bitrate),
     }
 }
 
@@ -658,22 +766,54 @@ async fn create_room(
     source: Option<ChannelId>,
     options: RoomOptions<'_>,
 ) -> Result<ChannelId> {
-    let Some(hub) = fetch_voice(ctx, guild, options.hub).await? else {
-        return Err(user_error("Ye hub voice channel nahi mila."));
+    let hub_parent = if let Some(hub) = options.hub {
+        fetch_voice(ctx, guild, hub)
+            .await?
+            .ok_or_else(|| user_error("Ye hub voice channel nahi mila."))?
+            .parent_id
+    } else {
+        None
     };
+    let template = if let Some(hub) = options.hub {
+        let conn = db()?;
+        if !control::ids("VIZIER_TEMPVC_HUBS").contains(&hub.get()) {
+            return Err(user_error("Ye temp voice hub ab active nahi hai."));
+        }
+        store::hub_template(&conn, guild.get(), hub.get())?
+    } else {
+        None
+    };
+    if !caps::has_required_role(
+        owner,
+        template.as_ref().and_then(|hub| hub.required_role_id),
+    ) {
+        audit::post(
+            ctx,
+            guild,
+            audit::Action::HubDenied,
+            Some(owner.user.id),
+            options.hub,
+            None,
+        );
+        return Err(user_error(
+            "Is hub mein room banane ke liye required role chahiye.",
+        ));
+    }
     let (category, mut overwrites, staff_roles) = {
         let cached = ctx
             .cache
             .guild(guild)
             .context("guild channels unavailable")?;
-        let configured = control::id("VIZIER_TEMPVC_CATEGORY")
-            .filter(|id| *id != 0)
-            .map(ChannelId::new);
-        let category = [configured, hub.parent_id]
-            .into_iter()
-            .flatten()
-            .filter_map(|id| cached.channels.get(&id))
-            .find(|channel| channel.kind == ChannelType::Category);
+        let category = [
+            template.as_ref().and_then(|hub| hub.category_id),
+            control::id("VIZIER_TEMPVC_CATEGORY"),
+            hub_parent.map(ChannelId::get),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|id| *id != 0)
+        .filter_map(|id| cached.channels.get(&ChannelId::new(id)))
+        .find(|channel| channel.kind == ChannelType::Category);
         let staff_roles = control::ids("VIZIER_TEMPVC_STAFF_ROLES")
             .into_iter()
             .filter(|id| *id != 0 && *id != guild.get())
@@ -686,18 +826,35 @@ async fn create_room(
             staff_roles,
         )
     };
+    if options.hub.is_none() && category.is_none() {
+        return Err(user_error(
+            "Scheduled room ke liye ek room category chahiye.",
+        ));
+    }
     let profile = store::profile(&*db()?, guild.get(), owner.user.id.get())?.unwrap_or_default();
     let panel_name = control::var("VIZIER_TEMPVC_NAME");
     let defaults = room_defaults(
         &options,
         &profile,
-        panel_name.as_deref().unwrap_or(DEFAULT_NAME),
-        control::number("VIZIER_TEMPVC_LIMIT", 0).min(99) as u32,
+        template
+            .as_ref()
+            .and_then(|hub| hub.name_pattern.as_deref())
+            .or(panel_name.as_deref())
+            .unwrap_or(DEFAULT_NAME),
+        template
+            .as_ref()
+            .and_then(|hub| hub.limit)
+            .unwrap_or_else(|| control::number("VIZIER_TEMPVC_LIMIT", 0).min(99) as u32),
+        template.as_ref().and_then(|hub| hub.bitrate),
     );
+    let actor = actions::actor(ctx, guild, owner)?;
+    let caps = caps::for_member(ctx, guild, owner, actor.staff)?;
+    // A guild identifier distinguishes a category-only scheduled room from a real hub.
+    let hub_id = options.hub.map_or_else(|| guild.get(), ChannelId::get);
     let name = expand_name(
         defaults.name,
         owner.display_name(),
-        store::count_for_hub(&*db()?, options.hub.get())? + 1,
+        store::count_for_hub(&*db()?, hub_id)? + 1,
     );
     for role in &staff_roles {
         actions::grant(
@@ -721,14 +878,24 @@ async fn create_room(
         .map(|role| role.get())
         .collect::<Vec<_>>();
     let suppressed = creation_restrictions(&mut overwrites, &defaults, guild, &staff_roles);
+    if let Some(role) = options.invite_role {
+        actions::grant(
+            &mut overwrites,
+            PermissionOverwriteType::Role(role),
+            Permissions::VIEW_CHANNEL | Permissions::CONNECT,
+        );
+    }
     let edits = access::plan(ctx, guild, owner.user.id, None, &mut overwrites).await?;
     let mut builder = CreateChannel::new(name)
         .kind(ChannelType::Voice)
-        .user_limit(defaults.limit)
+        .user_limit(caps.limit(defaults.limit))
         .permissions(overwrites)
         .audit_log_reason("Temp voice room");
-    if let Some(bitrate) = defaults.bitrate {
-        builder = builder.bitrate(bitrate.clamp(8_000, actions::bitrate_cap(ctx, guild)? * 1_000));
+    if let Some(bitrate) = defaults
+        .bitrate
+        .or_else(|| (caps.bitrate_kbps < 64).then_some(64_000))
+    {
+        builder = builder.bitrate(caps.bitrate(bitrate));
     }
     if let Some(category) = category {
         builder = builder.category(category);
@@ -738,7 +905,7 @@ async fn create_room(
     let room = Room {
         channel_id: channel.get(),
         guild_id: guild.get(),
-        hub_id: options.hub.get(),
+        hub_id,
         owner_id: owner.user.id.get(),
     };
     let room_lock = room_state(channel);
@@ -750,6 +917,24 @@ async fn create_room(
             store::save_suppressed_roles(&transaction, channel.get(), bits.bits(), roles)?;
         }
         edits.save_added(&transaction, channel)?;
+        let now = chrono::Utc::now();
+        store::record_room_created(
+            &transaction,
+            room.guild_id,
+            room.owner_id,
+            now.timestamp_millis(),
+        )?;
+        if let Some(id) = options.schedule_id
+            && !store::mark_schedule_open(
+                &transaction,
+                room.guild_id,
+                id,
+                room.channel_id,
+                now.timestamp(),
+            )?
+        {
+            return Err(anyhow!("schedule is no longer pending"));
+        }
         transaction.commit()?;
         Ok(())
     });
@@ -765,6 +950,14 @@ async fn create_room(
         ROOMS.lock().remove(&channel);
         return Err(err);
     }
+    audit::post(
+        ctx,
+        guild,
+        audit::Action::Created,
+        Some(owner.user.id),
+        Some(channel),
+        None,
+    );
     // List edits made while Discord created the channel could not yet see it.
     if let Err(err) = access::sync(
         ctx,
@@ -774,13 +967,24 @@ async fn create_room(
     )
     .await
     {
-        if let Err(cleanup) =
-            delete_room(ctx, room, &mut state, "Temp voice access setup failed").await
-        {
-            tracing::warn!(%channel, %cleanup, "tempvc: retrying cleanup after access setup failed");
-            reconcile(ctx, room, &mut state, &room_lock, None, RETRY);
+        if options.schedule_id.is_some() {
+            tracing::warn!(%channel, %err, "tempvc: could not refresh scheduled room access");
+        } else {
+            if let Err(cleanup) = delete_room(
+                ctx,
+                room,
+                &mut state,
+                "Temp voice access setup failed",
+                None,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(%channel, %cleanup, "tempvc: retrying cleanup after access setup failed");
+                reconcile(ctx, room, &mut state, &room_lock, None, RETRY);
+            }
+            return Err(err);
         }
-        return Err(err);
     }
     if let Some(source) = source {
         let moved = if voice(ctx, guild, owner.user.id) != Some(source) {
@@ -793,7 +997,8 @@ async fn create_room(
                 .map_err(Into::into)
         };
         if let Err(err) = moved {
-            if let Err(cleanup) = delete_room(ctx, room, &mut state, "Temp voice move failed").await
+            if let Err(cleanup) =
+                delete_room(ctx, room, &mut state, "Temp voice move failed", None, false).await
             {
                 tracing::warn!(%channel, %cleanup, "tempvc: retrying cleanup after move failed");
                 reconcile(ctx, room, &mut state, &room_lock, None, RETRY);
@@ -812,6 +1017,31 @@ async fn create_room(
         tracing::warn!(%channel, %err, "tempvc: could not post room controls");
     }
     Ok(channel)
+}
+
+async fn create_scheduled_room(
+    ctx: &Context,
+    guild: GuildId,
+    owner: &Member,
+    event: &store::Schedule,
+    role: Option<RoleId>,
+) -> Result<ChannelId> {
+    actions::check_enabled()?;
+    create_room(
+        ctx,
+        guild,
+        owner,
+        None,
+        RoomOptions {
+            hub: event.hub_id.map(ChannelId::new),
+            name: Some(&event.name),
+            limit: event.limit,
+            locked: None,
+            schedule_id: Some(event.id),
+            invite_role: role,
+        },
+    )
+    .await
 }
 
 fn expand_name(pattern: &str, user: &str, count: usize) -> String {
@@ -853,19 +1083,27 @@ mod tests {
     #[test]
     fn creation_applies_profile_fields_and_falls_back_individually() {
         let options = RoomOptions {
-            hub: ChannelId::new(1),
+            hub: Some(ChannelId::new(1)),
             name: None,
             limit: None,
             locked: None,
+            schedule_id: None,
+            invite_role: None,
         };
         assert_eq!(
-            room_defaults(&options, &Profile::default(), DEFAULT_NAME, 12),
+            room_defaults(
+                &options,
+                &Profile::default(),
+                DEFAULT_NAME,
+                12,
+                Some(32_000)
+            ),
             RoomDefaults {
                 name: DEFAULT_NAME,
                 limit: 12,
                 locked: None,
                 hidden: None,
-                bitrate: None,
+                bitrate: Some(32_000),
             }
         );
         let profile = Profile {
@@ -875,7 +1113,7 @@ mod tests {
             hidden: Some(true),
             bitrate: Some(64_000),
         };
-        let resolved = room_defaults(&options, &profile, DEFAULT_NAME, 12);
+        let resolved = room_defaults(&options, &profile, DEFAULT_NAME, 12, None);
         assert_eq!(
             resolved,
             RoomDefaults {
@@ -895,7 +1133,8 @@ mod tests {
                     ..Profile::default()
                 },
                 DEFAULT_NAME,
-                12
+                12,
+                None,
             ),
             RoomDefaults {
                 name: DEFAULT_NAME,
@@ -912,7 +1151,7 @@ mod tests {
             ..options
         };
         assert_eq!(
-            room_defaults(&explicit, &profile, DEFAULT_NAME, 12),
+            room_defaults(&explicit, &profile, DEFAULT_NAME, 12, None),
             RoomDefaults {
                 name: "Slash room",
                 limit: 7,
