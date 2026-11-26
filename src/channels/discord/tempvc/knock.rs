@@ -13,9 +13,9 @@ use crate::channels::discord::tempvc_panel::Reply;
 
 const KNOCK_COOLDOWN: Duration = Duration::from_secs(60);
 const KNOCK_LIFETIME: Duration = Duration::from_secs(10 * 60);
-const HIDDEN: &str = "Room hidden hai. Owner se `/vcinvite` ya `/vc permit` maang.";
-const BANNED: &str = "Tu is room ki ban list mein hai.";
-const EXPIRED: &str = "Ye knock ab active nahi hai.";
+const HIDDEN: &str = "This room is hidden. Ask the owner to use `/vcinvite` or `/vc permit`.";
+const BANNED: &str = "You're on this room owner's ban list.";
+const EXPIRED: &str = "This knock has expired.";
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
@@ -63,7 +63,7 @@ impl Knocks {
         now: Instant,
     ) -> Result<Knock> {
         if !controls(actor, owner) {
-            return Err(user_error("Sirf room owner ya staff jawab de sakte hain."));
+            return Err(user_error("Only the room owner or staff can answer."));
         }
         self.pending
             .get(&id)
@@ -79,14 +79,15 @@ fn request_allowed(locked: bool, hidden: bool, banned: bool) -> Result<()> {
     } else if hidden {
         Err(user_error(HIDDEN))
     } else if !locked {
-        Err(user_error("Room unlocked hai. Seedha join kar le."))
+        Err(user_error("This room is unlocked. You can join directly."))
     } else {
         Ok(())
     }
 }
 
 fn managed_room(guild: GuildId, channel: ChannelId) -> Result<Room> {
-    lookup(guild, channel)?.ok_or_else(|| user_error("Ye Loduchand ka temp VC nahi hai."))
+    lookup(guild, channel)?
+        .ok_or_else(|| user_error("Loduchand doesn't manage this voice channel."))
 }
 
 fn banned(room: Room, user: UserId) -> Result<bool> {
@@ -120,7 +121,7 @@ async fn target_voice(
     if let Some(room) = lookup(guild, channel)? {
         forget_room(ctx, room, state)?;
     }
-    Err(user_error("Ye temp VC ab nahi hai."))
+    Err(user_error("This temporary room is gone."))
 }
 
 pub(super) async fn request(
@@ -142,7 +143,7 @@ pub(super) async fn request(
         banned(room, user)?,
     )?;
     if state.knocks.cooling_down(user, Instant::now()) {
-        return Err(user_error("Abhi knock kiya tha. Owner ko ek minute de."));
+        return Err(user_error("Give the owner a minute before knocking again."));
     }
 
     let owner = UserId::new(room.owner_id);
@@ -151,9 +152,7 @@ pub(super) async fn request(
         .send_message(
             &ctx.http,
             CreateMessage::new()
-                .content(format!(
-                    "🚪 <@{owner}>, <@{user}> room join karna chahta hai."
-                ))
+                .content(format!("🚪 <@{owner}>, <@{user}> wants to join your room."))
                 .allowed_mentions(CreateAllowedMentions::new().users([owner]))
                 .components(tempvc_panel::knock_rows(id)),
         )
@@ -167,7 +166,7 @@ pub(super) async fn request(
         },
     );
     Ok(Reply::Text(format!(
-        "🚪 <#{channel}> ke chat mein knock bhej diya."
+        "🚪 Sent a knock in the chat for <#{channel}>."
     )))
 }
 
@@ -196,7 +195,7 @@ pub(in super::super) async fn answer_knock(
     let user = request.user;
     if !approved {
         state.knocks.pending.remove(&request_id);
-        return Ok(format!("⛔ <@{user}> ka knock deny kar diya."));
+        return Ok(format!("⛔ Declined <@{user}>'s knock."));
     }
 
     let voice_channel = target_voice(ctx, guild, channel, &mut state).await?;
@@ -205,7 +204,7 @@ pub(in super::super) async fn answer_knock(
     }
     let requester = member_if_present(ctx, guild, user)
         .await?
-        .ok_or_else(|| user_error("Ye member server mein nahi hai."))?;
+        .ok_or_else(|| user_error("This member is no longer in the server."))?;
     if !visible_in_room(ctx, &voice_channel, &requester)? {
         return Err(user_error(HIDDEN));
     }
@@ -229,14 +228,14 @@ pub(in super::super) async fn answer_knock(
         Some(user),
     );
 
-    let mut result = format!("✅ <@{user}> ka knock approve kar diya.");
+    let mut result = format!("✅ Approved <@{user}>'s knock.");
     // Move Members lets the bot admit an approved user even at the room limit.
     if voice(ctx, guild, user).is_some_and(|source| source != channel) {
         match guild.move_member(&ctx.http, user, channel).await {
-            Ok(_) => result.push_str(" Room mein move kar diya."),
+            Ok(_) => result.push_str(" They were moved into the room."),
             Err(err) => {
                 tracing::warn!(%channel, %user, %err, "tempvc: could not move approved knocker");
-                result.push_str(" Move nahi ho paaya. Ab khud join kar sakta hai.");
+                result.push_str(" I couldn't move them, but they can join now.");
             }
         }
     }

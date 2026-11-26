@@ -148,7 +148,8 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("help", EVERYONE, "/help topic:", "Every command you can use, by area; pick a topic for the details. Only the asker sees it."),
-                command("vcinvite", EVERYONE, "/vcinvite member:", "Invites someone to join your current voice channel. You can also right-click the member and choose Apps → Invite to my VC."),
+                command("dragme", EVERYONE, "/dragme member:", "Ask to join someone's voice channel. Anyone in that channel can approve or deny your request."),
+                command("vcinvite", EVERYONE, "/vcinvite member:", "Invite someone to your current voice channel. You can also right-click the member and choose Apps → Invite to my VC."),
             ],
         },
         Section {
@@ -2551,7 +2552,10 @@ pub fn sections() -> Vec<Section> {
             id: "tempvc",
             title: "Temp voice",
             icon: "🎙️",
-            about: "Join a hub to get a temporary voice room with its own controls in the room chat. The room is removed when it stays empty. If the owner leaves, ownership passes to the member who's been there longest.",
+            about: "Join a hub to get a temporary voice room with controls in its chat. Empty rooms close automatically. \
+                    If the owner leaves, the member who's been there longest can take over. Kick disconnects a member once. \
+                    The panel's Ban button and /vc me ban block members from all your rooms. When chat is off, the owner, \
+                    permitted members, trusted friends, and staff can still type.",
             settings: vec![
                 setting("VIZIER_TEMPVC", "Temporary voice rooms", "Enable the hubs, /vc and the room controls.", Kind::Toggle, "off"),
                 setting("VIZIER_TEMPVC_HUBS", "Join-to-create hubs", "Members who join these voice channels get a temporary room.", Kind::VoiceChannels, ""),
@@ -2566,7 +2570,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_TEMPVC_HANDOFF_SECONDS", "Ownership handoff delay", "How long the owner can be away before the longest-present member takes over.", number(0, 86400, "seconds"), "60"),
             ],
             commands: vec![
-                command("vc", EVERYONE, "/vc", "Manage temp rooms with /vc panel, lock, hide or knock. Kick bans a member from the owner's rooms. /vc me has saved defaults, trusted friends, bans, stats and the top 10. /vc event schedules rooms using India time. Staff can ping a role, use /vc drag, or manage rooms, hubs and perks under /vc admin."),
+                command("vc", EVERYONE, "/vc", "Use /vc panel, lock, hide, or knock. Use more to add mentions or IDs when managing permits, denials, trust, or bans. /vc me has saved defaults, stats, and the top 10. /vc event schedules rooms in India time. Staff can ping a role, use /vc drag, or manage rooms, hubs, and perks with /vc admin."),
             ],
         },
         Section {

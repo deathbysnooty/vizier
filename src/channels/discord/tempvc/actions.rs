@@ -3,7 +3,9 @@
 use serenity::all::{CreateAllowedMentions, CreateEmbed, CreateMessage, EditChannel, PremiumTier};
 
 use super::*;
-use crate::channels::discord::tempvc_panel::{Action, ForceAction, MeAction, Reply, RoomTarget};
+use crate::channels::discord::tempvc_panel::{
+    Action, BulkUsers, ForceAction, MeAction, Reply, RoomTarget,
+};
 use crate::channels::discord::tempvc_store::{Access, Rename};
 use serenity::all::{Guild, PermissionOverwrite};
 
@@ -14,6 +16,9 @@ pub(super) const OWNER_ACCESS: Permissions = Permissions::VIEW_CHANNEL
     .union(Permissions::READ_MESSAGE_HISTORY);
 pub(super) const STAFF_ACCESS: Permissions = OWNER_ACCESS.union(Permissions::USE_SOUNDBOARD);
 pub(super) const BOT_ACCESS: Permissions = OWNER_ACCESS.union(Permissions::EMBED_LINKS);
+pub(super) const PERMIT_ACCESS: Permissions = Permissions::VIEW_CHANNEL
+    .union(Permissions::CONNECT)
+    .union(Permissions::SEND_MESSAGES);
 
 pub(super) fn overwrite(
     overwrites: &[PermissionOverwrite],
@@ -145,7 +150,7 @@ pub(super) async fn give_ownership(
         ctx,
         channel.guild_id,
         new_owner,
-        Some(channel.id),
+        Some(channel),
         &mut overwrites,
     )
     .await?;
@@ -205,7 +210,7 @@ pub(super) async fn give_ownership(
 
 pub(super) async fn announce_owner(ctx: &Context, channel: ChannelId, user: UserId) {
     let message = CreateMessage::new()
-        .content(format!("👑 <@{user}> ab room ka owner hai."))
+        .content(format!("👑 <@{user}> now owns this room."))
         .allowed_mentions(CreateAllowedMentions::new());
     if let Err(err) = channel.send_message(&ctx.http, message).await {
         tracing::warn!(%channel, %err, "tempvc: could not announce ownership");
@@ -217,7 +222,7 @@ fn staff(guild: &Guild, member: &Member, roles: &[u64]) -> bool {
         || member.roles.iter().any(|role| roles.contains(&role.get()))
 }
 
-fn staff_roles() -> Vec<u64> {
+pub(super) fn staff_roles() -> Vec<u64> {
     control::ids("VIZIER_TEMPVC_STAFF_ROLES")
         .into_iter()
         .filter(|id| *id != 0)
@@ -235,7 +240,7 @@ pub(super) fn actor(ctx: &Context, guild: GuildId, member: &Member) -> Result<Ac
     let guild = ctx
         .cache
         .guild(guild)
-        .ok_or_else(|| user_error("Server load ho raha hai. Thodi der mein try kar."))?;
+        .ok_or_else(|| user_error("The server is still loading. Try again in a moment."))?;
     let id = member.user.id;
     Ok(Actor {
         id,
@@ -251,10 +256,10 @@ fn resolve(actor: Actor, target: RoomTarget) -> Result<ChannelId> {
     match target {
         RoomTarget::Panel(channel) => Ok(channel),
         RoomTarget::Voice(Some(channel)) if actor.staff => Ok(channel),
-        RoomTarget::Voice(Some(_)) => Err(user_error("Channel option sirf staff ke liye hai.")),
+        RoomTarget::Voice(Some(_)) => Err(user_error("Only staff can use the channel option.")),
         RoomTarget::Voice(None) => actor
             .voice
-            .ok_or_else(|| user_error("Pehle apne temp VC mein aa ja.")),
+            .ok_or_else(|| user_error("Join your temporary voice room first.")),
     }
 }
 
@@ -270,7 +275,7 @@ pub(super) fn check_enabled() -> Result<()> {
     if enabled() {
         Ok(())
     } else {
-        Err(user_error("Temp voice abhi off hai."))
+        Err(user_error("Temporary voice rooms are turned off."))
     }
 }
 
@@ -283,12 +288,12 @@ pub(in super::super) fn can_control(
     check_enabled()?;
     let actor = actor(ctx, guild, member)?;
     let channel = resolve(actor, target)?;
-    let room =
-        lookup(guild, channel)?.ok_or_else(|| user_error("Ye Loduchand ka temp VC nahi hai."))?;
+    let room = lookup(guild, channel)?
+        .ok_or_else(|| user_error("Loduchand doesn't manage this voice channel."))?;
     if controls(actor, UserId::new(room.owner_id)) {
         Ok(())
     } else {
-        Err(user_error("Sirf room owner ya staff ye kar sakte hain."))
+        Err(user_error("Only the room owner or staff can do this."))
     }
 }
 
@@ -304,7 +309,7 @@ pub(in super::super) async fn execute(
     let (action, force) = match action {
         Action::Force(force) => {
             if !actor.staff {
-                return Err(user_error("Room manager sirf staff ke liye hai."));
+                return Err(user_error("Only staff can use the room manager."));
             }
             let action = match force {
                 ForceAction::Claim => Action::Claim,
@@ -329,9 +334,11 @@ pub(in super::super) async fn execute(
     {
         let hub = select_hub(ctx, guild, hub, actor.voice)?;
         let _creation = CreationGuard::start(guild, actor.id)
-            .ok_or_else(|| user_error("Room banane se pehle 10 second ruk ja."))?;
+            .ok_or_else(|| user_error("Wait 10 seconds before creating another room."))?;
         if let Some(existing) = find_owned(ctx, guild, actor.id, None).await? {
-            return Err(user_error(format!("Tera room pehle se hai <#{existing}>.")));
+            return Err(user_error(format!(
+                "You already have a room in <#{existing}>."
+            )));
         }
         let options = RoomOptions {
             hub: Some(hub),
@@ -342,38 +349,41 @@ pub(in super::super) async fn execute(
             invite_role: None,
         };
         let channel = create_room(ctx, guild, member, actor.voice, options).await?;
-        return Ok(Reply::Text(format!("🎙️ Tera room ready hai <#{channel}>.")));
+        return Ok(Reply::Text(format!(
+            "🎙️ Your room is ready in <#{channel}>."
+        )));
     }
 
     let channel = resolve(actor, target)?;
-    lookup(guild, channel)?.ok_or_else(|| user_error("Ye Loduchand ka temp VC nahi hai."))?;
+    lookup(guild, channel)?
+        .ok_or_else(|| user_error("Loduchand doesn't manage this voice channel."))?;
     let room_lock = room_state(channel);
     let mut state = room_lock.lock().await;
     check_enabled()?;
     let actor = self::actor(ctx, guild, member)?;
     if resolve(actor, target)? != channel {
-        return Err(user_error("Tu room badal chuka hai. Phir se try kar."));
+        return Err(user_error("You switched rooms. Try again."));
     }
-    let room = lookup(guild, channel)?.ok_or_else(|| user_error("Ye temp VC ab nahi hai."))?;
+    let room = lookup(guild, channel)?.ok_or_else(|| user_error("This temporary room is gone."))?;
     let owner = UserId::new(room.owner_id);
     if force && !actor.staff {
-        return Err(user_error("Room manager sirf staff ke liye hai."));
+        return Err(user_error("Only staff can use the room manager."));
     }
     match action {
         Action::Info | Action::Claim => {}
         Action::Drag(_) => {
             if !actor.staff {
-                return Err(user_error("Drag sirf staff kar sakte hain."));
+                return Err(user_error("Only staff can move members."));
             }
         }
         _ if !controls(actor, owner) => {
-            return Err(user_error("Sirf room owner ya staff ye kar sakte hain."));
+            return Err(user_error("Only the room owner or staff can do this."));
         }
         _ => {}
     }
     let Some(ch) = fetch_voice(ctx, guild, channel).await? else {
         forget_room(ctx, room, &mut state)?;
-        return Err(user_error("Ye temp VC ab nahi hai."));
+        return Err(user_error("This temporary room is gone."));
     };
 
     let log =
@@ -424,18 +434,20 @@ pub(in super::super) async fn execute(
         }
         Action::Limit(limit) => {
             if limit > 99 {
-                return Err(user_error("Limit 0 se 99 tak rakh. 0 matlab unlimited."));
+                return Err(user_error(
+                    "Use a limit from 0 to 99. Set it to 0 for no limit.",
+                ));
             }
             let applied = caps::for_member(ctx, guild, member, actor.staff)?.limit(limit);
             channel
                 .edit(&ctx.http, EditChannel::new().user_limit(applied))
                 .await?;
             if applied == 0 {
-                "Room limit hata di.".into()
+                "Removed the room limit.".into()
             } else if applied != limit {
-                format!("Room limit {applied} kar di. Ye tera max hai.")
+                format!("Set the room limit to your maximum of {applied}.")
             } else {
-                format!("Room limit {applied} kar di.")
+                format!("Set the room limit to {applied}.")
             }
         }
         Action::Bitrate(kbps) => {
@@ -445,9 +457,9 @@ pub(in super::super) async fn execute(
                 .edit(&ctx.http, EditChannel::new().bitrate(applied * 1_000))
                 .await?;
             if kbps > cap {
-                format!("Bitrate {applied} kbps kar di. Ye tera max hai.")
+                format!("Set the bitrate to your maximum of {applied} kbps.")
             } else {
-                format!("Bitrate {applied} kbps kar di.")
+                format!("Set the bitrate to {applied} kbps.")
             }
         }
         Action::Region(region) => {
@@ -455,50 +467,54 @@ pub(in super::super) async fn execute(
             channel
                 .edit(&ctx.http, EditChannel::new().voice_region(region))
                 .await?;
-            format!("Voice region {label} kar diya.")
+            format!("Set the voice region to {label}.")
         }
-        Action::Permit(target)
-        | Action::Deny(target)
-        | Action::Kick(target)
+        Action::Permit(ref users) | Action::Deny(ref users) => {
+            let permit = matches!(action, Action::Permit(_));
+            return Ok(room_access(ctx, &ch, member, actor, owner, users, permit).await);
+        }
+        Action::Ban(users) => {
+            let scope = ListScope {
+                guild,
+                owner,
+                channel: Some(channel),
+            };
+            let result =
+                change_owner_list(ctx, member, actor, scope, &users, ListChange::Ban).await?;
+            drop(state);
+            return Ok(sync_list_reply(ctx, scope, result, "Added to the owner's ban list").await);
+        }
+        Action::Kick(target)
         | Action::Disconnect(target)
         | Action::Reset(target)
         | Action::Drag(target) => {
             if matches!(action, Action::Reset(_)) && target == owner {
                 return Err(user_error(
-                    "Owner ki permissions reset nahi kar sakte. Pehle room transfer kar.",
+                    "Transfer the room before resetting the owner's permissions.",
                 ));
             }
             checked_member(ctx, guild, member, actor.staff, owner, target).await?;
-            if matches!(action, Action::Kick(_)) {
-                save_kick_ban(&*db()?, room, target)?;
-                log(audit::Action::Kick, Some(target));
-                drop(state);
-                access::sync_owner_rooms(ctx, guild, owner).await?;
-                return Ok(Reply::Text(format!(
-                    "<@{target}> ko owner ki ban list mein daal diya."
-                )));
-            }
             let result = member_action(ctx, &ch, owner, target, &action).await?;
             match action {
                 Action::Drag(_) => log(audit::Action::Drag, Some(target)),
-                Action::Deny(_) => log(audit::Action::Deny, Some(target)),
+                Action::Kick(_) => log(audit::Action::Kick, Some(target)),
                 _ => {}
             }
             result
         }
         Action::Claim => {
             if !force && store::is_banned(&*db()?, room.guild_id, room.owner_id, actor.id.get())? {
-                return Err(user_error("Tu is room ki ban list mein hai."));
+                return Err(user_error("You're on this room owner's ban list."));
             }
             let owner_inside = voice(ctx, guild, owner) == Some(channel);
             let actor = self::actor(ctx, guild, member)?;
             if !can_claim(actor, channel, owner, owner_inside) {
                 return Err(user_error(if actor.id == owner {
-                    "Tu already room owner hai."
+                    "You already own this room."
                 } else if owner_inside {
-                    "Owner abhi room mein hai."
+                    "The owner is still in the room."
                 } else {
-                    "Claim karne ke liye pehle room join kar."
+                    "Join the room before claiming it."
                 }));
             }
             if owner_inside {
@@ -525,16 +541,16 @@ pub(in super::super) async fn execute(
                 None,
                 Job::Delete.delay(),
             );
-            "👑 Ab ye room tera hai.".into()
+            "👑 You now own this room.".into()
         }
         Action::Transfer(target) => {
             let target_member =
                 checked_member(ctx, guild, member, actor.staff, owner, target).await?;
             if target_member.user.bot || target == owner {
-                return Err(user_error("Is member ko room transfer nahi kar sakte."));
+                return Err(user_error("You can't transfer the room to this member."));
             }
             if !actor.staff && voice(ctx, guild, target) != Some(channel) {
-                return Err(user_error("Naya owner room mein hona chahiye."));
+                return Err(user_error("The new owner must be in the room."));
             }
             give_ownership(ctx, &ch, room, target).await?;
             log(
@@ -557,7 +573,7 @@ pub(in super::super) async fn execute(
                 None,
                 Job::Delete.delay(),
             );
-            format!("👑 <@{target}> ab room ka owner hai.")
+            format!("👑 <@{target}> now owns this room.")
         }
         Action::Delete => {
             delete_room(
@@ -569,11 +585,11 @@ pub(in super::super) async fn execute(
                 staff_action,
             )
             .await?;
-            "Room delete kar diya.".into()
+            "Deleted the room.".into()
         }
         Action::Panel => {
             tempvc_panel::post_panel(ctx, channel).await?;
-            format!("Panel <#{channel}> ke chat mein bhej diya.")
+            format!("Posted the panel in the chat for <#{channel}>.")
         }
         Action::Info => {
             let members = occupants(ctx, guild, channel)
@@ -596,7 +612,7 @@ async fn me(
     let user_id = actor.id.get();
     let text = match action {
         MeAction::Save => {
-            let save_error = || user_error("Apne temp VC mein jaake settings save kar.");
+            let save_error = || user_error("Join your temporary voice room to save its settings.");
             let channel = actor.voice.ok_or_else(save_error)?;
             let room_lock = room_state(channel);
             let _state = room_lock.lock().await;
@@ -617,65 +633,239 @@ async fn me(
                 bitrate: ch.bitrate.map(|bitrate| caps.bitrate(bitrate)),
             };
             store::save_profile(&*db()?, guild_id, user_id, &profile)?;
-            "Room ki settings save kar di. Naye rooms mein apply hongi."
+            "Saved your settings for new rooms."
         }
         MeAction::Set(mut profile) => {
             if profile == Profile::default() {
-                return Err(user_error("Badalne ke liye kam se kam ek option de."));
+                return Err(user_error("Choose at least one setting to change."));
             }
             let caps = caps::for_member(ctx, guild, member, actor.staff)?;
             profile.limit = profile.limit.map(|limit| caps.limit(limit));
             profile.bitrate = profile.bitrate.map(|bitrate| caps.bitrate(bitrate));
             store::save_profile(&*db()?, guild_id, user_id, &profile)?;
-            "Tere room defaults update ho gaye."
+            "Updated your room defaults."
         }
         MeAction::Profile => return profile_reply(guild_id, user_id),
         MeAction::Stats(target) => return usage::execute_stats(guild, target.unwrap_or(actor.id)),
         MeAction::Top => return usage::execute_top(guild),
         MeAction::Clear => {
             store::clear_profile(&*db()?, guild_id, user_id)?;
-            "Saved defaults hata diye."
+            "Cleared your saved defaults."
         }
-        MeAction::Trust(user)
-        | MeAction::Untrust(user)
-        | MeAction::Ban(user)
-        | MeAction::Unban(user) => {
-            if user == actor.id || user == ctx.cache.current_user().id {
-                return Err(user_error("Kisi aur member ko choose kar."));
-            }
-            let (access, add, message) = match action {
-                MeAction::Trust(_) => (Access::Trusted, true, "trusted list mein daal diya."),
-                MeAction::Untrust(_) => (Access::Trusted, false, "trusted list se hata diya."),
-                MeAction::Ban(_) => (Access::Banned, true, "ban list mein daal diya."),
-                MeAction::Unban(_) => (Access::Banned, false, "ban list se hata diya."),
+        MeAction::Trust(ref users)
+        | MeAction::Untrust(ref users)
+        | MeAction::Ban(ref users)
+        | MeAction::Unban(ref users) => {
+            let (change, message) = match action {
+                MeAction::Trust(_) => (ListChange::Trust, "Added to your trusted list"),
+                MeAction::Untrust(_) => (ListChange::Untrust, "Removed from your trusted list"),
+                MeAction::Ban(_) => (ListChange::Ban, "Added to your ban list"),
+                MeAction::Unban(_) => (ListChange::Unban, "Removed from your ban list"),
                 _ => unreachable!(),
             };
-            if add {
-                let target = if access == Access::Banned {
-                    checked_member(ctx, guild, member, actor.staff, actor.id, user).await?
-                } else {
-                    member_if_present(ctx, guild, user)
-                        .await?
-                        .ok_or_else(|| user_error("Ye member server mein nahi hai."))?
-                };
-                if target.user.bot {
-                    return Err(user_error("Kisi aur member ko choose kar."));
-                }
-            }
-            store::set_access(&*db()?, guild_id, user_id, user.get(), access, add)?;
-            if access == Access::Banned {
-                let action = if add {
-                    audit::Action::Ban
-                } else {
-                    audit::Action::Unban
-                };
-                audit::post(ctx, guild, action, Some(actor.id), None, Some(user));
-            }
-            access::sync_owner_rooms(ctx, guild, actor.id).await?;
-            return Ok(Reply::Text(format!("<@{user}> ko {message}")));
+            let scope = ListScope {
+                guild,
+                owner: actor.id,
+                channel: None,
+            };
+            let result = change_owner_list(ctx, member, actor, scope, users, change).await?;
+            return Ok(sync_list_reply(ctx, scope, result, message).await);
         }
     };
     Ok(Reply::Text(text.into()))
+}
+
+#[derive(Default)]
+struct BulkResult {
+    applied: Vec<UserId>,
+    skipped: Vec<(String, Vec<String>)>,
+}
+
+impl BulkResult {
+    fn new(users: &BulkUsers) -> Self {
+        let mut result = Self::default();
+        for token in &users.invalid {
+            result.skip(
+                format!("`{}`", token.replace('`', "'")),
+                "Use a member mention or ID.",
+            );
+        }
+        result
+    }
+
+    fn skip(&mut self, label: String, reason: impl Into<String>) {
+        let reason = reason.into();
+        if let Some((_, labels)) = self.skipped.iter_mut().find(|(text, _)| *text == reason) {
+            labels.push(label);
+        } else {
+            self.skipped.push((reason, vec![label]));
+        }
+    }
+
+    fn skip_user(&mut self, user: UserId, error: anyhow::Error) {
+        self.skip(format!("<@{user}>"), tempvc_panel::error_text(error));
+    }
+
+    fn reply(self, label: &str, note: Option<&str>) -> Reply {
+        let mut lines = Vec::new();
+        if self.applied.is_empty() {
+            lines.push("No members were updated.".into());
+        } else {
+            let members = self
+                .applied
+                .iter()
+                .map(|user| format!("<@{user}>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("**{label}**\n{members}"));
+        }
+        if !self.skipped.is_empty() {
+            lines.push("**Skipped**".into());
+            for (reason, users) in self.skipped {
+                lines.push(format!("{} — {reason}", users.join(", ")));
+            }
+        }
+        if let Some(note) = note {
+            lines.push(note.into());
+        }
+        Reply::info(CreateEmbed::new().description(lines.join("\n")))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ListScope {
+    guild: GuildId,
+    owner: UserId,
+    channel: Option<ChannelId>,
+}
+
+#[derive(Clone, Copy)]
+enum ListChange {
+    Trust,
+    Untrust,
+    Ban,
+    Unban,
+}
+
+impl ListChange {
+    fn update(self) -> (Access, bool, &'static str) {
+        match self {
+            Self::Trust => (Access::Trusted, true, "Already on the trusted list."),
+            Self::Untrust => (Access::Trusted, false, "Not on the trusted list."),
+            Self::Ban => (Access::Banned, true, "Already on the ban list."),
+            Self::Unban => (Access::Banned, false, "Not on the ban list."),
+        }
+    }
+}
+
+fn save_owner_list(
+    conn: &mut rusqlite::Connection,
+    scope: ListScope,
+    change: ListChange,
+    users: &[UserId],
+    result: &mut BulkResult,
+) -> Result<()> {
+    let (access, add, unchanged) = change.update();
+    let guild = scope.guild.get();
+    let owner = scope.owner.get();
+    let tx = conn.transaction()?;
+    let existing = store::access_list(&tx, guild, owner, access)?;
+    for &user in users {
+        if existing.contains(&user.get()) == add {
+            result.skip(format!("<@{user}>"), unchanged);
+            continue;
+        }
+        store::set_access(&tx, guild, owner, user.get(), access, add)?;
+        result.applied.push(user);
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+async fn verify_list_target(
+    ctx: &Context,
+    member: &Member,
+    actor: Actor,
+    scope: ListScope,
+    change: ListChange,
+    user: UserId,
+) -> Result<()> {
+    if user == scope.owner {
+        return Err(user_error("Choose someone other than the list owner."));
+    }
+    if user == actor.id || user == ctx.cache.current_user().id {
+        return Err(user_error("You can't do this to yourself or Loduchand."));
+    }
+    let target = match change {
+        ListChange::Trust => member_if_present(ctx, scope.guild, user)
+            .await?
+            .ok_or_else(|| user_error("This member is no longer in the server."))?,
+        ListChange::Ban => {
+            checked_member(ctx, scope.guild, member, actor.staff, scope.owner, user).await?
+        }
+        ListChange::Untrust | ListChange::Unban => return Ok(()),
+    };
+    if target.user.bot {
+        return Err(user_error("Choose a member who isn't a bot."));
+    }
+    Ok(())
+}
+
+async fn change_owner_list(
+    ctx: &Context,
+    member: &Member,
+    actor: Actor,
+    scope: ListScope,
+    users: &BulkUsers,
+    change: ListChange,
+) -> Result<(BulkResult, bool)> {
+    let mut result = BulkResult::new(users);
+    let mut valid = Vec::new();
+    for &user in &users.users {
+        match verify_list_target(ctx, member, actor, scope, change, user).await {
+            Ok(()) => valid.push(user),
+            Err(error) => result.skip_user(user, error),
+        }
+    }
+    if valid.is_empty() {
+        return Ok((result, false));
+    }
+    save_owner_list(&mut *db()?, scope, change, &valid, &mut result)?;
+    if let Some(action) = match change {
+        ListChange::Ban => Some(audit::Action::Ban),
+        ListChange::Unban => Some(audit::Action::Unban),
+        _ => None,
+    } {
+        for &user in &result.applied {
+            audit::post(
+                ctx,
+                scope.guild,
+                action,
+                Some(actor.id),
+                scope.channel,
+                Some(user),
+            );
+        }
+    }
+    // Also sync unchanged entries so repeating a command can recover a partial Discord update.
+    Ok((result, true))
+}
+
+async fn sync_list_reply(
+    ctx: &Context,
+    scope: ListScope,
+    (result, sync): (BulkResult, bool),
+    label: &str,
+) -> Reply {
+    let note = if sync {
+        access::sync_owner_rooms(ctx, scope.guild, scope.owner)
+            .await
+            .err()
+            .map(tempvc_panel::error_text)
+    } else {
+        None
+    };
+    result.reply(label, note.as_deref())
 }
 
 fn profile_reply(guild: u64, owner: u64) -> Result<Reply> {
@@ -692,7 +882,7 @@ fn profile_reply(guild: u64, owner: u64) -> Result<Reply> {
         for (index, user) in users.iter().enumerate() {
             let mention = format!("<@{user}>");
             if text.len() + mention.len() > 980 {
-                text.push_str(&format!("… aur {}", users.len() - index));
+                text.push_str(&format!("… and {} more", users.len() - index));
                 break;
             }
             text.push_str(&mention);
@@ -700,18 +890,14 @@ fn profile_reply(guild: u64, owner: u64) -> Result<Reply> {
                 text.push_str(", ");
             }
         }
-        if text.is_empty() {
-            "Koi nahi".into()
-        } else {
-            text
-        }
+        if text.is_empty() { "None".into() } else { text }
     }
 
     let conn = db()?;
     let profile = store::profile(&conn, guild, owner)?;
     let trusted = mentions(&store::access_list(&conn, guild, owner, Access::Trusted)?);
     let banned = mentions(&store::access_list(&conn, guild, owner, Access::Banned)?);
-    let mut embed = CreateEmbed::new().title("🎙️ Tera room profile");
+    let mut embed = CreateEmbed::new().title("🎙️ Your room profile");
     if let Some(profile) = profile {
         let limit = match profile.limit {
             Some(0) => "Unlimited".into(),
@@ -722,14 +908,13 @@ fn profile_reply(guild: u64, owner: u64) -> Result<Reply> {
             .bitrate
             .map_or_else(|| "Default".into(), |bps| format!("{} kbps", bps / 1_000));
         embed = embed
-            .field("Naam", profile.name.as_deref().unwrap_or("Default"), true)
+            .field("Name", profile.name.as_deref().unwrap_or("Default"), true)
             .field("Limit", limit, true)
             .field("Bitrate", bitrate, true)
             .field("Lock", flag(profile.locked), true)
             .field("Hide", flag(profile.hidden), true);
     } else {
-        embed = embed
-            .description("Abhi defaults save nahi hain. `/vc me save` ya `/vc me set` use kar.");
+        embed = embed.description("Use `/vc me save` or `/vc me set` to save your defaults.");
     }
     Ok(Reply::info(
         embed
@@ -759,16 +944,16 @@ fn select_hub(
         return if hubs.contains(&hub) {
             Ok(hub)
         } else {
-            Err(user_error("Ye temp voice hub nahi hai."))
+            Err(user_error("Choose a temporary voice hub."))
         };
     }
     if let Some(hub) = current.filter(|channel| hubs.contains(channel)) {
         return Ok(hub);
     }
     match hubs.len() {
-        0 => Err(user_error("Abhi koi temp voice hub set nahi hai.")),
+        0 => Err(user_error("No temporary voice hubs are set up.")),
         1 => Ok(hubs.remove(0)),
-        _ => Err(user_error("Kaunsa hub? Hub option se choose kar.")),
+        _ => Err(user_error("Choose a hub using the hub option.")),
     }
 }
 
@@ -812,14 +997,14 @@ impl Toggle {
 
     fn message(self, restricted: bool) -> &'static str {
         match (self, restricted) {
-            (Self::Connect, true) => "🔒 Room lock kar diya.",
-            (Self::Connect, false) => "🔓 Room unlock kar diya.",
-            (Self::View, true) => "🙈 Room hide kar diya.",
-            (Self::View, false) => "👀 Room ab visible hai.",
-            (Self::Chat, true) => "💬 Chat off kar di.",
-            (Self::Chat, false) => "💬 Chat on kar di.",
-            (Self::Soundboard, true) => "🔇 Soundboard off kar diya.",
-            (Self::Soundboard, false) => "🔊 Soundboard on kar diya.",
+            (Self::Connect, true) => "🔒 Room locked.",
+            (Self::Connect, false) => "🔓 Room unlocked.",
+            (Self::View, true) => "🙈 Room hidden.",
+            (Self::View, false) => "👀 Room is now visible.",
+            (Self::Chat, true) => "💬 Chat is read-only for members without access.",
+            (Self::Chat, false) => "💬 Chat is on.",
+            (Self::Soundboard, true) => "🔇 Soundboard is off.",
+            (Self::Soundboard, false) => "🔊 Soundboard is on.",
         }
     }
 }
@@ -864,7 +1049,7 @@ async fn toggle(
         }
     }
     overwrites.retain(|ow| !(ow.allow | ow.deny).is_empty());
-    if matches!(toggle, Toggle::Connect | Toggle::View) {
+    if matches!(toggle, Toggle::Connect | Toggle::View | Toggle::Chat) {
         access::sync(ctx, channel, owner, overwrites).await?;
     } else if channel.permission_overwrites != overwrites {
         channel
@@ -909,11 +1094,11 @@ async fn checked_member(
     target: UserId,
 ) -> Result<Member> {
     if target == actor.user.id || target == ctx.cache.current_user().id {
-        return Err(user_error("Khud par ya Loduchand par ye nahi kar sakte."));
+        return Err(user_error("You can't do this to yourself or Loduchand."));
     }
     let target_member = member_if_present(ctx, guild, target)
         .await?
-        .ok_or_else(|| user_error("Ye member server mein nahi hai."))?;
+        .ok_or_else(|| user_error("This member is no longer in the server."))?;
     let guild = ctx.cache.guild(guild).context("guild roles unavailable")?;
     let settings_roles = staff_roles();
     let actor_outranks = actor.user.id == guild.owner_id
@@ -926,9 +1111,9 @@ async fn checked_member(
         actor_outranks,
     ) {
         return Err(user_error(if actor_is_staff {
-            "Ye member tere role ke barabar ya upar hai."
+            "This member's highest role is equal to or above yours."
         } else {
-            "Staff ya room owner par ye nahi kar sakte."
+            "You can't do this to staff or the room owner."
         }));
     }
     Ok(target_member)
@@ -950,21 +1135,119 @@ pub(super) async fn member_if_present(
     }
 }
 
-fn save_kick_ban(conn: &rusqlite::Connection, room: Room, target: UserId) -> Result<()> {
-    if target.get() == room.owner_id {
+async fn room_access(
+    ctx: &Context,
+    channel: &GuildChannel,
+    member: &Member,
+    actor: Actor,
+    owner: UserId,
+    users: &BulkUsers,
+    permit: bool,
+) -> Reply {
+    let mut result = BulkResult::new(users);
+    for &user in &users.users {
+        let updated = async {
+            checked_member(ctx, channel.guild_id, member, actor.staff, owner, user).await?;
+            apply_room_access(ctx, channel, owner, user, permit).await
+        }
+        .await;
+        match updated {
+            Ok(()) => {
+                result.applied.push(user);
+                if !permit {
+                    audit::post(
+                        ctx,
+                        channel.guild_id,
+                        audit::Action::Deny,
+                        Some(actor.id),
+                        Some(channel.id),
+                        Some(user),
+                    );
+                }
+            }
+            Err(error) => result.skip_user(user, error),
+        }
+    }
+    let label = if permit {
+        "Allowed into this room"
+    } else {
+        "Blocked from joining this room"
+    };
+    result.reply(label, None)
+}
+
+fn check_room_list(
+    guild: GuildId,
+    owner: UserId,
+    target: UserId,
+    check_ban: bool,
+    check_trust: bool,
+) -> Result<()> {
+    let conn = db()?;
+    if check_ban && store::is_banned(&conn, guild.get(), owner.get(), target.get())? {
         return Err(user_error(
-            "Room owner ko disconnect kar sakte ho. Ban ke liye pehle room transfer kar.",
+            "They're on the owner's ban list. The owner can use `/vc me unban`.",
         ));
     }
-    store::set_access(
-        conn,
-        room.guild_id,
-        room.owner_id,
-        target.get(),
-        Access::Banned,
-        true,
-    )?;
+    if check_trust
+        && store::access_list(&conn, guild.get(), owner.get(), Access::Trusted)?
+            .contains(&target.get())
+    {
+        return Err(user_error(
+            "They're trusted by the owner. The owner can use `/vc me untrust`.",
+        ));
+    }
     Ok(())
+}
+
+fn set_room_access(ow: &mut PermissionOverwrite, permit: bool) {
+    if permit {
+        allow_bits(ow, PERMIT_ACCESS);
+    } else {
+        deny_bits(ow, Permissions::CONNECT);
+        ow.allow.remove(Permissions::SEND_MESSAGES);
+    }
+}
+
+async fn apply_room_access(
+    ctx: &Context,
+    channel: &GuildChannel,
+    owner: UserId,
+    target: UserId,
+    permit: bool,
+) -> Result<()> {
+    check_room_list(channel.guild_id, owner, target, permit, !permit)?;
+    let id = channel.id;
+    let kind = PermissionOverwriteType::Member(target);
+    let before = overwrite(&channel.permission_overwrites, kind);
+    let mut after = before.clone();
+    set_room_access(&mut after, permit);
+    if target == owner {
+        allow_bits(&mut after, Permissions::SEND_MESSAGES);
+    }
+    if after != before {
+        write_overwrite(ctx, id, &after).await?;
+    }
+    if permit {
+        // Keep a room-specific permit if this member later leaves the trusted list.
+        access::record_allow(id, target, PERMIT_ACCESS)?;
+    } else {
+        access::forget_permit(id, target)?;
+    }
+    Ok(())
+}
+
+async fn disconnect_once(
+    current_room: Option<ChannelId>,
+    room: ChannelId,
+    target: UserId,
+    disconnect: impl AsyncFnOnce(UserId) -> Result<()>,
+) -> Result<String> {
+    if current_room != Some(room) {
+        return Err(user_error("This member isn't in the room."));
+    }
+    disconnect(target).await?;
+    Ok(format!("Disconnected <@{target}>."))
 }
 
 async fn member_action(
@@ -976,66 +1259,42 @@ async fn member_action(
 ) -> Result<String> {
     let guild = channel.guild_id;
     let id = channel.id;
-    if matches!(
-        action,
-        Action::Permit(_) | Action::Drag(_) | Action::Reset(_)
-    ) && store::is_banned(&*db()?, guild.get(), owner.get(), target.get())?
-    {
-        return Err(user_error(
-            "Ye owner ki ban list mein hai. Owner `/vc me unban` use kar sakta hai.",
-        ));
-    }
-    if matches!(action, Action::Deny(_) | Action::Reset(_))
-        && store::access_list(&*db()?, guild.get(), owner.get(), Access::Trusted)?
-            .contains(&target.get())
-    {
-        return Err(user_error(
-            "Ye owner ki trusted list mein hai. Owner `/vc me untrust` use kar sakta hai.",
-        ));
-    }
-    let kind = PermissionOverwriteType::Member(target);
-    let before = overwrite(&channel.permission_overwrites, kind);
-    let mut after = before.clone();
-    let result = match action {
-        Action::Permit(_) => {
-            allow_bits(&mut after, Permissions::VIEW_CHANNEL | Permissions::CONNECT);
-            format!("<@{target}> ab join kar sakta hai.")
-        }
-        Action::Deny(_) => {
-            deny_bits(&mut after, Permissions::CONNECT);
-            format!("<@{target}> ab is room mein join nahi kar sakta.")
-        }
+    match action {
         Action::Reset(_) => {
-            after.allow = Permissions::empty();
-            after.deny = Permissions::empty();
-            format!("<@{target}> ki room permissions reset kar di.")
-        }
-        Action::Disconnect(_) => {
-            if voice(ctx, guild, target) != Some(id) {
-                return Err(user_error("Ye member is room mein nahi hai."));
+            check_room_list(guild, owner, target, true, true)?;
+            let kind = PermissionOverwriteType::Member(target);
+            let before = overwrite(&channel.permission_overwrites, kind);
+            if !(before.allow | before.deny).is_empty() {
+                let after = PermissionOverwrite {
+                    kind,
+                    allow: Permissions::empty(),
+                    deny: Permissions::empty(),
+                };
+                write_overwrite(ctx, id, &after).await?;
             }
-            guild.disconnect_member(&ctx.http, target).await?;
-            return Ok(format!("<@{target}> ko disconnect kar diya."));
+            access::forget_permit(id, target)?;
+            access::forget_suppressed_chat(id, target)?;
+            Ok(format!("Reset room permissions for <@{target}>."))
+        }
+        Action::Kick(_) | Action::Disconnect(_) => {
+            disconnect_once(voice(ctx, guild, target), id, target, async |target| {
+                guild.disconnect_member(&ctx.http, target).await?;
+                Ok(())
+            })
+            .await
         }
         Action::Drag(_) => {
+            check_room_list(guild, owner, target, true, false)?;
             let source = voice(ctx, guild, target)
-                .ok_or_else(|| user_error("Ye member kisi VC mein nahi hai."))?;
+                .ok_or_else(|| user_error("This member isn't in a voice channel."))?;
             if source == id {
-                return Err(user_error("Ye member already is VC mein hai."));
+                return Err(user_error("This member is already in the room."));
             }
             guild.move_member(&ctx.http, target, id).await?;
-            return Ok(format!("<@{target}> ko <#{id}> mein move kar diya."));
+            Ok(format!("Moved <@{target}> to <#{id}>."))
         }
         _ => unreachable!("only member actions are routed here"),
-    };
-    if after != before {
-        write_overwrite(ctx, id, &after).await?;
     }
-    if matches!(action, Action::Permit(_)) {
-        // Keep a room-specific permit if this member later leaves the trusted list.
-        access::record_allow(id, target, Permissions::CONNECT | Permissions::VIEW_CHANNEL)?;
-    }
-    Ok(result)
 }
 
 // Use the same sliding window after a restart. Leave a second of headroom at the boundary.
@@ -1074,7 +1333,7 @@ async fn rename(
             record.actor_id = None;
             save_rename(id, &record)?;
         }
-        return Ok("Room ka naam already yahi hai.".into());
+        return Ok("The room already has this name.".into());
     }
     let delay = rename_delay(&record, chrono::Utc::now().timestamp_millis());
     record.pending = Some(name);
@@ -1082,11 +1341,11 @@ async fn rename(
     save_rename(id, &record)?;
     if delay.is_zero() {
         apply_rename(ctx, id, record).await?;
-        Ok("Room ka naam badal diya.".into())
+        Ok("Renamed the room.".into())
     } else {
         start_rename(ctx, id, state, lock);
         Ok(format!(
-            "Rename queue mein hai. Lagbhag {} second mein ho jayega.",
+            "The room will be renamed in about {} seconds.",
             delay.as_millis().div_ceil(1_000)
         ))
     }
@@ -1227,8 +1486,8 @@ mod tests {
         assert!(!protected_target(true, true, true, true));
     }
 
-    #[test]
-    fn kick_bans_for_the_room_owner_and_removes_trust() {
+    #[tokio::test]
+    async fn kick_disconnects_once_without_banning_or_removing_trust() {
         let dir = tempfile::tempdir().unwrap();
         let conn = store::connect(&dir.path().join("tempvc.db")).unwrap();
         let room = Room {
@@ -1248,15 +1507,147 @@ mod tests {
         )
         .unwrap();
 
-        save_kick_ban(&conn, room, target).unwrap();
-        assert!(store::is_banned(&conn, room.guild_id, room.owner_id, target.get()).unwrap());
-        assert!(!store::is_banned(&conn, room.guild_id, 6, target.get()).unwrap());
+        let channel = ChannelId::new(room.channel_id);
+        let mut disconnected = Vec::new();
+        let reply = disconnect_once(Some(channel), channel, target, async |user| {
+            disconnected.push(user);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply, "Disconnected <@5>.");
+        let absent = disconnect_once(None, channel, target, async |user| {
+            disconnected.push(user);
+            Ok(())
+        })
+        .await;
+        assert!(absent.is_err());
+        assert_eq!(disconnected, [target]);
+        assert!(!store::is_banned(&conn, room.guild_id, room.owner_id, target.get()).unwrap());
+        assert_eq!(
+            store::access_list(&conn, room.guild_id, room.owner_id, Access::Trusted).unwrap(),
+            [target.get()]
+        );
         assert!(
-            store::access_list(&conn, room.guild_id, room.owner_id, Access::Trusted)
+            store::room_access(&conn, room.channel_id)
                 .unwrap()
                 .is_empty()
         );
-        assert!(save_kick_ban(&conn, room, UserId::new(room.owner_id)).is_err());
+    }
+
+    #[test]
+    fn room_permit_grants_chat_and_deny_retracts_the_grant() {
+        let kind = PermissionOverwriteType::Member(UserId::new(1));
+        let mut ow = overwrite(&[], kind);
+        ow.deny.insert(Permissions::SEND_MESSAGES);
+        ow.allow.insert(Permissions::READ_MESSAGE_HISTORY);
+        set_room_access(&mut ow, true);
+        assert!(
+            ow.allow
+                .contains(PERMIT_ACCESS | Permissions::READ_MESSAGE_HISTORY)
+        );
+        assert!(!ow.deny.intersects(PERMIT_ACCESS));
+
+        set_room_access(&mut ow, false);
+        assert!(ow.deny.contains(Permissions::CONNECT));
+        assert!(
+            !ow.allow
+                .intersects(Permissions::CONNECT | Permissions::SEND_MESSAGES)
+        );
+        assert!(
+            ow.allow
+                .contains(Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY)
+        );
+    }
+
+    #[test]
+    fn bulk_list_changes_apply_to_the_room_owner_and_report_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = store::connect(&dir.path().join("tempvc.db")).unwrap();
+        let scope = ListScope {
+            guild: GuildId::new(1),
+            owner: UserId::new(2),
+            channel: Some(ChannelId::new(3)),
+        };
+        let first = UserId::new(4);
+        let second = UserId::new(5);
+        let members = [first, second];
+        let mut result = BulkResult::default();
+        save_owner_list(&mut conn, scope, ListChange::Trust, &members, &mut result).unwrap();
+        assert_eq!(result.applied, members);
+        save_owner_list(
+            &mut conn,
+            scope,
+            ListChange::Untrust,
+            &members,
+            &mut BulkResult::default(),
+        )
+        .unwrap();
+        assert!(
+            store::access_list(&conn, 1, 2, Access::Trusted)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Banning from a room uses the same persistent list as /vc me ban
+        // and replaces trust for the affected members.
+        save_owner_list(
+            &mut conn,
+            scope,
+            ListChange::Trust,
+            &members,
+            &mut BulkResult::default(),
+        )
+        .unwrap();
+        save_owner_list(
+            &mut conn,
+            scope,
+            ListChange::Ban,
+            &[first],
+            &mut BulkResult::default(),
+        )
+        .unwrap();
+        let mut result = BulkResult::new(&BulkUsers {
+            users: members.to_vec(),
+            invalid: vec!["@someone".into()],
+        });
+        save_owner_list(&mut conn, scope, ListChange::Ban, &members, &mut result).unwrap();
+        assert_eq!(result.applied, [second]);
+        assert_eq!(
+            store::access_list(&conn, 1, 2, Access::Banned).unwrap(),
+            [4, 5]
+        );
+        assert!(
+            store::access_list(&conn, 1, 2, Access::Trusted)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store::access_list(&conn, 1, 6, Access::Banned)
+                .unwrap()
+                .is_empty()
+        );
+        let Reply::Info(embed) = result.reply("Added to your ban list", None) else {
+            panic!("expected a summary embed");
+        };
+        assert_eq!(
+            serde_json::to_value(embed).unwrap()["description"],
+            "**Added to your ban list**\n<@5>\n**Skipped**\n`@someone` — Use a member mention or ID.\n<@4> — Already on the ban list."
+        );
+
+        save_owner_list(
+            &mut conn,
+            scope,
+            ListChange::Unban,
+            &members,
+            &mut BulkResult::default(),
+        )
+        .unwrap();
+        assert!(
+            store::access_list(&conn, 1, 2, Access::Banned)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

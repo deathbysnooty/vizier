@@ -20,13 +20,13 @@ pub const INVITE_SLASH_COMMAND: &str = "vcinvite";
 
 const DRAG_PREFIX: &str = "dragme:";
 const INVITE_PREFIX: &str = "vcinv:";
-const EXPIRED: &str = "⌛ expired";
-const INVITER_LEFT: &str = "⚠️ Invite cancel ho gaya. Invite bhejne wala VC se nikal gaya.";
-const REQUESTER_LEFT: &str = "⚠️ Request bhejne wala VC se nikal gaya.";
-const JOIN_VOICE_FIRST: &str = "Pehle kisi bhi VC mein aa ja, phir Join dabana";
-const DRAG_NOT_ALLOWED: &str = "Sirf us VC ke log approve kar sakte hain.";
-const INVITE_NOT_ALLOWED: &str = "Sirf jisko invite bheja hai, woh jawab de sakta hai.";
-const MOVE_FAILED: &str = "⚠️ Move nahi ho paaya.";
+const EXPIRED: &str = "⌛ Expired.";
+const INVITER_LEFT: &str = "⚠️ The invite was canceled because the sender left the VC.";
+const REQUESTER_LEFT: &str = "⚠️ The requester left voice chat.";
+const JOIN_VOICE_FIRST: &str = "Join any voice channel first, then press Join.";
+const DRAG_NOT_ALLOWED: &str = "Only people in that VC can respond.";
+const INVITE_NOT_ALLOWED: &str = "Only the person invited can respond.";
+const MOVE_FAILED: &str = "⚠️ Couldn't move the member.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -77,8 +77,8 @@ impl Request {
         let initiator = self.initiator.mention();
         let member = self.member.mention();
         match self.kind {
-            Kind::Drag => format!("🎙️ {initiator} {member} ke VC mein aana chahta hai. Andar wale batao?"),
-            Kind::Invite => format!("🎙️ {member}, {initiator} ne tujhe {} mein bulaya hai!", self.target.mention()),
+            Kind::Drag => format!("🎙️ {initiator} wants to join {member}'s VC. Anyone in this VC can approve or deny."),
+            Kind::Invite => format!("🎙️ {member}, {initiator} invited you to join {}!", self.target.mention()),
         }
     }
 
@@ -209,7 +209,7 @@ fn voice_channels(ctx: &Context, guild: GuildId, first: UserId, second: UserId) 
 }
 
 fn request_from_command(ctx: &Context, command: &CommandInteraction) -> Result<Request, &'static str> {
-    let guild = command.guild_id.ok_or("Ye sirf server mein chalta hai.")?;
+    let guild = command.guild_id.ok_or("You can only use this in a server.")?;
     let initiator = command.user.id;
     let kind = if command.data.name == COMMAND { Kind::Drag } else { Kind::Invite };
     let member = if command.data.name == INVITE_COMMAND {
@@ -219,19 +219,19 @@ fn request_from_command(ctx: &Context, command: &CommandInteraction) -> Result<R
             CommandDataOptionValue::User(id) if option.name == "member" => Some(id),
             _ => None,
         })
-    }.ok_or("Kisi member ko select kar.")?;
+    }.ok_or("Choose a member.")?;
     let (own_voice, member_voice) = voice_channels(ctx, guild, initiator, member);
     let (target, message_channel) = match kind {
         Kind::Drag => {
-            let own = own_voice.ok_or("Pehle kisi bhi VC mein aa ja, phir /dragme kar.")?;
-            let target = member_voice.ok_or("Woh abhi kisi VC mein nahi hai.")?;
+            let own = own_voice.ok_or("Join any voice channel first, then use /dragme.")?;
+            let target = member_voice.ok_or("That member isn't in a voice channel right now.")?;
             if own == target {
-                return Err("Tu already usi VC mein hai!");
+                return Err("You're already in the same voice channel!");
             }
             (target, target)
         }
         Kind::Invite => (
-            own_voice.ok_or("Pehle kisi bhi VC mein aa ja, phir invite bhej.")?,
+            own_voice.ok_or("Join a voice channel first, then send the invite.")?,
             command.channel_id,
         ),
     };
@@ -257,7 +257,7 @@ pub async fn on_command(ctx: &Context, command: &CommandInteraction) {
             Ok(reply) => reply,
             Err(err) => {
                 tracing::warn!("{err}");
-                "Message nahi bhej paaya. Thodi der mein try kar."
+                "Couldn't send the message. Try again in a moment."
             }
         },
         Err(reply) => reply,
@@ -270,7 +270,7 @@ pub async fn on_command(ctx: &Context, command: &CommandInteraction) {
 async fn post_request(ctx: &Context, id: u64, mut request: Request) -> crate::Result<&'static str> {
     // Reserve the request before sending so two commands cannot both post it.
     if !PENDING.lock().insert(id, request, Instant::now()) {
-        return Ok("Is VC ki request pehle se pending hai.");
+        return Ok("You already have a pending request for this VC.");
     }
     let builder = CreateMessage::new()
         .content(request.content())
@@ -304,8 +304,8 @@ async fn post_request(ctx: &Context, id: u64, mut request: Request) -> crate::Re
         }
     });
     Ok(match request.kind {
-        Kind::Drag => "Us VC ke chat mein request bhej di. Ab unke jawab ka wait kar.",
-        Kind::Invite => "Invite bhej diya!",
+        Kind::Drag => "Request sent to that VC's chat. Wait for someone there to respond.",
+        Kind::Invite => "Invite sent!",
     })
 }
 
@@ -338,7 +338,7 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     };
     match request.message {
         None => {
-            reply(ctx, component, "Ek second ruk, phir button dabana.").await;
+            reply(ctx, component, "Give it a second, then press the button again.").await;
             return;
         }
         Some(id) if id != component.message.id => {
@@ -419,7 +419,7 @@ async fn report_move_failure(
         serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
             if response.status_code.as_u16() == 403 || response.error.code == 50013 =>
         {
-            "Loduchand ko Move Members permission chahiye."
+            "Loduchand needs the Move Members permission."
         }
         _ if request.kind == Kind::Drag
             && voice_channels(ctx, request.guild, request.initiator, request.member).0.is_none() =>

@@ -28,6 +28,16 @@ const ROOM_SCHEMA: &str = "
         role_id INTEGER NOT NULL CHECK (role_id <> 0),
         PRIMARY KEY (channel_id, permission, role_id)
     );
+    CREATE TABLE IF NOT EXISTS suppressed_member_chat (
+        channel_id INTEGER NOT NULL REFERENCES rooms(channel_id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL CHECK (user_id <> 0),
+        PRIMARY KEY (channel_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS room_permits (
+        channel_id INTEGER NOT NULL REFERENCES rooms(channel_id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL CHECK (user_id <> 0),
+        PRIMARY KEY (channel_id, user_id)
+    );
 ";
 const PROFILE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS profiles (
@@ -59,6 +69,7 @@ const PROFILE_SCHEMA: &str = "
         user_id INTEGER NOT NULL CHECK (user_id <> 0),
         original_allow INTEGER NOT NULL,
         original_deny INTEGER NOT NULL,
+        tracks_chat INTEGER NOT NULL DEFAULT 0 CHECK (tracks_chat IN (0, 1)),
         PRIMARY KEY (channel_id, user_id)
     );
 ";
@@ -150,6 +161,18 @@ pub(super) fn connect(path: &Path) -> anyhow::Result<Connection> {
     if !has_rename_actor {
         tx.execute(
             "ALTER TABLE room_renames ADD COLUMN actor_id INTEGER CHECK (actor_id <> 0)",
+            [],
+        )?;
+    }
+    let has_chat_baseline = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('room_access_overwrites') WHERE name = 'tracks_chat')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_chat_baseline {
+        tx.execute(
+            "ALTER TABLE room_access_overwrites ADD COLUMN tracks_chat INTEGER NOT NULL DEFAULT 0
+             CHECK (tracks_chat IN (0, 1))",
             [],
         )?;
     }
@@ -433,17 +456,30 @@ pub fn set_access(
     Ok(())
 }
 
-/// Member IDs and the allow/deny bits to restore after removing managed room access.
-pub fn room_access(conn: &Connection, channel_id: u64) -> rusqlite::Result<Vec<(u64, u64, u64)>> {
+/// The allow/deny bits to restore after removing managed room access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomAccessBaseline {
+    pub allow: u64,
+    pub deny: u64,
+    pub tracks_chat: bool,
+}
+
+pub fn room_access(
+    conn: &Connection,
+    channel_id: u64,
+) -> rusqlite::Result<Vec<(u64, RoomAccessBaseline)>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT user_id, original_allow, original_deny
+        "SELECT user_id, original_allow, original_deny, tracks_chat
          FROM room_access_overwrites WHERE channel_id = ?1 ORDER BY user_id",
     )?;
     stmt.query_map([channel_id as i64], |row| {
         Ok((
             row.get::<_, i64>(0)? as u64,
-            row.get::<_, i64>(1)? as u64,
-            row.get::<_, i64>(2)? as u64,
+            RoomAccessBaseline {
+                allow: row.get::<_, i64>(1)? as u64,
+                deny: row.get::<_, i64>(2)? as u64,
+                tracks_chat: row.get(3)?,
+            },
         ))
     })?
     .collect()
@@ -453,16 +489,24 @@ pub fn set_room_access(
     conn: &Connection,
     channel_id: u64,
     user_id: u64,
-    baseline: Option<(u64, u64)>,
+    baseline: Option<RoomAccessBaseline>,
 ) -> rusqlite::Result<()> {
-    if let Some((allow, deny)) = baseline {
+    if let Some(baseline) = baseline {
         conn.execute(
-            "INSERT INTO room_access_overwrites (channel_id, user_id, original_allow, original_deny)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO room_access_overwrites
+                (channel_id, user_id, original_allow, original_deny, tracks_chat)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (channel_id, user_id) DO UPDATE SET
                  original_allow = excluded.original_allow,
-                 original_deny = excluded.original_deny",
-            params![channel_id as i64, user_id as i64, allow as i64, deny as i64],
+                 original_deny = excluded.original_deny,
+                 tracks_chat = excluded.tracks_chat",
+            params![
+                channel_id as i64,
+                user_id as i64,
+                baseline.allow as i64,
+                baseline.deny as i64,
+                baseline.tracks_chat
+            ],
         )?;
     } else {
         conn.execute(
@@ -470,6 +514,54 @@ pub fn set_room_access(
             params![channel_id as i64, user_id as i64],
         )?;
     }
+    Ok(())
+}
+
+pub fn room_suppressed_chat(conn: &Connection, channel_id: u64) -> rusqlite::Result<Vec<u64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT user_id FROM suppressed_member_chat WHERE channel_id = ?1 ORDER BY user_id",
+    )?;
+    stmt.query_map([channel_id as i64], |row| Ok(row.get::<_, i64>(0)? as u64))?
+        .collect()
+}
+
+pub fn set_member_chat_suppressed(
+    conn: &Connection,
+    channel_id: u64,
+    user_id: u64,
+    suppressed: bool,
+) -> rusqlite::Result<()> {
+    let query = if suppressed {
+        "INSERT INTO suppressed_member_chat (channel_id, user_id) VALUES (?1, ?2)
+         ON CONFLICT (channel_id, user_id) DO NOTHING"
+    } else {
+        "DELETE FROM suppressed_member_chat WHERE channel_id = ?1 AND user_id = ?2"
+    };
+    conn.execute(query, params![channel_id as i64, user_id as i64])?;
+    Ok(())
+}
+
+pub fn room_permits(conn: &Connection, channel_id: u64) -> rusqlite::Result<Vec<u64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT user_id FROM room_permits WHERE channel_id = ?1 ORDER BY user_id",
+    )?;
+    stmt.query_map([channel_id as i64], |row| Ok(row.get::<_, i64>(0)? as u64))?
+        .collect()
+}
+
+pub fn set_room_permit(
+    conn: &Connection,
+    channel_id: u64,
+    user_id: u64,
+    permitted: bool,
+) -> rusqlite::Result<()> {
+    let query = if permitted {
+        "INSERT INTO room_permits (channel_id, user_id) VALUES (?1, ?2)
+         ON CONFLICT (channel_id, user_id) DO NOTHING"
+    } else {
+        "DELETE FROM room_permits WHERE channel_id = ?1 AND user_id = ?2"
+    };
+    conn.execute(query, params![channel_id as i64, user_id as i64])?;
     Ok(())
 }
 
@@ -1214,24 +1306,36 @@ mod tests {
         };
         let connect_bit = 1 << 20;
         let view_bit = 1 << 10;
+        let send_bit = 1 << 11;
         insert(&conn, &managed).unwrap();
-        set_room_access(&conn, managed.channel_id, 40, Some((connect_bit, 0))).unwrap();
-        set_room_access(&conn, managed.channel_id, 40, Some((0, view_bit))).unwrap();
-        set_room_access(&conn, managed.channel_id, 41, Some((0, 0))).unwrap();
+        let baseline = |allow, deny| RoomAccessBaseline {
+            allow,
+            deny,
+            tracks_chat: true,
+        };
+        set_room_access(&conn, managed.channel_id, 40, Some(baseline(connect_bit, 0))).unwrap();
+        set_room_access(&conn, managed.channel_id, 40, Some(baseline(0, view_bit | send_bit))).unwrap();
+        set_room_access(&conn, managed.channel_id, 41, Some(baseline(0, 0))).unwrap();
+        set_room_permit(&conn, managed.channel_id, 40, true).unwrap();
+        set_member_chat_suppressed(&conn, managed.channel_id, 41, true).unwrap();
         drop(conn);
 
         let conn = connect(&path).unwrap();
         assert_eq!(
             room_access(&conn, managed.channel_id).unwrap(),
-            [(40, 0, view_bit), (41, 0, 0)]
+            [(40, baseline(0, view_bit | send_bit)), (41, baseline(0, 0))]
         );
         set_room_access(&conn, managed.channel_id, 41, None).unwrap();
         assert_eq!(
             room_access(&conn, managed.channel_id).unwrap(),
-            [(40, 0, view_bit)]
+            [(40, baseline(0, view_bit | send_bit))]
         );
+        assert_eq!(room_permits(&conn, managed.channel_id).unwrap(), [40]);
+        assert_eq!(room_suppressed_chat(&conn, managed.channel_id).unwrap(), [41]);
         assert!(delete(&conn, managed.channel_id).unwrap());
         assert!(room_access(&conn, managed.channel_id).unwrap().is_empty());
+        assert!(room_permits(&conn, managed.channel_id).unwrap().is_empty());
+        assert!(room_suppressed_chat(&conn, managed.channel_id).unwrap().is_empty());
     }
 
     #[test]

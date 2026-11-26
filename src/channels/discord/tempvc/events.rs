@@ -72,10 +72,10 @@ pub(in super::super) fn execute_event(
     actions::check_enabled()?;
     let actor = actions::actor(ctx, guild, member)?;
     let [sub] = options else {
-        return Err(user_error("Ek `/vc event` action select kar."));
+        return Err(user_error("Choose a `/vc event` action."));
     };
     let CommandDataOptionValue::SubCommand(options) = &sub.value else {
-        return Err(user_error("Ek `/vc event` action select kar."));
+        return Err(user_error("Choose a `/vc event` action."));
     };
     let value = |key| option_value(options, key);
     let int = |key| value(key).and_then(CommandDataOptionValue::as_i64);
@@ -89,26 +89,24 @@ pub(in super::super) fn execute_event(
         "schedule" => {
             let now = Utc::now().timestamp();
             let run_at = string("when").and_then(|when| parse_when(when, now))
-                .ok_or_else(|| user_error("Time samajh nahi aaya. `in 2h`, `1d 30m`, `<t:UNIX>` ya `2026-12-01 20:00` (IST) try kar."))?;
+                .ok_or_else(|| user_error("Try a time like `in 2h`, `1d 30m`, `<t:UNIX>`, or `2026-12-01 20:00` (IST)."))?;
             if run_at <= now {
-                return Err(user_error("Aage ka time choose kar."));
+                return Err(user_error("Choose a time in the future."));
             }
             let name = string("name")
                 .filter(|name| !name.is_empty() && name.chars().count() <= 100)
-                .ok_or_else(|| user_error("Room ka naam 1 se 100 characters mein rakh."))?;
+                .ok_or_else(|| user_error("Use 1 to 100 characters for the room name."))?;
             let requested = int("limit").and_then(|limit| u32::try_from(limit).ok());
             let caps = caps::for_member(ctx, guild, member, actor.staff)?;
             let limit = requested.map(|limit| caps.limit(limit));
             let role = value("role").and_then(CommandDataOptionValue::as_role_id);
             if role.is_some() && !actor.staff {
-                return Err(user_error("Role ping sirf staff kar sakte hain."));
+                return Err(user_error("Only staff can ping a role."));
             }
             if let Some(role) = role
                 && !ping_role_exists(ctx, guild, role)
             {
-                return Err(user_error(
-                    "Server ka ek role select kar. @everyone allowed nahi hai.",
-                ));
+                return Err(user_error("Choose a server role other than @everyone."));
             }
             let hub = choose_hub(ctx, guild, member, None)?;
             let event = store::NewSchedule {
@@ -121,9 +119,9 @@ pub(in super::super) fn execute_event(
                 hub_id: hub.map(ChannelId::get),
             };
             let id = store::add_schedule(&*db()?, &event)?;
-            let mut reply = format!("📅 Room #{id} <t:{run_at}:F> ke liye schedule ho gaya.");
+            let mut reply = format!("📅 Room #{id} is scheduled for <t:{run_at}:F>.");
             if let Some(limit) = limit.filter(|&limit| Some(limit) != requested) {
-                reply.push_str(&format!(" Tera limit {limit} hai."));
+                reply.push_str(&format!(" Your room limit is {limit}."));
             }
             Ok(Reply::Text(reply))
         }
@@ -131,15 +129,13 @@ pub(in super::super) fn execute_event(
         "cancel" => {
             let id = int("id")
                 .filter(|&id| id > 0)
-                .ok_or_else(|| user_error("`/vc event list` se schedule ID le."))?;
+                .ok_or_else(|| user_error("Get the schedule ID from `/vc event list`."))?;
             if !store::cancel_schedule(&*db()?, guild.get(), id, creator)? {
-                return Err(user_error(
-                    "Ye schedule cancel karne ke liye available nahi hai.",
-                ));
+                return Err(user_error("You can't cancel this schedule."));
             }
-            Ok(Reply::Text(format!("✅ Schedule #{id} cancel ho gaya.")))
+            Ok(Reply::Text(format!("✅ Canceled schedule #{id}.")))
         }
-        _ => Err(user_error("Ye `/vc event` action ab available nahi hai.")),
+        _ => Err(user_error("This `/vc event` action is unavailable.")),
     }
 }
 
@@ -147,7 +143,7 @@ fn list_events(guild: GuildId, creator: Option<u64>, page: Option<i64>) -> Resul
     let mut rows = store::list_schedules(&*db()?, guild.get())?;
     rows.retain(|event| creator.is_none_or(|user| event.creator_id == user));
     if rows.is_empty() {
-        return Ok(Reply::Text("Abhi koi scheduled room nahi hai.".into()));
+        return Ok(Reply::Text("No rooms are scheduled.".into()));
     }
     let pages = rows.len().div_ceil(PAGE_SIZE);
     let page = page
@@ -218,7 +214,9 @@ fn choose_hub(
         return if has_category {
             Ok(None)
         } else {
-            Err(user_error("Staff se ek temp VC hub ya category set karwa."))
+            Err(user_error(
+                "Ask staff to set up a temporary voice hub or category.",
+            ))
         };
     }
     hubs.sort_by_key(|id| Some(id.get()) != preferred);
@@ -231,7 +229,7 @@ fn choose_hub(
         }
     }
     Err(user_error(
-        "Tere paas kisi temp VC hub ka required role nahi hai.",
+        "You need a role that gives you access to a temporary voice hub.",
     ))
 }
 
@@ -425,7 +423,7 @@ async fn announce_event(ctx: &Context, guild: GuildId, event: &store::Schedule) 
 }
 
 fn announcement(id: i64, role: Option<RoleId>) -> CreateMessage {
-    let mut content = format!("📅 Scheduled temp VC #{id} khul gaya. Join kar lo!");
+    let mut content = format!("📅 Scheduled voice room #{id} is open. Come join!");
     if let Some(role) = role {
         content.push_str(&format!(" <@&{role}>"));
     }

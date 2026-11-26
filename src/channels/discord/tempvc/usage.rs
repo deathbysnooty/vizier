@@ -218,7 +218,7 @@ fn stats_text(stats: store::VoiceStats) -> String {
 
 fn top_text(rows: &[(u64, store::VoiceStats)]) -> String {
     if rows.is_empty() {
-        return "Abhi koi voice time record nahi hua.".into();
+        return "No voice time recorded yet.".into();
     }
     rows.iter()
         .enumerate()

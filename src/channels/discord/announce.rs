@@ -562,18 +562,18 @@ const TEMPVC_NEWS_ID: &str = "tempvc-2026-11";
 
 pub const NEWS: &[News] = &[News {
     id: "dragme-2026-11",
-    title: "🎙️ VC mein aana hai?",
-    body: "Kisi VC mein ho? `/dragme member:@someone` se unke VC ke chat mein request jayegi. Wahan jo bhi VC mein hai, woh **Approve** ya **Deny** daba sakta hai. Request 10 minute tak khuli rahegi.\n\n\
-           Apne VC mein kisi ko bulana hai? `/vcinvite member:@someone` chalao, ya unpe right-click karo, phir **Apps → Invite to my VC**. Unke paas **Join** ya **No thanks** dabane ke liye 30 minute hain. **Join** dabane se pehle woh kisi VC mein hon. Tum apne VC se nikle toh invite cancel.\n\n\
-           VC full hai? Approve ya Join se Loduchand phir bhi move kar sakta hai.",
+    title: "🎙️ Ask to join or invite someone to your VC",
+    body: "Join any voice channel and use `/dragme member:@someone` to send a request to their VC's chat. Anyone in that VC can press **Approve** or **Deny** within 10 minutes.\n\n\
+           To invite someone to your VC, use `/vcinvite member:@someone` or right-click them and choose **Apps → Invite to my VC**. They have 30 minutes to press **Join** or **No thanks**. They need to be in a VC before pressing **Join**. Leaving your VC cancels the invite.\n\n\
+           Loduchand can still move people into a full VC when someone presses **Approve** or **Join**.",
 }, News {
     id: TEMPVC_NEWS_ID,
-    title: "🎙️ Apna temporary VC",
-    body: "Join-to-create voice channel mein jao aur Loduchand tumhare liye ek room bana dega. Chat mein controls milenge. Panel dobara chahiye? `/vc panel` chalao. `/vc lock` aur `/vc hide` ke `state` mein `on` ya `off` choose karo.\n\n\
-           Apne room ki settings agli baar bhi chahiye? `/vc me save` karo, `/vc me set` se badlo, aur `/vc me profile` mein dekho. `/vc me trust` se dost locked ya hidden room mein bhi aa sakte hain. Kick ya `/vc me ban` se member tumhare rooms se ban ho jayega. `/vc me unban` se ban hata sakte ho.\n\n\
-           Locked room join karna hai? `/vc knock` se owner ko request bhejo. Owner ya staff 10 minute ke andar approve kar sakte hain. Hidden room ke liye owner se invite maango.\n\n\
-           Owner nikle toh room mein sabse pehle aaya member owner ban sakta hai. Khaali room khud band ho jayega.\n\n\
-           `/vc me stats` mein apna voice time aur rooms dekh. `/vc me top` mein is mahine aur all-time top 10 hain. `/vc event schedule` se `in 2h` ya India time mein room book kar. Role ping staff ke liye hai.",
+    title: "🎙️ Create your own temporary voice room",
+    body: "Join a join-to-create voice channel to get your own room. Find controls in the room chat or run `/vc panel`. Use `/vc lock` and `/vc hide` with `on` or `off`.\n\n\
+           Save defaults with `/vc me save`, change them with `/vc me set`, and view them with `/vc me profile`. Use `/vc me trust` to let friends into locked or hidden rooms. When chat is off, the owner, permitted members, trusted friends, and staff can still type.\n\n\
+           Kick disconnects a member once. Panel **Ban** and `/vc me ban` block them from all your rooms until you use `/vc me unban`. Panel **Permit**, **Deny**, and **Ban** accept up to 25 members. Use `more` for extra mentions or IDs in slash commands for permits, denials, trust, and bans.\n\n\
+           Use `/vc knock` for a locked room. The owner or staff can approve within 10 minutes. Ask the owner for an invite to a hidden room. If the owner leaves, the member who's been there longest can take over. Empty rooms close automatically.\n\n\
+           See your voice time and rooms with `/vc me stats`, and the monthly and all-time top 10 with `/vc me top`. Book a room with `/vc event schedule` using `in 2h` or India time. Staff can ping a role.",
 }, News {
     id: "geo-world-2026-09",
     title: "\u{1F30D} Geo goes worldwide \u{2014} vote India, World or Mix",

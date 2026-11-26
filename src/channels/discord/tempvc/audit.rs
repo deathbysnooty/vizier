@@ -32,7 +32,7 @@ impl Action {
             Self::Created => "Room created",
             Self::Deleted => "Room deleted",
             Self::StaffDelete => "Staff force-deleted room",
-            Self::Kick => "Member kicked and banned",
+            Self::Kick => "Member kicked from the room",
             Self::Ban => "Member banned",
             Self::Deny => "Member denied room access",
             Self::Unban => "Member unbanned",

@@ -769,7 +769,7 @@ async fn create_room(
     let hub_parent = if let Some(hub) = options.hub {
         fetch_voice(ctx, guild, hub)
             .await?
-            .ok_or_else(|| user_error("Ye hub voice channel nahi mila."))?
+            .ok_or_else(|| user_error("I couldn't find that voice hub."))?
             .parent_id
     } else {
         None
@@ -777,7 +777,7 @@ async fn create_room(
     let template = if let Some(hub) = options.hub {
         let conn = db()?;
         if !control::ids("VIZIER_TEMPVC_HUBS").contains(&hub.get()) {
-            return Err(user_error("Ye temp voice hub ab active nahi hai."));
+            return Err(user_error("This temporary voice hub is no longer active."));
         }
         store::hub_template(&conn, guild.get(), hub.get())?
     } else {
@@ -796,7 +796,7 @@ async fn create_room(
             None,
         );
         return Err(user_error(
-            "Is hub mein room banane ke liye required role chahiye.",
+            "You need the required role to create a room in this hub.",
         ));
     }
     let (category, mut overwrites, staff_roles) = {
@@ -828,7 +828,7 @@ async fn create_room(
     };
     if options.hub.is_none() && category.is_none() {
         return Err(user_error(
-            "Scheduled room ke liye ek room category chahiye.",
+            "Set a voice category before creating a scheduled room.",
         ));
     }
     let profile = store::profile(&*db()?, guild.get(), owner.user.id.get())?.unwrap_or_default();
@@ -988,7 +988,7 @@ async fn create_room(
     }
     if let Some(source) = source {
         let moved = if voice(ctx, guild, owner.user.id) != Some(source) {
-            Err(user_error("Tu voice se nikal gaya. Phir se try kar."))
+            Err(user_error("You left voice. Join again and try again."))
         } else {
             guild
                 .move_member(&ctx.http, owner.user.id, channel)

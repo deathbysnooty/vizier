@@ -53,7 +53,7 @@ pub(in super::super) fn command() -> CreateCommandOption {
         .add_sub_option(
             sub(
                 "hub-set",
-                "Enable a hub and set its overrides; omitted fields use defaults",
+                "Enable a hub and customize its defaults",
             )
             .add_sub_option(channel())
             .add_sub_option(
@@ -86,18 +86,18 @@ pub(in super::super) fn command() -> CreateCommandOption {
 fn staff(ctx: &Context, guild: GuildId, member: &Member) -> Result<UserId> {
     let actor = actions::actor(ctx, guild, member)?;
     if !actor.staff {
-        return Err(user_error("Ye sirf temp voice staff ke liye hai."));
+        return Err(user_error("Only temp voice staff can use this."));
     }
     Ok(actor.id)
 }
 
 fn required(name: &str) -> anyhow::Error {
-    user_error(format!("`{name}` bhi bhar de."))
+    user_error(format!("Fill in `{name}`."))
 }
 
 fn role(guild: GuildId, role: RoleId) -> Result<u64> {
     if role == guild.everyone_role() {
-        return Err(user_error("@everyone ki jagah ek member role select kar."));
+        return Err(user_error("Choose a member role other than @everyone."));
     }
     Ok(role.get())
 }
@@ -115,7 +115,7 @@ fn number(
                 .filter(|n| range.contains(n))
                 .ok_or_else(|| {
                     user_error(format!(
-                        "`{name}` {} se {} tak rakh.",
+                        "Set `{name}` between {} and {}.",
                         range.start(),
                         range.end()
                     ))
@@ -133,7 +133,7 @@ fn hub_template(guild: GuildId, options: &[CommandDataOption]) -> Result<HubTemp
         .and_then(CommandDataOptionValue::as_str)
         .map(str::trim);
     if name_pattern.is_some_and(|name| name.is_empty() || name.chars().count() > 100) {
-        return Err(user_error("Room name pattern 1 se 100 characters ka rakh."));
+        return Err(user_error("Use 1–100 characters for the room name pattern."));
     }
     Ok(HubTemplate {
         channel_id: channel.get(),
@@ -162,7 +162,7 @@ fn set_hub(ctx: &Context, guild: GuildId, actor: UserId, template: &HubTemplate)
             .get(&channel)
             .is_some_and(|ch| ch.kind == ChannelType::Voice)
         {
-            return Err(user_error("Server ka voice channel select kar."));
+            return Err(user_error("Choose a voice channel in this server."));
         }
         if let Some(id) = template.category_id
             && !cached
@@ -170,11 +170,11 @@ fn set_hub(ctx: &Context, guild: GuildId, actor: UserId, template: &HubTemplate)
                 .get(&ChannelId::new(id))
                 .is_some_and(|ch| ch.kind == ChannelType::Category)
         {
-            return Err(user_error("Server ki category select kar."));
+            return Err(user_error("Choose a category in this server."));
         }
     }
     if lookup(guild, channel)?.is_some() {
-        return Err(user_error("Temp room ko hub nahi bana sakte."));
+        return Err(user_error("Choose a permanent voice channel for the hub."));
     }
     // Save the access template before exposing a newly enabled hub to joins.
     let conn = db()?;
@@ -182,11 +182,11 @@ fn set_hub(ctx: &Context, guild: GuildId, actor: UserId, template: &HubTemplate)
     if let Err(err) = control::edit_ids(HUBS_KEY, actor.get(), channel.get(), true) {
         tracing::warn!(%channel, %err, "tempvc: hub template saved but hub could not be enabled");
         return Ok(format!(
-            "<#{channel}> ka template save hai. Hub ko panel se on kar de."
+            "Saved the template for <#{channel}>. Turn on the hub from the panel."
         ));
     }
     Ok(format!(
-        "<#{channel}> hub ready hai. Jo fields khaali chhodi, unke defaults lagenge."
+        "<#{channel}> is ready. Blank fields use the defaults."
     ))
 }
 
@@ -198,14 +198,14 @@ fn remove_hub(ctx: &Context, guild: GuildId, actor: UserId, channel: ChannelId) 
     let conn = db()?;
     let template = store::hub_template(&conn, guild.get(), channel.get())?;
     if template.is_none() && !exists_in_guild {
-        return Err(user_error("Ye hub server mein nahi mila."));
+        return Err(user_error("I couldn't find that voice hub in this server."));
     }
     let disabled = control::edit_ids(HUBS_KEY, actor.get(), channel.get(), false)?;
     let removed = store::remove_hub_template(&conn, guild.get(), channel.get())?;
     if disabled || removed {
-        Ok(format!("<#{channel}> hub band kar diya."))
+        Ok(format!("Disabled the hub in <#{channel}>."))
     } else {
-        Ok(format!("<#{channel}> pehle se hub nahi hai."))
+        Ok(format!("The hub in <#{channel}> is already off."))
     }
 }
 
@@ -217,10 +217,10 @@ pub(in super::super) fn command_reply(
 ) -> Result<EditInteractionResponse> {
     let actor = staff(ctx, guild, member)?;
     let [sub] = options else {
-        return Err(user_error("Ek staff action select kar."));
+        return Err(user_error("Choose a staff action."));
     };
     let CommandDataOptionValue::SubCommand(options) = &sub.value else {
-        return Err(user_error("Ek staff action select kar."));
+        return Err(user_error("Choose a staff action."));
     };
     let id = |name| option_value(options, name);
     let perk_role = || {
@@ -249,14 +249,14 @@ pub(in super::super) fn command_reply(
                 bitrate: bitrate * 1_000,
             };
             store::save_role_perk(&*db()?, guild.get(), &perk)?;
-            format!("<@&{role_id}> ka perk save ho gaya.")
+            format!("Saved the perk for <@&{role_id}>.")
         }
         "perk-remove" => {
             let role_id = perk_role()?;
             if store::remove_role_perk(&*db()?, guild.get(), role_id)? {
-                format!("<@&{role_id}> ka perk hata diya.")
+                format!("Removed the perk for <@&{role_id}>.")
             } else {
-                format!("<@&{role_id}> ka perk set nahi tha.")
+                format!("<@&{role_id}> had no perk to remove.")
             }
         }
         "hub-set" => set_hub(ctx, guild, actor, &hub_template(guild, options)?)?,
@@ -268,7 +268,7 @@ pub(in super::super) fn command_reply(
                 .and_then(CommandDataOptionValue::as_channel_id)
                 .ok_or_else(|| required("channel"))?,
         )?,
-        _ => return Err(user_error("Ye staff action available nahi hai.")),
+        _ => return Err(user_error("This staff action is unavailable.")),
     };
     Ok(edit().content(text))
 }
@@ -395,7 +395,7 @@ impl RoomCard {
             .collect::<Vec<_>>()
             .join(" ");
         match self.members.len() {
-            0 => "Abhi room khaali hai.".into(),
+            0 => "The room is empty.".into(),
             count if count > MAX_SHOWN => format!("{listed} · +{}", count - MAX_SHOWN),
             _ => listed,
         }
@@ -474,7 +474,7 @@ fn rooms_reply(
     let current = selected.and_then(|id| rooms.iter().find(|room| room.id == id));
     let mut rows: Vec<_> = navigation(actor, View::Rooms, &page).into_iter().collect();
     if rooms.is_empty() {
-        description.push_str("Abhi koi temp room nahi hai.");
+        description.push_str("There are no temporary rooms right now.");
     } else {
         let options = rooms
             .iter()
@@ -488,7 +488,7 @@ fn rooms_reply(
             custom_id(actor, "select", page.index, None),
             CreateSelectMenuKind::String { options },
         )
-        .placeholder("Room select kar")
+        .placeholder("Choose a room")
         .min_values(1)
         .max_values(1);
         rows.push(CreateActionRow::SelectMenu(select));
@@ -510,7 +510,7 @@ fn rooms_reply(
         && current.is_none()
         && (notice.is_empty() || !matches!(mode, Mode::Browse))
     {
-        "Ye temp room ab nahi hai. Koi aur room select kar."
+        "This temporary room is gone. Choose another room."
     } else {
         notice
     };
@@ -544,7 +544,7 @@ fn room_controls(
                     default_users: None,
                 },
             )
-            .placeholder("Naya owner select kar")
+            .placeholder("Choose a new owner")
             .min_values(1)
             .max_values(1);
             rows.push(CreateActionRow::SelectMenu(picker));
@@ -580,13 +580,13 @@ fn list_reply(
                 .collect::<Vec<_>>();
             (
                 "Temp voice perks",
-                "Abhi koi role perk set nahi hai.",
+                "There are no role perks yet.",
                 lines,
             )
         }
         View::Hubs => (
             "Temp voice hubs",
-            "Abhi koi hub set nahi hai.",
+            "There are no voice hubs yet.",
             hub_lines(ctx, guild)?,
         ),
         View::Rooms => return rooms_reply(ctx, guild, actor, requested, None, Mode::Browse, ""),
@@ -688,13 +688,13 @@ impl<'a> Control<'a> {
 
 pub(in super::super) async fn component(ctx: &Context, component: &ComponentInteraction, id: &str) {
     let authorized = (|| {
-        let control = Control::parse(id).ok_or_else(|| user_error("Ye panel purana ho gaya."))?;
+        let control = Control::parse(id).ok_or_else(|| user_error("This panel has expired."))?;
         let (guild, member) = component
             .guild_id
             .zip(component.member.as_ref())
-            .ok_or_else(|| user_error("Ye sirf server mein chalta hai."))?;
+            .ok_or_else(|| user_error("Use this in a server."))?;
         if staff(ctx, guild, member)? != control.actor {
-            return Err(user_error("Apna panel `/vc admin rooms` se khol."));
+            return Err(user_error("Use `/vc admin rooms` to open your own panel."));
         }
         Ok((guild, member, control))
     })();
@@ -772,20 +772,20 @@ async fn component_reply(
             return render(
                 channel,
                 Mode::ConfirmDelete,
-                "Pakka, ye room delete karna hai?",
+                "Delete this room?",
             );
         }
         ("ask-transfer", _) if button => {
-            return render(channel, Mode::Transfer, "Naya owner kaun?");
+            return render(channel, Mode::Transfer, "Who should own this room?");
         }
         ("delete", _) if button => ForceAction::Delete,
         ("claim", _) if button => ForceAction::Claim,
         ("transfer", ComponentInteractionDataKind::UserSelect { values }) if values.len() == 1 => {
             ForceAction::Transfer(values[0])
         }
-        _ => return Err(user_error("Ye control ab available nahi hai.")),
+        _ => return Err(user_error("This control is unavailable.")),
     };
-    let room = channel.ok_or_else(|| user_error("Pehle room select kar."))?;
+    let room = channel.ok_or_else(|| user_error("Choose a room first."))?;
     let deleted = matches!(force, ForceAction::Delete);
     let reply = actions::execute(
         ctx,
