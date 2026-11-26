@@ -74,6 +74,8 @@ pub struct ChannelInfo {
     pub id: String,
     pub name: String,
     pub kind: ChannelKind,
+    /// Stages count as voice for existing panel views, but cannot be room hubs.
+    pub stage: bool,
     /// The category's name, if the channel sits in one.
     pub category: Option<String>,
     /// Where the category sits, for grouping in Discord's order.
@@ -452,6 +454,7 @@ impl PanelData for LiveData {
                         ChannelType::Category => ChannelKind::Category,
                         _ => ChannelKind::Other,
                     },
+                    stage: c.kind == ChannelType::Stage,
                     category: parent.map(|p| p.name.clone()),
                     category_position: parent.map(|p| p.position as i64).unwrap_or(-1),
                     position: c.position as i64,
@@ -1537,7 +1540,20 @@ pub fn parse_time(raw: &str) -> Option<String> {
     (h < 24 && m < 60 && raw.trim().len() <= 5).then(|| format!("{:02}:{:02}", h, m))
 }
 
+#[derive(Clone, Copy)]
+enum ChannelSetting {
+    Text,
+    Voice,
+    Hub,
+    Category,
+}
+
 fn check_channel(panel: &Panel, raw: &str, voice: bool) -> Result<String, String> {
+    let setting = if voice { ChannelSetting::Voice } else { ChannelSetting::Text };
+    check_channel_kind(panel, raw, setting)
+}
+
+fn check_channel_kind(panel: &Panel, raw: &str, setting: ChannelSetting) -> Result<String, String> {
     let id = parse_id(raw).ok_or_else(|| format!("\"{}\" isn't a channel id.", raw.trim()))?;
     let channels = panel.data.channels();
     if channels.is_empty() {
@@ -1546,15 +1562,24 @@ fn check_channel(panel: &Panel, raw: &str, voice: bool) -> Result<String, String
     let Some(channel) = channels.iter().find(|c| c.id == id.to_string()) else {
         return Err(format!("There's no channel {} in the server.", id));
     };
-    let fits = if voice { channel.kind == ChannelKind::Voice } else { channel.kind == ChannelKind::Text };
+    let (fits, expected) = match setting {
+        ChannelSetting::Text => (channel.kind == ChannelKind::Text, "text channel"),
+        ChannelSetting::Voice => (channel.kind == ChannelKind::Voice, "voice channel"),
+        ChannelSetting::Hub => (channel.kind == ChannelKind::Voice && !channel.stage, "voice channel"),
+        ChannelSetting::Category => (channel.kind == ChannelKind::Category, "category"),
+    };
     if !fits {
-        return Err(format!(
-            "#{} is not a {} channel.",
-            channel.name,
-            if voice { "voice" } else { "text" }
-        ));
+        return Err(format!("#{} is not a {}.", channel.name, expected));
     }
     Ok(id.to_string())
+}
+
+fn check_role(roles: &[RoleInfo], raw: &str) -> Result<String, String> {
+    let id = parse_id(raw).ok_or("That isn't a role id.")?.to_string();
+    if !roles.is_empty() && !roles.iter().any(|r| r.id == id) {
+        return Err(format!("There's no role {} in the server.", id));
+    }
+    Ok(id)
 }
 
 fn split_list(raw: &str) -> impl Iterator<Item = &str> {
@@ -1569,7 +1594,8 @@ async fn validate(panel: &Panel, setting: &Setting, raw: &str) -> Result<String,
     }
     let empty_ok = matches!(
         setting.kind,
-        Kind::Text | Kind::Channel | Kind::Channels | Kind::WeightedChannels | Kind::VoiceChannel | Kind::Role | Kind::Users | Kind::Time
+        Kind::Text | Kind::Channel | Kind::Channels | Kind::WeightedChannels | Kind::VoiceChannel
+            | Kind::VoiceChannels | Kind::Category | Kind::Role | Kind::Roles | Kind::Users | Kind::Time
     );
     if value.is_empty() {
         return if empty_ok { Ok(String::new()) } else { Err(format!("{} needs a value.", setting.label)) };
@@ -1582,10 +1608,12 @@ async fn validate(panel: &Panel, setting: &Setting, raw: &str) -> Result<String,
         },
         Kind::Channel => check_channel(panel, value, false),
         Kind::VoiceChannel => check_channel(panel, value, true),
-        Kind::Channels => {
+        Kind::Category => check_channel_kind(panel, value, ChannelSetting::Category),
+        Kind::Channels | Kind::VoiceChannels => {
+            let kind = if matches!(setting.kind, Kind::VoiceChannels) { ChannelSetting::Hub } else { ChannelSetting::Text };
             let mut out = Vec::new();
             for part in split_list(value) {
-                let id = check_channel(panel, part, false)?;
+                let id = check_channel_kind(panel, part, kind)?;
                 if !out.contains(&id) {
                     out.push(id);
                 }
@@ -1613,13 +1641,17 @@ async fn validate(panel: &Panel, setting: &Setting, raw: &str) -> Result<String,
             }
             Ok(out.join(","))
         }
-        Kind::Role => {
-            let id = parse_id(value).ok_or("That isn't a role id.")?;
+        Kind::Role => check_role(&panel.data.roles(), value),
+        Kind::Roles => {
             let roles = panel.data.roles();
-            if !roles.is_empty() && !roles.iter().any(|r| r.id == id.to_string()) {
-                return Err(format!("There's no role {} in the server.", id));
+            let mut out = Vec::new();
+            for part in split_list(value) {
+                let id = check_role(&roles, part)?;
+                if !out.contains(&id) {
+                    out.push(id);
+                }
             }
-            Ok(id.to_string())
+            Ok(out.join(","))
         }
         Kind::Users => {
             let mut out = Vec::new();

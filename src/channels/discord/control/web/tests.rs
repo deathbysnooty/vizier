@@ -53,6 +53,7 @@ fn ch(id: u64, name: &str, kind: ChannelKind, category: Option<(&str, i64)>, pos
         id: id.to_string(),
         name: name.into(),
         kind,
+        stage: false,
         category: category.map(|c| c.0.to_string()),
         category_position: category.map(|c| c.1).unwrap_or(-1),
         position,
@@ -90,6 +91,7 @@ impl PanelData for FakeData {
             ch(41, "Lounge", Voice, voice, 0),
             ch(42, "Gaming", Voice, voice, 1),
             ch(43, "AFK", Voice, voice, 2),
+            ChannelInfo { stage: true, ..ch(44, "Stage", Voice, voice, 3) },
             ch(SAFE, "safe-corner", Text, chat, 4),
         ]
     }
@@ -1835,6 +1837,27 @@ async fn settings_are_checked_by_kind() {
     assert_eq!(entry["label"], "Points for a win");
     assert_eq!(entry["user_name"], "Kabir");
     assert_eq!(entry["section"]["id"], "arena");
+}
+
+#[tokio::test]
+async fn temp_voice_settings_validate_channel_and_role_types() {
+    let panel = Panel::new(Arc::new(FakeData), catalog::sections);
+    let (section, hubs) = panel.find("VIZIER_TEMPVC_HUBS").unwrap();
+    assert_eq!(section.commands[0].name, "vc");
+    assert_eq!(section.settings[0].default, "off");
+    assert_eq!(validate(&panel, &hubs, "41, 42, 41").await.unwrap(), "41,42");
+    assert!(validate(&panel, &hubs, "41, 21").await.is_err());
+    assert!(validate(&panel, &hubs, "44").await.is_err());
+
+    let (_, category) = panel.find("VIZIER_TEMPVC_CATEGORY").unwrap();
+    assert_eq!(validate(&panel, &category, "40").await.unwrap(), "40");
+    assert_eq!(validate(&panel, &category, "").await.unwrap(), "");
+    assert!(validate(&panel, &category, "41").await.is_err());
+
+    let (_, roles) = panel.find("VIZIER_TEMPVC_STAFF_ROLES").unwrap();
+    assert_eq!(validate(&panel, &roles, "50, 51,50").await.unwrap(), "50,51");
+    assert_eq!(validate(&panel, &roles, "").await.unwrap(), "");
+    assert!(validate(&panel, &roles, "50, 99").await.is_err());
 }
 
 #[tokio::test]

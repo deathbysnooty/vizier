@@ -189,6 +189,10 @@ pub fn set(key: &str, value: Option<&str>, by: u64) -> anyhow::Result<()> {
         Some(v) => values.insert(key.to_string(), v.to_string()),
         None => values.remove(key),
     };
+    drop(values);
+    if key == "VIZIER_TEMPVC" {
+        super::tempvc::enabled_setting_changed();
+    }
     Ok(())
 }
 

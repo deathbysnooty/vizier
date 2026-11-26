@@ -1,0 +1,592 @@
+//! Discord interactions for temporary voice rooms. The room service owns all authorization.
+
+use serenity::all::{
+    ActionRowComponent, ButtonStyle, ChannelId, ChannelType, CommandDataOption,
+    CommandDataOptionValue, CommandInteraction, CommandOptionType, ComponentInteraction,
+    ComponentInteractionDataKind, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
+    CreateCommand, CreateCommandOption, CreateEmbed, CreateInputText, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateSelectMenu,
+    CreateSelectMenuKind, EditInteractionResponse, GuildChannel, GuildId, InputTextStyle,
+    InteractionContext, Member, ModalInteraction, PermissionOverwriteType, Permissions, UserId,
+};
+
+use super::tempvc::{self, UserError};
+
+pub(super) const COMMAND: &str = "vc";
+pub(super) const PREFIX: &str = "tvc:";
+const FIELD: &str = "value";
+
+#[derive(Clone, Copy)]
+pub(super) enum RoomTarget {
+    Voice(Option<ChannelId>),
+    Panel(ChannelId),
+}
+
+pub(super) enum Action {
+    Create {
+        hub: Option<ChannelId>,
+        name: Option<String>,
+        limit: Option<u32>,
+        locked: bool,
+    },
+    Lock(Option<bool>),
+    Hide(Option<bool>),
+    Chat(Option<bool>),
+    Soundboard(Option<bool>),
+    Rename(String),
+    Limit(u32),
+    Bitrate(u32),
+    Region(Option<String>),
+    Permit(UserId),
+    Deny(UserId),
+    Kick(UserId),
+    Disconnect(UserId),
+    Reset(UserId),
+    Claim,
+    Transfer(UserId),
+    Delete,
+    Panel,
+    Info,
+    Drag(UserId),
+}
+
+pub(super) enum Reply {
+    Text(String),
+    Info(CreateEmbed),
+}
+
+pub(super) fn command() -> CreateCommand {
+    use CommandOptionType::{Boolean, Channel, Integer, String, SubCommand, User};
+
+    let channel = || {
+        CreateCommandOption::new(Channel, "channel", "Temp room to manage (staff only)")
+            .channel_types(vec![ChannelType::Voice])
+    };
+    let sub = |name, description| CreateCommandOption::new(SubCommand, name, description);
+    let room = |name, description| sub(name, description).add_sub_option(channel());
+    let with = |name, description, option: CreateCommandOption| {
+        sub(name, description)
+            .add_sub_option(option.required(true))
+            .add_sub_option(channel())
+    };
+    let user = |description| CreateCommandOption::new(User, "user", description);
+    let name = || {
+        CreateCommandOption::new(String, "name", "Room name (supports {user} and {count})")
+            .min_length(1)
+            .max_length(100)
+    };
+    let limit = |key| {
+        CreateCommandOption::new(Integer, key, "User limit (0 means unlimited)")
+            .min_int_value(0)
+            .max_int_value(99)
+    };
+
+    CreateCommand::new(COMMAND)
+        .description("Manage temporary voice rooms")
+        .contexts(vec![InteractionContext::Guild])
+        .set_options(vec![
+            sub("create", "Create your own temp room")
+                .add_sub_option(name())
+                .add_sub_option(limit("limit"))
+                .add_sub_option(CreateCommandOption::new(Boolean, "locked", "Start locked"))
+                .add_sub_option(
+                    CreateCommandOption::new(Channel, "hub", "Configured hub to create from")
+                        .channel_types(vec![ChannelType::Voice]),
+                ),
+            room("lock", "Lock the room"),
+            room("unlock", "Unlock the room"),
+            room("hide", "Hide the room"),
+            room("unhide", "Make the room visible"),
+            with("rename", "Rename the room", name()),
+            with("limit", "Set the user limit", limit("count")),
+            with(
+                "bitrate",
+                "Set the audio bitrate",
+                CreateCommandOption::new(Integer, "kbps", "Bitrate in kbps, up to the server cap")
+                    .min_int_value(8)
+                    .max_int_value(384),
+            ),
+            with(
+                "region",
+                "Set the voice region",
+                CreateCommandOption::new(String, "region", "Region ID, e.g. singapore or auto")
+                    .min_length(1)
+                    .max_length(32),
+            ),
+            with(
+                "chat",
+                "Turn room chat on or off",
+                CreateCommandOption::new(Boolean, "enabled", "Allow messages in the room"),
+            ),
+            with(
+                "soundboard",
+                "Turn the soundboard on or off",
+                CreateCommandOption::new(Boolean, "enabled", "Allow soundboard in the room"),
+            ),
+            with("permit", "Let a member see and join", user("Who to allow")),
+            with("deny", "Block a member from joining", user("Who to block")),
+            with(
+                "reset",
+                "Clear a member's room overrides",
+                user("Whose permissions to clear"),
+            ),
+            with(
+                "kick",
+                "Disconnect a member and block rejoining",
+                user("Who to kick"),
+            ),
+            with(
+                "disconnect",
+                "Disconnect a member from the room",
+                user("Who to disconnect"),
+            ),
+            room("claim", "Claim a room after its owner leaves"),
+            with(
+                "transfer",
+                "Give the room to someone else",
+                user("New room owner"),
+            ),
+            room("delete", "Delete the room"),
+            room("panel", "Repost the control panel in the room"),
+            room("info", "Show room details"),
+            with(
+                "drag",
+                "Staff: pull a member into the room",
+                user("Who to move from voice"),
+            ),
+        ])
+}
+
+fn slash_request(options: &[CommandDataOption]) -> anyhow::Result<(RoomTarget, Action)> {
+    let [sub] = options else {
+        return Err(UserError("Ek `/vc` action select kar.".into()).into());
+    };
+    let CommandDataOptionValue::SubCommand(options) = &sub.value else {
+        return Err(UserError("Ek `/vc` action select kar.".into()).into());
+    };
+    let value = |name| options.iter().find(|o| o.name == name).map(|o| &o.value);
+    let channel = |name| value(name).and_then(CommandDataOptionValue::as_channel_id);
+    let int = |name| {
+        value(name)
+            .and_then(CommandDataOptionValue::as_i64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let string = |name| {
+        value(name)
+            .and_then(CommandDataOptionValue::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let flag = |name| value(name).and_then(CommandDataOptionValue::as_bool);
+    let user = || {
+        value("user")
+            .and_then(CommandDataOptionValue::as_user_id)
+            .ok_or_else(|| UserError("Kisi member ko select kar.".into()))
+    };
+    let required = |name| UserError(format!("`{name}` bhi bhar de."));
+    let action = match sub.name.as_str() {
+        "create" => Action::Create {
+            hub: channel("hub"),
+            name: string("name"),
+            limit: int("limit"),
+            locked: flag("locked").unwrap_or_default(),
+        },
+        "lock" => Action::Lock(Some(true)),
+        "unlock" => Action::Lock(Some(false)),
+        "hide" => Action::Hide(Some(true)),
+        "unhide" => Action::Hide(Some(false)),
+        "rename" => Action::Rename(string("name").ok_or_else(|| required("name"))?),
+        "limit" => Action::Limit(int("count").ok_or_else(|| required("count"))?),
+        "bitrate" => Action::Bitrate(int("kbps").ok_or_else(|| required("kbps"))?),
+        "chat" => Action::Chat(Some(flag("enabled").ok_or_else(|| required("enabled"))?)),
+        "soundboard" => {
+            Action::Soundboard(Some(flag("enabled").ok_or_else(|| required("enabled"))?))
+        }
+        "region" => Action::Region(
+            string("region")
+                .ok_or_else(|| required("region"))
+                .map(|region| region.to_ascii_lowercase())
+                .map(|region| (region != "auto").then_some(region))?,
+        ),
+        "permit" => Action::Permit(user()?),
+        "deny" => Action::Deny(user()?),
+        "reset" => Action::Reset(user()?),
+        "kick" => Action::Kick(user()?),
+        "disconnect" => Action::Disconnect(user()?),
+        "claim" => Action::Claim,
+        "transfer" => Action::Transfer(user()?),
+        "delete" => Action::Delete,
+        "panel" => Action::Panel,
+        "info" => Action::Info,
+        "drag" => Action::Drag(user()?),
+        _ => return Err(UserError("Ye `/vc` action ab available nahi hai.".into()).into()),
+    };
+    Ok((RoomTarget::Voice(channel("channel")), action))
+}
+
+fn actor(guild_id: Option<GuildId>, member: Option<&Member>) -> anyhow::Result<(GuildId, &Member)> {
+    guild_id
+        .zip(member)
+        .ok_or_else(|| UserError("Ye sirf server mein chalta hai.".into()).into())
+}
+
+pub(super) async fn on_command(ctx: &Context, command: &CommandInteraction) {
+    if let Err(err) = command.defer_ephemeral(&ctx.http).await {
+        tracing::warn!(%err, "temp voice: could not defer command");
+        return;
+    }
+    let result = async {
+        let (guild, member) = actor(command.guild_id, command.member.as_deref())?;
+        let (target, action) = slash_request(&command.data.options)?;
+        tempvc::execute(ctx, guild, member, target, action).await
+    }
+    .await;
+    if let Err(err) = command.edit_response(&ctx.http, edit_reply(result)).await {
+        tracing::warn!(%err, "temp voice: could not respond to command");
+    }
+}
+
+fn edit_reply(result: anyhow::Result<Reply>) -> EditInteractionResponse {
+    let edit = EditInteractionResponse::new().allowed_mentions(CreateAllowedMentions::new());
+    match result {
+        Ok(Reply::Text(text)) => edit.content(text),
+        Ok(Reply::Info(embed)) => edit.embed(embed),
+        Err(err) => edit.content(error_text(err)),
+    }
+}
+
+fn error_text(err: anyhow::Error) -> String {
+    if let Some(err) = err.downcast_ref::<UserError>() {
+        return err.0.clone();
+    }
+    tracing::warn!(%err, "temp voice: action failed");
+    "Ye action nahi ho paaya. Thodi der mein try kar.".into()
+}
+
+fn button(action: &str, label: &str, style: ButtonStyle) -> CreateButton {
+    CreateButton::new(format!("{PREFIX}{action}"))
+        .label(label)
+        .style(style)
+}
+
+fn panel_rows() -> Vec<CreateActionRow> {
+    use ButtonStyle::{Danger, Primary, Secondary};
+
+    vec![
+        CreateActionRow::Buttons(vec![
+            button("lock", "Lock / Unlock", Secondary),
+            button("hide", "Hide / Unhide", Secondary),
+            button("chat", "Chat on / off", Secondary),
+            button("soundboard", "Soundboard on / off", Secondary),
+        ]),
+        CreateActionRow::Buttons(vec![
+            button("rename", "Rename", Secondary),
+            button("limit", "Limit", Secondary),
+            button("bitrate", "Bitrate", Secondary),
+        ]),
+        CreateActionRow::Buttons(vec![
+            button("kick", "Kick", Secondary),
+            button("permit", "Permit", Secondary),
+            button("transfer", "Transfer", Secondary),
+            button("claim", "Claim", Primary),
+            button("delete", "Delete", Danger),
+        ]),
+    ]
+}
+
+pub(super) async fn post_panel(ctx: &Context, channel: ChannelId) -> serenity::Result<()> {
+    let embed = CreateEmbed::new()
+        .title("🎛️ Temp voice controls")
+        .description("Owner aur staff room manage kar sakte hain. Owner chala gaya? Voice mein rehkar **Claim** daba.");
+    channel
+        .send_message(
+            &ctx.http,
+            CreateMessage::new().embed(embed).components(panel_rows()),
+        )
+        .await?;
+    Ok(())
+}
+
+pub(super) fn info_embed(channel: &GuildChannel, owner: UserId, members: &[UserId]) -> CreateEmbed {
+    let everyone = PermissionOverwriteType::Role(channel.guild_id.everyone_role());
+    let deny = channel
+        .permission_overwrites
+        .iter()
+        .find(|overwrite| overwrite.kind == everyone)
+        .map_or_else(Permissions::empty, |overwrite| overwrite.deny);
+    let yes_no = |yes| if yes { "Yes" } else { "No" };
+    let on_off = |yes| if yes { "On" } else { "Off" };
+    let limit = match channel.user_limit.unwrap_or_default() {
+        0 => "Unlimited".into(),
+        limit => limit.to_string(),
+    };
+    let bitrate = channel
+        .bitrate
+        .map_or_else(|| "—".into(), |bps| format!("{} kbps", bps / 1000));
+    let occupancy = match members.len() {
+        0 => "Abhi room khaali hai.".into(),
+        count => format!("Voice mein abhi {count}"),
+    };
+    CreateEmbed::new()
+        .title(&channel.name)
+        .description(occupancy)
+        .field("Owner", format!("<@{owner}>"), true)
+        .field("Limit", limit, true)
+        .field("Bitrate", bitrate, true)
+        .field(
+            "Region",
+            channel.rtc_region.as_deref().unwrap_or("Automatic"),
+            true,
+        )
+        .field("Locked", yes_no(deny.contains(Permissions::CONNECT)), true)
+        .field(
+            "Hidden",
+            yes_no(deny.contains(Permissions::VIEW_CHANNEL)),
+            true,
+        )
+        .field(
+            "Chat",
+            on_off(!deny.contains(Permissions::SEND_MESSAGES)),
+            true,
+        )
+        .field(
+            "Soundboard",
+            on_off(!deny.contains(Permissions::USE_SOUNDBOARD)),
+            true,
+        )
+}
+
+fn ephemeral(text: impl Into<String>) -> CreateInteractionResponseMessage {
+    CreateInteractionResponseMessage::new()
+        .content(text)
+        .ephemeral(true)
+        .allowed_mentions(CreateAllowedMentions::new())
+}
+
+fn modal(action: &str, title: &str, label: &str, max_length: u16) -> CreateInteractionResponse {
+    CreateInteractionResponse::Modal(
+        CreateModal::new(format!("{PREFIX}{action}"), title).components(vec![
+            CreateActionRow::InputText(
+                CreateInputText::new(InputTextStyle::Short, label, FIELD)
+                    .max_length(max_length)
+                    .required(true),
+            ),
+        ]),
+    )
+}
+
+fn member_picker(action: &str, prompt: &str) -> CreateInteractionResponse {
+    let picker = CreateSelectMenu::new(
+        format!("{PREFIX}pick:{action}"),
+        CreateSelectMenuKind::User {
+            default_users: None,
+        },
+    )
+    .placeholder("Member select kar")
+    .min_values(1)
+    .max_values(1);
+    CreateInteractionResponse::Message(
+        ephemeral(prompt).components(vec![CreateActionRow::SelectMenu(picker)]),
+    )
+}
+
+fn panel_form(action: &str) -> Option<CreateInteractionResponse> {
+    Some(match action {
+        "rename" => modal("rename", "Room rename", "Naya naam", 100),
+        "limit" => modal("limit", "Room limit", "Member limit (0 = unlimited)", 2),
+        "bitrate" => modal("bitrate", "Room bitrate", "Bitrate in kbps", 3),
+        "kick" => member_picker("kick", "Kisko kick karna hai?"),
+        "permit" => member_picker("permit", "Kisko entry deni hai?"),
+        "transfer" => member_picker("transfer", "Naya owner kaun?"),
+        "delete" => CreateInteractionResponse::Message(
+            ephemeral("Pakka, sabke liye room delete karna hai?").components(vec![
+                CreateActionRow::Buttons(vec![button(
+                    "delete:confirm",
+                    "Delete room",
+                    ButtonStyle::Danger,
+                )]),
+            ]),
+        ),
+        _ => return None,
+    })
+}
+
+fn component_action(id: &str, kind: &ComponentInteractionDataKind) -> anyhow::Result<Action> {
+    let picked = || match kind {
+        ComponentInteractionDataKind::UserSelect { values } if values.len() == 1 => Ok(values[0]),
+        _ => Err(UserError("Ek member select kar.".into())),
+    };
+    Ok(match id {
+        "lock" => Action::Lock(None),
+        "hide" => Action::Hide(None),
+        "chat" => Action::Chat(None),
+        "soundboard" => Action::Soundboard(None),
+        "claim" => Action::Claim,
+        "delete:confirm" => Action::Delete,
+        "pick:kick" => Action::Kick(picked()?),
+        "pick:permit" => Action::Permit(picked()?),
+        "pick:transfer" => Action::Transfer(picked()?),
+        _ => {
+            return Err(UserError(
+                "Ye button ab available nahi hai. `/vc panel` se naya panel laga.".into(),
+            )
+            .into());
+        }
+    })
+}
+
+pub(super) async fn on_component(ctx: &Context, component: &ComponentInteraction) {
+    let Some(id) = component.data.custom_id.strip_prefix(PREFIX) else {
+        return;
+    };
+    let target = RoomTarget::Panel(component.channel_id);
+    if let Some(form) = panel_form(id) {
+        let result = match actor(component.guild_id, component.member.as_ref()) {
+            Ok((guild, member)) => tempvc::can_control(ctx, guild, member, target),
+            Err(err) => Err(err),
+        };
+        let response = match result {
+            Ok(()) => form,
+            Err(err) => CreateInteractionResponse::Message(ephemeral(error_text(err))),
+        };
+        if let Err(err) = component.create_response(&ctx.http, response).await {
+            tracing::warn!(%err, "temp voice: could not open panel control");
+        }
+        return;
+    }
+
+    if let Err(err) = component.defer_ephemeral(&ctx.http).await {
+        tracing::warn!(%err, "temp voice: could not defer panel action");
+        return;
+    }
+    let result = async {
+        let (guild, member) = actor(component.guild_id, component.member.as_ref())?;
+        let action = component_action(id, &component.data.kind)?;
+        tempvc::execute(ctx, guild, member, target, action).await
+    }
+    .await;
+    if let Err(err) = component.edit_response(&ctx.http, edit_reply(result)).await {
+        tracing::warn!(%err, "temp voice: could not respond to panel action");
+    }
+}
+
+fn modal_action(modal: &ModalInteraction) -> anyhow::Result<Action> {
+    let value = modal
+        .data
+        .components
+        .iter()
+        .flat_map(|row| &row.components)
+        .find_map(|field| match field {
+            ActionRowComponent::InputText(input) if input.custom_id == FIELD => {
+                input.value.as_deref()
+            }
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| UserError("Kuch toh bhar de.".into()))?;
+    let number = || {
+        value
+            .parse()
+            .map_err(|_| UserError("Poora number daal.".into()))
+    };
+    match modal.data.custom_id.strip_prefix(PREFIX) {
+        Some("rename") => Ok(Action::Rename(value.into())),
+        Some("limit") => Ok(Action::Limit(number()?)),
+        Some("bitrate") => Ok(Action::Bitrate(number()?)),
+        _ => Err(UserError("Ye form ab available nahi hai.".into()).into()),
+    }
+}
+
+pub(super) async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
+    if let Err(err) = modal.defer_ephemeral(&ctx.http).await {
+        tracing::warn!(%err, "temp voice: could not defer room form");
+        return;
+    }
+    let result = async {
+        let (guild, member) = actor(modal.guild_id, modal.member.as_ref())?;
+        let target = RoomTarget::Panel(modal.channel_id);
+        tempvc::execute(ctx, guild, member, target, modal_action(modal)?).await
+    }
+    .await;
+    if let Err(err) = modal.edit_response(&ctx.http, edit_reply(result)).await {
+        tracing::warn!(%err, "temp voice: could not respond to room form");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vc_is_guild_only_and_leaves_room_for_three_subcommand_groups() {
+        let serialized = serde_json::to_value(command()).unwrap();
+        assert_eq!(serialized["name"], "vc");
+        assert_eq!(
+            serialized["contexts"],
+            serde_json::to_value([InteractionContext::Guild]).unwrap()
+        );
+        let options = serialized["options"].as_array().unwrap();
+        assert!(options.len() <= 25 - 3);
+        let names: Vec<_> = options
+            .iter()
+            .map(|option| option["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "create",
+                "lock",
+                "unlock",
+                "hide",
+                "unhide",
+                "rename",
+                "limit",
+                "bitrate",
+                "region",
+                "chat",
+                "soundboard",
+                "permit",
+                "deny",
+                "reset",
+                "kick",
+                "disconnect",
+                "claim",
+                "transfer",
+                "delete",
+                "panel",
+                "info",
+                "drag",
+            ]
+        );
+        for option in options.iter().filter(|option| option["name"] != "create") {
+            let children = option["options"].as_array().unwrap();
+            let channel = children.last().unwrap();
+            assert_eq!(channel["name"], "channel");
+            assert_eq!(channel["required"], false);
+        }
+    }
+
+    #[test]
+    fn all_room_controls_have_routable_persistent_ids() {
+        let rows = serde_json::to_value(panel_rows()).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert!(rows.len() <= 5);
+        for row in rows {
+            let buttons = row["components"].as_array().unwrap();
+            assert!(buttons.len() <= 5);
+            for button in buttons {
+                let id = button["custom_id"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix(PREFIX)
+                    .unwrap();
+                assert!(
+                    panel_form(id).is_some()
+                        || component_action(id, &ComponentInteractionDataKind::Button).is_ok()
+                );
+            }
+        }
+    }
+}

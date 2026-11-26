@@ -850,15 +850,14 @@
     const c = chan(id);
     const bare = opts && opts.bare;
     if (!c) return h('span', { class: 'inline-ref', title: 'Channel ' + id }, bare ? null : h('span', { class: 'glyph' }, '#'), 'unknown-channel');
-    return h('span', { class: 'inline-ref' }, bare ? null : c.kind === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'), c.name, opts && opts.category && c.category ? h('small', { style: 'color:var(--faint);margin-left:4px' }, c.category) : null);
+    return h('span', { class: 'inline-ref' }, bare ? null : c.kind === 'voice' ? icon('voice') : c.kind === 'category' ? icon('menu') : h('span', { class: 'glyph' }, '#'), c.name, opts && opts.category && c.category ? h('small', { style: 'color:var(--faint);margin-left:4px' }, c.category) : null);
   }
 
-  function channelItems(kind, selected) {
-    const wanted = kind === 'voice' ? 'voice' : 'text';
+  function channelItems(kind, selected, includeStages = true) {
     return (q) => {
       q = q.toLowerCase();
-      return S.channels.filter((c) => c.kind === wanted && (!q || c.name.toLowerCase().includes(q) || (c.category || '').toLowerCase().includes(q)))
-        .map((c) => ({ id: c.id, label: c.name, group: c.category || '', lead: wanted === 'voice' ? icon('voice') : h('span', { class: 'glyph' }, '#'),
+      return S.channels.filter((c) => c.kind === kind && (includeStages || !c.stage) && (!q || c.name.toLowerCase().includes(q) || (c.category || '').toLowerCase().includes(q)))
+        .map((c) => ({ id: c.id, label: c.name, group: kind === 'category' ? undefined : c.category || '', lead: kind === 'voice' ? icon('voice') : kind === 'category' ? icon('menu') : h('span', { class: 'glyph' }, '#'),
           trail: selected && selected.includes(c.id) ? icon('check', 'check-mark') : null }));
     };
   }
@@ -1186,10 +1185,11 @@
     const wrap = (...kids) => h('span', { class: 'val' }, kids);
     switch (type) {
       case 'toggle': return wrap(isOn(value) ? 'On' : 'Off');
-      case 'channel': case 'voice_channel': return wrap(channelRef(value));
-      case 'channels': return wrap(value.split(',').filter(Boolean).map((id, i) => [i ? ', ' : '', channelRef(id.trim())]));
+      case 'channel': case 'voice_channel': case 'category': return wrap(channelRef(value));
+      case 'channels': case 'voice_channels': return wrap(value.split(',').filter(Boolean).map((id, i) => [i ? ', ' : '', channelRef(id.trim())]));
       case 'weighted_channels': return wrap(value.split(',').filter(Boolean).map((p, i) => { const [id, w] = p.split(':'); return [i ? ', ' : '', channelRef(id.trim()), ' ×' + (w || 1)]; }));
       case 'role': { const r = role(value); return wrap(h('span', { class: 'role-dot', style: r && r.color ? 'background:' + r.color : '' }), r ? r.name : 'role ' + value); }
+      case 'roles': return wrap(describePlain(value, kind));
       case 'users': {
         const ids = value.split(',').map((x) => x.trim()).filter(Boolean);
         const el = wrap(icon('users'), h('span', null, plural(ids.length, 'member') + '…'));
@@ -1305,9 +1305,11 @@
     switch (kind.type) {
       case 'toggle': return isOn(v) ? 'On' : 'Off';
       case 'channel': case 'voice_channel': { const c = chan(v); return c ? '#' + c.name : v; }
-      case 'channels': return v.split(',').map((id) => { const c = chan(id.trim()); return c ? '#' + c.name : id; }).join(', ');
+      case 'category': { const c = chan(v); return c ? c.name : v; }
+      case 'channels': case 'voice_channels': return v.split(',').map((id) => { const c = chan(id.trim()); return c ? '#' + c.name : id; }).join(', ');
       case 'weighted_channels': return v.split(',').map((p) => { const [id, w] = p.split(':'); const c = chan((id || '').trim()); return (c ? '#' + c.name : id) + ' ×' + (w || 1); }).join(', ');
       case 'role': { const r = role(v); return r ? '@' + r.name : v; }
+      case 'roles': return v.split(',').map((id) => { const r = role(id.trim()); return r ? '@' + r.name : id; }).join(', ');
       case 'choice': { const o = (kind.options || []).find((x) => x[0] === v); return o ? o[1] : v; }
       case 'times': return v.split(',').filter(Boolean).join(', ');
       case 'number': case 'decimal': return v + (kind.unit ? ' ' + kind.unit : '');
@@ -1408,26 +1410,33 @@
       case 'toggle':
         return switchEl(f.draft === 'on', s.label, (on, btn) => { btn.set(on); set(on ? 'on' : 'off'); });
       case 'channel':
-      case 'voice_channel': {
-        const voice = k.type === 'voice_channel';
+      case 'voice_channel':
+      case 'category': {
+        const kind = k.type === 'voice_channel' ? 'voice' : k.type === 'category' ? 'category' : 'text';
+        const category = kind === 'category';
+        const item = category ? 'category' : 'channel';
         const c = f.draft ? chan(f.draft) : null;
         const btn = h('button', { class: 'picker-btn' + (f.draft && !c ? ' missing' : ''), type: 'button', id, 'aria-describedby': described, 'aria-haspopup': 'listbox' },
-          f.draft ? (voice ? icon('voice') : h('span', { class: 'glyph' }, '#')) : icon(voice ? 'voice' : 'hash'),
-          h('span', { class: 'value' + (f.draft ? '' : ' placeholder') }, c ? c.name : f.draft ? 'Unknown channel ' + f.draft : 'No channel set'),
+          kind === 'text' && f.draft ? h('span', { class: 'glyph' }, '#') : icon(kind === 'text' ? 'hash' : category ? 'menu' : 'voice'),
+          h('span', { class: 'value' + (f.draft ? '' : ' placeholder') }, c ? c.name : f.draft ? 'Unknown ' + item + ' ' + f.draft : 'No ' + item + ' set'),
           c && c.category ? h('small', { style: 'color:var(--faint)' }, c.category) : null, icon('chevron'));
-        btn.addEventListener('click', () => openPicker(btn, { title: 'Choose a channel', placeholder: voice ? 'Search voice channels' : 'Search channels', load: channelItems(voice ? 'voice' : 'text', [f.draft]), onPick: (it) => set(it.id, true) }));
+        btn.addEventListener('click', () => openPicker(btn, { title: 'Choose a ' + item,
+          placeholder: category ? 'Search categories' : kind === 'voice' ? 'Search voice channels' : 'Search channels', load: channelItems(kind, [f.draft]), onPick: (it) => set(it.id, true) }));
         return h('div', { class: 'picker-row' }, btn, f.draft ? h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Clear ' + s.label, 'data-tip': 'Clear', onclick: () => set('', true) }, icon('x')) : null);
       }
-      case 'channels': {
-        const ids = f.draft ? f.draft.split(',').filter(Boolean) : [];
+      case 'channels':
+      case 'voice_channels': {
+        const voice = k.type === 'voice_channels';
+        const ids = f.draft.split(',').map((id) => id.trim()).filter(Boolean);
         const chips = h('div', { class: 'chips', id, 'aria-describedby': described });
         ids.forEach((cid) => {
           const c = chan(cid);
-          chips.appendChild(h('span', { class: 'chip' + (c ? '' : ' missing') }, h('span', { class: 'glyph' }, '#'), h('span', { class: 'chip-text' }, c ? c.name : 'unknown ' + cid),
+          chips.appendChild(h('span', { class: 'chip' + (c ? '' : ' missing') }, voice ? icon('voice') : h('span', { class: 'glyph' }, '#'), h('span', { class: 'chip-text' }, c ? c.name : 'unknown ' + cid),
             h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + (c ? c.name : cid), onclick: () => set(ids.filter((x) => x !== cid).join(','), true) }, icon('x'))));
         });
         const add = h('button', { class: 'btn sm', type: 'button' }, icon('plus'), ids.length ? 'Add' : 'Add channel');
-        add.addEventListener('click', () => openPicker(add, { title: 'Add a channel', placeholder: 'Search channels', load: channelItems('text', ids), onPick: (it) => { if (!ids.includes(it.id)) set(ids.concat(it.id).join(','), true); } }));
+        add.addEventListener('click', () => openPicker(add, { title: 'Add a channel', placeholder: voice ? 'Search voice channels' : 'Search channels',
+          load: channelItems(voice ? 'voice' : 'text', ids, false), onPick: (it) => { if (!ids.includes(it.id)) set(ids.concat(it.id).join(','), true); } }));
         chips.appendChild(add);
         return chips;
       }
@@ -1439,6 +1448,21 @@
           h('span', { class: 'value' + (f.draft ? '' : ' placeholder') }, r ? r.name : f.draft ? 'Unknown role ' + f.draft : 'No role set'), icon('chevron'));
         btn.addEventListener('click', () => openPicker(btn, { title: 'Choose a role', placeholder: 'Search roles', load: roleItems, onPick: (it) => set(it.id, true) }));
         return h('div', { class: 'picker-row' }, btn, f.draft ? h('button', { class: 'btn ghost icon-only', type: 'button', 'aria-label': 'Clear ' + s.label, onclick: () => set('', true) }, icon('x')) : null);
+      }
+      case 'roles': {
+        const ids = f.draft.split(',').map((id) => id.trim()).filter(Boolean);
+        const chips = h('div', { class: 'chips', id, 'aria-describedby': described });
+        ids.forEach((rid) => {
+          const r = role(rid);
+          chips.appendChild(h('span', { class: 'chip' + (r ? '' : ' missing') }, h('span', { class: 'role-dot', style: r && r.color ? 'background:' + r.color : '' }),
+            h('span', { class: 'chip-text' }, r ? r.name : 'unknown ' + rid),
+            h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Remove ' + (r ? r.name : rid), onclick: () => set(ids.filter((x) => x !== rid).join(','), true) }, icon('x'))));
+        });
+        const add = h('button', { class: 'btn sm', type: 'button' }, icon('plus'), ids.length ? 'Add' : 'Add role');
+        add.addEventListener('click', () => openPicker(add, { title: 'Add a role', placeholder: 'Search roles',
+          load: (q) => roleItems(q).filter((r) => !ids.includes(r.id)), onPick: (it) => set(ids.concat(it.id).join(','), true) }));
+        chips.appendChild(add);
+        return chips;
       }
       case 'users': {
         const ids = f.draft ? f.draft.split(',').filter(Boolean) : [];

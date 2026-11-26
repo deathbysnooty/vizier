@@ -53,6 +53,9 @@ mod image_fetch;
 mod deepdive;
 mod kalesh;
 mod kalesh_store;
+mod tempvc;
+mod tempvc_panel;
+mod tempvc_store;
 mod msglog;
 mod msglog_gone;
 mod member_facts;
@@ -274,6 +277,9 @@ impl VizierChannel for DiscordChannelReader {
         // Fights the kalesh detector called, and the panel's summaries of them.
         if let Err(err) = kalesh_store::open(&self.deps.config.workspace) {
             tracing::warn!("kalesh: store not opened: {}", err);
+        }
+        if let Err(err) = tempvc_store::open(&self.deps.config.workspace) {
+            tracing::warn!("tempvc: store not opened: {}", err);
         }
         // What each member talked about, night by night, and what the nightly
         // jobs have already done. Not opening only means the topic pass and the
@@ -1536,7 +1542,12 @@ impl EventHandler for Handler {
     async fn voice_state_update(&self, ctx: Context, old: Option<serenity::all::VoiceState>, new: serenity::all::VoiceState) {
         // Deafened stretches, for voice points: Dyno's log has no deafen lines.
         stats::on_voice_state(&ctx, &new);
+        tempvc::on_voice_state(&ctx, old.as_ref(), &new);
         dragme::on_voice_state(&ctx, old.as_ref(), &new).await;
+    }
+
+    async fn channel_delete(&self, _ctx: Context, channel: serenity::all::GuildChannel, _messages: Option<Vec<serenity::all::Message>>) {
+        tempvc::on_channel_delete(&channel);
     }
 
     async fn cache_ready(&self, ctx: Context, _guilds: Vec<serenity::all::GuildId>) {
@@ -1547,6 +1558,7 @@ impl EventHandler for Handler {
         // The invite snapshot, read again on every cache_ready in case a
         // reconnect missed an invite event; the periodic re-read starts once.
         invites::on_ready(&ctx, _guilds.first().copied());
+        tempvc::on_cache_ready(&ctx, _guilds);
     }
 
     async fn ready(&self, ctx: Context, _ready: Ready) {
@@ -1748,6 +1760,7 @@ impl EventHandler for Handler {
         commands.push(dragme::invite_command());
         commands.push(dragme::command());
         commands.push(dragme::invite_slash_command());
+        commands.push(tempvc_panel::command());
 
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
@@ -2055,6 +2068,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
+            if id.starts_with(tempvc_panel::PREFIX) {
+                return tempvc_panel::on_component(&ctx, component).await;
+            }
             if dragme::owns_component(&id) {
                 dragme::on_component(&ctx, component).await;
                 return;
@@ -2330,6 +2346,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
 
         // Reply modal submitted: send it back the way it came.
         if let Interaction::Modal(ref modal) = interaction {
+            if modal.data.custom_id.starts_with(tempvc_panel::PREFIX) {
+                return tempvc_panel::on_modal(&ctx, modal).await;
+            }
             if modal.data.custom_id.starts_with("frogans:") {
                 frog::on_modal(&ctx, modal).await;
                 return;
@@ -2422,6 +2441,9 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         }
 
         if let Interaction::Command(command) = interaction {
+            if command.data.name == tempvc_panel::COMMAND {
+                return tempvc_panel::on_command(&ctx, &command).await;
+            }
             if matches!(command.data.name.as_str(), dragme::COMMAND | dragme::INVITE_COMMAND | dragme::INVITE_SLASH_COMMAND) {
                 dragme::on_command(&ctx, &command).await;
                 return;

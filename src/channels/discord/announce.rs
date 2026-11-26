@@ -558,12 +558,19 @@ pub struct News {
     pub body: &'static str,
 }
 
+const TEMPVC_NEWS_ID: &str = "tempvc-2026-11";
+
 pub const NEWS: &[News] = &[News {
     id: "dragme-2026-11",
     title: "🎙️ VC mein aana hai?",
     body: "Kisi VC mein ho? `/dragme member:@someone` se unke VC ke chat mein request jayegi. Wahan jo bhi VC mein hai, woh **Approve** ya **Deny** daba sakta hai. Request 10 minute tak khuli rahegi.\n\n\
            Apne VC mein kisi ko bulana hai? `/vcinvite member:@someone` chalao, ya unpe right-click karo, phir **Apps → Invite to my VC**. Unke paas **Join** ya **No thanks** dabane ke liye 30 minute hain. **Join** dabane se pehle woh kisi VC mein hon. Tum apne VC se nikle toh invite cancel.\n\n\
            VC full hai? Approve ya Join se Loduchand phir bhi move kar sakta hai.",
+}, News {
+    id: TEMPVC_NEWS_ID,
+    title: "🎙️ Apna temporary VC",
+    body: "Join-to-create voice channel mein jao aur Loduchand tumhare liye ek room bana dega. Uske chat mein controls milenge. Wahan se room ka naam ya limit badlo, lock karo, ya kisi ko andar aane do. Panel dobara chahiye? `/vc panel` chalao.\n\n\
+           Owner nikle toh thodi der baad room mein sabse pehle aaya member owner ban jayega. Sab nikal gaye toh room khud band ho jayega.",
 }, News {
     id: "geo-world-2026-09",
     title: "\u{1F30D} Geo goes worldwide \u{2014} vote India, World or Mix",
@@ -682,9 +689,9 @@ pub fn fill_channels(body: &str) -> String {
         .replace("{scoreboard}", &mention("VIZIER_SCOREBOARD_CHANNEL", "the game updates channel"))
 }
 
-/// The oldest note nobody has been told about yet.
-pub fn next_news(done: &[String]) -> Option<&'static News> {
-    NEWS.iter().find(|n| !done.iter().any(|d| d == n.id))
+/// The oldest available note nobody has been told about yet.
+fn next_news(done: &[String], tempvc_configured: bool) -> Option<&'static News> {
+    NEWS.iter().find(|n| (n.id != TEMPVC_NEWS_ID || tempvc_configured) && !done.iter().any(|d| d == n.id))
 }
 
 // --- when a batch is ready ------------------------------------------------------------------
@@ -893,7 +900,8 @@ async fn retry(ctx: &Context) -> bool {
 /// The next release note, if one is waiting.
 async fn news(ctx: &Context, channels: &[u64]) -> bool {
     let mut done = list(NEWS_DONE);
-    let Some(entry) = next_news(&done) else {
+    let tempvc_configured = control::on("VIZIER_TEMPVC", false) && !control::ids("VIZIER_TEMPVC_HUBS").is_empty();
+    let Some(entry) = next_news(&done, tempvc_configured) else {
         return false;
     };
     let post = Post::new(entry.title, &fill_channels(entry.body));
@@ -1172,15 +1180,22 @@ mod tests {
             assert!(!filled.contains('{'), "{} still has a channel mark in it:\n{}", note.id, filled);
             assert!(note.body.chars().count() <= NEWS_LIMIT, "{} is too long", note.id);
         }
-        let first = next_news(&[]).expect("a seeded note");
+        let first = next_news(&[], true).expect("a seeded note");
         assert_eq!(first.id, NEWS[0].id);
         let done: Vec<String> = NEWS.iter().map(|n| n.id.to_string()).collect();
-        assert!(next_news(&done).is_none());
+        assert!(next_news(&done, true).is_none());
         // Ids are stable and unique, or a note would go out twice.
         let mut ids: Vec<&str> = NEWS.iter().map(|n| n.id).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), NEWS.len());
+    }
+
+    #[test]
+    fn temp_voice_release_note_waits_until_configured() {
+        let done = NEWS.iter().filter(|n| n.id != TEMPVC_NEWS_ID).map(|n| n.id.to_string()).collect::<Vec<_>>();
+        assert!(next_news(&done, false).is_none());
+        assert_eq!(next_news(&done, true).map(|n| n.id), Some(TEMPVC_NEWS_ID));
     }
 
     #[test]

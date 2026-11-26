@@ -18,7 +18,12 @@ pub enum Kind {
     WeightedChannels,
     /// A voice channel id.
     VoiceChannel,
+    /// Comma-separated voice channel ids.
+    VoiceChannels,
+    Category,
     Role,
+    /// Comma-separated role ids.
+    Roles,
     /// Comma-separated member ids.
     Users,
     Number { min: i64, max: i64, unit: &'static str },
@@ -2540,6 +2545,25 @@ pub fn sections() -> Vec<Section> {
                      and moderators only - anybody else is told so. Every look is written to the activity log with \
                      your name on it. The same thing is on the Confessions page.",
                 ),
+            ],
+        },
+        Section {
+            id: "tempvc",
+            title: "Temp voice",
+            icon: "🎙️",
+            about: "Join a hub to get a temporary voice room with its own controls in the room chat. The room is removed when it stays empty. If the owner leaves, ownership passes to the member who's been there longest.",
+            settings: vec![
+                setting("VIZIER_TEMPVC", "Temporary voice rooms", "Enable the hubs, /vc and the room controls.", Kind::Toggle, "off"),
+                setting("VIZIER_TEMPVC_HUBS", "Join-to-create hubs", "Members who join these voice channels get a temporary room.", Kind::VoiceChannels, ""),
+                setting("VIZIER_TEMPVC_CATEGORY", "Room category", "Where temporary rooms are created. Leave empty to use the hub's category.", Kind::Category, ""),
+                setting("VIZIER_TEMPVC_NAME", "Room name pattern", "{user} is the member's display name. {count} is the number of active rooms from that hub including the new one.", Kind::Text, "{user}'s room"),
+                setting("VIZIER_TEMPVC_LIMIT", "Default room limit", "Maximum number of members in a new room. Use 0 for unlimited.", number(0, 99, "members"), "0"),
+                setting("VIZIER_TEMPVC_STAFF_ROLES", "Temp voice staff roles", "These roles can manage temporary rooms alongside Discord administrators.", Kind::Roles, ""),
+                setting("VIZIER_TEMPVC_GRACE_SECONDS", "Empty room grace", "How long an empty room stays open. The countdown stops if someone joins.", number(0, 86400, "seconds"), "20"),
+                setting("VIZIER_TEMPVC_HANDOFF_SECONDS", "Ownership handoff delay", "How long the owner can be away before the longest-present member takes over.", number(0, 86400, "seconds"), "60"),
+            ],
+            commands: vec![
+                command("vc", EVERYONE, "/vc", "Manage your temporary room. Use /vc panel to repost the controls in the room chat. Staff can specify a channel and use /vc drag."),
             ],
         },
         Section {
