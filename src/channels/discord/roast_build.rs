@@ -7,10 +7,8 @@
 //! Nothing here touches Discord or a model - `roast.rs` does that - so the
 //! tests can hand it a fake model and a made-up dossier.
 //!
-//! The rules are narrower than member notes'. A ship verdict is allowed to be
-//! sharp: the "unkind" filter notes use is deliberately not here, and neither is
-//! the ban on talking about someone's routine or the games they lose. What stays
-//! banned is the cruelty the owner ruled out - slurs, family, death, looks and
+//! A ship verdict can poke fun at someone's routine or the games they lose.
+//! The filter rules out slurs, family, death, looks and
 //! body, mental health, gender and sexuality, religion and caste - and those
 //! stay out even when the member jokes about them themselves. #safe-corner
 //! never reaches the model: nothing said there is in the message log to begin
@@ -22,7 +20,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-use super::notes_build::{cut, estimate_tokens};
+use super::message_text::{cut, estimate_tokens};
 use super::ship_score::{self, Between, Score};
 
 pub use super::ship_score::{MAX_PERCENT, MIN_PERCENT, WHAT_MOVES_IT, base as ship_base};

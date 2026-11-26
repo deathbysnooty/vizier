@@ -423,7 +423,7 @@ pub async fn rebuild(who: Vec<u64>, now: i64) -> Run {
             continue;
         }
         let games: Vec<String> =
-            tokio::task::spawn_blocking(move || super::notes_facts::games_of(user).into_iter().map(|g| g.name.to_string()).collect::<Vec<_>>())
+            tokio::task::spawn_blocking(move || super::member_facts::games_of(user).into_iter().map(|g| g.name.to_string()).collect::<Vec<_>>())
                 .await
                 .unwrap_or_default();
         let sheet = build(user, &rows, games, totals.get(&user).copied().unwrap_or(0), pairs.get(&user).cloned().unwrap_or_default(), now);

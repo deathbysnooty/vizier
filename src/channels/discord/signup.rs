@@ -524,7 +524,7 @@ pub fn compose(title: &str, body: &str, attached: &[Attached]) -> Result<Draft, 
     }
     let bad: Vec<String> = attached
         .iter()
-        .filter(|a| !super::imagefx_recent::looks_like_an_image(&a.filename, a.content_type.as_deref()))
+        .filter(|a| !super::image_fetch::looks_like_an_image(&a.filename, a.content_type.as_deref()))
         .map(|a| a.filename.clone())
         .collect();
     if !bad.is_empty() {
@@ -612,7 +612,7 @@ pub async fn command(ctx: &Context, command: &CommandInteraction) {
     let mut files = Vec::new();
     let mut lost = Vec::new();
     for image in &draft.images {
-        match super::imagefx_fetch::get(&image.url, IMAGE_CAP, Duration::from_secs(20)).await {
+        match super::image_fetch::get(&image.url, IMAGE_CAP, Duration::from_secs(20)).await {
             Ok(bytes) => files.push(CreateAttachment::bytes(bytes, image.filename.clone())),
             Err(err) => {
                 tracing::warn!("signup: the poster {} was not fetched: {}", image.filename, err.plainly());

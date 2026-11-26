@@ -455,10 +455,7 @@ impl VizierTools {
                     .tool(send_message)
                     .tool(react_message)
                     .tool(get_message)
-                    .tool(search_history)
-                    .tool(crate::agents::tools::discord::SetMemberReminder)
-                    .tool(crate::agents::tools::discord::ListMemberReminders)
-                    .tool(crate::agents::tools::discord::CancelMemberReminder);
+                    .tool(search_history);
             }
         }
 

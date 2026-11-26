@@ -1,7 +1,6 @@
 //! Richer scheduled posts on the panel: templates to start from, the values the
 //! preview fills in, trying an AI prompt, sending a test post, checking the new
-//! reminder fields, and how member-reminder and picture changes read in the
-//! activity log.
+//! reminder fields, and how picture changes read in the activity log.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -141,9 +140,8 @@ pub fn check_extras(r: &mut Reminder) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// How a member-reminder (`memo:<id>`) or picture (`media:<id>`) change reads.
-/// Never the reminder's text.
-pub fn audit_entry(panel: &Panel, e: &super::super::AuditEntry) -> Map<String, Value> {
+/// How a picture (`media:<id>`) change reads.
+pub fn audit_entry(e: &super::super::AuditEntry) -> Map<String, Value> {
     let body = |b: &Option<String>| b.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()).unwrap_or(Value::Null);
     let (old, new) = (body(&e.old), body(&e.new));
     let facts = if new.is_null() { &old } else { &new };
@@ -151,32 +149,8 @@ pub fn audit_entry(panel: &Panel, e: &super::super::AuditEntry) -> Map<String, V
     obj.insert("section".into(), json!({ "id": "reminders", "title": "Reminders", "icon": "⏰" }));
     obj.insert("old".into(), Value::Null);
     obj.insert("new".into(), Value::Null);
-    if e.key.starts_with("memo:") {
-        let uid = facts.get("user_id").and_then(Value::as_str).unwrap_or("");
-        let name = uid
-            .parse::<u64>()
-            .ok()
-            .and_then(|id| panel.data.cached_member(id))
-            .map(|m| m.name)
-            .unwrap_or_else(|| if uid.is_empty() { "a member".to_string() } else { uid.to_string() });
-        let change = match facts.get("action").and_then(Value::as_str) {
-            Some("created") => match facts.get("due_ts").and_then(Value::as_i64) {
-                Some(due) => format!("Created · due {}", super::super::memos::describe(due, e.ts)),
-                None => "Created".to_string(),
-            },
-            Some("cancelled") => "Cancelled".to_string(),
-            Some(other) => other.to_string(),
-            None => "Changed".to_string(),
-        };
-        obj.insert("label".into(), json!(format!("Member reminder for @{}", name)));
-        if !uid.is_empty() {
-            obj.insert("member_id".into(), json!(uid));
-        }
-        obj.insert("change".into(), json!(change));
-    } else {
-        let name = facts.get("name").and_then(Value::as_str).unwrap_or("a picture");
-        obj.insert("label".into(), json!(format!("Picture “{}”", name)));
-        obj.insert("change".into(), json!(if new.is_null() { "Deleted" } else { "Uploaded" }));
-    }
+    let name = facts.get("name").and_then(Value::as_str).unwrap_or("a picture");
+    obj.insert("label".into(), json!(format!("Picture “{}”", name)));
+    obj.insert("change".into(), json!(if new.is_null() { "Deleted" } else { "Uploaded" }));
     obj
 }

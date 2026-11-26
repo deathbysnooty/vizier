@@ -471,7 +471,7 @@ All notable changes to this project will be documented in this file.
 
 ### 💼 Other
 
-- Admins can set a reminder for another member (chat or /remind member:)
+- Added the ability for admins to set a personal reminder for another member. The feature has since been retired.
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -480,7 +480,7 @@ All notable changes to this project will be documented in this file.
 
 ### 💼 Other
 
-- Members set their own by asking the bot or with /remind
+- Added personal reminders for members. The feature has since been retired.
 
 ### ⚙️ Miscellaneous Tasks
 

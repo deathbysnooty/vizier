@@ -143,6 +143,7 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("help", EVERYONE, "/help topic:", "Every command you can use, by area; pick a topic for the details. Only the asker sees it."),
+                command("vcinvite", EVERYONE, "/vcinvite member:", "Invites someone to join your current voice channel. You can also right-click the member and choose Apps → Invite to my VC."),
             ],
         },
         Section {
@@ -397,8 +398,8 @@ pub fn sections() -> Vec<Section> {
                     "House Cup",
                     "The whole Cup, in one switch. ON is normal. OFF pauses it: no house points are written by ANY source - the games, \
                      chat, voice, the arena, the Snitch, a full frog set, /housepoints or /modgive - and nothing at all goes into the \
-                     ledger, not even a nought. Chocolate Frogs and Snitches stop dropping, and /frogdrop and /snitchdrop say so instead \
-                     of dropping. While it is off the games stop mentioning houses or house points altogether: a round says only what it \
+                     ledger, not even a nought. Chocolate Frogs and Snitches stop dropping. While it is off the games stop mentioning \
+                     houses or house points altogether: a round says only what it \
                      paid in its OWN points, and the cards drop the crest and the house colours. What is untouched: every game keeps \
                      running and keeps paying its own score, whatever is already in the ledger stays readable as that month's final \
                      result, everyone keeps their house, and the cards people own stay theirs - /frogs, /frogcard and trading all keep \
@@ -603,7 +604,7 @@ pub fn sections() -> Vec<Section> {
                     Misses get no reply, so a busy catch doesn't flood the channel. A day's plan is made once, so \
                     changes to drops, hours and gap apply from the next day's plan.",
             settings: vec![
-                toggle("VIZIER_SNITCH", "Scheduled drops", "Drop Snitches on their own through the day. Off stops new drops; /snitchdrop still works."),
+                toggle("VIZIER_SNITCH", "Scheduled drops", "Drop Snitches on their own through the day. Off stops new drops."),
                 setting(
                     "VIZIER_SNITCH_CHANNELS",
                     "Drop channels",
@@ -640,12 +641,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_SNITCH_GOLDEN_2ND", "Golden 2nd", "Points for the second catcher of a Golden Snitch.", number(0, 100, "points"), "4"),
                 setting("VIZIER_SNITCH_GOLDEN_3RD", "Golden 3rd", "Points for the third catcher of a Golden Snitch.", number(0, 100, "points"), "2"),
             ],
-            commands: vec![command(
-                "snitchdrop",
-                ADMINS,
-                "/snitchdrop type:",
-                "Drops a Snitch (Bronze, Silver, Golden or random) in this channel right now. It scores like any other but doesn't use up a scheduled drop.",
-            )],
+            commands: vec![],
         },
         Section {
             id: "frogs",
@@ -1257,7 +1253,7 @@ pub fn sections() -> Vec<Section> {
                     limited per channel per week. A missed run (the bot was down) still happens within the catch-up \
                     time.",
             settings: vec![
-                toggle("VIZIER_WEEKLY", "Scheduled scan", "Run the scan every week on its own. Off stops it; /weeklyscan still works."),
+                toggle("VIZIER_WEEKLY", "Scheduled scan", "Run the scan every week on its own."),
                 setting(
                     "VIZIER_WEEKLY_CHANNELS",
                     "Channels read",
@@ -1282,12 +1278,7 @@ pub fn sections() -> Vec<Section> {
                     "36",
                 ),
             ],
-            commands: vec![command(
-                "weeklyscan",
-                ADMINS,
-                "/weeklyscan",
-                "Runs the scan over the last 7 days now; results go to the reviewers by DM for approval.",
-            )],
+            commands: vec![],
         },
         Section {
             id: "games",
@@ -1582,8 +1573,7 @@ pub fn sections() -> Vec<Section> {
                     "VIZIER_ROAST_OPTOUTS",
                     "Opted out of ships",
                     "Members who can't be shipped, and whose record is never sent to the AI for one. \
-                     Members add and remove themselves with /noroast; you can edit the list here. This is a different \
-                     list from the member-notes opt-out (/forgetme) - changing one never changes the other.",
+                     Members add and remove themselves with /noroast. You can edit the list here.",
                     Kind::Users,
                     "",
                 ),
@@ -1643,130 +1633,7 @@ pub fn sections() -> Vec<Section> {
                      sample barely moves it, and it only moves in steps of 3 - so it changes when something real \
                      changed, never at random. Nothing else is read into it.",
                 ),
-                command("noroast", EVERYONE, "/noroast", "Keeps you out of /ship. Run it again to come back in. Not the same as /forgetme."),
-            ],
-        },
-        Section {
-            id: "image",
-            title: "Image toolkit",
-            icon: "🖼\u{fe0f}",
-            about: "One command, /image, with about thirty effects on it: magik (the melty one - the picture is \
-                    content-aware shrunk and grown again, which is what crowds the detail and eats the flat parts), \
-                    deepfry, jpeg, pixelate, swirl, explode, implode, wave, glitch, edges, wide, tall, the four \
-                    mirrors, flip, flop, rotate, invert, grayscale, hue, blurple, caption, meme, ascii, and gif \
-                    versions - spin, shake, zoom, magikgif, glitchgif. Start typing in the effect box and it \
-                    searches by name or by group. Everything is done inside the bot, on the bot's own CPU: no \
-                    ImageMagick, no web service, nothing leaves the machine except fetching the picture itself. \
-                    PNG, JPEG, WEBP and GIF go in; a PNG or a GIF comes back, or a code block for ascii. An \
-                    animated picture has the effect applied to every frame. \
-                    The picture is taken from the first of these there is: a file attached to the command, a member \
-                    (their profile picture), a link, a custom emoji, or - with none of those - the last picture \
-                    posted in the channel, which is what makes it quick to use. That last one is remembered as \
-                    pictures are posted rather than looked up when asked for, so it costs nothing; the bot's own \
-                    output counts, which is how one effect gets run on another's result. \
-                    It works in ONE channel. Run anywhere else it answers only to whoever asked, with a pointer to \
-                    the right channel, and posts nothing where it was asked. \
-                    Anyone on the /noroast list cannot have their profile picture used; they are told kindly and \
-                    every other picture still works. Words in a caption have every at-sign and every mention taken \
-                    out before they are drawn, so a caption can never ping anyone. \
-                    A link is fetched carefully: http and https only, the address is checked before the connection \
-                    is made and refused if it is private, loopback, link-local (which is where a cloud provider's \
-                    credential service lives), carrier-grade NAT or an intranet name, redirects are followed by \
-                    hand and re-checked at every hop, the size and the time are capped, and the bytes have to be a \
-                    real picture whatever the server called them. \
-                    Work is capped as well: the picture is scaled down before anything touches it, an animation is \
-                    read to the frame cap and no further, and a job that runs past its time budget hands back what \
-                    it finished. All of it happens off the main thread, so the bot keeps answering. \
-                    If the result is too heavy for Discord it is thinned and scaled until it fits rather than \
-                    failing. Every effect shares one allowance, per member and per channel; somebody over it who \
-                    asks again within a second gets an emoji and no words, so the channel is never filled with \
-                    slow-down notices.",
-            settings: vec![
-                toggle("VIZIER_IMAGE", "/image on", "Off: /image says it is switched off, and no picture is remembered."),
-                setting(
-                    "VIZIER_IMAGE_CHANNEL",
-                    "Image channel",
-                    "The one channel /image works in, and the only channel whose pictures are remembered for it. \
-                     Run anywhere else, whoever asked gets a pointer to this channel and nothing is posted.",
-                    Kind::Channel,
-                    "1516534303968858312",
-                ),
-                setting(
-                    "VIZIER_IMAGE_MAX_SIDE",
-                    "Biggest side worked on",
-                    "A still picture is scaled down to fit a square this many pixels across before any effect \
-                     touches it. 800 is what NotSoBot uses. Higher looks better and costs more CPU per command.",
-                    number(64, 2_048, "pixels"),
-                    "800",
-                ),
-                setting(
-                    "VIZIER_IMAGE_ANIM_SIDE",
-                    "Biggest side for a gif",
-                    "The same, for a frame of an animation - much smaller, because a sixty-frame gif is sixty of \
-                     everything. Raise it and gifs get sharper, slower and heavier.",
-                    number(32, 768, "pixels"),
-                    "256",
-                ),
-                setting(
-                    "VIZIER_IMAGE_MAX_FRAMES",
-                    "Most frames",
-                    "How many frames of an animated picture are read at all. A longer gif is cut to its first this \
-                     many. Also caps how many frames a gif effect makes from a still.",
-                    number(1, 300, "frames"),
-                    "60",
-                ),
-                setting(
-                    "VIZIER_IMAGE_SECONDS",
-                    "Time budget",
-                    "How long one command may spend bending pixels. Past this, a multi-frame job stops and posts \
-                     the frames it finished; there is nothing to cut short about a single picture, which is capped \
-                     by its size instead. Also caps how long fetching a link may take.",
-                    number(1, 120, "seconds"),
-                    "20",
-                ),
-                setting(
-                    "VIZIER_IMAGE_FETCH_MB",
-                    "Biggest download",
-                    "The most a picture may weigh when it is fetched from a link, an attachment or an avatar. A \
-                     server that promises less and sends more is cut off at this point too.",
-                    number(1, 25, "MB"),
-                    "8",
-                ),
-                setting(
-                    "VIZIER_IMAGE_PER_MEMBER",
-                    "Per member",
-                    "How many effects one member may run inside the window below. Every effect shares the one \
-                     allowance. Over it, they are told once and then only get an emoji.",
-                    number(1, 60, "commands"),
-                    "4",
-                ),
-                setting(
-                    "VIZIER_IMAGE_PER_CHANNEL",
-                    "Per channel",
-                    "How many effects the channel may run inside the window, across everyone. This is what stops \
-                     six people at once from eating the CPU the games need.",
-                    number(1, 240, "commands"),
-                    "12",
-                ),
-                setting(
-                    "VIZIER_IMAGE_WINDOW_SECS",
-                    "Allowance window",
-                    "How long the two allowances above are counted over.",
-                    number(5, 3_600, "seconds"),
-                    "60",
-                ),
-            ],
-            commands: vec![
-                command(
-                    "image",
-                    EVERYONE,
-                    "/image effect: [text:] [strength:] [picture:] [member:] [url:] [emoji:]",
-                    "Runs an effect on a picture. Pick the effect by typing part of its name. The picture comes \
-                     from the attachment, else the member's avatar, else the link, else the custom emoji, else the \
-                     last picture posted in the channel. text is for caption and meme (meme splits it on a |); \
-                     strength is 1 to 10, and for rotate it means that many 45-degree turns. Only works in the \
-                     image channel.",
-                ),
+                command("noroast", EVERYONE, "/noroast", "Keeps you out of /ship. Run it again to come back in."),
             ],
         },
         Section {
@@ -1982,8 +1849,7 @@ pub fn sections() -> Vec<Section> {
             icon: "👋",
             about: "When someone joins, the bot greets them in the welcome channel - with a ribbing count for anyone \
                     who keeps leaving and coming back - and the house sorting card follows underneath. Every join \
-                    and leave is recorded quietly (leaving is never announced), and accounts that belong to one person \
-                    can be merged so their history adds up. Admins can also set a special welcome for one member on the \
+                    and leave is recorded quietly (leaving is never announced). Admins can also set a special welcome for one member on the \
                     panel's Welcomes page: a message of their own that posts the moment that member joins, for someone \
                     the server is waiting on to come back.",
             settings: vec![
@@ -2003,7 +1869,6 @@ pub fn sections() -> Vec<Section> {
             ],
             commands: vec![
                 command("rejoinstats", EVERYONE, "/rejoinstats", "The top 15 people who keep leaving and coming back, with their counts."),
-                command("samebanda", ADMINS, "/samebanda purana: naya:", "Merges an old account's join history into the account the person uses now."),
             ],
         },
         Section {
@@ -2026,10 +1891,7 @@ pub fn sections() -> Vec<Section> {
                     "15",
                 ),
             ],
-            commands: vec![
-                command("invitedby", ADMINS, "/invitedby member:", "Which invite a member joined through and who made it, answered privately."),
-                command("invites", ADMINS, "/invites member:", "How many people a member's invites brought in and how many are still here, answered privately."),
-            ],
+            commands: vec![],
         },
         Section {
             id: "quotes",
@@ -2039,13 +1901,22 @@ pub fn sections() -> Vec<Section> {
                     with `@Loduchand quote this`. The quoter picks a style and presses Save, and the card goes to the \
                     quotes channel (one left unsaved is saved after 15 minutes). /awards draws the server's awards \
                     card - most messages, most voice time and more - for all time or last week.",
-            settings: vec![setting(
-                "VIZIER_QUOTES_CHANNEL",
-                "Quotes channel",
-                "Where saved quote cards are posted. Empty means the channel with gyaan in its name.",
-                Kind::Channel,
-                "",
-            )],
+            settings: vec![
+                setting(
+                    "VIZIER_QUOTES_CHANNEL",
+                    "Quotes channel",
+                    "Where saved quote cards are posted. Empty means the channel with gyaan in its name.",
+                    Kind::Channel,
+                    "",
+                ),
+                setting(
+                    "VIZIER_BISKI_CHANNEL",
+                    "Biski channel",
+                    "Where the Biski message menu posts its screenshots.",
+                    Kind::Channel,
+                    "1572834797758193714",
+                ),
+            ],
             commands: vec![
                 command("Quote", EVERYONE, "Right-click a message → Apps → Quote", "Makes a quote card of the message to style and save."),
             ],
@@ -2061,20 +1932,8 @@ pub fn sections() -> Vec<Section> {
                     back to the server, posting a welcome line. A slot is posted once, only while it's fresh - after \
                     downtime the bot doesn't catch up on missed ones - and a reminder with an end date switches itself \
                     off after it.",
-            settings: vec![toggle(
-                "VIZIER_MEMBER_REMINDERS",
-                "Members' own reminders",
-                "Let members set their own reminders by asking the bot (\"@Loduchand remind me in 2 hours to…\") or with /remind. Off stops new ones and pauses sending.",
-            )],
-            commands: vec![
-                command(
-                    "remind",
-                    EVERYONE,
-                    "/remind when: what:",
-                    "Set yourself a reminder (in 2 hours, 30m, at 9pm, tomorrow 9am, 2026-09-20 18:00 - India time); the bot pings you in that channel. You can also just ask the bot in chat. Up to 20 waiting, 60 days ahead.",
-                ),
-                command("reminders", EVERYONE, "/reminders", "See your waiting reminders and cancel any of them. Private."),
-            ],
+            settings: vec![],
+            commands: vec![],
         },
         Section {
             id: "members",
@@ -2100,92 +1959,6 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_ACTIVE_FAIR_POINTS", "Fairly active: game points", "Game and activity points in 30 days that make someone fairly active.", number(1, 10_000, "points"), "20"),
             ],
             commands: vec![],
-        },
-        Section {
-            id: "about",
-            title: "About members",
-            icon: "🪪",
-            about: "A few bullet points about a member, answered at once and at no cost: no model is asked when \
-                    someone asks. First the facts, read from the bot's own records when asked - member since, messages \
-                    this month and all time, their three main channels, the games they play most and how they do there, \
-                    house and points this month with their place in the house, frog cards, voice time this month, who \
-                    they talk with most, and a favourite emoji and phrase. Then \"what they're like\": four to six \
-                    bullets a cheap model wrote ahead of time from a sample of their own messages (never #safe-corner), \
-                    and stored. It never mentions health, religion or caste, politics, sexuality or gender, \
-                    relationships, family, where they live, study or work, or when they are online - the model is told \
-                    so and every bullet is checked again afterwards, along with anything quoted word for word or \
-                    unkind. A member can see only their own; mods and admins can look anyone up, and every such lookup \
-                    is written to the activity log. Asking in chat (@Loduchand about @someone, tell me about @someone, \
-                    who is @someone) answers in the asker's DMs. The first build starts when this is switched on and \
-                    runs once a day, within the cap, until everyone who qualifies is covered; after that a weekly run \
-                    rebuilds only members with enough new messages. Every run's model calls and tokens are logged and \
-                    shown on each member's page, where a mod can also rebuild or clear their notes.",
-            settings: vec![
-                setting(
-                    "VIZIER_NOTES",
-                    "Member notes on",
-                    "Switches on /about, the chat ask and the builds. Off: /about says it's off, the chat ask goes to \
-                     the AI as before and nothing is built. /forgetme works either way.",
-                    Kind::Toggle,
-                    "off",
-                ),
-                setting(
-                    "VIZIER_NOTES_MODEL",
-                    "Model that writes them",
-                    "A model on the bot's own provider for writing \"what they're like\" - the same cheap one Name \
-                     Place Animal Thing judges with unless changed. \"agent\" uses the bot's usual model.",
-                    Kind::Text,
-                    "google/gemini-2.5-flash-lite",
-                ),
-                setting(
-                    "VIZIER_NOTES_MIN_MESSAGES",
-                    "Least messages to write about",
-                    "Someone with fewer usable messages than this (one-word replies and bot commands don't count) is \
-                     never sent to the model; their answer says there isn't enough to go on yet.",
-                    number(20, 10_000, "messages"),
-                    "100",
-                ),
-                setting(
-                    "VIZIER_NOTES_NEW_MESSAGES",
-                    "New messages for a rebuild",
-                    "The weekly run rebuilds someone's notes only once they have written at least this many messages \
-                     since the last build.",
-                    number(1, 10_000, "messages"),
-                    "50",
-                ),
-                setting(
-                    "VIZIER_NOTES_MAX_PER_RUN",
-                    "Most builds per run",
-                    "The cap on model calls in one run, first build and weekly alike. Anyone left over waits for the \
-                     next run. 0 stops the builds without switching the rest off.",
-                    number(0, 1000, "members"),
-                    "30",
-                ),
-                setting(
-                    "VIZIER_NOTES_READ_BUDGET",
-                    "Messages read per member",
-                    "How much of a member's own writing the model reads, in tokens: about half from their newest \
-                     messages and the rest spread over their older ones. The whole call costs this plus about 550 for the instructions and 150 for the answer.",
-                    number(500, 30_000, "tokens"),
-                    "4000",
-                ),
-            ],
-            commands: vec![
-                command(
-                    "about",
-                    EVERYONE,
-                    "/about member:",
-                    "Your own notes: the facts and what you're like. Only mods and admins can name someone else, and \
-                     that lookup is logged. Only you see the answer.",
-                ),
-                command(
-                    "forgetme",
-                    EVERYONE,
-                    "/forgetme",
-                    "Deletes your notes and keeps you out of every future build. Facts already public elsewhere \
-                     (points, cards, games) can still show. Run it again, or press the button, to opt back in.",
-                ),
-            ],
         },
         Section {
             id: "msglog",
@@ -2524,13 +2297,7 @@ pub fn sections() -> Vec<Section> {
                     "30",
                 ),
             ],
-            commands: vec![command(
-                "announce",
-                ADMINS,
-                "/announce text:",
-                "Posts your own message as a gold card in the same channels, in your own words. Only you see the \
-                 reply, which says which channels took it. It's written to the activity log with your name.",
-            )],
+            commands: vec![],
         },
         Section {
             id: "signups",
@@ -2589,7 +2356,7 @@ pub fn sections() -> Vec<Section> {
                     the confessions already in there are never touched. If the card carrying the buttons is \
                     deleted, they move to the newest surviving \
                     card.\n\nNothing said in any of these three channels reaches the AI: they are excluded from the \
-                    message log exactly as #safe-corner is, so no confession is in the member notes, the daily \
+                    message log exactly as #safe-corner is, so no confession is in the daily \
                     topics, a deep dive, the Kalesh pages, the weekly scan or any summary. In public a confession \
                     carries a number and the words and nothing else - no name, no mention, no footer. Moderators see \
                     who submitted, in review and in the log, and /whosent answers it later; that look is written to \

@@ -61,11 +61,11 @@ are gitignored too.
 
 ## Things that will bite you
 
-- **Slash-command ceiling.** Discord allows 100 global chat commands; the bot
-  builds ~110. Over the limit, the bulk registration fails outright and *no*
-  new command appears — the only sign is one ERROR line at boot. `MONTH_OFF`
-  and `PAUSED_OFF` in `mod.rs` drop commands while a month/the Cup is paused.
-  Right-click *message* commands (Quote, Biski) are counted separately.
+- **Slash-command ceiling.** Discord allows 100 global chat commands. Over
+  the limit, the bulk registration fails and no new command appears. Look
+  for the ERROR line at boot. In `mod.rs`, `MONTH_OFF` takes commands off
+  during a themed month and `PAUSED_OFF` takes commands off while the Cup is
+  paused. Right-click commands are counted separately.
 - **Settings precedence.** `control::var` reads the saved panel value before the
   environment, so an env var can't override a stored setting. A value written
   straight into `.runtime/control.db` does **not** take effect until restart

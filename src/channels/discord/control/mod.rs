@@ -19,8 +19,6 @@ pub mod live_ui;
 pub mod media;
 pub mod posts;
 pub mod members;
-pub mod memos;
-pub mod remind;
 pub mod profiles;
 pub mod reminders;
 pub mod scheduler;
@@ -76,7 +74,6 @@ pub fn open(workspace: &str) -> anyhow::Result<()> {
     reminders::migrate(&conn)?;
     autoreplies::migrate(&conn)?;
     members::migrate(&conn)?;
-    memos::migrate(&conn)?;
     media::migrate(&conn)?;
     profiles::migrate(&conn)?;
     welcomes::migrate(&conn)?;

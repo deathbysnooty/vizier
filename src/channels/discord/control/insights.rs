@@ -108,7 +108,7 @@ pub struct Seen {
 /// Channels whose messages are never counted, and never recorded: #safe-corner,
 /// and the three channels the confessions feature owns. `msglog::never_logged`
 /// reads this list, so nothing said in any of them is in the message log at all
-/// — which is what keeps a confession out of the member notes, the daily topic
+/// — which is what keeps a confession out of /ship, the daily topic
 /// pass, the deep dive, the Kalesh pages and every summary.
 pub fn sensitive_channels() -> Vec<u64> {
     let mut out = vec![super::super::weekly::SAFE_CORNER];
@@ -294,7 +294,7 @@ pub fn rows_between(since: i64, until: i64) -> Vec<Interaction> {
 }
 
 /// The people `user` exchanges replies and mentions with most since `since`,
-/// both ways added up, most first. For member notes.
+/// both ways added up, most first. For /ship.
 pub fn partners(user: u64, since: i64, limit: usize) -> Vec<(u64, i64)> {
     let Some(db) = DB.get() else { return Vec::new() };
     let conn = db.lock();

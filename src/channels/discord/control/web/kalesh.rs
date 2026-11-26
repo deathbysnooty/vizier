@@ -1220,9 +1220,9 @@ pub mod fake {
                 "interpretation": ["Seems to be around less than they were a month ago."]
             })
             .to_string();
-            let input_tokens = super::super::super::super::notes_build::estimate_tokens(PROMPTS.lock().last().map(String::as_str).unwrap_or("")) as u64;
+            let input_tokens = super::super::super::super::message_text::estimate_tokens(PROMPTS.lock().last().map(String::as_str).unwrap_or("")) as u64;
             return Ok(Reply {
-                output_tokens: super::super::super::super::notes_build::estimate_tokens(&text) as u64,
+                output_tokens: super::super::super::super::message_text::estimate_tokens(&text) as u64,
                 text,
                 input_tokens,
                 model: "fake/main-model".into(),
@@ -1272,8 +1272,8 @@ pub mod fake {
             })
             .to_string()
         };
-        let input_tokens = super::super::super::super::notes_build::estimate_tokens(PROMPTS.lock().last().map(String::as_str).unwrap_or("")) as u64;
-        Ok(Reply { output_tokens: super::super::super::super::notes_build::estimate_tokens(&text) as u64, text, input_tokens, model: "fake/main-model".into() })
+        let input_tokens = super::super::super::super::message_text::estimate_tokens(PROMPTS.lock().last().map(String::as_str).unwrap_or("")) as u64;
+        Ok(Reply { output_tokens: super::super::super::super::message_text::estimate_tokens(&text) as u64, text, input_tokens, model: "fake/main-model".into() })
     }
 }
 

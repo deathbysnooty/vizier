@@ -7092,7 +7092,6 @@ dependencies = [
  "flume",
  "form_urlencoded",
  "futures",
- "gif",
  "glob",
  "hound",
  "html2md",

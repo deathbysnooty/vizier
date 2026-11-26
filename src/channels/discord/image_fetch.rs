@@ -1,12 +1,6 @@
-//! Fetching a picture from a URL somebody typed - the dangerous part.
+//! Fetching image attachments for sign-up posts.
 //!
-//! The rest of the toolkit only bends pixels. This module takes an address from
-//! a member of the server and makes the bot open it, which means the bot can be
-//! aimed at anything the bot can reach: its own admin ports, the panel on
-//! localhost, another machine on the same network, or a cloud provider's
-//! metadata service, which hands out credentials to anyone who asks from the
-//! right address. That is server-side request forgery, and it is the one thing
-//! in here that can lose something that matters.
+//! The bot validates every URL it opens to prevent server-side request forgery.
 //!
 //! So, in order:
 //!
@@ -36,6 +30,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use image::ImageFormat;
 use reqwest::Url;
 
 /// The most redirects one fetch will follow.
@@ -238,7 +233,7 @@ pub fn all_public(addrs: &[SocketAddr]) -> bool {
 }
 
 /// The headers check: the server has to claim an image, and has to claim it
-/// fits. Both are only claims - [`super::imagefx_engine::sniff`] has the last
+/// fits. Both are only claims - [`sniff`] has the last
 /// word - but a server that admits to sending a gigabyte of HTML can be turned
 /// away before a byte of it arrives.
 pub fn check_headers(content_type: Option<&str>, length: Option<u64>, cap: usize) -> Result<(), Refusal> {
@@ -259,6 +254,32 @@ pub fn check_headers(content_type: Option<&str>, length: Option<u64>, cap: usize
             if kind.starts_with("image/") { Ok(()) } else { Err(Refusal::NotImage) }
         }
     }
+}
+
+/// Whether an attachment looks like a supported picture. The filename is a
+/// fallback when Discord supplies no useful content type.
+pub fn looks_like_an_image(filename: &str, content_type: Option<&str>) -> bool {
+    if let Some(kind) = content_type {
+        let kind = kind.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        if let Some(rest) = kind.strip_prefix("image/") {
+            return matches!(rest, "png" | "jpeg" | "jpg" | "webp" | "gif");
+        }
+        if !kind.is_empty() && kind != "application/octet-stream" {
+            return false;
+        }
+    }
+    let lower = filename.to_ascii_lowercase();
+    let lower = lower.split(['?', '#']).next().unwrap_or(&lower);
+    [".png", ".jpg", ".jpeg", ".webp", ".gif"].iter().any(|ext| lower.ends_with(ext))
+}
+
+fn readable(format: ImageFormat) -> bool {
+    matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif)
+}
+
+/// The format these bytes really are, by their own magic numbers.
+fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
+    image::guess_format(bytes).ok().filter(|f| readable(*f))
 }
 
 /// Read chunks until they run out, or until they go over the cap. Split out
@@ -290,8 +311,7 @@ pub fn next_hop(from: &Url, location: &str) -> Result<Url, Refusal> {
 
 // --- the fetch itself --------------------------------------------------------------------------
 
-/// One picture from a URL a member typed, with every check above applied at
-/// every hop.
+/// Fetch one picture, applying the URL checks at every redirect.
 pub async fn get(raw: &str, cap: usize, wait: Duration) -> Result<Vec<u8>, Refusal> {
     let mut url = check_url(raw)?;
     for _hop in 0..=MAX_HOPS {
@@ -344,7 +364,7 @@ pub async fn get(raw: &str, cap: usize, wait: Duration) -> Result<Vec<u8>, Refus
             }
         }
         // The server's word counts for nothing; the bytes' own header decides.
-        if super::imagefx_engine::sniff(&body).is_none() {
+        if sniff(&body).is_none() {
             return Err(Refusal::NotImage);
         }
         return Ok(body);
@@ -355,6 +375,42 @@ pub async fn get(raw: &str, cap: usize, wait: Duration) -> Result<Vec<u8>, Refus
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_counts_as_a_picture() {
+        for (name, kind) in [
+            ("cat.png", Some("image/png")),
+            ("cat.JPG", Some("image/jpeg")),
+            ("cat.webp", Some("image/webp")),
+            ("loop.gif", Some("image/gif")),
+            ("cat.png", None),
+            ("cat.jpeg?ex=123&is=456", None),
+            ("blob", Some("image/png")),
+            ("cat.png", Some("application/octet-stream")),
+        ] {
+            assert!(looks_like_an_image(name, kind), "{} / {:?} was not taken for a picture", name, kind);
+        }
+        for (name, kind) in [
+            ("notes.txt", Some("text/plain")),
+            ("clip.mp4", Some("video/mp4")),
+            ("song.mp3", Some("audio/mpeg")),
+            ("thing.svg", Some("image/svg+xml")),
+            ("sheet.pdf", Some("application/pdf")),
+            ("archive.zip", None),
+            ("no-extension", None),
+        ] {
+            assert!(!looks_like_an_image(name, kind), "{} / {:?} was taken for a picture", name, kind);
+        }
+    }
+
+    #[test]
+    fn only_the_four_formats_are_read() {
+        assert!(readable(ImageFormat::Png) && readable(ImageFormat::Jpeg));
+        assert!(readable(ImageFormat::WebP) && readable(ImageFormat::Gif));
+        assert!(!readable(ImageFormat::Bmp) && !readable(ImageFormat::Tiff));
+        assert_eq!(sniff(b"GIF89a....."), Some(ImageFormat::Gif));
+        assert_eq!(sniff(b"nope"), None);
+    }
 
     #[test]
     fn the_addresses_the_bot_must_never_open() {

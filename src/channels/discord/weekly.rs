@@ -26,10 +26,10 @@ use parking_lot::Mutex;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
-    ButtonStyle, Channel, ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind, Context,
-    CreateActionRow, CreateAllowedMentions, CreateButton, CreateCommand, CreateInteractionResponse,
+    ButtonStyle, Channel, ChannelId, ComponentInteraction, ComponentInteractionDataKind, Context,
+    CreateActionRow, CreateAllowedMentions, CreateButton, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption,
-    EditInteractionResponse, GetMessages, Http, Message, MessageId, MessageType, UserId,
+    GetMessages, Http, Message, MessageId, MessageType, UserId,
 };
 
 use super::points::{Outcome, Source};
@@ -306,11 +306,6 @@ pub(crate) fn is_safe_corner(channel: u64, name: &str) -> bool {
     channel == SAFE_CORNER || name.to_lowercase().contains("safe-corner")
 }
 
-pub fn command() -> CreateCommand {
-    CreateCommand::new("weeklyscan")
-        .description("admin only: scan the last 7 days of posts for house points now (results go to reviewers by DM)")
-}
-
 // --- storage -----------------------------------------------------------------------------
 
 const SCHEMA: &str = "
@@ -373,8 +368,7 @@ fn due_week(now: i64, done: Option<&str>) -> Option<(String, i64)> {
 }
 
 /// Which week a scan's awards belong to: the week most of its window lies in.
-/// A manual scan on a Monday morning therefore shares last week's dedupe keys,
-/// so the same posts can't be paid twice.
+/// A scan scheduled for Monday morning therefore uses last week's dedupe keys.
 fn week_key(since: i64, until: i64) -> String {
     super::points::week_start_day(since + (until - since) / 2)
 }
@@ -1467,7 +1461,7 @@ async fn scan_channel(
 
 /// Reads every channel for `since..until`, runs both passes and DMs the
 /// reviewers. Returns how many lines were proposed.
-pub async fn run_scan(
+async fn run_scan(
     ctx: &Context,
     deps: &VizierDependencies,
     agent_id: &str,
@@ -1499,25 +1493,8 @@ pub async fn run_scan(
     Ok(saved.len())
 }
 
-/// `/weeklyscan`: an admin runs the scan over the last 7 days now.
-pub async fn scan_command(ctx: &Context, deps: &VizierDependencies, agent_id: &str, command: &CommandInteraction) {
-    if !super::admin_ids().contains(&command.user.id.get()) {
-        let reply = CreateInteractionResponseMessage::new().content("Only admins can do this.").ephemeral(true);
-        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
-        return;
-    }
-    let _ = command.defer_ephemeral(&ctx.http).await;
-    let now = Utc::now().timestamp();
-    let text = match run_scan(ctx, deps, agent_id, now - 7 * DAY, now).await {
-        Ok(0) => "📝 Scan finished: nothing stood out this week. The reviewers got a DM saying so.".to_string(),
-        Ok(n) => format!("📝 Scan finished: {} proposal(s) sent to the reviewers by DM for approval.", n),
-        Err(err) => format!("Couldn't run the weekly scan: {}", err),
-    };
-    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(text)).await;
-}
-
 /// Every Sunday at 20:00 India time, once per week, surviving restarts.
-/// `VIZIER_WEEKLY=off` stops the scheduled run; `/weeklyscan` still works.
+/// `VIZIER_WEEKLY=off` stops the scheduled run.
 pub fn spawn(ctx: Context, deps: VizierDependencies, agent_id: String) {
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {
@@ -1765,7 +1742,7 @@ Hope that helps."#;
         // Next Sunday is a new week.
         assert_eq!(due_week(due + 7 * DAY, Some("2026-09-14")), Some(("2026-09-21".into(), due + 7 * DAY)));
 
-        // The scheduled window's week is the due week; a manual Monday scan shares it.
+        // The award week follows the messages scanned, even with a Monday schedule.
         assert_eq!(week_key(due - 7 * DAY, due), "2026-09-14");
         let monday_after = due + 14 * HOUR;
         assert_eq!(week_key(monday_after - 7 * DAY, monday_after), "2026-09-14");

@@ -24,9 +24,7 @@
 //! but that number. `ship_score::WHAT_MOVES_IT` says the whole of it in English.
 //!
 //! The rules and the check every model answer has to pass live in
-//! `roast_build.rs`, with the tests. `/noroast` is the opt-out, and it is a
-//! different thing from `/forgetme`: that one is about member notes, and
-//! neither touches the other.
+//! `roast_build.rs`, with the tests. Members can opt out with `/noroast`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -44,7 +42,7 @@ use serenity::all::{
 use super::control;
 use super::kalesh;
 use super::kalesh_store;
-use super::notes_facts::Facts;
+use super::member_facts::{self, Facts};
 use super::roast_card::{self, Face};
 use super::roast_build::{self as build, Dossier, Made, Together};
 
@@ -84,8 +82,7 @@ pub fn channel() -> u64 {
     control::id("VIZIER_ROAST_CHANNEL").unwrap_or(DEFAULT_CHANNEL)
 }
 
-/// Members who have put themselves out of reach of `/ship`. Kept apart from the
-/// member-notes opt-out on purpose: `/forgetme` is about notes.
+/// Members who have put themselves out of reach of `/ship`.
 pub fn optouts() -> Vec<u64> {
     control::ids("VIZIER_ROAST_OPTOUTS")
 }
@@ -208,8 +205,8 @@ async fn dossier(ctx: &Context, storage: &std::sync::Arc<crate::storage::VizierS
         }
     }
     let now = Utc::now().timestamp();
-    let (channels, members, words) = super::notes::cache_names(ctx);
-    let facts = super::notes::facts_for(ctx, storage, user, words).await;
+    let (channels, members, words) = member_facts::cache_names(ctx);
+    let facts = member_facts::facts_for(ctx, storage, user, words).await;
     let d = dossier_from(user, name, &facts, now, &channels, &members);
     if !window.is_zero() {
         let mut cache = dossier_cache().lock();
@@ -273,7 +270,7 @@ fn together_of(a: u64, b: u64, now_ms: i64, channels: &HashMap<u64, String>) -> 
                 if sample.len() >= SHIP_SAMPLE {
                     break;
                 }
-                let text = super::notes_build::cut(&line.row.content.split_whitespace().collect::<Vec<_>>().join(" "), SHIP_SAMPLE_CHARS);
+                let text = super::message_text::cut(&line.row.content.split_whitespace().collect::<Vec<_>>().join(" "), SHIP_SAMPLE_CHARS);
                 if text.chars().filter(|c| c.is_alphanumeric()).count() >= 4 {
                     sample.push((line.row.author_name.clone(), text));
                 }
@@ -478,7 +475,7 @@ fn name_of(ctx: &Context, command: &CommandInteraction, user: u64) -> String {
         .and_then(|m| m.nick.clone())
         .or_else(|| command.data.resolved.users.get(&UserId::new(user)).map(|u| u.display_name().to_string()))
         .unwrap_or_else(|| if user == command.user.id.get() { command.user.display_name().to_string() } else { "that member".into() });
-    super::notes::display_name(ctx, user, &fallback)
+    member_facts::display_name(ctx, user, &fallback)
 }
 
 /// Where the answer to the command itself goes: quietly, unless the card is
@@ -540,7 +537,7 @@ pub async fn ship_command(ctx: &Context, storage: &std::sync::Arc<crate::storage
     }
     let da = dossier(ctx, storage, a, &name_a).await;
     let db = dossier(ctx, storage, b, &name_b).await;
-    let channels = super::notes::cache_names(ctx).0;
+    let channels = member_facts::cache_names(ctx).0;
     let mut t = pair_together(a, b, channels).await;
     t.shared_games = da.games.iter().map(|(g, _)| g.clone()).filter(|g| db.games.iter().any(|(o, _)| o == g)).collect();
     // The shares come off the two nightly sheets, so both halves of every share
@@ -617,10 +614,8 @@ pub fn noroast_builder() -> CreateCommand {
 }
 
 const OUT: &str = "Done - nobody can `/ship` you while you're out, and nothing of yours goes to the AI for it. \
-    Run `/noroast` again to come back in.\n\
-    -# This is separate from `/forgetme`: that one is about member notes, and it hasn't changed.";
-const IN: &str = "You're back in - `/ship` can name you again. Brace yourself.\n\
-    -# `/forgetme` is untouched: it's a different opt-out, about member notes.";
+    Run `/noroast` again to come back in.";
+const IN: &str = "You're back in - `/ship` can name you again. Brace yourself.";
 
 /// Flips a member's opt-out on the panel's list; true when they are now out.
 pub fn toggle_optout(user: u64) -> anyhow::Result<bool> {
@@ -663,14 +658,9 @@ mod tests {
         assert!(build::needs_redirect_note(999, channel()));
     }
 
-    /// The two opt-outs are different lists, in different places, with
-    /// different commands: nobody loses their notes opt-out by running /noroast.
     #[test]
-    fn the_roast_opt_out_is_not_the_notes_opt_out() {
-        let name_of = |c: &CreateCommand| serde_json::to_value(c).unwrap()["name"].as_str().unwrap_or_default().to_string();
-        assert_eq!(name_of(&noroast_builder()), "noroast");
-        assert_eq!(name_of(&super::super::notes::forgetme_builder()), "forgetme");
-        // And the command the owner asked for exists, with the options it needs.
+    fn ship_and_its_opt_out_have_the_expected_commands_and_copy() {
+        assert_eq!(serde_json::to_value(noroast_builder()).unwrap()["name"], "noroast");
         let ship = serde_json::to_value(ship_builder()).unwrap();
         assert_eq!(ship["name"], "ship");
         assert_eq!(ship["options"][0]["name"], "member");
@@ -680,8 +670,6 @@ mod tests {
         // /noroast now keeps you out of /ship, and says so.
         assert!(OUT.contains("`/ship`") && !OUT.contains("`/roast`"), "{OUT}");
         assert!(IN.contains("`/ship`") && !IN.contains("`/roast`"), "{IN}");
-        assert!(OUT.contains("separate from `/forgetme`") && IN.contains("different opt-out"));
-        // The opt-out list lives in the panel's settings; the notes list in notes.db.
         assert!(optouts().is_empty(), "nothing saved, nobody out");
     }
 

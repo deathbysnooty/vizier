@@ -32,9 +32,8 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serenity::all::{
-    ChannelId, CommandDataOptionValue, CommandInteraction, CommandOptionType, Context, CreateAllowedMentions,
-    CreateAttachment, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditAttachments, EditMessage, Message, MessageId,
+    ChannelId, Context, CreateAllowedMentions, CreateAttachment, CreateEmbed, CreateEmbedFooter, CreateMessage,
+    EditAttachments, EditMessage, Message, MessageId,
     MessageReferenceKind,
 };
 
@@ -856,7 +855,7 @@ pub fn spawn(ctx: Context) {
 
 /// A one-off drop asked for from outside the bot: a channel id stored under the
 /// `drop_once` meta key is taken, cleared, and gets a Snitch shortly after start.
-/// Like `/snitchdrop`, it doesn't use up a scheduled drop.
+/// It doesn't use up a scheduled drop.
 fn drop_once(ctx: &Context) {
     let Some(db) = DB.get() else {
         return;
@@ -995,57 +994,6 @@ fn persist(plan: &Plan) {
         if let Err(err) = save_plan(&db.lock(), plan) {
             tracing::warn!("snitch: plan for {} not saved: {}", plan.day, err);
         }
-    }
-}
-
-/// The `/snitchdrop` command, to register.
-pub fn command() -> CreateCommand {
-    let mut kind = CreateCommandOption::new(CommandOptionType::String, "type", "which Snitch (random if left out)");
-    for k in Kind::ALL {
-        kind = kind.add_string_choice(k.name(), k.key());
-    }
-    CreateCommand::new("snitchdrop").description("admin only: drop a Snitch right here, right now").add_option(kind)
-}
-
-/// `/snitchdrop [type]` - admins only. Drops one in the channel it is run in,
-/// straight away. It is a real Snitch under the same catch rules, and it doesn't
-/// use up a scheduled drop or reset the gap between them.
-pub async fn drop_command(ctx: &Context, command: &CommandInteraction) {
-    let whisper = |text: &str| {
-        CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
-    };
-    if command.guild_id.is_none() {
-        let _ = command.create_response(&ctx.http, whisper("This only works in a server.")).await;
-        return;
-    }
-    if !super::admin_ids().contains(&command.user.id.get()) {
-        let _ = command.create_response(&ctx.http, whisper("Only mods can drop a Snitch.")).await;
-        return;
-    }
-    if !super::house_cup::gate("/snitchdrop") {
-        let _ = command.create_response(&ctx.http, whisper(&super::house_cup::drop_refused("a Snitch"))).await;
-        return;
-    }
-    let kind = command
-        .data
-        .options
-        .iter()
-        .find_map(|o| match (&o.name[..], &o.value) {
-            ("type", CommandDataOptionValue::String(key)) => Kind::from_key(key),
-            _ => None,
-        })
-        .unwrap_or_else(|| choose_kind(rand::random::<f64>()));
-    let text = format!("Releasing a {} Snitch.", kind.name());
-    let _ = command.create_response(&ctx.http, whisper(&text)).await;
-    if release(ctx, command.channel_id, kind).await.is_none() {
-        let _ = command
-            .create_followup(
-                &ctx.http,
-                serenity::all::CreateInteractionResponseFollowup::new()
-                    .content("Discord wouldn't take the Snitch - check my permissions here.")
-                    .ephemeral(true),
-            )
-            .await;
     }
 }
 

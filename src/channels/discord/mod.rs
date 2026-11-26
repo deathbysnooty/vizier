@@ -49,23 +49,14 @@ mod frog_trade;
 mod house;
 mod invites;
 mod invites_store;
-// The image toolkit: /image and everything under it.
-mod imagefx;
-mod imagefx_effects;
-mod imagefx_engine;
-mod imagefx_fetch;
-mod imagefx_recent;
-mod imagefx_seam;
-mod imagefx_text;
+mod image_fetch;
 mod deepdive;
 mod kalesh;
 mod kalesh_store;
 mod msglog;
 mod msglog_gone;
-mod notes;
-mod notes_build;
-mod notes_facts;
-mod notes_store;
+mod member_facts;
+mod message_text;
 mod roast;
 mod roast_build;
 mod roast_card;
@@ -264,10 +255,6 @@ impl VizierChannel for DiscordChannelReader {
         }
         if let Err(err) = quiz::open(&self.deps.config.workspace) {
             tracing::error!("quiz database unavailable: {}", err);
-        }
-        // Member notes. Not opening only means /about and the builds are unavailable.
-        if let Err(err) = notes_store::open(&self.deps.config.workspace) {
-            tracing::warn!("notes: store not opened: {}", err);
         }
         // /ship's memory of what each pair scored last. Not opening only means
         // the card can't say which way the number has moved.
@@ -1359,30 +1346,24 @@ async fn post_welcome_line(ctx: &Context, channel: u64, uid: u64, joins: u32) {
     }
 }
 
-/// The commands that come off Discord's list while the House Cup is paused:
-/// everything about houses, house points and Snitch drops. The card commands
-/// (`/housecards`, `/frogs`, `/frogcard`, `/trade`, `/trades`) are deliberately
-/// not here - collections and trading carry on.
 /// Commands the themed month replaces, taken off the list while it runs.
 ///
-/// Discord allows a hundred global commands and the bot now builds more than
-/// that, so something has to go. These are the ones the month makes pointless:
-/// the houses are dealt by the hatch rather than drafted, drawn or assigned by
-/// hand, the Snitch is retired for the month and the ravens do the dropping.
-/// Every one of them is a mod command - members lose nothing - and they all
-/// come back by switching the month off.
+/// The hatch handles house assignments, and ravens do the dropping.
+/// These commands come back when the month is switched off.
 ///
 /// `houseopt` is NOT one of them, though it was at first: it is a member's own
 /// way out of the houses and back in, which a themed month does not replace.
 const MONTH_OFF: &[&str] = &[
-    "snitchdrop", "frogdrop", "housedraft", "housedraw", "houseroles", "housechannels", "houselist",
+    "frogdrop", "housedraft", "housedraw", "houseroles", "housechannels", "houselist",
     "housecaptain", "houseping", "sellset",
 ];
 
+/// House and points commands taken off Discord's list while the Cup is paused.
+/// Members can still view and trade their cards.
 const PAUSED_OFF: &[&str] = &[
     "housecup", "housepoints", "housetop", "houses", "houselist", "houseping", "housecaptain",
     "housechannels", "housedraft", "housedraw", "houseroles", "houseopt", "mypoints", "today",
-    "snitchdrop", "frogdrop", "sellset", "modgive", "modpoints",
+    "frogdrop", "sellset", "modgive", "modpoints",
     // Sorting someone by hand is house furniture too: with nothing being
     // scored it moves a member between houses that no longer play.
     // `housecards` is NOT here - it reads collections people keep, and the
@@ -1390,13 +1371,15 @@ const PAUSED_OFF: &[&str] = &[
     "sort",
 ];
 
-/// Slash commands the owner retired (2026-09-15), deleted from Discord on start.
+/// Slash commands the owner retired, deleted from Discord on start.
 const RETIRED_COMMANDS: &[&str] = &[
     "ping", "new", "session", "abort", "checkpoint", "lobotomy", "thinking", "tool_calls", "adminonly", "awards", "warrior",
     // Truth or Dare, taken out of the bot. Discord keeps a global command until
     // it is told to drop one, so these stay in the / menu until this list does
     // it - registering fewer commands is not the same as removing any.
     "dare", "darehelp", "dareskip", "darestop",
+    "announce", "image", "invitedby", "invites", "about", "forgetme", "samebanda", "remind",
+    "reminders", "snitchdrop", "weeklyscan",
 ];
 
 /// Hides an admin command from members' / menu: only people with Manage Server
@@ -1696,8 +1679,6 @@ impl EventHandler for Handler {
         weekly::spawn(ctx.clone(), self.1.clone(), self.0.clone());
         // Daily topic posts: each topic channel's card at its times.
         daily::spawn(ctx.clone(), self.1.clone(), self.0.clone());
-        // Member notes: the first build once switched on, then the weekly refresh.
-        notes::spawn(ctx.clone());
         // /ship's nightly sheets: one row of counts per active member, rebuilt
         // in the small hours so a ship never has to read the whole log itself.
         ship_sheet::spawn(ctx.clone());
@@ -1758,26 +1739,6 @@ impl EventHandler for Handler {
             .description("check your unopened anonymous letters (only you see this)");
         commands.push(inbox);
 
-        let samebanda = CreateCommand::new("samebanda")
-            .description("same person, new account - merge their join history (admins only)")
-            .add_option(
-                CreateCommandOption::new(
-                    serenity::all::CommandOptionType::User,
-                    "purana",
-                    "the account they used before",
-                )
-                .required(true),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    serenity::all::CommandOptionType::User,
-                    "naya",
-                    "the account they use now",
-                )
-                .required(true),
-            );
-        commands.push(admin_command(samebanda));
-
         // Right-click a message -> Apps -> Quote.
         let quote_cmd = CreateCommand::new("Quote").kind(serenity::all::CommandType::Message);
         commands.push(quote_cmd);
@@ -1786,6 +1747,7 @@ impl EventHandler for Handler {
         commands.push(CreateCommand::new("Biski").kind(serenity::all::CommandType::Message));
         commands.push(dragme::invite_command());
         commands.push(dragme::command());
+        commands.push(dragme::invite_slash_command());
 
         let awards_cmd = CreateCommand::new("awards")
             .description("the server's awards - all time, or last week");
@@ -1877,7 +1839,6 @@ impl EventHandler for Handler {
         commands.push(admin_command(house::pool_builder()));
         commands.push(admin_command(house::give_builder()));
 
-        commands.push(admin_command(snitch::command()));
         commands.push(frog::command());
         commands.push(frog::card_command());
         commands.push(admin_command(frog::drop_command_builder()));
@@ -1896,8 +1857,6 @@ impl EventHandler for Handler {
         commands.push(admin_command(puzzle::skip_builder()));
         commands.push(chess::help_builder());
         commands.push(admin_command(chess::stop_builder()));
-        commands.push(admin_command(invites::invitedby_builder()));
-        commands.push(admin_command(invites::invites_builder()));
         commands.push(duel::command());
         commands.push(duel::help_builder());
         commands.push(duel::top_builder());
@@ -1923,22 +1882,15 @@ impl EventHandler for Handler {
         commands.push(admin_command(geo::skip_builder()));
         commands.push(admin_command(geo::stop_builder()));
         commands.push(frog_trade::trades_command_builder());
-        commands.push(admin_command(weekly::command()));
         commands.push(admin_command(daily::command()));
         commands.push(standings::mypoints_builder());
-        commands.push(notes::about_builder());
-        commands.push(notes::forgetme_builder());
         commands.push(roast::ship_builder());
         commands.push(roast::noroast_builder());
-        commands.push(imagefx::builder());
         commands.push(standings::today_builder());
-        commands.push(control::remind::remind_builder());
-        commands.push(control::remind::reminders_builder());
         commands.push(standings::housetop_builder());
         commands.push(standings::housecup_builder());
         commands.push(admin_command(standings::draw_builder()));
         commands.push(admin_command(scoreboard::refresh_builder()));
-        commands.push(admin_command(announce::builder()));
         commands.push(admin_command(signup::builder()));
         commands.push(admin_command(confess::whosent_builder()));
         // Everyone's: the door that does not depend on a card existing.
@@ -2045,12 +1997,11 @@ impl EventHandler for Handler {
         // Discord's hundred.
         commands.extend(marriage_cmd::builders());
         
-// While the Cup is paused the house and Snitch commands come off the list
+// While the Cup is paused the house and points commands come off the list
 // entirely - a command nobody can use is worse than no command, because
 // Discord still offers it and it only answers with a refusal. The card
 // commands stay: people keep their collections and go on trading.
-// The month takes its own commands off first: Discord stops at a hundred
-// global commands and the bot builds more than that now.
+// Apply the themed month's exclusions before the Cup's.
 let commands = match month::running() {
     false => commands,
     true => {
@@ -2079,7 +2030,7 @@ let commands = match house_cup::running() {
                     .unwrap_or(true)
             })
             .collect();
-        tracing::info!("commands: the Cup is paused, so {} house and Snitch commands are off the list", PAUSED_OFF.len());
+        tracing::info!("commands: the Cup is paused, so {} house and points commands are off the list", PAUSED_OFF.len());
         kept
     }
 };
@@ -2101,15 +2052,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        // The /image effect picker, answered as it is typed in. Autocomplete is
-        // its own kind of interaction and never a command, so it returns here
-        // rather than falling through to the dispatch below.
-        if let Interaction::Autocomplete(ref auto) = interaction {
-            if auto.data.name == "image" {
-                imagefx::autocomplete(&ctx, auto).await;
-            }
-            return;
-        }
         // Letter buttons: open, and the reply box.
         if let Interaction::Component(ref component) = interaction {
             let id = component.data.custom_id.clone();
@@ -2169,10 +2111,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 scoreboard::on_component(&ctx, component).await;
                 return;
             }
-            if id.starts_with("remindcancel:") {
-                control::remind::on_component(&ctx, component).await;
-                return;
-            }
             if id.starts_with("weekly") {
                 weekly::on_component(&ctx, component).await;
                 return;
@@ -2187,10 +2125,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if id.starts_with("houselist:") || id.starts_with("housedraft:") {
                 house::on_component(&ctx, component).await;
-                return;
-            }
-            if id.starts_with("notes:") {
-                notes::on_component(&ctx, component).await;
                 return;
             }
             // Dispatched by the custom id alone, so a sign-up message posted
@@ -2488,7 +2422,7 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         }
 
         if let Interaction::Command(command) = interaction {
-            if matches!(command.data.name.as_str(), dragme::COMMAND | dragme::INVITE_COMMAND) {
+            if matches!(command.data.name.as_str(), dragme::COMMAND | dragme::INVITE_COMMAND | dragme::INVITE_SLASH_COMMAND) {
                 dragme::on_command(&ctx, &command).await;
                 return;
             }
@@ -2584,66 +2518,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
                                 .content(reply),
-                        ),
-                    )
-                    .await;
-            }
-
-            if command.data.name == "samebanda" {
-                let opt = |n: &str| {
-                    command.data.options.iter().find(|o| o.name == n).and_then(|o| match &o.value {
-                        serenity::all::CommandDataOptionValue::User(id) => Some(id.get()),
-                        _ => None,
-                    })
-                };
-                let text = if !admin_ids().contains(&command.user.id.get()) {
-                    "Ye admin ka kaam hai.".to_string()
-                } else {
-                    match (opt("purana"), opt("naya")) {
-                        (Some(old), Some(new)) if old == new => {
-                            "Dono same account hain. Kya jod raha hai?".to_string()
-                        }
-                        (Some(old), Some(new)) => {
-                            let mut raw: HashMap<String, String> = self
-                                .1
-                                .storage
-                                .get_state(ALIAS_KEY.to_string())
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|v| serde_json::from_value(v).ok())
-                                .unwrap_or_default();
-                            raw.insert(old.to_string(), new.to_string());
-                            let _ = self
-                                .1
-                                .storage
-                                .save_state(
-                                    ALIAS_KEY.to_string(),
-                                    serde_json::json!(raw),
-                                )
-                                .await;
-                            let all = joinlog_all(&self.1.storage).await;
-                            let merged = all.iter().find(|(id, _)| *id == new);
-                            match merged {
-                                Some((_, log)) => format!(
-                                    "Jod diya. <@{}> aur <@{}> ab ek hi bande hain.\nMila ke **{}** baar aaya, **{}** baar gaya.",
-                                    old, new, log.joins, log.leaves
-                                ),
-                                None => format!("Jod diya. <@{}> ab <@{}> hai.", old, new),
-                            }
-                        }
-                        _ => "Dono account bata - purana aur naya.".to_string(),
-                    }
-                };
-                let _ = command
-                    .create_response(
-                        ctx.http.clone(),
-                        serenity::all::CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content(text)
-                                .allowed_mentions(
-                                    serenity::all::CreateAllowedMentions::new().empty_users(),
-                                ),
                         ),
                     )
                     .await;
@@ -2747,19 +2621,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 battle::stop_command(&ctx, &command).await;
             }
 
-            // The four houses.
-            // Invite tracking, mods only, answered privately.
-            if command.data.name == "invitedby" {
-                invites::invitedby_command(&ctx, &command).await;
-                return;
-            }
-            if command.data.name == "invites" {
-                invites::invites_command(&ctx, &command, &self.1.storage).await;
-                return;
-            }
-            if command.data.name == "snitchdrop" {
-                snitch::drop_command(&ctx, &command).await;
-            }
             if command.data.name == "frogs" {
                 frog::frogs_command(&ctx, &command).await;
                 return;
@@ -2935,14 +2796,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             if command.data.name == "mypoints" {
                 standings::mypoints_command(&ctx, &command).await;
             }
-            if command.data.name == "about" {
-                notes::about_command(&ctx, &self.1.storage, &command).await;
-                return;
-            }
-            if command.data.name == "forgetme" {
-                notes::forgetme_command(&ctx, &command).await;
-                return;
-            }
             if command.data.name == "ship" {
                 roast::ship_command(&ctx, &self.1.storage, &command).await;
                 return;
@@ -2951,18 +2804,8 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 roast::noroast_command(&ctx, &command).await;
                 return;
             }
-            if command.data.name == "image" {
-                imagefx::command(&ctx, &command).await;
-                return;
-            }
             if command.data.name == "today" {
                 standings::today_command(&ctx, &command).await;
-            }
-            if command.data.name == "remind" {
-                control::remind::remind_command(&ctx, &command).await;
-            }
-            if command.data.name == "reminders" {
-                control::remind::reminders_command(&ctx, &command).await;
             }
             if command.data.name == "housetop" {
                 standings::housetop_command(&ctx, &command).await;
@@ -2975,10 +2818,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "guiderefresh" {
                 scoreboard::refresh_command(&ctx, &command).await;
-            }
-            if command.data.name == "announce" {
-                announce::command(&ctx, &command).await;
-                return;
             }
             if command.data.name == "signup" {
                 signup::command(&ctx, &command).await;
@@ -3059,9 +2898,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             }
             if command.data.name == "sort" {
                 house::sort_command(&ctx, &command).await;
-            }
-            if command.data.name == "weeklyscan" {
-                weekly::scan_command(&ctx, &self.1, &agent_id, &command).await;
             }
             if command.data.name == "dailypost" {
                 daily::post_command(&ctx, &self.1, &agent_id, &command).await;
@@ -3788,10 +3624,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
         movie::note_message(&ctx, &msg);
         // And in the geo channel.
         geo::note_message(&ctx, &msg);
-        // A picture posted in the image channel is remembered, so `/image` with
-        // no arguments has something to work on. Before the bot check on
-        // purpose: the bot's own output is what a second effect chains onto.
-        imagefx::on_message(&msg);
         // Other bots - music players, game bots, loggers - are not members and
         // were being stored and counted like people.
         if msg.author.bot {
@@ -3855,20 +3687,6 @@ if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
                 }
             }
             return;
-        }
-
-        // "@Loduchand about @someone" (or "tell me about" / "who is") answers
-        // from the stored member notes, like the quote card: no tokens, never
-        // the model, in any channel and in admin-only mode too. Who may see
-        // whose notes is checked inside, and the notes go to the asker's DMs.
-        // A pause still stops it. Only while member notes are switched on.
-        if !is_dm && notes::enabled() && notes::chat_target(&msg.content, ctx.cache.current_user().id.get(), msg.author.id.get()).is_some() {
-            if is_paused(&self.1.storage, &agent_id).await {
-                return;
-            }
-            if notes::on_message(&ctx, &self.1.storage, &msg).await {
-                return;
-            }
         }
 
         // The quiz channel belongs to the quiz: answers are checked there, for
@@ -4333,7 +4151,7 @@ mod paused_commands_tests {
         for kept in ["housecards", "frogs", "frogcard", "trade", "trades"] {
             assert!(!PAUSED_OFF.contains(&kept), "/{} must stay while the Cup is paused", kept);
         }
-        for gone in ["housecup", "housepoints", "housetop", "snitchdrop", "frogdrop", "modgive", "sort"] {
+        for gone in ["housecup", "housepoints", "housetop", "frogdrop", "modgive", "sort"] {
             assert!(PAUSED_OFF.contains(&gone), "/{} should come off the list", gone);
         }
         for name in PAUSED_OFF {

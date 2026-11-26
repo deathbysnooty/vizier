@@ -33,7 +33,7 @@
 //!
 //! **The text never reaches the AI.** The three channels are listed as
 //! sensitive ([`sensitive_channels`]), which is the same list #safe-corner is
-//! on, so the message log never records them — and the member notes, the daily
+//! on, so the message log never records them — and /ship, the daily
 //! topic pass, the deep dive, the Kalesh pages and the weekly posts scan all
 //! read the message log. The weekly scan can also be pointed at channels by
 //! hand, so it filters these out of its own list too.
@@ -180,7 +180,7 @@ pub fn channels() -> Vec<u64> {
 /// the name together, which is the one pairing that must never be summarised.
 ///
 /// This is the whole of the AI exclusion: `msglog::never_logged` reads this
-/// list, so these channels are never recorded at all, and the member notes, the
+/// list, so these channels are never recorded at all, and /ship, the
 /// topic pass, the deep dive and the Kalesh pages all read the message log.
 pub fn sensitive_channels() -> Vec<u64> {
     channels()
@@ -3492,9 +3492,8 @@ mod tests {
             assert!(insights::rows_for(&seen_in(id, None), &sensitive).is_empty(), "{} made an interaction row", id);
             assert!(insights::rows_for(&seen_in(999_001, Some(id)), &sensitive).is_empty());
 
-            // The member notes and the notes facts both filter on exactly this
-            // list, the same way they filter #safe-corner.
-            assert!(sensitive.contains(&id), "the notes builder reads this list: {:?}", sensitive);
+            // /ship facts use the same channel exclusions as the message log.
+            assert!(sensitive.contains(&id), "/ship facts read this list: {:?}", sensitive);
         }
 
         // The weekly posts scan is the one AI path pointed at channels by hand,

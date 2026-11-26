@@ -21,8 +21,7 @@
 //! "unsure"; the second then sees nothing change, so it is given the same
 //! candidates instead of being called unknown.
 //!
-//! Joins before tracking began are not known at all, and the panel and the
-//! commands say so rather than guess.
+//! The panel marks joins before tracking began as unknown.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -30,10 +29,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use chrono::TimeZone;
 use parking_lot::Mutex;
 use rusqlite::Connection;
-use serenity::all::{
-    CommandDataOptionValue, CommandInteraction, Context, CreateAllowedMentions, CreateCommand, CreateCommandOption,
-    CreateInteractionResponse, CreateInteractionResponseMessage, GuildId, Http, UserId,
-};
+use serenity::all::{Context, GuildId, Http};
 
 use super::control;
 use super::invites_store::{self as store, Candidate, How, Invite, Join, NewJoin, Vanity};
@@ -579,121 +575,6 @@ pub fn still_here(leaves: u32, last_join: Option<&str>, last_leave: Option<&str>
     }
     let Some(left) = last_leave.and_then(moment) else { return true };
     matches!(last_join.and_then(moment), Some(back) if back >= left)
-}
-
-// --- the slash commands --------------------------------------------------------------------------------
-
-pub fn invitedby_builder() -> CreateCommand {
-    CreateCommand::new("invitedby")
-        .description("mods: which invite a member joined through, and who made it")
-        .add_option(CreateCommandOption::new(serenity::all::CommandOptionType::User, "member", "who to look up").required(true))
-}
-
-pub fn invites_builder() -> CreateCommand {
-    CreateCommand::new("invites")
-        .description("mods: how many people a member's invites brought in, and how many stayed")
-        .add_option(CreateCommandOption::new(serenity::all::CommandOptionType::User, "member", "whose invites").required(true))
-}
-
-fn whisper(text: String) -> CreateInteractionResponse {
-    CreateInteractionResponse::Message(
-        CreateInteractionResponseMessage::new().content(text).ephemeral(true).allowed_mentions(CreateAllowedMentions::new()),
-    )
-}
-
-fn member_option(command: &CommandInteraction) -> Option<UserId> {
-    command.data.options.iter().find_map(|o| match o.value {
-        CommandDataOptionValue::User(id) if o.name == "member" => Some(id),
-        _ => None,
-    })
-}
-
-/// Refuses anyone who isn't a mod, privately. True when they may go on.
-async fn mods_only(ctx: &Context, command: &CommandInteraction) -> bool {
-    if super::admin_ids().contains(&command.user.id.get()) {
-        return true;
-    }
-    tracing::warn!("rejected /{} from non-admin {} ({})", command.data.name, command.user.name, command.user.id.get());
-    let _ = command.create_response(&ctx.http, whisper("Only mods can use this.".into())).await;
-    false
-}
-
-/// `/invitedby member:` - the same line as the panel's profile.
-pub async fn invitedby_command(ctx: &Context, command: &CommandInteraction) {
-    if !mods_only(ctx, command).await {
-        return;
-    }
-    let Some(target) = member_option(command) else {
-        let _ = command.create_response(&ctx.http, whisper("Pick a member.".into())).await;
-        return;
-    };
-    let Some(db) = store::db() else {
-        let _ = command.create_response(&ctx.http, whisper("Invite tracking isn't running (its store didn't open).".into())).await;
-        return;
-    };
-    // The cache is read and let go before Discord is asked: never across an await.
-    let cached = command.guild_id.and_then(|g| ctx.cache.guild(g).and_then(|guild| guild.members.get(&target).map(|m| m.joined_at)));
-    let joined_at = match (cached, command.guild_id) {
-        (Some(at), _) => at.map(|t| t.unix_timestamp()),
-        (None, Some(g)) => g.member(&ctx.http, target).await.ok().and_then(|m| m.joined_at.map(|t| t.unix_timestamp())),
-        (None, None) => None,
-    };
-    let (join, started) = {
-        let conn = db.lock();
-        (store::joins_of(&conn, target.get()).ok().and_then(|j| j.into_iter().next()), store::started_ts(&conn))
-    };
-    let now = chrono::Utc::now().timestamp();
-    let text = format!("<@{}>: {}", target.get(), line(join.as_ref().map(|j| &j.new), started, joined_at, now, &|id, _| format!("<@{}>", id)));
-    let _ = command.create_response(&ctx.http, whisper(text)).await;
-}
-
-/// `/invites member:` - how many their invites brought in and how many stayed.
-pub async fn invites_command(ctx: &Context, command: &CommandInteraction, storage: &Arc<crate::storage::VizierStorage>) {
-    if !mods_only(ctx, command).await {
-        return;
-    }
-    let Some(target) = member_option(command) else {
-        let _ = command.create_response(&ctx.http, whisper("Pick a member.".into())).await;
-        return;
-    };
-    let Some(db) = store::db() else {
-        let _ = command.create_response(&ctx.http, whisper("Invite tracking isn't running (its store didn't open).".into())).await;
-        return;
-    };
-    let (joins, started, live) = {
-        let conn = db.lock();
-        let live = store::active(&conn).unwrap_or_default().into_iter().filter(|s| s.invite.inviter_id == Some(target.get())).count();
-        (store::all_joins(&conn).unwrap_or_default(), store::started_ts(&conn), live)
-    };
-    let now = chrono::Utc::now().timestamp();
-    let mine = tally(&joins).into_iter().find(|t| t.inviter_id == target.get());
-    let brought = mine.map(|t| t.members).unwrap_or_default();
-    let mut stayed = 0;
-    for b in &brought {
-        let log = super::joinlog_get(storage, b.member_id).await;
-        if still_here(log.leaves, log.last_join.as_deref(), log.last_leave.as_deref()) {
-            stayed += 1;
-        }
-    }
-    let since = day_words(started, now);
-    let text = if brought.is_empty() {
-        format!("<@{}>'s invites have brought nobody in since tracking began on {}. They have {} live.", target.get(), since, plural(live as u64, "invite"))
-    } else {
-        format!(
-            "<@{}>'s invites brought in {} since tracking began on {}: {} still here, {} gone. They have {} live.",
-            target.get(),
-            plural(brought.len() as u64, "member"),
-            since,
-            stayed,
-            brought.len() - stayed,
-            plural(live as u64, "invite")
-        )
-    };
-    let _ = command.create_response(&ctx.http, whisper(text)).await;
-}
-
-fn plural(n: u64, word: &str) -> String {
-    if n == 1 { format!("1 {}", word) } else { format!("{} {}s", n, word) }
 }
 
 #[cfg(test)]

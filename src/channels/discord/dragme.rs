@@ -16,6 +16,7 @@ use crate::error::VizierError;
 
 pub const COMMAND: &str = "dragme";
 pub const INVITE_COMMAND: &str = "Invite to my VC";
+pub const INVITE_SLASH_COMMAND: &str = "vcinvite";
 
 const DRAG_PREFIX: &str = "dragme:";
 const INVITE_PREFIX: &str = "vcinv:";
@@ -176,6 +177,13 @@ pub fn invite_command() -> CreateCommand {
         .contexts(vec![InteractionContext::Guild])
 }
 
+pub fn invite_slash_command() -> CreateCommand {
+    CreateCommand::new(INVITE_SLASH_COMMAND)
+        .description("Invite someone into your voice channel")
+        .add_option(CreateCommandOption::new(CommandOptionType::User, "member", "Who to invite").required(true))
+        .contexts(vec![InteractionContext::Guild])
+}
+
 pub fn owns_component(id: &str) -> bool {
     id.starts_with(DRAG_PREFIX) || id.starts_with(INVITE_PREFIX)
 }
@@ -203,16 +211,15 @@ fn voice_channels(ctx: &Context, guild: GuildId, first: UserId, second: UserId) 
 fn request_from_command(ctx: &Context, command: &CommandInteraction) -> Result<Request, &'static str> {
     let guild = command.guild_id.ok_or("Ye sirf server mein chalta hai.")?;
     let initiator = command.user.id;
-    let (kind, member) = if command.data.name == COMMAND {
-        let member = command.data.options.iter().find_map(|option| match option.value {
+    let kind = if command.data.name == COMMAND { Kind::Drag } else { Kind::Invite };
+    let member = if command.data.name == INVITE_COMMAND {
+        command.data.target_id.map(|id| id.to_user_id())
+    } else {
+        command.data.options.iter().find_map(|option| match option.value {
             CommandDataOptionValue::User(id) if option.name == "member" => Some(id),
             _ => None,
-        });
-        (Kind::Drag, member)
-    } else {
-        (Kind::Invite, command.data.target_id.map(|id| id.to_user_id()))
-    };
-    let member = member.ok_or("Kisi member ko select kar.")?;
+        })
+    }.ok_or("Kisi member ko select kar.")?;
     let (own_voice, member_voice) = voice_channels(ctx, guild, initiator, member);
     let (target, message_channel) = match kind {
         Kind::Drag => {
@@ -462,6 +469,25 @@ mod tests {
             message: Some(MessageId::new(6)),
             expires_at: now + kind.lifetime(),
         }
+    }
+
+    #[test]
+    fn voice_invites_have_slash_and_user_menu_commands() {
+        let slash = serde_json::to_value(invite_slash_command()).unwrap();
+        assert_eq!(slash["name"], "vcinvite");
+        assert_eq!(slash["description"], "Invite someone into your voice channel");
+        let options = slash["options"].as_array().unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0]["name"], "member");
+        assert_eq!(options[0]["type"], serde_json::to_value(CommandOptionType::User).unwrap());
+        assert_eq!(options[0]["required"], true);
+
+        let menu = serde_json::to_value(invite_command()).unwrap();
+        assert_eq!(menu["name"], "Invite to my VC");
+        assert_eq!(menu["type"], serde_json::to_value(CommandType::User).unwrap());
+        let guild_only = serde_json::to_value([InteractionContext::Guild]).unwrap();
+        assert_eq!(slash["contexts"], guild_only);
+        assert_eq!(menu["contexts"], guild_only);
     }
 
     #[test]

@@ -1719,10 +1719,8 @@ button.tidbit:hover { border-color: var(--accent-line); }
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
 
-/* --- reminders: scheduled posts and members' reminders ---------------------------------- */
+/* --- scheduled posts -------------------------------------------------------------------- */
 
-.tab-count { font-size: 11.5px; font-weight: 650; min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
-.tab-count.is-live { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .show-sm { display: none; }
 
 button.new-card { font: inherit; width: 100%; cursor: pointer; }
@@ -1802,44 +1800,15 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .tpl-icon .icon { width: 18px; height: 18px; color: var(--muted); }
 .tpl-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 4px; }
 
-/* members' reminders */
+/* special welcomes notices */
 .memo-note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: var(--text-2); font-size: 13.5px; }
 .memo-note .icon { width: 16px; height: 16px; flex: none; margin-top: 2px; color: var(--accent-text); }
 .memo-note p { margin: 0; }
-.memo-note code { font-size: 12.5px; }
 .memo-note.is-off { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 8%, var(--surface)); }
 .memo-note.is-off .icon { color: var(--warn); }
-.memo-list { padding: 0; overflow: hidden; }
-.memo-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) 190px 96px; gap: 14px; align-items: start; padding: 14px var(--pad-card, 16px); border-top: 1px solid var(--line); }
-.memo-row:first-child { border-top: 0; }
-.memo-avatar { display: block; line-height: 0; }
-.memo-who { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.memo-who > a, .memo-who > b { font-weight: 600; color: var(--text); }
-.memo-by { color: var(--muted); font-size: 12.5px; display: inline-flex; align-items: center; gap: 4px; }
-.memo-by .inline-ref { font-weight: 500; color: var(--text-2); }
-.memo-text { margin: 3px 0 7px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
-.memo-text.private { color: var(--muted); font-style: italic; }
-.memo-text.private .icon { width: 14px; height: 14px; vertical-align: -2px; }
-.memo-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; color: var(--muted); font-size: 12.5px; }
-.memo-fact { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.memo-fact .icon { width: 13px; height: 13px; color: var(--faint); }
-.memo-when { display: grid; gap: 2px; font-size: 13.5px; padding-top: 1px; }
-.memo-when b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.memo-when small { color: var(--muted); font-size: 12.5px; }
-.memo-actions { display: flex; justify-content: flex-end; }
-.memo-row.is-cancelled .memo-text, .memo-row.is-cancelled .memo-who { opacity: .6; }
 .badge.waiting { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
 .badge.failed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
-.quick-when { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-.when-note.ok { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--text-2); }
-.when-note.ok .icon { width: 14px; height: 14px; color: var(--ok); }
-.when-note.ok b { color: var(--text); }
 
-@media (max-width: 900px) {
-  .memo-row { grid-template-columns: 36px minmax(0, 1fr) auto; }
-  .memo-when { grid-column: 2; grid-row: 2; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .memo-actions { grid-column: 3; grid-row: 1; }
-}
 @media (max-width: 640px) {
   .hide-sm, .btn.hide-sm { display: none; }
   .show-sm { display: inline; }
@@ -1848,7 +1817,6 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
   .form-card > h3 .right .segmented { width: 100%; }
   .form-card > h3 .right .segmented button { flex: 1; }
   .pic-tools .btn { height: 38px; }
-  .memo-row { gap: 10px; padding: 12px; }
   .pic-tools { flex-direction: column; }
   .pic { width: 76px; height: 76px; }
   .lib-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2360,11 +2328,6 @@ button.new-card { font: inherit; width: 100%; cursor: pointer; }
 .automod-model.quiet { color: var(--faint); }
 .automod-model svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
 .msglog-times .quiet { color: var(--faint); }
-
-/* Member notes on a member's page (/about). */
-.about-bullets { margin: 0 0 10px; padding-left: 20px; display: grid; gap: 6px; }
-.about-lookups { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; }
-.card-head .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* Kalesh: looking back at a fight between two to six members, each in their own colour. */
 :root { --side-a: #5aa9ff; --side-b: #f07a9c; --side-c: #5cd08e; --side-d: #e8b04f; --side-e: #b58cf5; --side-f: #4fd1d9; --side-other: var(--faint); }

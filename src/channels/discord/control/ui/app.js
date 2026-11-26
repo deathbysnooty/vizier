@@ -762,7 +762,7 @@
     removeSavebar();
     switch (r.name) {
       case 'section': renderSection(page, r.parts[1], r.q.get('k')); break;
-      case 'reminders': if (r.parts[1] === 'members') renderMemos(page); else { renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1], r.q); } break;
+      case 'reminders': renderReminders(page); if (r.parts[1]) openReminderEditor(r.parts[1], r.q); break;
       case 'welcomes': renderWelcomes(page); if (r.parts[1]) openWelcomeEditor(r.parts[1]); break;
       case 'autoreplies': renderRules(page); if (r.parts[1]) openRuleEditor(r.parts[1]); break;
       case 'houses': if (r.parts[1] === 'scorers') renderScorers(page); else renderHouses(page); break;
@@ -4580,28 +4580,10 @@
 
   // --- reminders page ------------------------------------------------------------------
 
-  function reminderTabs(active) {
-    const pending = S.memoPending;
-    return h('nav', { class: 'page-tabs', 'aria-label': 'Reminder views' },
-      h('a', { href: '#/reminders', 'aria-current': active === 'posts' ? 'page' : null }, icon('calendar'), h('span', { class: 'hide-sm' }, 'Scheduled posts'), h('span', { class: 'show-sm' }, 'Posts'), h('span', { class: 'tab-count' }, String(S.reminders.length))),
-      h('a', { href: '#/reminders/members', 'aria-current': active === 'members' ? 'page' : null }, icon('users'), h('span', { class: 'hide-sm' }, 'Members’ reminders'), h('span', { class: 'show-sm' }, 'Members'),
-        h('span', { class: 'tab-count' + (pending ? ' is-live' : ''), id: 'memo-tab-count', hidden: pending === undefined }, String(pending || 0))));
-  }
-  async function refreshMemoCount() {
-    try {
-      const data = await api('GET', '/memos?status=pending');
-      S.memoPending = data.pending;
-      const el = document.getElementById('memo-tab-count');
-      if (el) { el.textContent = String(data.pending); el.hidden = false; el.classList.toggle('is-live', data.pending > 0); }
-      return data;
-    } catch (_) { return null; }
-  }
-
   function renderReminders(page) {
     document.title = 'Reminders · Loduchand';
     const newBtn = h('button', { class: 'btn primary', type: 'button', onclick: () => chooseTemplate() }, icon('plus'), 'New post');
-    page.appendChild(pageHead('Reminders', 'Posts Loduchand makes on a schedule, and the reminders members set for themselves.', newBtn));
-    page.appendChild(reminderTabs('posts'));
+    page.appendChild(pageHead('Reminders', 'Posts Loduchand makes on a schedule.', newBtn));
     const grid = h('div', { class: 'reminders' });
     const draw = () => {
       clear(grid);
@@ -4610,7 +4592,6 @@
     };
     draw();
     page.appendChild(grid);
-    refreshMemoCount();
     const needs = S.reminders.some((r) => (r.images || []).length || (r.reactions || []).some((x) => /:\d+>?$/.test(x)));
     if (needs && (!S.media || !S.emojis)) Promise.all([loadMedia(), loadEmojis()]).then(() => { if (grid.isConnected) draw(); });
   }
@@ -4687,184 +4668,6 @@
     return { id: 0, name: '', enabled: true, channel_id: general ? general.id : '', lines: [''], order: 'rotate', schedule: { kind: 'every', minutes: 60 },
       active_from: '', active_to: '', user_id: '', user_name: '', since: '', stop_when_back: false, welcome_line: '', ends: '', last_sent: 0, sent_count: 0,
       images: [], image_order: 'rotate', style: 'plain', title: '', colour: '', footer: '', reactions: [], delete_previous: false, last_message_id: '', ai_prompt: '', ai_recent: [] };
-  }
-
-  // --- members' reminders --------------------------------------------------------------
-
-  const memoView = { status: 'pending', q: '' };
-  const VIA = { chat: ['Asked the bot', 'message'], command: ['/remind', 'slash'], panel: ['Panel', 'sliders'] };
-  const MEMO_STATUS = { pending: ['Waiting', 'waiting'], sent: ['Sent', 'on'], cancelled: ['Cancelled', 'paused'], failed: ['Not delivered', 'failed'] };
-
-  function memberRemindersSetting() {
-    for (const sec of S.sections) { const st = sec.settings.find((x) => x.key === 'VIZIER_MEMBER_REMINDERS'); if (st) return { sec, st }; }
-    return null;
-  }
-
-  function renderMemos(page) {
-    document.title = 'Members’ reminders · Loduchand';
-    page.appendChild(pageHead('Reminders', 'Posts Loduchand makes on a schedule, and the reminders members set for themselves.',
-      h('button', { class: 'btn primary', type: 'button', onclick: () => openMemoForm(() => load()) }, icon('plus'), 'New member reminder')));
-    page.appendChild(reminderTabs('members'));
-    const found = memberRemindersSetting();
-    const settingLink = found ? h('a', { href: '#/s/' + found.sec.id + '?k=VIZIER_MEMBER_REMINDERS' }, h('code', null, 'VIZIER_MEMBER_REMINDERS')) : h('code', null, 'VIZIER_MEMBER_REMINDERS');
-    const banner = h('div');
-    page.appendChild(banner);
-    const input = h('input', { type: 'search', placeholder: 'Search by member, text or channel', 'aria-label': 'Search reminders', value: memoView.q });
-    const count = h('span', { class: 'count', 'aria-live': 'polite' });
-    const list = h('div', { class: 'memo-list card' }, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading reminders…'));
-    let data = null;
-    const drawBanner = () => {
-      clear(banner);
-      const on = data ? data.enabled : true;
-      banner.appendChild(h('div', { class: 'memo-note' + (on ? '' : ' is-off') }, icon(on ? 'info' : 'pause'),
-        h('p', null, on ? null : h('b', null, 'Member reminders are switched off, so none of these go out. '),
-          'Members set these by asking the bot (“remind me in 2 hours to…”) or with ', h('code', null, '/remind'), '. The master switch is ', settingLink, '.')));
-    };
-    const draw = () => {
-      clear(list);
-      if (!data) return;
-      const q = memoView.q.trim().toLowerCase();
-      const items = data.items.filter((m) => !q || [m.user && m.user.name, m.set_by && m.set_by.name, m.text, m.channel && m.channel.name, (VIA[m.via] || [m.via])[0]].filter(Boolean).join(' ').toLowerCase().includes(q));
-      count.textContent = items.length === data.items.length ? plural(items.length, 'reminder') : items.length + ' of ' + data.items.length;
-      if (!items.length) {
-        list.appendChild(h('div', { class: 'empty' }, h('p', null, q ? 'No reminder matches “' + memoView.q.trim() + '”.' : memoView.status === 'pending' ? 'Nobody has a reminder waiting.' : 'Nothing here yet.'),
-          !q && memoView.status === 'pending' ? h('small', null, 'Members can ask: “@Loduchand remind me at 9pm to join quiz”.') : null));
-        return;
-      }
-      items.forEach((m) => list.appendChild(memoRow(m, async () => {
-        const who = (m.user && m.user.name) || 'this member';
-        const ok = await confirmDialog({ title: 'Cancel ' + who + '’s reminder?', icon: 'trash', danger: true, body: 'It was due ' + m.due_words + '. It won’t be sent, and ' + who + ' isn’t told.', confirm: 'Cancel reminder', cancel: 'Keep it' });
-        if (!ok) return;
-        try { await api('POST', '/memos/' + m.id + '/cancel'); toast('Cancelled ' + who + '’s reminder'); refreshAudit(); load(); }
-        catch (e) { toast(e.message, 'error'); load(); }
-      })));
-    };
-    const load = async () => {
-      try {
-        data = await api('GET', '/memos?status=' + memoView.status);
-        S.memoPending = data.pending;
-        const el = document.getElementById('memo-tab-count');
-        if (el) { el.textContent = String(data.pending); el.hidden = false; el.classList.toggle('is-live', data.pending > 0); }
-      } catch (e) { clear(list); list.appendChild(h('div', { class: 'empty' }, h('p', null, e.message))); return; }
-      if (!list.isConnected) return;
-      drawBanner();
-      draw();
-    };
-    input.addEventListener('input', () => { memoView.q = input.value; draw(); });
-    page.appendChild(h('div', { class: 'toolbar' },
-      segmented([['pending', 'Waiting'], ['done', 'Done'], ['all', 'All']], memoView.status, 'Which reminders', (v) => { memoView.status = v; data = null; clear(list); list.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading…')); load(); }),
-      h('label', { class: 'search-box' }, icon('search'), input), count));
-    page.appendChild(list);
-    drawBanner();
-    load();
-  }
-
-  function memoRow(m, onCancel) {
-    const name = (m.user && m.user.name) || (m.user ? 'Member ' + m.user.id : 'Unknown member');
-    const [statusText, statusCls] = MEMO_STATUS[m.status] || [m.status, ''];
-    const [viaText, viaIcon] = VIA[m.via] || [m.via, 'message'];
-    const ch = m.channel || {};
-    const place = ch.name ? '#' + ch.name + (ch.thread ? ' › thread' : '') : ch.thread ? 'a thread' : 'a DM or private channel';
-    let whenEl;
-    if (m.status === 'pending') whenEl = [h('b', null, m.due_words), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, fromNow(m.due_ts))];
-    else if (m.status === 'sent') whenEl = [h('b', null, 'Sent ' + ago(m.sent_ts || m.due_ts)), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, 'was due ' + when(m.due_ts))];
-    else whenEl = [h('b', null, m.status === 'failed' ? 'Couldn’t post' : 'Cancelled'), h('small', { title: fmtFull.format(new Date(m.due_ts * 1000)) + ' IST' }, 'was due ' + when(m.due_ts))];
-    return h('div', { class: 'memo-row is-' + m.status },
-      m.user ? h('a', { href: '#/members/' + m.user.id, class: 'memo-avatar', tabindex: '-1', 'aria-hidden': 'true' }, avatar(m.user.avatar, name, 'lg')) : h('span', { class: 'memo-avatar' }, avatar(null, '?', 'lg')),
-      h('div', { class: 'memo-main' },
-        h('div', { class: 'memo-who' }, m.user ? h('a', { href: '#/members/' + m.user.id }, name) : h('b', null, name),
-          m.set_by ? h('span', { class: 'memo-by' }, 'set by ', h('span', { class: 'inline-ref' }, avatar(m.set_by.avatar, m.set_by.name || '?', 'xs'), '@' + (m.set_by.name || m.set_by.id))) : null),
-        m.private ? h('p', { class: 'memo-text private' }, icon('shield'), ' Set somewhere private, so the text isn’t shown here.') : h('p', { class: 'memo-text' }, m.text),
-        h('div', { class: 'memo-meta' },
-          h('span', { class: 'badge ' + statusCls }, m.status === 'pending' ? h('span', { class: 'dot' }) : null, statusText),
-          h('span', { class: 'memo-fact' }, icon(ch.name ? 'hash' : 'shield'), place),
-          h('span', { class: 'memo-fact' }, icon(viaIcon), viaText),
-          h('span', { class: 'memo-fact hide-sm', title: fmtFull.format(new Date(m.created_ts * 1000)) + ' IST' }, 'made ' + ago(m.created_ts)))),
-      h('div', { class: 'memo-when' }, whenEl),
-      h('div', { class: 'memo-actions' }, m.status === 'pending' ? h('button', { class: 'btn sm', type: 'button', onclick: onCancel, 'aria-label': 'Cancel ' + name + '’s reminder' }, icon('x'), 'Cancel') : null));
-  }
-
-  function openMemoForm(onSaved) {
-    const general = S.channels.find((c) => c.kind === 'text' && c.name === 'general');
-    const f = { user_id: '', channel_id: general ? general.id : '', when: '', text: '' };
-    let member = null;
-    let parsed = null;
-    let seq = 0;
-    const dr = openDrawer({
-      title: 'New member reminder', sub: 'Loduchand pings the member in the channel when it’s due.', saveLabel: 'Set reminder',
-      isDirty: () => !!(f.user_id || f.when.trim() || f.text.trim()),
-      onSave: async (btn) => {
-        if (!f.user_id) { toast('Pick the member to remind.', 'error'); return; }
-        if (!f.channel_id) { toast('Pick the channel the reminder goes to.', 'error'); return; }
-        if (!f.when.trim()) { toast('Say when, like “in 2 hours” or “tomorrow 9am”.', 'error'); return; }
-        if (!f.text.trim()) { toast('What should the reminder say?', 'error'); return; }
-        btn.disabled = true;
-        try {
-          const saved = await api('POST', '/memos', f);
-          dr.finish();
-          toast('Reminder set for ' + (saved.user && saved.user.name || 'the member') + ', ' + saved.due_words);
-          refreshAudit();
-          onSaved && onSaved(saved);
-        } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
-      },
-    });
-    const body = dr.body;
-    const field = (label, control, hint, id) => h('div', null, h('label', { class: 'label', for: id || null }, label), control, hint || null);
-    const whenNote = h('div', { class: 'hint when-note', 'aria-live': 'polite' }, 'India time. Like “in 2 hours”, “at 9pm”, “tomorrow 9am” or “20/09 18:00”.');
-    const preview = h('div', { class: 'preview' });
-    const counter = h('div', { class: 'line-count' });
-    const drawPreview = () => {
-      clear(preview);
-      const who = h('span', { class: 'mention' }, '@' + (member ? member.name : 'member'));
-      const text = f.text.trim() || 'what to remember';
-      const me = S.me ? S.me.name : 'admin';
-      const line = f.user_id && f.user_id !== (S.me && S.me.id) ? ['⏰ ', who, ' reminder from ', h('span', { class: 'mention' }, '@' + me), ': ', text] : ['⏰ ', who, ' reminder: ', text];
-      preview.appendChild(postMessage({ text: line, time: parsed && parsed.ok ? parsed.words.replace(/^today at /, 'Today at ').replace(/^tomorrow at /, 'Tomorrow at ').replace(/ IST$/, '') : 'When it’s due' }));
-    };
-    const check = async () => {
-      const mine = ++seq;
-      const text = f.when.trim();
-      if (!text) { parsed = null; whenNote.className = 'hint when-note'; whenNote.textContent = 'India time. Like “in 2 hours”, “at 9pm”, “tomorrow 9am” or “20/09 18:00”.'; drawPreview(); return; }
-      try {
-        const res = await api('GET', '/memos/when?text=' + encodeURIComponent(text));
-        if (mine !== seq) return;
-        parsed = res;
-        clear(whenNote);
-        if (res.ok) { whenNote.className = 'when-note ok'; append(whenNote, [icon('right'), h('b', null, res.words), h('span', null, ' · ' + fromNow(res.due_ts))]); }
-        else { whenNote.className = 'error-text when-note'; append(whenNote, [icon('alert'), res.error]); }
-        drawPreview();
-      } catch (_) { /* keep the last answer */ }
-    };
-    let timer = null;
-    const draw = () => {
-      clear(body);
-      const mBtn = h('button', { class: 'picker-btn', type: 'button', id: 'm-member', 'aria-haspopup': 'listbox' },
-        member ? avatar(member.avatar, member.name, 'xs') : icon('user'), h('span', { class: 'value' + (member ? '' : ' placeholder') }, member ? member.name : 'Choose a member'), icon('chevron'));
-      mBtn.addEventListener('click', () => openPicker(mBtn, { title: 'Member', placeholder: 'Search members by name', debounce: 180, load: memberItems, onPick: (it) => { f.user_id = it.id; member = it.member; draw(); } }));
-      const c = chan(f.channel_id);
-      const chBtn = h('button', { class: 'picker-btn', type: 'button', id: 'm-channel', 'aria-haspopup': 'listbox' }, h('span', { class: 'glyph' }, '#'),
-        h('span', { class: 'value' + (c ? '' : ' placeholder') }, c ? c.name : 'Choose a channel'), c && c.category ? h('small', { style: 'color:var(--faint)' }, c.category) : null, icon('chevron'));
-      chBtn.addEventListener('click', () => openPicker(chBtn, { title: 'Channel', placeholder: 'Search channels', load: channelItems('text', [f.channel_id]), onPick: (it) => { f.channel_id = it.id; draw(); } }));
-      const when = h('input', { class: 'input', id: 'm-when', value: f.when, placeholder: 'e.g. at 9pm', autocomplete: 'off', maxlength: '80' });
-      when.addEventListener('input', () => { f.when = when.value; clearTimeout(timer); timer = setTimeout(check, 220); });
-      const quick = h('div', { class: 'quick-when' }, ['in 30m', 'in 2 hours', 'at 9pm', 'tomorrow 9am'].map((q) => h('button', { class: 'ph', type: 'button', onclick: () => { f.when = q; when.value = q; check(); } }, q)));
-      const text = h('textarea', { class: 'textarea', id: 'm-text', rows: '3', maxlength: '400', placeholder: 'e.g. join quiz night in #quiz' });
-      text.value = f.text;
-      const count = () => { counter.textContent = f.text.length > 300 ? f.text.length + ' / 400' : ''; counter.classList.toggle('over', f.text.length > 400); };
-      text.addEventListener('input', () => { f.text = text.value; count(); drawPreview(); });
-      count();
-      append(body, [
-        h('section', { class: 'form-card' }, h('h3', null, icon('bell'), 'Reminder'),
-          h('div', { class: 'form-grid' }, field('Member', mBtn, null, 'm-member'), field('Posts in', chBtn, null, 'm-channel')),
-          field('When', h('div', null, when, quick), whenNote, 'm-when'),
-          field('What to remind them', h('div', null, text, counter), null, 'm-text')),
-        h('section', { class: 'form-card' }, h('h3', null, icon('eye'), 'Preview'), preview,
-          h('p', { class: 'hint', style: 'margin:0' }, 'Only the member is pinged. They can see and cancel it with ', h('code', null, '/reminders'), '.')),
-      ]);
-      drawPreview();
-    };
-    draw();
-    requestAnimationFrame(() => { const b = body.querySelector('#m-member'); if (b) b.focus({ preventScroll: true }); });
   }
 
   async function openReminderEditor(which, q) {
@@ -7304,7 +7107,7 @@
 
   async function renderProfile(page, id, tab) {
     document.title = 'Member · Loduchand';
-    profileState.tab = ['overview', 'seen', 'memories', 'analysis', 'connections', 'about'].includes(tab) ? tab : 'overview';
+    profileState.tab = ['overview', 'seen', 'memories', 'analysis', 'connections'].includes(tab) ? tab : 'overview';
     page.appendChild(h('a', { class: 'back-link', href: '#/members' }, icon('left'), 'Members'));
     const holder = h('div', null, h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading the profile…'));
     page.appendChild(holder);
@@ -7357,13 +7160,12 @@
       clear(panel);
       if (key === 'connections') profileConnections(panel, p);
       else if (key === 'analysis') profileAnalysis(panel, p, show);
-      else if (key === 'about') profileAbout(panel, p);
       else if (key === 'seen') profileSeen(panel, p);
       else if (key === 'memories') profileMemories(panel, p);
       else profileOverview(panel, p);
     };
     const tabs = h('nav', { class: 'page-tabs', 'aria-label': 'Profile sections' },
-      [['overview', 'Overview', 'overview'], ['connections', 'Connections', 'spark'], ['analysis', 'Bot’s analysis', 'flask'], ['about', '/about notes', 'user'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
+      [['overview', 'Overview', 'overview'], ['connections', 'Connections', 'spark'], ['analysis', 'Bot’s analysis', 'flask'], ['seen', 'What the bot sees', 'message'], ['memories', 'What it remembers', 'bot']].map(([key, label, ic]) =>
         h('a', { href: '#/members/' + p.id + (key === 'overview' ? '' : '/' + key), dataset: { tab: key }, onclick: (e) => { e.preventDefault(); show(key); } }, icon(ic), label)));
     main.appendChild(tabs);
     main.appendChild(panel);
@@ -7501,60 +7303,6 @@
     });
     if (!data.memories.length) list.appendChild(h('li', { class: 'empty' }, icon('bot'), h('h3', null, 'No memories mention them'), h('p', null, 'Searched ' + plural(data.searched, 'memory', 'memories') + ' for ' + data.terms.join(', ') + '.')));
     panel.appendChild(card('pf-memories', 'What the bot remembers', plural(data.memories.length, 'memory', 'memories') + ' naming them, out of ' + numberFmt.format(data.searched) + ' · read-only', list));
-  }
-
-  // What /about says about a member, when "what they're like" was built and
-  // what it cost, who looked them up, and rebuild / clear. Opening this is
-  // itself a lookup and goes in the activity log.
-  async function profileAbout(panel, p) {
-    panel.appendChild(h('div', { class: 'cup-loading' }, h('span', { class: 'spinner' }), 'Loading their notes…'));
-    let got, all;
-    try { [got, all] = await Promise.all([api('GET', '/notes/' + p.id), api('GET', '/notes').catch(() => null)]); }
-    catch (e) { clear(panel).appendChild(h('div', { class: 'card empty' }, h('p', null, e.message))); return; }
-    if (!panel.isConnected) return;
-    clear(panel);
-    const again = () => { if (panel.isConnected) { clear(panel); profileAbout(panel, p); } };
-    const tokens = (n) => numberFmt.format(n.input_tokens) + ' in + ' + numberFmt.format(n.output_tokens) + ' out';
-    if (!got.enabled) {
-      panel.appendChild(h('section', { class: 'card' }, h('div', { class: 'empty' }, icon('user'), h('h3', null, 'Member notes are off'),
-        h('p', null, 'Switch them on under Settings → About members (VIZIER_NOTES). Until then /about says they are off and nothing is built.'))));
-    }
-    if (got.preview) {
-      panel.appendChild(card('pf-about-preview', 'What /about shows', 'Exactly the private answer they (or a mod) would get · opening this is logged', h('pre', { class: 'ai-preview' }, got.preview), { pad: true }));
-    }
-    const n = got.note;
-    const rebuild = h('button', { class: 'btn primary sm', type: 'button', disabled: got.opted_out || !got.enabled }, icon('restart'), n ? 'Rebuild now' : 'Build now');
-    rebuild.addEventListener('click', async () => {
-      rebuild.disabled = true; rebuild.lastChild.textContent = 'Asking the model…';
-      try { const r = await api('POST', '/notes/' + p.id + '/rebuild'); toast('Rebuilt · ' + tokens(r.note) + ' tokens'); refreshAudit(); again(); }
-      catch (e) { toast(e.message, 'error'); rebuild.disabled = false; rebuild.lastChild.textContent = n ? 'Rebuild now' : 'Build now'; }
-    });
-    const clearBtn = n ? h('button', { class: 'btn ghost sm', type: 'button' }, icon('trash'), 'Clear') : null;
-    if (clearBtn) clearBtn.addEventListener('click', async () => {
-      const yes = await confirmDialog({ title: 'Clear ' + p.name + '’s notes?', icon: 'trash', danger: true, confirm: 'Clear notes',
-        body: '“What they’re like” is deleted now. They aren’t opted out, so a later run can build it again once they have ' + got.new_messages + ' new messages.' });
-      if (!yes) return;
-      try { await api('DELETE', '/notes/' + p.id); toast('Cleared'); refreshAudit(); again(); } catch (e) { toast(e.message, 'error'); }
-    });
-    let body;
-    if (got.opted_out) body = h('p', { class: 'hint' }, icon('shield'), ' They opted out with /forgetme: nothing is kept and no build will include them until they opt back in.');
-    else if (n) body = h('div', null,
-      h('ul', { class: 'about-bullets' }, n.bullets.map((b) => h('li', null, b))),
-      h('p', { class: 'hint' }, 'Built ' + when(n.built_ts) + ' (' + ago(n.built_ts) + ')' + (n.built_by ? ' by a mod' : ' by the scheduled run') + ' · ' + n.model +
-        ' · read ' + plural(n.messages_used, 'message') + ' · ' + tokens(n) + ' tokens' + (n.rejected ? ' · ' + plural(n.rejected, 'bullet') + ' thrown out by the filter' : '')));
-    else body = h('p', { class: 'hint' }, got.attempt ? 'Not built: ' + got.attempt.outcome + ' (' + ago(got.attempt.ts) + ').' : 'Not built yet. The first build covers members with at least ' + got.min_messages + ' messages.');
-    panel.appendChild(card('pf-about-note', 'What they’re like', 'Written by the notes model, stored, and shown with no model call', body, { pad: true, actions: h('div', { class: 'row-actions' }, rebuild, clearBtn) }));
-    const looks = got.lookups.length
-      ? h('ul', { class: 'about-lookups' }, got.lookups.map((l) => h('li', null, (l.asker_name || l.asker) + ' · ' + l.via + ' · ' + when(l.ts))))
-      : h('p', { class: 'hint' }, 'Nobody has looked them up.');
-    panel.appendChild(card('pf-about-lookups', 'Lookups by mods', 'Newest first · also in the activity log', looks, { pad: true }));
-    if (all) {
-      const runs = all.runs.length
-        ? h('ul', { class: 'about-lookups' }, all.runs.map((r) => h('li', null, when(r.ts) + ' · ' + r.kind + ' · ' + plural(r.asked, 'model call') + ', ' + r.built + ' built, ' + r.skipped + ' too little, ' + r.failed + ' failed · ' + tokens(r) + ' tokens' + (r.waiting ? ' · ' + r.waiting + ' waiting' : ''))))
-        : h('p', { class: 'hint' }, 'No runs yet.');
-      panel.appendChild(card('pf-about-runs', 'All builds', all.built + ' members have notes · ' + all.opted_out + ' opted out · spent ' + tokens(all.spent) + ' tokens · a full first build now: ' +
-        plural(all.estimate.members, 'member') + ', about ' + numberFmt.format(all.estimate.input_tokens) + ' + ' + numberFmt.format(all.estimate.output_tokens) + ' tokens', runs, { pad: true }));
-    }
   }
 
   function markTerms(text, terms) {

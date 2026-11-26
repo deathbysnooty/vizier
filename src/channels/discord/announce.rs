@@ -33,11 +33,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serenity::all::{
-    ChannelId, CommandDataOptionValue, CommandInteraction, CommandOptionType, Context, CreateAllowedMentions,
-    CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, EditInteractionResponse,
-};
+use serenity::all::{ChannelId, Context, CreateAllowedMentions, CreateEmbed, CreateEmbedFooter, CreateMessage};
 
 use super::control;
 use super::house;
@@ -566,7 +562,7 @@ pub const NEWS: &[News] = &[News {
     id: "dragme-2026-11",
     title: "🎙️ VC mein aana hai?",
     body: "Kisi VC mein ho? `/dragme member:@someone` se unke VC ke chat mein request jayegi. Wahan jo bhi VC mein hai, woh **Approve** ya **Deny** daba sakta hai. Request 10 minute tak khuli rahegi.\n\n\
-           Apne VC mein kisi ko bulana hai? Unpe right-click karo, phir **Apps → Invite to my VC**. Unke paas **Join** ya **No thanks** dabane ke liye 30 minute hain. **Join** dabane se pehle woh kisi VC mein hon. Tum apne VC se nikle toh invite cancel.\n\n\
+           Apne VC mein kisi ko bulana hai? `/vcinvite member:@someone` chalao, ya unpe right-click karo, phir **Apps → Invite to my VC**. Unke paas **Join** ya **No thanks** dabane ke liye 30 minute hain. **Join** dabane se pehle woh kisi VC mein hon. Tum apne VC se nikle toh invite cancel.\n\n\
            VC full hai? Approve ya Join se Loduchand phir bhi move kar sakta hai.",
 }, News {
     id: "geo-world-2026-09",
@@ -824,8 +820,8 @@ async fn send(ctx: &Context, channels: &[u64], p: &Post) -> Vec<u64> {
 }
 
 /// One line for the panel's activity log.
-fn logged(key: &str, what: &str, by: u64) {
-    if let Err(err) = control::log_change(key, None, Some(what), by) {
+fn logged(key: &str, what: &str) {
+    if let Err(err) = control::log_change(key, None, Some(what), 0) {
         tracing::warn!("announce: not written to the activity log: {}", err);
     }
 }
@@ -907,7 +903,7 @@ async fn news(ctx: &Context, channels: &[u64]) -> bool {
     save(NEWS_DONE, &done);
     if said {
         house::meta_set(LAST_TS, &Utc::now().timestamp().to_string());
-        logged("announce:news", &format!("{} · {} channels", entry.title, channels.len()), 0);
+        logged("announce:news", &format!("{} · {} channels", entry.title, channels.len()));
     }
     true
 }
@@ -962,7 +958,6 @@ async fn settings(ctx: &Context, channels: &[u64], now: i64) -> bool {
         logged(
             "announce:settings",
             &format!("{} · {} channels", plural(lines.len() as i64, "change", "changes"), channels.len()),
-            0,
         );
     }
     tracing::info!("announce: {} change(s) for {} channel(s), posted: {}", lines.len(), channels.len(), said);
@@ -1004,58 +999,6 @@ pub fn spawn(ctx: Context) {
             tokio::time::sleep(Duration::from_secs(POLL_SECS)).await;
         }
     });
-}
-
-// --- /announce ------------------------------------------------------------------------------------
-
-pub fn builder() -> CreateCommand {
-    CreateCommand::new("announce")
-        .description("admin only: post an announcement in the common rooms and the houses channel")
-        .add_option(
-            CreateCommandOption::new(CommandOptionType::String, "text", "what to tell everyone")
-                .required(true)
-                .max_length(NEWS_LIMIT as u16),
-        )
-}
-
-/// `/announce`: the same card, in the same places, with your own words.
-pub async fn command(ctx: &Context, command: &CommandInteraction) {
-    if !super::admin_ids().contains(&command.user.id.get()) {
-        let reply = CreateInteractionResponseMessage::new().content("Only bot admins can do that.").ephemeral(true);
-        let _ = command.create_response(&ctx.http, CreateInteractionResponse::Message(reply)).await;
-        return;
-    }
-    let text = command
-        .data
-        .options
-        .iter()
-        .find_map(|o| match (&o.value, o.name.as_str()) {
-            (CommandDataOptionValue::String(v), "text") => Some(v.trim().to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let _ = command.defer_ephemeral(&ctx.http).await;
-    let channels = channels_for(ctx);
-    let reply = if text.is_empty() {
-        "There was nothing to say.".to_string()
-    } else if channels.is_empty() {
-        "No announcement channels are set, and the four common rooms could not be found by name either - add them on the panel under Announcements.".to_string()
-    } else {
-        let post = Post::new("📣 Announcement", &text);
-        let failed = send(ctx, &channels, &post).await;
-        logged("announce:custom", &cut(&text, 200), command.user.id.get());
-        let landed = channels.len() - failed.len();
-        match failed.as_slice() {
-            [] => format!("Posted in {} channels.", landed),
-            some => format!(
-                "Posted in {} of {} channels. These wouldn't take it: {}",
-                landed,
-                channels.len(),
-                some.iter().map(|id| format!("<#{}>", id)).collect::<Vec<_>>().join(", ")
-            ),
-        }
-    };
-    let _ = command.edit_response(&ctx.http, EditInteractionResponse::new().content(reply)).await;
 }
 
 #[cfg(test)]

@@ -868,7 +868,7 @@ pub async fn ask_live_as(prompt: String, name: Option<String>) -> anyhow::Result
     let config = deps.storage.get_agent(agent_id).await?.ok_or_else(|| anyhow::anyhow!("no config for {}", agent_id))?;
     let named = name.clone().map(|n| (config.provider.clone(), n));
     let model = VizierModel::new_with_override(deps, &config, named).await?;
-    let prompt_tokens = super::notes_build::estimate_tokens(&prompt) as u64;
+    let prompt_tokens = super::message_text::estimate_tokens(&prompt) as u64;
     let (_, choice, usage) = tokio::time::timeout(MODEL_WAIT, model.completion(ModelMessage::user(prompt), vec![], vec![]))
         .await
         .map_err(|_| anyhow::anyhow!("the model took over {}s", MODEL_WAIT.as_secs()))??;
@@ -883,7 +883,7 @@ pub async fn ask_live_as(prompt: String, name: Option<String>) -> anyhow::Result
     let (input_tokens, output_tokens) = if usage.input_tokens + usage.output_tokens > 0 {
         (usage.input_tokens, usage.output_tokens)
     } else {
-        (prompt_tokens, super::notes_build::estimate_tokens(&text) as u64)
+        (prompt_tokens, super::message_text::estimate_tokens(&text) as u64)
     };
     Ok(Reply { text, input_tokens, output_tokens, model: name.unwrap_or(config.model) })
 }

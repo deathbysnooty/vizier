@@ -22,7 +22,7 @@
 //! Two gates stand between a day and an entry. A **floor** — usable messages
 //! and real characters, both settings — so somebody who dropped four "lol"s and
 //! a sticker gets no entry at all rather than an invented one; `usable` is
-//! `notes_build`'s, so bot commands, one-word replies and repeats do not count.
+//! `message_text`'s, so bot commands, one-word replies and repeats do not count.
 //! And a **filter** on the way out, which throws away a tag or a line touching
 //! sexuality, gender, religion, caste, health or family, anything quoted, and
 //! filler like "chatting" that says nothing. A rejected tag is dropped; a day
@@ -42,7 +42,7 @@ use serde_json::Value;
 
 use super::control;
 use super::kalesh::Reply;
-use super::notes_build;
+use super::message_text;
 use super::pronouns;
 
 // --- settings ---------------------------------------------------------------------------------
@@ -154,7 +154,7 @@ pub struct Substance {
 }
 
 /// Every member of the day, with what they actually said. `usable` is
-/// `notes_build`'s: a bot command, a one-word reply, or the same line again is
+/// `message_text`'s: a bot command, a one-word reply, or the same line again is
 /// not somebody talking.
 pub fn substance(day: &[Said]) -> HashMap<u64, Substance> {
     let mut out: HashMap<u64, Substance> = HashMap::new();
@@ -164,7 +164,7 @@ pub fn substance(day: &[Said]) -> HashMap<u64, Substance> {
         let s = out.entry(m.author_id).or_default();
         s.messages += 1;
         *places.entry(m.author_id).or_default().entry(m.channel_id).or_insert(0) += 1;
-        let Some(text) = notes_build::usable(&m.text) else { continue };
+        let Some(text) = message_text::usable(&m.text) else { continue };
         if !seen.entry(m.author_id).or_default().insert(text.to_lowercase()) {
             continue;
         }
@@ -199,7 +199,7 @@ pub struct Chunk {
 
 /// One message's cost in a chunk: the words, the name in front, and the marks.
 fn cost(m: &Said) -> usize {
-    notes_build::estimate_tokens(&notes_build::cut(&m.text, MESSAGE_CHARS)) + notes_build::estimate_tokens(&m.author_name) + 4
+    message_text::estimate_tokens(&message_text::cut(&m.text, MESSAGE_CHARS)) + message_text::estimate_tokens(&m.author_name) + 4
 }
 
 /// The day as the cap left it: what will be sent, and what the cap took.
@@ -234,7 +234,7 @@ pub fn chunks(day: &[Said], set: &Settings) -> Vec<Chunk> {
 pub fn cut(day: &[Said], set: &Settings) -> Cut {
     let mut by_channel: Vec<(u64, String, Vec<usize>)> = Vec::new();
     for (i, m) in day.iter().enumerate() {
-        if notes_build::usable(&m.text).is_none() {
+        if message_text::usable(&m.text).is_none() {
             continue;
         }
         match by_channel.iter_mut().find(|(c, _, _)| *c == m.channel_id) {
@@ -352,7 +352,7 @@ pub fn build_prompt(day_label: &str, chunk: &Chunk, day: &[Said], known: &HashMa
     text.push_str("\nMessages:\n");
     for i in &chunk.lines {
         let m = &day[*i];
-        text.push_str(&format!("[{}] {}: {}\n", clock(m.ts), m.author_name, notes_build::cut(&m.text, MESSAGE_CHARS)));
+        text.push_str(&format!("[{}] {}: {}\n", clock(m.ts), m.author_name, message_text::cut(&m.text, MESSAGE_CHARS)));
     }
     text
 }
@@ -428,9 +428,9 @@ pub fn parse_chunk(raw: &str, roster: &HashMap<String, u64>, day: &[Said], chunk
         let topics: Vec<String> = p
             .get("topics")
             .and_then(Value::as_array)
-            .map(|t| t.iter().filter_map(Value::as_str).map(|s| notes_build::cut(&tidy(s), TAG_CHARS)).filter(|s| !s.is_empty()).collect())
+            .map(|t| t.iter().filter_map(Value::as_str).map(|s| message_text::cut(&tidy(s), TAG_CHARS)).filter(|s| !s.is_empty()).collect())
             .unwrap_or_default();
-        let line = notes_build::cut(&tidy(p.get("line").and_then(Value::as_str).unwrap_or("")), LINE_CHARS);
+        let line = message_text::cut(&tidy(p.get("line").and_then(Value::as_str).unwrap_or("")), LINE_CHARS);
         out.push(About { user_id, topics, line, weight: weight.get(&user_id).copied().unwrap_or(0) });
     }
     Some(out)
@@ -439,12 +439,12 @@ pub fn parse_chunk(raw: &str, roster: &HashMap<String, u64>, day: &[Said], chunk
 // --- the filter ---------------------------------------------------------------------------------
 
 /// The areas a topic may never touch, however openly they were discussed.
-/// The word lists are `notes_build`'s, so the two features can never drift into
+/// The word lists are `message_text`'s, so the two features can never drift into
 /// disagreeing about what counts as somebody's private business.
 pub const BANNED_AREAS: [&str; 4] = ["health", "religion or caste", "sexuality or gender identity", "family"];
 
 static BANNED_RES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    notes_build::BANNED
+    message_text::BANNED
         .iter()
         .filter(|(area, _)| BANNED_AREAS.contains(area))
         .map(|(area, words)| (*area, Regex::new(&format!(r"(?i)\b(?:{})\b", words)).expect("banned words")))
@@ -513,7 +513,7 @@ pub const QUOTE_RUN: usize = 5;
 /// Why a line must go, or `None` when it may stay: a banned area, a quotation,
 /// a mention, or a run of words lifted straight out of one of their messages.
 ///
-/// The ban list is the tags' own — [`BANNED_RES`], read off `notes_build`'s
+/// The ban list is the tags' own — [`BANNED_RES`], read off `message_text`'s
 /// words — so a line can never carry what a tag is not allowed to. That is what
 /// keeps a third party's private business out of a line as well: "asked around
 /// about Dev's sister's wedding" trips *family* exactly as the tag would, and a
@@ -639,7 +639,7 @@ pub fn merge(day_label: &str, day: &[Said], parts: Vec<About>, substance: &HashM
         let Some(s) = substance.get(&user_id).filter(|s| eligible(s, set)) else { continue };
         // The chunk they said most in speaks for them.
         said.sort_by(|a, b| b.weight.cmp(&a.weight));
-        let source = notes_build::shingles(&s.texts, QUOTE_RUN);
+        let source = message_text::shingles(&s.texts, QUOTE_RUN);
         let mut topics: Vec<String> = Vec::new();
         for tag in said.iter().flat_map(|a| a.topics.iter()) {
             match reject_tag(tag, &names) {
@@ -1124,7 +1124,7 @@ pub mod tests {
     #[test]
     fn nothing_quoted_no_people_in_tags_and_no_third_party_business() {
         let day = a_day();
-        let source = notes_build::shingles(&day.iter().filter(|m| m.author_id == 11).map(|m| m.text.clone()).collect::<Vec<_>>(), QUOTE_RUN);
+        let source = message_text::shingles(&day.iter().filter(|m| m.author_id == 11).map(|m| m.text.clone()).collect::<Vec<_>>(), QUOTE_RUN);
         assert_eq!(reject_line("He said \"RCB ka batting order hi galat\" all day.", &source), Some("a quotation"));
         // Words lifted straight out of a message, without quote marks.
         assert_eq!(reject_line("Went on about how RCB ka batting order hi galat hai.", &source), Some("words lifted from a message"));
@@ -1175,9 +1175,9 @@ pub mod tests {
         // part that must not be allowed to drift.
         assert_eq!(BANNED_RES.len(), BANNED_AREAS.len(), "the two features share one list of areas");
         for area in BANNED_AREAS {
-            assert!(notes_build::BANNED.iter().any(|(a, _)| *a == area), "{area} left notes_build's list");
+            assert!(message_text::BANNED.iter().any(|(a, _)| *a == area), "{area} left message_text's list");
         }
-        for (area, words) in notes_build::BANNED.iter().filter(|(a, _)| BANNED_AREAS.contains(a)) {
+        for (area, words) in message_text::BANNED.iter().filter(|(a, _)| BANNED_AREAS.contains(a)) {
             for word in words.split('|').filter(|w| w.chars().all(|c| c.is_ascii_alphabetic()) && w.len() > 3).take(8) {
                 assert_eq!(reject_tag(word, &names), Some(*area), "{word:?} should throw a tag away as {area}");
                 assert_eq!(reject_line(&format!("Spent the day on {} and little else.", word), &source), Some(*area), "{word:?} must throw the line away too");
@@ -1442,7 +1442,7 @@ pub mod tests {
         assert!(!names.contains(&"chatting"), "the busiest channel was never dropped: {names:?}");
         let lost: usize = short.dropped.iter().map(|(_, n)| n).sum();
         let kept: usize = capped.iter().map(|c| c.lines.len()).sum();
-        let want: usize = day.iter().filter(|m| notes_build::usable(&m.text).is_some()).count();
+        let want: usize = day.iter().filter(|m| message_text::usable(&m.text).is_some()).count();
         assert_eq!(kept + lost, want, "every message is either sent or counted as dropped");
         // A day that fits drops nothing and says nothing.
         let whole = cut(&day, &Settings { max_chunks: 500, chunk_tokens: 200, ..Settings::default() });
@@ -1465,7 +1465,7 @@ pub mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), before, "a message was in two chunks");
-        let want: usize = day.iter().filter(|m| notes_build::usable(&m.text).is_some()).count();
+        let want: usize = day.iter().filter(|m| message_text::usable(&m.text).is_some()).count();
         assert_eq!(seen.len(), want, "every message with something in it was sent exactly once");
     }
 
@@ -1542,13 +1542,13 @@ pub mod tests {
             }
         }
         assert_eq!(day.len(), 22_000, "a day the size of a real one");
-        let worth_sending = day.iter().filter(|m| notes_build::usable(&m.text).is_some()).count();
+        let worth_sending = day.iter().filter(|m| message_text::usable(&m.text).is_some()).count();
 
         let set = Settings::default();
         let cut = chunks(&day, &set);
         let prompts: Vec<String> = cut.iter().map(|c| build_prompt("2026-09-21", c, &day, &nobody())).collect();
-        let sent: usize = prompts.iter().map(|p| notes_build::estimate_tokens(p)).sum();
-        let overhead = cut.len() * notes_build::estimate_tokens(INSTRUCTIONS);
+        let sent: usize = prompts.iter().map(|p| message_text::estimate_tokens(p)).sum();
+        let overhead = cut.len() * message_text::estimate_tokens(INSTRUCTIONS);
         println!(
             "a 22,000-message day: {} of them worth sending, {} chunks, {} input tokens in all \
              ({} of those the instructions, repeated once a chunk), {} tokens a chunk on average",

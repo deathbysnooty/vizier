@@ -90,8 +90,7 @@ pub const MOD_REFUSED: &str =
     "🏆 The House Cup is paused, so there are no house points to give or take. The games all still run and still pay their own points. \
      Switch **House Cup** back on in the panel and this works again.";
 
-/// A mod asking for a manual drop while the Cup is paused. `what` is "a
-/// Chocolate Frog" or "a Snitch".
+/// A mod asking for a Chocolate Frog drop while the Cup is paused.
 pub fn drop_refused(what: &str) -> String {
     format!(
         "🏆 The House Cup is paused, so {} won't drop. Nobody's cards are touched - `/frogs`, `/frogcard` and trading all still work, \
@@ -576,18 +575,14 @@ mod tests {
         assert!(!MOD_REFUSED.trim().is_empty(), "silence is not a refusal");
     }
 
-    /// `/frogdrop` and `/snitchdrop` say so rather than dropping.
     #[test]
-    fn the_manual_drops_refuse_and_promise_the_cards() {
+    fn a_manual_frog_drop_is_refused_while_paused() {
         let switch = Switch::paused();
-        assert!(!gate("/frogdrop") && !gate("/snitchdrop"), "neither may drop while paused");
-        for what in ["a Chocolate Frog", "a Snitch"] {
-            let text = drop_refused(what);
-            assert!(text.contains("House Cup is paused"), "{}", text);
-        }
-        // Back on and they work again.
+        assert!(!gate("/frogdrop"), "the frog may not drop while paused");
+        let text = drop_refused("a Chocolate Frog");
+        assert!(text.contains("House Cup is paused"), "{}", text);
         switch.set("on");
-        assert!(gate("/frogdrop") && gate("/snitchdrop"), "the Cup is back, so the drops are");
+        assert!(gate("/frogdrop"), "frog drops resume when the Cup does");
     }
 
     /// `/housetop`, `/houses`, `/mypoints` and `/housecup` show a closed result,
@@ -645,12 +640,9 @@ mod tests {
     fn the_refusals_say_what_is_paused_and_what_is_not() {
         assert!(MOD_REFUSED.contains("paused"), "{}", MOD_REFUSED);
         assert!(MOD_REFUSED.to_lowercase().contains("still run"), "the games must be promised: {}", MOD_REFUSED);
-        for what in ["a Chocolate Frog", "a Snitch"] {
-            let text = drop_refused(what);
-            assert!(text.contains("paused") && text.contains(what), "{}", text);
-        }
         // The cards are the owner's promise: nothing may read as taking them.
         let frog = drop_refused("a Chocolate Frog");
+        assert!(frog.contains("paused") && frog.contains("a Chocolate Frog"), "{}", frog);
         assert!(frog.contains("trading") && frog.contains("carry"), "the cards must be promised safe: {}", frog);
         assert!(NOTE.contains("paused") && NOTE.to_lowercase().contains("own scores"), "{}", NOTE);
         let closed = closed_heading("September 2026");
