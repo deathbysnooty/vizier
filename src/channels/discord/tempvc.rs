@@ -1,6 +1,8 @@
 //! Join-to-create and lifecycle for the temporary rooms recorded in tempvc.db.
 
+mod access;
 mod actions;
+mod knock;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +13,7 @@ use anyhow::{Context as _, Result, anyhow};
 use parking_lot::Mutex;
 use serenity::all::{
     ChannelId, ChannelType, Context, CreateChannel, GuildChannel, GuildId, HttpError, Member,
-    PermissionOverwriteType, Permissions, RoleId, UserId, VoiceState,
+    PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId, UserId, VoiceState,
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
@@ -19,9 +21,10 @@ use tokio::time::{Instant, sleep};
 
 use super::control;
 use super::tempvc_panel;
-use super::tempvc_store::{self as store, Room};
+use super::tempvc_store::{self as store, Profile, Room};
 
 pub(super) use actions::{can_control, execute};
+pub(super) use knock::answer_knock;
 
 const DEFAULT_NAME: &str = "{user}'s room";
 const COOLDOWN: Duration = Duration::from_secs(10);
@@ -83,6 +86,7 @@ struct RoomState {
     joined: HashMap<UserId, Instant>,
     lifecycle: Option<(Job, JoinHandle<()>)>,
     rename: Option<JoinHandle<()>>,
+    knocks: knock::Knocks,
 }
 
 impl RoomState {
@@ -152,12 +156,17 @@ fn job_changed(current: Option<Job>, occupants: &Occupants, owner: UserId) -> Op
     (current != wanted).then_some(wanted)
 }
 
-fn longest_present(humans: &[UserId], joined: &HashMap<UserId, Instant>) -> Option<UserId> {
+fn longest_present(
+    humans: &[UserId],
+    joined: &HashMap<UserId, Instant>,
+    banned: &[u64],
+) -> Option<UserId> {
     // The gateway does not report join times for people already present on boot.
     // Break ties stably by user ID when their original order is unknown.
     humans
         .iter()
         .copied()
+        .filter(|user| banned.binary_search(&user.get()).is_err())
         .min_by_key(|user| (joined.get(user).is_none(), joined.get(user), *user))
 }
 
@@ -297,11 +306,21 @@ async fn finish_job(
             // Check again after the REST lookup, in case someone just returned.
             let current =
                 occupants(ctx, guild, channel).context("guild voice state unavailable")?;
-            if desired_job(&current, owner) == Some(Job::Handoff)
-                && let Some(next) = longest_present(&current.humans, &state.joined)
-            {
-                actions::give_ownership(ctx, &ch, room, next).await?;
-                actions::announce_owner(ctx, channel, next).await;
+            if desired_job(&current, owner) == Some(Job::Handoff) {
+                let bans = store::access_list(
+                    &*db()?,
+                    room.guild_id,
+                    room.owner_id,
+                    store::Access::Banned,
+                )?;
+                if let Some(next) = longest_present(&current.humans, &state.joined, &bans) {
+                    actions::give_ownership(ctx, &ch, room, next).await?;
+                    actions::announce_owner(ctx, channel, next).await;
+                } else {
+                    for user in current.humans {
+                        access::disconnect_if_present(ctx, guild, channel, user).await?;
+                    }
+                }
             }
             Ok(())
         }
@@ -352,16 +371,49 @@ async fn recover_room(ctx: &Context, guild: GuildId, channel: ChannelId) -> Resu
     let Some(room) = lookup(guild, channel)? else {
         return Ok(());
     };
-    let cached = ctx
-        .cache
-        .guild(guild)
-        .map(|guild| guild.channels.contains_key(&channel));
-    if cached == Some(false) && fetch_voice(ctx, guild, channel).await?.is_none() {
+    let fetched = fetch_voice(ctx, guild, channel).await;
+    if matches!(fetched, Ok(None)) {
         return forget_room(channel, &mut state);
     }
     reconcile(ctx, room, &mut state, &room_lock, None, Duration::ZERO);
     actions::restore_rename(ctx, channel, &mut state, &room_lock)?;
+    if let Some(ch) = fetched? {
+        access::sync(
+            ctx,
+            &ch,
+            UserId::new(room.owner_id),
+            ch.permission_overwrites.clone(),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+pub(super) fn on_member_join(ctx: &Context, guild: GuildId, user: UserId) {
+    if !enabled() || store::db().is_none() {
+        return;
+    }
+    let rooms = match db()
+        .and_then(|conn| Ok(store::rooms_listing_member(&conn, guild.get(), user.get())?))
+    {
+        Ok(rooms) if rooms.is_empty() => return,
+        Ok(rooms) => rooms,
+        Err(err) => {
+            tracing::warn!(%guild, %user, %err, "tempvc: could not look up returning member's access");
+            return;
+        }
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        for room in rooms {
+            let channel = ChannelId::new(room.channel_id);
+            if let Err(err) =
+                access::sync_owned_room(&ctx, guild, UserId::new(room.owner_id), channel).await
+            {
+                tracing::warn!(%channel, %err, "tempvc: could not sync returning member's access");
+            }
+        }
+    });
 }
 
 pub(super) fn on_voice_state(ctx: &Context, old: Option<&VoiceState>, new: &VoiceState) {
@@ -417,6 +469,12 @@ async fn update_room(
         let room_lock = room_state(channel);
         let mut state = room_lock.lock().await;
         if let Some(room) = lookup(guild, channel)? {
+            let mut disconnected = Ok(());
+            if let Some((user, _)) = joined
+                && store::is_banned(&*db()?, room.guild_id, room.owner_id, user.get())?
+            {
+                disconnected = access::disconnect_if_present(ctx, guild, channel, user).await;
+            }
             reconcile(
                 ctx,
                 room,
@@ -425,6 +483,7 @@ async fn update_room(
                 joined,
                 Job::Delete.delay(),
             );
+            disconnected?;
         }
     }
     Ok(())
@@ -491,7 +550,7 @@ async fn join_hub(ctx: &Context, guild: GuildId, hub: ChannelId, user: UserId) -
             hub,
             name: None,
             limit: None,
-            locked: false,
+            locked: None,
         };
         create_room(ctx, guild, &member, Some(hub), options).await?;
     }
@@ -539,7 +598,57 @@ struct RoomOptions<'a> {
     hub: ChannelId,
     name: Option<&'a str>,
     limit: Option<u32>,
-    locked: bool,
+    locked: Option<bool>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RoomDefaults<'a> {
+    name: &'a str,
+    limit: u32,
+    locked: Option<bool>,
+    hidden: Option<bool>,
+    bitrate: Option<u32>,
+}
+
+fn room_defaults<'a>(
+    options: &RoomOptions<'a>,
+    profile: &'a Profile,
+    panel_name: &'a str,
+    panel_limit: u32,
+) -> RoomDefaults<'a> {
+    RoomDefaults {
+        name: options
+            .name
+            .or(profile.name.as_deref())
+            .unwrap_or(panel_name),
+        limit: options.limit.or(profile.limit).unwrap_or(panel_limit),
+        locked: options.locked.or(profile.locked),
+        hidden: profile.hidden,
+        bitrate: profile.bitrate,
+    }
+}
+
+fn creation_restrictions(
+    overwrites: &mut Vec<PermissionOverwrite>,
+    defaults: &RoomDefaults<'_>,
+    guild: GuildId,
+    staff: &[u64],
+) -> Vec<(Permissions, Vec<u64>)> {
+    let mut suppressed = Vec::new();
+    for (state, bits) in [
+        (defaults.locked, Permissions::CONNECT),
+        (defaults.hidden, Permissions::VIEW_CHANNEL),
+    ] {
+        match state {
+            Some(true) => suppressed.push((
+                bits,
+                actions::restrict_roles(overwrites, guild, bits, staff),
+            )),
+            Some(false) => actions::remove_restriction(overwrites, guild, bits),
+            None => {}
+        }
+    }
+    suppressed
 }
 
 async fn create_room(
@@ -577,17 +686,19 @@ async fn create_room(
             staff_roles,
         )
     };
-    let pattern = control::var("VIZIER_TEMPVC_NAME");
+    let profile = store::profile(&*db()?, guild.get(), owner.user.id.get())?.unwrap_or_default();
+    let panel_name = control::var("VIZIER_TEMPVC_NAME");
+    let defaults = room_defaults(
+        &options,
+        &profile,
+        panel_name.as_deref().unwrap_or(DEFAULT_NAME),
+        control::number("VIZIER_TEMPVC_LIMIT", 0).min(99) as u32,
+    );
     let name = expand_name(
-        options
-            .name
-            .unwrap_or_else(|| pattern.as_deref().unwrap_or(DEFAULT_NAME)),
+        defaults.name,
         owner.display_name(),
         store::count_for_hub(&*db()?, options.hub.get())? + 1,
     );
-    let limit = options
-        .limit
-        .unwrap_or_else(|| control::number("VIZIER_TEMPVC_LIMIT", 0).min(99) as u32);
     for role in &staff_roles {
         actions::grant(
             &mut overwrites,
@@ -605,20 +716,20 @@ async fn create_room(
         PermissionOverwriteType::Member(ctx.cache.current_user().id),
         actions::BOT_ACCESS,
     );
-    let suppressed = if options.locked {
-        let roles = staff_roles
-            .iter()
-            .map(|role| role.get())
-            .collect::<Vec<_>>();
-        actions::restrict_roles(&mut overwrites, guild, Permissions::CONNECT, &roles)
-    } else {
-        Vec::new()
-    };
+    let staff_roles = staff_roles
+        .iter()
+        .map(|role| role.get())
+        .collect::<Vec<_>>();
+    let suppressed = creation_restrictions(&mut overwrites, &defaults, guild, &staff_roles);
+    let edits = access::plan(ctx, guild, owner.user.id, None, &mut overwrites).await?;
     let mut builder = CreateChannel::new(name)
         .kind(ChannelType::Voice)
-        .user_limit(limit)
+        .user_limit(defaults.limit)
         .permissions(overwrites)
         .audit_log_reason("Temp voice room");
+    if let Some(bitrate) = defaults.bitrate {
+        builder = builder.bitrate(bitrate.clamp(8_000, actions::bitrate_cap(ctx, guild)? * 1_000));
+    }
     if let Some(category) = category {
         builder = builder.category(category);
     }
@@ -635,12 +746,10 @@ async fn create_room(
     let inserted = db().and_then(|mut conn| {
         let transaction = conn.transaction()?;
         store::insert(&transaction, &room)?;
-        store::save_suppressed_roles(
-            &transaction,
-            channel.get(),
-            Permissions::CONNECT.bits(),
-            &suppressed,
-        )?;
+        for (bits, roles) in &suppressed {
+            store::save_suppressed_roles(&transaction, channel.get(), bits.bits(), roles)?;
+        }
+        edits.save_added(&transaction, channel)?;
         transaction.commit()?;
         Ok(())
     });
@@ -654,6 +763,23 @@ async fn create_room(
             tracing::error!(%channel, %cleanup, "tempvc: could not roll back room creation");
         }
         ROOMS.lock().remove(&channel);
+        return Err(err);
+    }
+    // List edits made while Discord created the channel could not yet see it.
+    if let Err(err) = access::sync(
+        ctx,
+        &created,
+        owner.user.id,
+        created.permission_overwrites.clone(),
+    )
+    .await
+    {
+        if let Err(cleanup) =
+            delete_room(ctx, room, &mut state, "Temp voice access setup failed").await
+        {
+            tracing::warn!(%channel, %cleanup, "tempvc: retrying cleanup after access setup failed");
+            reconcile(ctx, room, &mut state, &room_lock, None, RETRY);
+        }
         return Err(err);
     }
     if let Some(source) = source {
@@ -725,6 +851,102 @@ mod tests {
     use super::*;
 
     #[test]
+    fn creation_applies_profile_fields_and_falls_back_individually() {
+        let options = RoomOptions {
+            hub: ChannelId::new(1),
+            name: None,
+            limit: None,
+            locked: None,
+        };
+        assert_eq!(
+            room_defaults(&options, &Profile::default(), DEFAULT_NAME, 12),
+            RoomDefaults {
+                name: DEFAULT_NAME,
+                limit: 12,
+                locked: None,
+                hidden: None,
+                bitrate: None,
+            }
+        );
+        let profile = Profile {
+            name: Some("{user} #{count}".into()),
+            limit: Some(0),
+            locked: Some(true),
+            hidden: Some(true),
+            bitrate: Some(64_000),
+        };
+        let resolved = room_defaults(&options, &profile, DEFAULT_NAME, 12);
+        assert_eq!(
+            resolved,
+            RoomDefaults {
+                name: "{user} #{count}",
+                limit: 0,
+                locked: Some(true),
+                hidden: Some(true),
+                bitrate: Some(64_000),
+            }
+        );
+        assert_eq!(expand_name(resolved.name, "Asha", 3), "Asha #3");
+        assert_eq!(
+            room_defaults(
+                &options,
+                &Profile {
+                    limit: Some(2),
+                    ..Profile::default()
+                },
+                DEFAULT_NAME,
+                12
+            ),
+            RoomDefaults {
+                name: DEFAULT_NAME,
+                limit: 2,
+                locked: None,
+                hidden: None,
+                bitrate: None,
+            }
+        );
+        let explicit = RoomOptions {
+            name: Some("Slash room"),
+            limit: Some(7),
+            locked: Some(false),
+            ..options
+        };
+        assert_eq!(
+            room_defaults(&explicit, &profile, DEFAULT_NAME, 12),
+            RoomDefaults {
+                name: "Slash room",
+                limit: 7,
+                locked: Some(false),
+                hidden: Some(true),
+                bitrate: Some(64_000),
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_off_overrides_inherited_deny_and_missing_flags_keep_it() {
+        let guild = GuildId::new(1);
+        let everyone = PermissionOverwriteType::Role(guild.everyone_role());
+        let mut overwrites = vec![PermissionOverwrite {
+            kind: everyone,
+            allow: Permissions::empty(),
+            deny: Permissions::CONNECT | Permissions::VIEW_CHANNEL,
+        }];
+        let defaults = RoomDefaults {
+            name: DEFAULT_NAME,
+            limit: 0,
+            locked: Some(false),
+            hidden: None,
+            bitrate: None,
+        };
+        assert!(creation_restrictions(&mut overwrites, &defaults, guild, &[]).is_empty());
+        assert_eq!(
+            actions::overwrite(&overwrites, everyone).deny,
+            Permissions::VIEW_CHANNEL
+        );
+    }
+
+    #[test]
     fn expands_names_once_and_bounds_unicode() {
         assert_eq!(expand_name(DEFAULT_NAME, "Asha", 1), "Asha's room");
         assert_eq!(
@@ -745,11 +967,13 @@ mod tests {
         let c = UserId::new(3);
         let now = Instant::now();
         let mut joined = HashMap::from([(a, now), (b, now - Duration::from_secs(10))]);
-        assert_eq!(longest_present(&[c, a, b], &joined), Some(b));
-        assert_eq!(longest_present(&[c, a], &joined), Some(a));
+        assert_eq!(longest_present(&[c, a, b], &joined, &[]), Some(b));
+        assert_eq!(longest_present(&[c, a, b], &joined, &[b.get()]), Some(a));
+        assert_eq!(longest_present(&[c, a], &joined, &[]), Some(a));
         joined.insert(b, now);
-        assert_eq!(longest_present(&[b, a], &joined), Some(a));
-        assert_eq!(longest_present(&[], &joined), None);
+        assert_eq!(longest_present(&[b, a], &joined, &[]), Some(a));
+        assert_eq!(longest_present(&[b, a], &joined, &[a.get(), b.get()]), None);
+        assert_eq!(longest_present(&[], &joined, &[]), None);
     }
 
     #[test]

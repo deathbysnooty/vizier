@@ -2563,7 +2563,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_TEMPVC_HANDOFF_SECONDS", "Ownership handoff delay", "How long the owner can be away before the longest-present member takes over.", number(0, 86400, "seconds"), "60"),
             ],
             commands: vec![
-                command("vc", EVERYONE, "/vc", "Manage your temporary room. Use /vc panel to repost the controls in the room chat. Staff can specify a channel and use /vc drag."),
+                command("vc", EVERYONE, "/vc", "Manage your temporary room. Use /vc panel to repost the controls, /vc lock or /vc hide with state on or off, and /vc me to manage saved defaults, trusted friends and bans. Kick bans the member from the owner's rooms. Use /vc knock to ask to join a locked, visible room. Staff can specify a channel for room controls and use /vc drag."),
             ],
         },
         Section {

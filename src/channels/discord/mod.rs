@@ -1422,6 +1422,7 @@ fn admin_command(command: CreateCommand) -> CreateCommand {
 #[async_trait]
 impl EventHandler for Handler {
     async fn guild_member_addition(&self, ctx: Context, member: serenity::all::Member) {
+        tempvc::on_member_join(&ctx, member.guild_id, member.user.id);
         if member.user.bot {
             return;
         }

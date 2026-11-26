@@ -1,10 +1,10 @@
 //! Shared policy and room edits for slash commands, panels and automatic handoff.
 
-use serenity::all::{CreateAllowedMentions, CreateMessage, EditChannel, PremiumTier};
+use serenity::all::{CreateAllowedMentions, CreateEmbed, CreateMessage, EditChannel, PremiumTier};
 
 use super::*;
-use crate::channels::discord::tempvc_panel::{Action, Reply, RoomTarget};
-use crate::channels::discord::tempvc_store::Rename;
+use crate::channels::discord::tempvc_panel::{Action, MeAction, Reply, RoomTarget};
+use crate::channels::discord::tempvc_store::{Access, Rename};
 use serenity::all::{Guild, PermissionOverwrite};
 
 pub(super) const OWNER_ACCESS: Permissions = Permissions::VIEW_CHANNEL
@@ -15,7 +15,7 @@ pub(super) const OWNER_ACCESS: Permissions = Permissions::VIEW_CHANNEL
 pub(super) const STAFF_ACCESS: Permissions = OWNER_ACCESS.union(Permissions::USE_SOUNDBOARD);
 pub(super) const BOT_ACCESS: Permissions = OWNER_ACCESS.union(Permissions::EMBED_LINKS);
 
-fn overwrite(
+pub(super) fn overwrite(
     overwrites: &[PermissionOverwrite],
     kind: PermissionOverwriteType,
 ) -> PermissionOverwrite {
@@ -30,19 +30,28 @@ fn overwrite(
         })
 }
 
-fn set_overwrite(overwrites: &mut Vec<PermissionOverwrite>, replacement: PermissionOverwrite) {
-    overwrites.retain(|ow| ow.kind != replacement.kind);
-    if !(replacement.allow | replacement.deny).is_empty() {
-        overwrites.push(replacement);
+pub(super) fn set_overwrite(
+    overwrites: &mut Vec<PermissionOverwrite>,
+    replacement: PermissionOverwrite,
+) {
+    let position = overwrites.iter().position(|ow| ow.kind == replacement.kind);
+    let empty = (replacement.allow | replacement.deny).is_empty();
+    match (position, empty) {
+        (Some(index), true) => {
+            overwrites.remove(index);
+        }
+        (Some(index), false) => overwrites[index] = replacement,
+        (None, false) => overwrites.push(replacement),
+        (None, true) => {}
     }
 }
 
-fn allow_bits(ow: &mut PermissionOverwrite, permissions: Permissions) {
+pub(super) fn allow_bits(ow: &mut PermissionOverwrite, permissions: Permissions) {
     ow.allow.insert(permissions);
     ow.deny.remove(permissions);
 }
 
-fn deny_bits(ow: &mut PermissionOverwrite, permissions: Permissions) {
+pub(super) fn deny_bits(ow: &mut PermissionOverwrite, permissions: Permissions) {
     ow.allow.remove(permissions);
     ow.deny.insert(permissions);
 }
@@ -84,7 +93,20 @@ pub(super) fn restrict_roles(
     suppressed
 }
 
-async fn write_overwrite(
+pub(super) fn remove_restriction(
+    overwrites: &mut Vec<PermissionOverwrite>,
+    guild: GuildId,
+    bits: Permissions,
+) {
+    let mut everyone = overwrite(
+        overwrites,
+        PermissionOverwriteType::Role(guild.everyone_role()),
+    );
+    everyone.deny.remove(bits);
+    set_overwrite(overwrites, everyone);
+}
+
+pub(super) async fn write_overwrite(
     ctx: &Context,
     channel: ChannelId,
     ow: &PermissionOverwrite,
@@ -103,66 +125,82 @@ pub(super) async fn give_ownership(
     room: Room,
     new_owner: UserId,
 ) -> Result<()> {
-    let new_before = overwrite(
-        &channel.permission_overwrites,
-        PermissionOverwriteType::Member(new_owner),
-    );
-    let old_before = overwrite(
+    let mut old_grant = overwrite(
         &channel.permission_overwrites,
         PermissionOverwriteType::Member(UserId::new(room.owner_id)),
     );
-    let mut new_grant = new_before.clone();
-    allow_bits(&mut new_grant, OWNER_ACCESS);
-    let mut old_grant = old_before.clone();
     old_grant.allow.remove(OWNER_ACCESS);
     if let Some(category) = channel.parent_id
         && let Some(guild) = ctx.cache.guild(channel.guild_id)
         && let Some(category) = guild.channels.get(&category)
     {
-        let inherited = overwrite(&category.permission_overwrites, old_before.kind);
+        let inherited = overwrite(&category.permission_overwrites, old_grant.kind);
         old_grant.allow.insert(inherited.allow & OWNER_ACCESS);
         old_grant.deny.insert(inherited.deny & OWNER_ACCESS);
     }
 
-    if new_before != new_grant {
-        write_overwrite(ctx, channel.id, &new_grant).await?;
-    }
-    if old_before != old_grant
-        && let Err(err) = write_overwrite(ctx, channel.id, &old_grant).await
-    {
-        restore_overwrite(ctx, channel.id, &new_before, &new_grant).await;
+    let mut overwrites = channel.permission_overwrites.clone();
+    set_overwrite(&mut overwrites, old_grant);
+    let edits = access::plan(
+        ctx,
+        channel.guild_id,
+        new_owner,
+        Some(channel.id),
+        &mut overwrites,
+    )
+    .await?;
+    grant(
+        &mut overwrites,
+        PermissionOverwriteType::Member(new_owner),
+        OWNER_ACCESS,
+    );
+    let edited = if channel.permission_overwrites == overwrites {
+        None
+    } else {
+        Some(
+            channel
+                .id
+                .edit(&ctx.http, EditChannel::new().permissions(overwrites))
+                .await?,
+        )
+    };
+    let updated = db().and_then(|mut conn| {
+        let tx = conn.transaction()?;
+        if !store::set_owner(&tx, room.channel_id, room.owner_id, new_owner.get())? {
+            return Err(anyhow!("room owner changed while transferring"));
+        }
+        edits.save_added(&tx, channel.id)?;
+        edits.save_removed(&tx, channel.id)?;
+        tx.commit()?;
+        Ok(())
+    });
+    if let Err(err) = updated {
+        if edited.is_some()
+            && let Err(restore) = channel
+                .id
+                .edit(
+                    &ctx.http,
+                    EditChannel::new().permissions(channel.permission_overwrites.clone()),
+                )
+                .await
+        {
+            tracing::warn!(channel = %channel.id, %restore, "tempvc: could not restore permissions after a failed transfer");
+        }
         return Err(err);
     }
-    let updated = db().and_then(|conn| {
-        Ok(store::set_owner(
-            &conn,
-            room.channel_id,
-            room.owner_id,
-            new_owner.get(),
-        )?)
-    });
-    match updated {
-        Ok(true) => Ok(()),
-        result => {
-            restore_overwrite(ctx, channel.id, &old_before, &old_grant).await;
-            restore_overwrite(ctx, channel.id, &new_before, &new_grant).await;
-            result?;
-            Err(anyhow!("room owner changed while transferring"))
-        }
-    }
-}
-
-async fn restore_overwrite(
-    ctx: &Context,
-    channel: ChannelId,
-    before: &PermissionOverwrite,
-    after: &PermissionOverwrite,
-) {
-    if before != after
-        && let Err(err) = write_overwrite(ctx, channel, before).await
+    // Re-read the new owner's lists now that list edits can find this room.
+    let channel = edited.as_ref().unwrap_or(channel);
+    if let Err(err) = access::sync(
+        ctx,
+        channel,
+        new_owner,
+        channel.permission_overwrites.clone(),
+    )
+    .await
     {
-        tracing::warn!(%channel, %err, "tempvc: could not restore permissions after a failed edit");
+        tracing::warn!(channel = %channel.id, %err, "tempvc: could not sync access after transfer");
     }
+    Ok(())
 }
 
 pub(super) async fn announce_owner(ctx: &Context, channel: ChannelId, user: UserId) {
@@ -187,13 +225,13 @@ fn staff_roles() -> Vec<u64> {
 }
 
 #[derive(Clone, Copy)]
-struct Actor {
-    id: UserId,
-    staff: bool,
-    voice: Option<ChannelId>,
+pub(super) struct Actor {
+    pub(super) id: UserId,
+    pub(super) staff: bool,
+    pub(super) voice: Option<ChannelId>,
 }
 
-fn actor(ctx: &Context, guild: GuildId, member: &Member) -> Result<Actor> {
+pub(super) fn actor(ctx: &Context, guild: GuildId, member: &Member) -> Result<Actor> {
     let guild = ctx
         .cache
         .guild(guild)
@@ -220,7 +258,7 @@ fn resolve(actor: Actor, target: RoomTarget) -> Result<ChannelId> {
     }
 }
 
-fn controls(actor: Actor, owner: UserId) -> bool {
+pub(super) fn controls(actor: Actor, owner: UserId) -> bool {
     actor.staff || actor.id == owner
 }
 
@@ -228,7 +266,7 @@ fn can_claim(actor: Actor, room: ChannelId, owner: UserId, owner_inside: bool) -
     actor.id != owner && (actor.staff || (actor.voice == Some(room) && !owner_inside))
 }
 
-fn check_enabled() -> Result<()> {
+pub(super) fn check_enabled() -> Result<()> {
     if enabled() {
         Ok(())
     } else {
@@ -263,6 +301,11 @@ pub(in super::super) async fn execute(
 ) -> Result<Reply> {
     check_enabled()?;
     let actor = actor(ctx, guild, member)?;
+    match action {
+        Action::Me(action) => return me(ctx, guild, member, actor, action).await,
+        Action::Knock(channel) => return knock::request(ctx, guild, member, channel).await,
+        _ => {}
+    }
     if let Action::Create {
         hub,
         name,
@@ -315,14 +358,23 @@ pub(in super::super) async fn execute(
     };
 
     let result = match action {
-        Action::Create { .. } => unreachable!("create is handled before selecting a room"),
-        Action::Lock(value) => toggle(ctx, &ch, Toggle::Connect, value).await?,
-        Action::Hide(value) => toggle(ctx, &ch, Toggle::View, value).await?,
+        Action::Create { .. } | Action::Me(_) | Action::Knock(_) => {
+            unreachable!("handled before selecting a room")
+        }
+        Action::Lock(value) => toggle(ctx, &ch, owner, Toggle::Connect, value).await?,
+        Action::Hide(value) => toggle(ctx, &ch, owner, Toggle::View, value).await?,
         Action::Chat(value) => {
-            toggle(ctx, &ch, Toggle::Chat, value.map(|enabled| !enabled)).await?
+            toggle(ctx, &ch, owner, Toggle::Chat, value.map(|enabled| !enabled)).await?
         }
         Action::Soundboard(value) => {
-            toggle(ctx, &ch, Toggle::Soundboard, value.map(|enabled| !enabled)).await?
+            toggle(
+                ctx,
+                &ch,
+                owner,
+                Toggle::Soundboard,
+                value.map(|enabled| !enabled),
+            )
+            .await?
         }
         Action::Rename(pattern) => {
             let name = expand_name(&pattern, member.display_name(), 1);
@@ -372,9 +424,20 @@ pub(in super::super) async fn execute(
                 ));
             }
             checked_member(ctx, guild, member, actor.staff, owner, target).await?;
-            member_action(ctx, &ch, target, &action).await?
+            if matches!(action, Action::Kick(_)) {
+                save_kick_ban(&*db()?, room, target)?;
+                drop(state);
+                access::sync_owner_rooms(ctx, guild, owner).await?;
+                return Ok(Reply::Text(format!(
+                    "<@{target}> ko owner ki ban list mein daal diya."
+                )));
+            }
+            member_action(ctx, &ch, owner, target, &action).await?
         }
         Action::Claim => {
+            if store::is_banned(&*db()?, room.guild_id, room.owner_id, actor.id.get())? {
+                return Err(user_error("Tu is room ki ban list mein hai."));
+            }
             let owner_inside = voice(ctx, guild, owner) == Some(channel);
             let actor = self::actor(ctx, guild, member)?;
             if !can_claim(actor, channel, owner, owner_inside) {
@@ -446,10 +509,149 @@ pub(in super::super) async fn execute(
             let members = occupants(ctx, guild, channel)
                 .map(|occupants| occupants.all)
                 .unwrap_or_default();
-            return Ok(Reply::Info(tempvc_panel::info_embed(&ch, owner, &members)));
+            return Ok(Reply::info(tempvc_panel::info_embed(&ch, owner, &members)));
         }
     };
     Ok(Reply::Text(result))
+}
+
+async fn me(
+    ctx: &Context,
+    guild: GuildId,
+    member: &Member,
+    actor: Actor,
+    action: MeAction,
+) -> Result<Reply> {
+    let guild_id = guild.get();
+    let user_id = actor.id.get();
+    let text = match action {
+        MeAction::Save => {
+            let save_error = || user_error("Apne temp VC mein jaake settings save kar.");
+            let channel = actor.voice.ok_or_else(save_error)?;
+            let room_lock = room_state(channel);
+            let _state = room_lock.lock().await;
+            if !lookup(guild, channel)?.is_some_and(|room| room.owner_id == user_id)
+                || voice(ctx, guild, actor.id) != Some(channel)
+            {
+                return Err(save_error());
+            }
+            let ch = fetch_voice(ctx, guild, channel)
+                .await?
+                .ok_or_else(save_error)?;
+            let profile = Profile {
+                name: Some(ch.name.clone()),
+                limit: Some(ch.user_limit.unwrap_or_default()),
+                locked: Some(room_restricted(&ch, Permissions::CONNECT)),
+                hidden: Some(room_restricted(&ch, Permissions::VIEW_CHANNEL)),
+                bitrate: ch.bitrate,
+            };
+            store::save_profile(&*db()?, guild_id, user_id, &profile)?;
+            "Room ki settings save kar di. Naye rooms mein apply hongi."
+        }
+        MeAction::Set(profile) => {
+            if profile == Profile::default() {
+                return Err(user_error("Badalne ke liye kam se kam ek option de."));
+            }
+            store::save_profile(&*db()?, guild_id, user_id, &profile)?;
+            "Tere room defaults update ho gaye."
+        }
+        MeAction::Profile => return profile_reply(guild_id, user_id),
+        MeAction::Clear => {
+            store::clear_profile(&*db()?, guild_id, user_id)?;
+            "Saved defaults hata diye."
+        }
+        MeAction::Trust(user)
+        | MeAction::Untrust(user)
+        | MeAction::Ban(user)
+        | MeAction::Unban(user) => {
+            if user == actor.id || user == ctx.cache.current_user().id {
+                return Err(user_error("Kisi aur member ko choose kar."));
+            }
+            let (access, add, message) = match action {
+                MeAction::Trust(_) => (Access::Trusted, true, "trusted list mein daal diya."),
+                MeAction::Untrust(_) => (Access::Trusted, false, "trusted list se hata diya."),
+                MeAction::Ban(_) => (Access::Banned, true, "ban list mein daal diya."),
+                MeAction::Unban(_) => (Access::Banned, false, "ban list se hata diya."),
+                _ => unreachable!(),
+            };
+            if add {
+                let target = if access == Access::Banned {
+                    checked_member(ctx, guild, member, actor.staff, actor.id, user).await?
+                } else {
+                    member_if_present(ctx, guild, user)
+                        .await?
+                        .ok_or_else(|| user_error("Ye member server mein nahi hai."))?
+                };
+                if target.user.bot {
+                    return Err(user_error("Kisi aur member ko choose kar."));
+                }
+            }
+            store::set_access(&*db()?, guild_id, user_id, user.get(), access, add)?;
+            access::sync_owner_rooms(ctx, guild, actor.id).await?;
+            return Ok(Reply::Text(format!("<@{user}> ko {message}")));
+        }
+    };
+    Ok(Reply::Text(text.into()))
+}
+
+fn profile_reply(guild: u64, owner: u64) -> Result<Reply> {
+    fn flag(value: Option<bool>) -> &'static str {
+        match value {
+            Some(true) => "On",
+            Some(false) => "Off",
+            None => "Default",
+        }
+    }
+    fn mentions(users: &[u64]) -> String {
+        // A Discord embed field holds 1,024 characters. Reserve room for the count.
+        let mut text = String::new();
+        for (index, user) in users.iter().enumerate() {
+            let mention = format!("<@{user}>");
+            if text.len() + mention.len() > 980 {
+                text.push_str(&format!("… aur {}", users.len() - index));
+                break;
+            }
+            text.push_str(&mention);
+            if index + 1 < users.len() {
+                text.push_str(", ");
+            }
+        }
+        if text.is_empty() {
+            "Koi nahi".into()
+        } else {
+            text
+        }
+    }
+
+    let conn = db()?;
+    let profile = store::profile(&conn, guild, owner)?;
+    let trusted = mentions(&store::access_list(&conn, guild, owner, Access::Trusted)?);
+    let banned = mentions(&store::access_list(&conn, guild, owner, Access::Banned)?);
+    let mut embed = CreateEmbed::new().title("🎙️ Tera room profile");
+    if let Some(profile) = profile {
+        let limit = match profile.limit {
+            Some(0) => "Unlimited".into(),
+            Some(limit) => limit.to_string(),
+            None => "Default".into(),
+        };
+        let bitrate = profile
+            .bitrate
+            .map_or_else(|| "Default".into(), |bps| format!("{} kbps", bps / 1_000));
+        embed = embed
+            .field("Naam", profile.name.as_deref().unwrap_or("Default"), true)
+            .field("Limit", limit, true)
+            .field("Bitrate", bitrate, true)
+            .field("Lock", flag(profile.locked), true)
+            .field("Hide", flag(profile.hidden), true);
+    } else {
+        embed = embed
+            .description("Abhi defaults save nahi hain. `/vc me save` ya `/vc me set` use kar.");
+    }
+    Ok(Reply::info(
+        embed
+            .field("Trusted friends", trusted, false)
+            .field("Ban list", banned, false),
+    ))
 }
 
 fn select_hub(
@@ -486,7 +688,7 @@ fn select_hub(
     }
 }
 
-fn bitrate_cap(ctx: &Context, id: GuildId) -> Result<u32> {
+pub(super) fn bitrate_cap(ctx: &Context, id: GuildId) -> Result<u32> {
     let guild = ctx
         .cache
         .guild(id)
@@ -541,12 +743,13 @@ impl Toggle {
 async fn toggle(
     ctx: &Context,
     channel: &GuildChannel,
+    owner: UserId,
     toggle: Toggle,
     restrict: Option<bool>,
 ) -> Result<String> {
     let everyone = PermissionOverwriteType::Role(RoleId::new(channel.guild_id.get()));
     let bits = toggle.bits();
-    let mut everyone_ow = overwrite(&channel.permission_overwrites, everyone);
+    let everyone_ow = overwrite(&channel.permission_overwrites, everyone);
     let restricted = restrict.unwrap_or(!everyone_ow.deny.contains(bits));
     let mut overwrites = channel.permission_overwrites.clone();
     let mut suppressed = store::load_suppressed_roles(&*db()?, channel.id.get(), bits.bits())?;
@@ -562,8 +765,7 @@ async fn toggle(
         // Persist first so a restart still has the grants it needs to restore.
         store::save_suppressed_roles(&*db()?, channel.id.get(), bits.bits(), &suppressed)?;
     } else {
-        everyone_ow.deny.remove(bits);
-        set_overwrite(&mut overwrites, everyone_ow);
+        remove_restriction(&mut overwrites, channel.guild_id, bits);
         let guild = ctx
             .cache
             .guild(channel.guild_id)
@@ -578,7 +780,9 @@ async fn toggle(
         }
     }
     overwrites.retain(|ow| !(ow.allow | ow.deny).is_empty());
-    if channel.permission_overwrites != overwrites {
+    if matches!(toggle, Toggle::Connect | Toggle::View) {
+        access::sync(ctx, channel, owner, overwrites).await?;
+    } else if channel.permission_overwrites != overwrites {
         channel
             .id
             .edit(&ctx.http, EditChannel::new().permissions(overwrites))
@@ -588,6 +792,15 @@ async fn toggle(
         store::save_suppressed_roles(&*db()?, channel.id.get(), bits.bits(), &[])?;
     }
     Ok(toggle.message(restricted).into())
+}
+
+pub(super) fn room_restricted(channel: &GuildChannel, bits: Permissions) -> bool {
+    overwrite(
+        &channel.permission_overwrites,
+        PermissionOverwriteType::Role(channel.guild_id.everyone_role()),
+    )
+    .deny
+    .contains(bits)
 }
 
 fn protected_target(
@@ -614,15 +827,9 @@ async fn checked_member(
     if target == actor.user.id || target == ctx.cache.current_user().id {
         return Err(user_error("Khud par ya Loduchand par ye nahi kar sakte."));
     }
-    let target_member = match guild.member(ctx, target).await {
-        Ok(member) => member,
-        Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
-            if response.error.code == 10007 =>
-        {
-            return Err(user_error("Ye member server mein nahi hai."));
-        }
-        Err(err) => return Err(err.into()),
-    };
+    let target_member = member_if_present(ctx, guild, target)
+        .await?
+        .ok_or_else(|| user_error("Ye member server mein nahi hai."))?;
     let guild = ctx.cache.guild(guild).context("guild roles unavailable")?;
     let settings_roles = staff_roles();
     let actor_outranks = actor.user.id == guild.owner_id
@@ -643,14 +850,65 @@ async fn checked_member(
     Ok(target_member)
 }
 
+pub(super) async fn member_if_present(
+    ctx: &Context,
+    guild: GuildId,
+    target: UserId,
+) -> Result<Option<Member>> {
+    match guild.member(ctx, target).await {
+        Ok(member) => Ok(Some(member)),
+        Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+            if response.error.code == 10007 =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn save_kick_ban(conn: &rusqlite::Connection, room: Room, target: UserId) -> Result<()> {
+    if target.get() == room.owner_id {
+        return Err(user_error(
+            "Room owner ko disconnect kar sakte ho. Ban ke liye pehle room transfer kar.",
+        ));
+    }
+    store::set_access(
+        conn,
+        room.guild_id,
+        room.owner_id,
+        target.get(),
+        Access::Banned,
+        true,
+    )?;
+    Ok(())
+}
+
 async fn member_action(
     ctx: &Context,
     channel: &GuildChannel,
+    owner: UserId,
     target: UserId,
     action: &Action,
 ) -> Result<String> {
     let guild = channel.guild_id;
     let id = channel.id;
+    if matches!(
+        action,
+        Action::Permit(_) | Action::Drag(_) | Action::Reset(_)
+    ) && store::is_banned(&*db()?, guild.get(), owner.get(), target.get())?
+    {
+        return Err(user_error(
+            "Ye owner ki ban list mein hai. Owner `/vc me unban` use kar sakta hai.",
+        ));
+    }
+    if matches!(action, Action::Deny(_) | Action::Reset(_))
+        && store::access_list(&*db()?, guild.get(), owner.get(), Access::Trusted)?
+            .contains(&target.get())
+    {
+        return Err(user_error(
+            "Ye owner ki trusted list mein hai. Owner `/vc me untrust` use kar sakta hai.",
+        ));
+    }
     let kind = PermissionOverwriteType::Member(target);
     let before = overwrite(&channel.permission_overwrites, kind);
     let mut after = before.clone();
@@ -662,19 +920,6 @@ async fn member_action(
         Action::Deny(_) => {
             deny_bits(&mut after, Permissions::CONNECT);
             format!("<@{target}> ab is room mein join nahi kar sakta.")
-        }
-        Action::Kick(_) => {
-            deny_bits(&mut after, Permissions::CONNECT);
-            if after != before {
-                write_overwrite(ctx, id, &after).await?;
-            }
-            if voice(ctx, guild, target) == Some(id)
-                && let Err(err) = guild.disconnect_member(&ctx.http, target).await
-            {
-                restore_overwrite(ctx, id, &before, &after).await;
-                return Err(err.into());
-            }
-            return Ok(format!("<@{target}> ko room se block kar diya."));
         }
         Action::Reset(_) => {
             after.allow = Permissions::empty();
@@ -701,6 +946,10 @@ async fn member_action(
     };
     if after != before {
         write_overwrite(ctx, id, &after).await?;
+    }
+    if matches!(action, Action::Permit(_)) {
+        // Keep a room-specific permit if this member later leaves the trusted list.
+        access::record_allow(id, target, Permissions::CONNECT | Permissions::VIEW_CHANNEL)?;
     }
     Ok(result)
 }
@@ -880,6 +1129,38 @@ mod tests {
         assert!(!protected_target(false, false, false, false));
         assert!(protected_target(true, true, false, false));
         assert!(!protected_target(true, true, true, true));
+    }
+
+    #[test]
+    fn kick_bans_for_the_room_owner_and_removes_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = store::connect(&dir.path().join("tempvc.db")).unwrap();
+        let room = Room {
+            guild_id: 1,
+            channel_id: 2,
+            hub_id: 3,
+            owner_id: 4,
+        };
+        let target = UserId::new(5);
+        store::set_access(
+            &conn,
+            room.guild_id,
+            room.owner_id,
+            target.get(),
+            Access::Trusted,
+            true,
+        )
+        .unwrap();
+
+        save_kick_ban(&conn, room, target).unwrap();
+        assert!(store::is_banned(&conn, room.guild_id, room.owner_id, target.get()).unwrap());
+        assert!(!store::is_banned(&conn, room.guild_id, 6, target.get()).unwrap());
+        assert!(
+            store::access_list(&conn, room.guild_id, room.owner_id, Access::Trusted)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(save_kick_ban(&conn, room, UserId::new(room.owner_id)).is_err());
     }
 
     #[test]

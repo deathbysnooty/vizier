@@ -6,15 +6,18 @@ use serenity::all::{
     ComponentInteractionDataKind, Context, CreateActionRow, CreateAllowedMentions, CreateButton,
     CreateCommand, CreateCommandOption, CreateEmbed, CreateInputText, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreateModal, CreateSelectMenu,
-    CreateSelectMenuKind, EditInteractionResponse, GuildChannel, GuildId, InputTextStyle,
-    InteractionContext, Member, ModalInteraction, PermissionOverwriteType, Permissions, UserId,
+    CreateSelectMenuKind, EditInteractionResponse, EditMessage, GuildChannel, GuildId,
+    InputTextStyle, InteractionContext, Member, ModalInteraction, PermissionOverwriteType,
+    Permissions, UserId,
 };
 
 use super::tempvc::{self, UserError};
+use super::tempvc_store::Profile;
 
 pub(super) const COMMAND: &str = "vc";
 pub(super) const PREFIX: &str = "tvc:";
 const FIELD: &str = "value";
+const KNOCK_PREFIX: &str = "knock:";
 
 #[derive(Clone, Copy)]
 pub(super) enum RoomTarget {
@@ -27,7 +30,7 @@ pub(super) enum Action {
         hub: Option<ChannelId>,
         name: Option<String>,
         limit: Option<u32>,
-        locked: bool,
+        locked: Option<bool>,
     },
     Lock(Option<bool>),
     Hide(Option<bool>),
@@ -48,15 +51,34 @@ pub(super) enum Action {
     Panel,
     Info,
     Drag(UserId),
+    Knock(ChannelId),
+    Me(MeAction),
+}
+
+pub(super) enum MeAction {
+    Save,
+    Set(Profile),
+    Profile,
+    Clear,
+    Trust(UserId),
+    Untrust(UserId),
+    Ban(UserId),
+    Unban(UserId),
 }
 
 pub(super) enum Reply {
     Text(String),
-    Info(CreateEmbed),
+    Info(Box<CreateEmbed>),
+}
+
+impl Reply {
+    pub(super) fn info(embed: CreateEmbed) -> Self {
+        Self::Info(Box::new(embed))
+    }
 }
 
 pub(super) fn command() -> CreateCommand {
-    use CommandOptionType::{Boolean, Channel, Integer, String, SubCommand, User};
+    use CommandOptionType::{Boolean, Channel, Integer, String, SubCommand, SubCommandGroup, User};
 
     let channel = || {
         CreateCommandOption::new(Channel, "channel", "Temp room to manage (staff only)")
@@ -80,6 +102,44 @@ pub(super) fn command() -> CreateCommand {
             .min_int_value(0)
             .max_int_value(99)
     };
+    let bitrate = |key| {
+        CreateCommandOption::new(Integer, key, "Bitrate in kbps, up to the server cap")
+            .min_int_value(8)
+            .max_int_value(384)
+    };
+    let state = |description| {
+        CreateCommandOption::new(String, "state", description)
+            .add_string_choice("on", "on")
+            .add_string_choice("off", "off")
+    };
+    let list_action = |name, description| {
+        sub(name, description).add_sub_option(user("Which member").required(true))
+    };
+    let me = CreateCommandOption::new(SubCommandGroup, "me", "Manage your room defaults and lists")
+        .add_sub_option(sub("save", "Save settings from your current room"))
+        .add_sub_option(
+            sub("set", "Edit your saved defaults")
+                .add_sub_option(name())
+                .add_sub_option(limit("limit"))
+                .add_sub_option(CreateCommandOption::new(Boolean, "locked", "Start locked"))
+                .add_sub_option(CreateCommandOption::new(Boolean, "hidden", "Start hidden"))
+                .add_sub_option(bitrate("bitrate")),
+        )
+        .add_sub_option(sub(
+            "profile",
+            "See your defaults, trusted friends and bans",
+        ))
+        .add_sub_option(sub("clear", "Clear your saved defaults"))
+        .add_sub_option(list_action(
+            "trust",
+            "Let a friend always see and join your rooms",
+        ))
+        .add_sub_option(list_action(
+            "untrust",
+            "Remove a member from your trusted list",
+        ))
+        .add_sub_option(list_action("ban", "Block a member from your rooms"))
+        .add_sub_option(list_action("unban", "Remove a member from your ban list"));
 
     CreateCommand::new(COMMAND)
         .description("Manage temporary voice rooms")
@@ -93,19 +153,11 @@ pub(super) fn command() -> CreateCommand {
                     CreateCommandOption::new(Channel, "hub", "Configured hub to create from")
                         .channel_types(vec![ChannelType::Voice]),
                 ),
-            room("lock", "Lock the room"),
-            room("unlock", "Unlock the room"),
-            room("hide", "Hide the room"),
-            room("unhide", "Make the room visible"),
+            with("lock", "Lock or unlock the room", state("Lock the room")),
+            with("hide", "Hide or show the room", state("Hide the room")),
             with("rename", "Rename the room", name()),
             with("limit", "Set the user limit", limit("count")),
-            with(
-                "bitrate",
-                "Set the audio bitrate",
-                CreateCommandOption::new(Integer, "kbps", "Bitrate in kbps, up to the server cap")
-                    .min_int_value(8)
-                    .max_int_value(384),
-            ),
+            with("bitrate", "Set the audio bitrate", bitrate("kbps")),
             with(
                 "region",
                 "Set the voice region",
@@ -132,7 +184,7 @@ pub(super) fn command() -> CreateCommand {
             ),
             with(
                 "kick",
-                "Disconnect a member and block rejoining",
+                "Disconnect a member and ban them from the owner's rooms",
                 user("Who to kick"),
             ),
             with(
@@ -154,17 +206,85 @@ pub(super) fn command() -> CreateCommand {
                 "Staff: pull a member into the room",
                 user("Who to move from voice"),
             ),
+            sub("knock", "Ask to join a locked temp room").add_sub_option(
+                CreateCommandOption::new(Channel, "channel", "Locked temp room to join")
+                    .channel_types(vec![ChannelType::Voice])
+                    .required(true),
+            ),
+            me,
         ])
+}
+
+fn option_value<'a>(
+    options: &'a [CommandDataOption],
+    name: &str,
+) -> Option<&'a CommandDataOptionValue> {
+    options
+        .iter()
+        .find(|option| option.name == name)
+        .map(|option| &option.value)
+}
+
+fn user_option(options: &[CommandDataOption]) -> Result<UserId, UserError> {
+    option_value(options, "user")
+        .and_then(CommandDataOptionValue::as_user_id)
+        .ok_or_else(|| UserError("Kisi member ko select kar.".into()))
+}
+
+fn me_request(options: &[CommandDataOption]) -> anyhow::Result<MeAction> {
+    let [sub] = options else {
+        return Err(UserError("Ek `/vc me` action select kar.".into()).into());
+    };
+    let CommandDataOptionValue::SubCommand(options) = &sub.value else {
+        return Err(UserError("Ek `/vc me` action select kar.".into()).into());
+    };
+    let user = || user_option(options);
+    Ok(match sub.name.as_str() {
+        "save" => MeAction::Save,
+        "set" => {
+            let int = |name| {
+                option_value(options, name)
+                    .and_then(CommandDataOptionValue::as_i64)
+                    .and_then(|value| u32::try_from(value).ok())
+            };
+            let flag = |name| option_value(options, name).and_then(CommandDataOptionValue::as_bool);
+            let name = option_value(options, "name")
+                .and_then(CommandDataOptionValue::as_str)
+                .map(str::trim);
+            if name == Some("") {
+                return Err(UserError("Room ka naam khaali nahi ho sakta.".into()).into());
+            }
+            MeAction::Set(Profile {
+                name: name.map(str::to_owned),
+                limit: int("limit"),
+                locked: flag("locked"),
+                hidden: flag("hidden"),
+                bitrate: int("bitrate").and_then(|kbps| kbps.checked_mul(1000)),
+            })
+        }
+        "profile" => MeAction::Profile,
+        "clear" => MeAction::Clear,
+        "trust" => MeAction::Trust(user()?),
+        "untrust" => MeAction::Untrust(user()?),
+        "ban" => MeAction::Ban(user()?),
+        "unban" => MeAction::Unban(user()?),
+        _ => return Err(UserError("Ye `/vc me` action ab available nahi hai.".into()).into()),
+    })
 }
 
 fn slash_request(options: &[CommandDataOption]) -> anyhow::Result<(RoomTarget, Action)> {
     let [sub] = options else {
         return Err(UserError("Ek `/vc` action select kar.".into()).into());
     };
+    if sub.name == "me"
+        && let CommandDataOptionValue::SubCommandGroup(options) = &sub.value
+    {
+        return Ok((RoomTarget::Voice(None), Action::Me(me_request(options)?)));
+    }
     let CommandDataOptionValue::SubCommand(options) = &sub.value else {
         return Err(UserError("Ek `/vc` action select kar.".into()).into());
     };
-    let value = |name| options.iter().find(|o| o.name == name).map(|o| &o.value);
+    let value = |name| option_value(options, name);
     let channel = |name| value(name).and_then(CommandDataOptionValue::as_channel_id);
     let int = |name| {
         value(name)
@@ -179,23 +299,22 @@ fn slash_request(options: &[CommandDataOption]) -> anyhow::Result<(RoomTarget, A
             .map(str::to_owned)
     };
     let flag = |name| value(name).and_then(CommandDataOptionValue::as_bool);
-    let user = || {
-        value("user")
-            .and_then(CommandDataOptionValue::as_user_id)
-            .ok_or_else(|| UserError("Kisi member ko select kar.".into()))
-    };
+    let user = || user_option(options);
     let required = |name| UserError(format!("`{name}` bhi bhar de."));
+    let state = || match value("state").and_then(CommandDataOptionValue::as_str) {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        _ => Err(UserError("`state` mein `on` ya `off` select kar.".into())),
+    };
     let action = match sub.name.as_str() {
         "create" => Action::Create {
             hub: channel("hub"),
             name: string("name"),
             limit: int("limit"),
-            locked: flag("locked").unwrap_or_default(),
+            locked: flag("locked"),
         },
-        "lock" => Action::Lock(Some(true)),
-        "unlock" => Action::Lock(Some(false)),
-        "hide" => Action::Hide(Some(true)),
-        "unhide" => Action::Hide(Some(false)),
+        "lock" => Action::Lock(Some(state()?)),
+        "hide" => Action::Hide(Some(state()?)),
         "rename" => Action::Rename(string("name").ok_or_else(|| required("name"))?),
         "limit" => Action::Limit(int("count").ok_or_else(|| required("count"))?),
         "bitrate" => Action::Bitrate(int("kbps").ok_or_else(|| required("kbps"))?),
@@ -220,6 +339,7 @@ fn slash_request(options: &[CommandDataOption]) -> anyhow::Result<(RoomTarget, A
         "panel" => Action::Panel,
         "info" => Action::Info,
         "drag" => Action::Drag(user()?),
+        "knock" => Action::Knock(channel("channel").ok_or_else(|| required("channel"))?),
         _ => return Err(UserError("Ye `/vc` action ab available nahi hai.".into()).into()),
     };
     Ok((RoomTarget::Voice(channel("channel")), action))
@@ -251,7 +371,7 @@ fn edit_reply(result: anyhow::Result<Reply>) -> EditInteractionResponse {
     let edit = EditInteractionResponse::new().allowed_mentions(CreateAllowedMentions::new());
     match result {
         Ok(Reply::Text(text)) => edit.content(text),
-        Ok(Reply::Info(embed)) => edit.embed(embed),
+        Ok(Reply::Info(embed)) => edit.embed(*embed),
         Err(err) => edit.content(error_text(err)),
     }
 }
@@ -268,6 +388,21 @@ fn button(action: &str, label: &str, style: ButtonStyle) -> CreateButton {
     CreateButton::new(format!("{PREFIX}{action}"))
         .label(label)
         .style(style)
+}
+
+pub(super) fn knock_rows(request_id: u64) -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
+        button(
+            &format!("{KNOCK_PREFIX}approve:{request_id}"),
+            "Approve",
+            ButtonStyle::Success,
+        ),
+        button(
+            &format!("{KNOCK_PREFIX}deny:{request_id}"),
+            "Deny",
+            ButtonStyle::Danger,
+        ),
+    ])]
 }
 
 fn panel_rows() -> Vec<CreateActionRow> {
@@ -295,7 +430,7 @@ fn panel_rows() -> Vec<CreateActionRow> {
     ]
 }
 
-pub(super) async fn post_panel(ctx: &Context, channel: ChannelId) -> serenity::Result<()> {
+pub(super) async fn post_panel(ctx: &Context, channel: ChannelId) -> anyhow::Result<()> {
     let embed = CreateEmbed::new()
         .title("🎛️ Temp voice controls")
         .description("Owner aur staff room manage kar sakte hain. Owner chala gaya? Voice mein rehkar **Claim** daba.");
@@ -396,7 +531,7 @@ fn panel_form(action: &str) -> Option<CreateInteractionResponse> {
         "rename" => modal("rename", "Room rename", "Naya naam", 100),
         "limit" => modal("limit", "Room limit", "Member limit (0 = unlimited)", 2),
         "bitrate" => modal("bitrate", "Room bitrate", "Bitrate in kbps", 3),
-        "kick" => member_picker("kick", "Kisko kick karna hai?"),
+        "kick" => member_picker("kick", "Kisko kick karke owner ke rooms se ban karna hai?"),
         "permit" => member_picker("permit", "Kisko entry deni hai?"),
         "transfer" => member_picker("transfer", "Naya owner kaun?"),
         "delete" => CreateInteractionResponse::Message(
@@ -436,6 +571,37 @@ fn component_action(id: &str, kind: &ComponentInteractionDataKind) -> anyhow::Re
     })
 }
 
+fn knock_action(id: &str) -> Option<(u64, bool)> {
+    let (answer, request) = id.split_once(':')?;
+    let approved = match answer {
+        "approve" => true,
+        "deny" => false,
+        _ => return None,
+    };
+    Some((request.parse().ok()?, approved))
+}
+
+async fn answer_knock(
+    ctx: &Context,
+    component: &ComponentInteraction,
+    guild: GuildId,
+    member: &Member,
+    id: &str,
+) -> anyhow::Result<Reply> {
+    let (request_id, approved) = knock_action(id)
+        .ok_or_else(|| UserError("Ye join request ab available nahi hai.".into()))?;
+    let message = (component.channel_id, component.message.id);
+    let text = tempvc::answer_knock(ctx, guild, member, message, request_id, approved).await?;
+    let edit = EditMessage::new()
+        .content(&text)
+        .components(vec![])
+        .allowed_mentions(CreateAllowedMentions::new());
+    if let Err(err) = message.0.edit_message(&ctx.http, message.1, edit).await {
+        tracing::warn!(%err, "temp voice: could not update knock prompt");
+    }
+    Ok(Reply::Text(text))
+}
+
 pub(super) async fn on_component(ctx: &Context, component: &ComponentInteraction) {
     let Some(id) = component.data.custom_id.strip_prefix(PREFIX) else {
         return;
@@ -462,6 +628,9 @@ pub(super) async fn on_component(ctx: &Context, component: &ComponentInteraction
     }
     let result = async {
         let (guild, member) = actor(component.guild_id, component.member.as_ref())?;
+        if let Some(request) = id.strip_prefix(KNOCK_PREFIX) {
+            return answer_knock(ctx, component, guild, member, request).await;
+        }
         let action = component_action(id, &component.data.kind)?;
         tempvc::execute(ctx, guild, member, target, action).await
     }
@@ -517,7 +686,16 @@ pub(super) async fn on_modal(ctx: &Context, modal: &ModalInteraction) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
+
+    fn option_named<'a>(options: &'a [Value], name: &str) -> &'a Value {
+        options
+            .iter()
+            .find(|option| option["name"] == name)
+            .unwrap()
+    }
 
     #[test]
     fn vc_is_guild_only_and_leaves_room_for_three_subcommand_groups() {
@@ -538,9 +716,7 @@ mod tests {
             [
                 "create",
                 "lock",
-                "unlock",
                 "hide",
-                "unhide",
                 "rename",
                 "limit",
                 "bitrate",
@@ -558,14 +734,115 @@ mod tests {
                 "panel",
                 "info",
                 "drag",
+                "knock",
+                "me",
             ]
         );
-        for option in options.iter().filter(|option| option["name"] != "create") {
+        for option in options
+            .iter()
+            .filter(|option| !matches!(option["name"].as_str(), Some("create" | "knock" | "me")))
+        {
             let children = option["options"].as_array().unwrap();
             let channel = children.last().unwrap();
             assert_eq!(channel["name"], "channel");
             assert_eq!(channel["required"], false);
         }
+
+        for action in ["lock", "hide"] {
+            let children = option_named(options, action)["options"].as_array().unwrap();
+            let state = option_named(children, "state");
+            assert_eq!(state["required"], true);
+            assert_eq!(
+                state["choices"],
+                json!([{"name": "on", "value": "on"}, {"name": "off", "value": "off"}])
+            );
+        }
+        let knock_channel = &option_named(options, "knock")["options"][0];
+        assert_eq!(knock_channel["name"], "channel");
+        assert_eq!(knock_channel["required"], true);
+        assert_eq!(knock_channel["channel_types"], json!([ChannelType::Voice]));
+
+        let me = option_named(options, "me");
+        assert_eq!(me["type"], json!(CommandOptionType::SubCommandGroup));
+        let children = me["options"].as_array().unwrap();
+        let names: Vec<_> = children
+            .iter()
+            .map(|child| child["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "save", "set", "profile", "clear", "trust", "untrust", "ban", "unban"
+            ]
+        );
+        let settings = option_named(children, "set")["options"].as_array().unwrap();
+        assert_eq!(settings.len(), 5);
+        for name in ["name", "limit", "locked", "hidden", "bitrate"] {
+            assert_eq!(option_named(settings, name)["required"], false);
+        }
+        for action in ["trust", "untrust", "ban", "unban"] {
+            let user = &option_named(children, action)["options"][0];
+            assert_eq!(user["name"], "user");
+            assert_eq!(user["required"], true);
+        }
+    }
+
+    #[test]
+    fn slash_request_preserves_explicit_off_and_zero_and_parses_knock_channel() {
+        let options = |parsed| serde_json::from_value::<Vec<CommandDataOption>>(parsed).unwrap();
+        let profile = options(json!([{
+            "name": "me", "type": CommandOptionType::SubCommandGroup, "options": [{
+                "name": "set", "type": CommandOptionType::SubCommand, "options": [
+                    {"name": "name", "type": CommandOptionType::String, "value": " {user} {count} "},
+                    {"name": "limit", "type": CommandOptionType::Integer, "value": 0},
+                    {"name": "locked", "type": CommandOptionType::Boolean, "value": false},
+                    {"name": "bitrate", "type": CommandOptionType::Integer, "value": 64}
+                ]
+            }]
+        }]));
+        let (_, Action::Me(MeAction::Set(profile))) = slash_request(&profile).unwrap() else {
+            panic!("expected profile settings");
+        };
+        assert_eq!(profile.name.as_deref(), Some("{user} {count}"));
+        assert_eq!(profile.limit, Some(0));
+        assert_eq!(profile.locked, Some(false));
+        assert_eq!(profile.hidden, None);
+        assert_eq!(profile.bitrate, Some(64_000));
+
+        let lock = options(json!([{
+            "name": "lock", "type": CommandOptionType::SubCommand, "options": [
+                {"name": "state", "type": CommandOptionType::String, "value": "off"}
+            ]
+        }]));
+        assert!(matches!(
+            slash_request(&lock),
+            Ok((_, Action::Lock(Some(false))))
+        ));
+
+        let knock = options(json!([{
+            "name": "knock", "type": CommandOptionType::SubCommand, "options": [
+                {"name": "channel", "type": CommandOptionType::Channel, "value": "5"}
+            ]
+        }]));
+        assert!(matches!(slash_request(&knock), Ok((_, Action::Knock(id))) if id.get() == 5));
+    }
+
+    #[test]
+    fn knock_buttons_route_to_the_same_request() {
+        let rows = serde_json::to_value(knock_rows(42)).unwrap();
+        let buttons = rows[0]["components"].as_array().unwrap();
+        assert_eq!(buttons.len(), 2);
+        for (index, approved) in [true, false].into_iter().enumerate() {
+            let id = buttons[index]["custom_id"]
+                .as_str()
+                .unwrap()
+                .strip_prefix(PREFIX)
+                .unwrap()
+                .strip_prefix(KNOCK_PREFIX)
+                .unwrap();
+            assert_eq!(knock_action(id), Some((42, approved)));
+        }
+        assert_eq!(knock_action("approve:nope"), None);
     }
 
     #[test]
