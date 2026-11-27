@@ -124,12 +124,30 @@ pub(super) async fn write_overwrite(
     Ok(())
 }
 
+pub(super) enum OwnershipChange {
+    Claim,
+    Transfer { by_staff: bool },
+    Handoff,
+}
+
 pub(super) async fn give_ownership(
     ctx: &Context,
     channel: &GuildChannel,
     room: Room,
-    new_owner: UserId,
-) -> Result<()> {
+    new_owner: Actor,
+    change: OwnershipChange,
+) -> Result<bool> {
+    let Actor { id: new_owner, staff, .. } = new_owner;
+    let owner_guard = owner_lock(channel.guild_id, new_owner).await;
+    if let Some(limit) = owned_room_limit(staff)
+        && room_limit_reached(
+            Some(limit),
+            &live_owned_rooms(ctx, channel.guild_id, new_owner).await?,
+        )
+    {
+        return Ok(false);
+    }
+
     let mut old_grant = overwrite(
         &channel.permission_overwrites,
         PermissionOverwriteType::Member(UserId::new(room.owner_id)),
@@ -159,6 +177,20 @@ pub(super) async fn give_ownership(
         PermissionOverwriteType::Member(new_owner),
         OWNER_ACCESS,
     );
+    // Capacity and overwrite checks can await Discord. Confirm voice presence again.
+    let receiver_inside = voice(ctx, channel.guild_id, new_owner) == Some(channel.id);
+    let owner_inside =
+        || voice(ctx, channel.guild_id, UserId::new(room.owner_id)) == Some(channel.id);
+    match change {
+        OwnershipChange::Handoff if !receiver_inside || owner_inside() => return Ok(false),
+        OwnershipChange::Claim if !staff && (!receiver_inside || owner_inside()) => {
+            return Err(user_error("The room's voice membership changed. Try again."));
+        }
+        OwnershipChange::Transfer { by_staff: false } if !receiver_inside => {
+            return Err(user_error("The new owner must be in the room."));
+        }
+        _ => ()
+    }
     let edited = if channel.permission_overwrites == overwrites {
         None
     } else {
@@ -193,6 +225,7 @@ pub(super) async fn give_ownership(
         }
         return Err(err);
     }
+    drop(owner_guard);
     // Re-read the new owner's lists now that list edits can find this room.
     let channel = edited.as_ref().unwrap_or(channel);
     if let Err(err) = access::sync(
@@ -205,7 +238,7 @@ pub(super) async fn give_ownership(
     {
         tracing::warn!(channel = %channel.id, %err, "tempvc: could not sync access after transfer");
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(super) async fn announce_owner(ctx: &Context, channel: ChannelId, user: UserId) {
@@ -297,6 +330,37 @@ pub(in super::super) fn can_control(
     }
 }
 
+fn check_create_capacity(limit: usize, rooms: &[Room]) -> Result<()> {
+    if !room_limit_reached(Some(limit), rooms) {
+        return Ok(());
+    }
+
+    // Leave room in Discord's 2,000-character reply for accounts that used to be staff.
+    const MAX_ROOM_MENTIONS: usize = 70;
+    let mut mentions = rooms
+        .iter()
+        .take(MAX_ROOM_MENTIONS)
+        .map(|room| format!("<#{}>", room.channel_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if rooms.len() > MAX_ROOM_MENTIONS {
+        mentions.push_str(&format!(" and {} more", rooms.len() - MAX_ROOM_MENTIONS));
+    }
+    Err(user_error(format!(
+        "You've reached your temporary voice room limit of {limit}. You own {mentions}."
+    )))
+}
+
+fn transfer_reply(transferred: bool, target: UserId) -> Result<String> {
+    if transferred {
+        Ok(format!("👑 <@{target}> now owns this room."))
+    } else {
+        Err(user_error(
+            "This member has reached their temporary voice room limit.",
+        ))
+    }
+}
+
 pub(in super::super) async fn execute(
     ctx: &Context,
     guild: GuildId,
@@ -332,14 +396,15 @@ pub(in super::super) async fn execute(
         locked,
     } = action
     {
+        let _owner_guard = owner_lock(guild, actor.id).await;
+        check_enabled()?;
+        let actor = self::actor(ctx, guild, member)?;
+        if let Some(limit) = owned_room_limit(actor.staff) {
+            check_create_capacity(limit, &live_owned_rooms(ctx, guild, actor.id).await?)?;
+        }
         let hub = select_hub(ctx, guild, hub, actor.voice)?;
         let _creation = CreationGuard::start(guild, actor.id)
             .ok_or_else(|| user_error("Wait 10 seconds before creating another room."))?;
-        if let Some(existing) = find_owned(ctx, guild, actor.id, None).await? {
-            return Err(user_error(format!(
-                "You already have a room in <#{existing}>."
-            )));
-        }
         let options = RoomOptions {
             hub: Some(hub),
             name: name.as_deref(),
@@ -429,7 +494,8 @@ pub(in super::super) async fn execute(
             .await?
         }
         Action::Rename(pattern) => {
-            let name = expand_name(&pattern, member.display_name(), 1);
+            let count = store::count_for_hub(&*db()?, room.hub_id)?;
+            let name = expand_name(&pattern, member.display_name(), count);
             rename(ctx, &ch, &mut state, &room_lock, name, actor.id).await?
         }
         Action::Limit(limit) => {
@@ -520,7 +586,9 @@ pub(in super::super) async fn execute(
             if owner_inside {
                 checked_member(ctx, guild, member, actor.staff, owner, owner).await?;
             }
-            give_ownership(ctx, &ch, room, actor.id).await?;
+            if !give_ownership(ctx, &ch, room, actor, OwnershipChange::Claim).await? {
+                return Err(user_error("You've reached your temporary voice room limit."));
+            }
             log(
                 if staff_action {
                     audit::Action::StaffClaim
@@ -552,7 +620,18 @@ pub(in super::super) async fn execute(
             if !actor.staff && voice(ctx, guild, target) != Some(channel) {
                 return Err(user_error("The new owner must be in the room."));
             }
-            give_ownership(ctx, &ch, room, target).await?;
+            let receiver = self::actor(ctx, guild, &target_member)?;
+            let transferred = give_ownership(
+                ctx,
+                &ch,
+                room,
+                receiver,
+                OwnershipChange::Transfer {
+                    by_staff: actor.staff,
+                },
+            )
+            .await?;
+            let reply = transfer_reply(transferred, target)?;
             log(
                 if staff_action {
                     audit::Action::StaffTransfer
@@ -573,7 +652,7 @@ pub(in super::super) async fn execute(
                 None,
                 Job::Delete.delay(),
             );
-            format!("👑 <@{target}> now owns this room.")
+            reply
         }
         Action::Delete => {
             delete_room(
@@ -1438,6 +1517,39 @@ async fn queued_edit(ctx: &Context, channel: ChannelId) -> Result<Option<Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned_rooms() -> [Room; 3] {
+        [30, 20, 10].map(|channel_id| Room {
+            channel_id,
+            guild_id: 1,
+            hub_id: 2,
+            owner_id: 3,
+        })
+    }
+
+    #[test]
+    fn slash_create_refuses_at_capacity_and_names_the_members_rooms() {
+        let rooms = owned_rooms();
+        assert!(check_create_capacity(3, &rooms[..2]).is_ok());
+        let err = check_create_capacity(3, &rooms).unwrap_err();
+        assert_eq!(
+            tempvc_panel::error_text(err),
+            "You've reached your temporary voice room limit of 3. You own <#30>, <#20>, <#10>."
+        );
+    }
+
+    #[test]
+    fn transfer_refuses_a_receiver_at_capacity() {
+        let rooms = owned_rooms();
+        let receiver = UserId::new(rooms[0].owner_id);
+        assert!(transfer_reply(!room_limit_reached(Some(3), &rooms[..2]), receiver).is_ok());
+        assert!(transfer_reply(!room_limit_reached(None, &rooms), receiver).is_ok());
+        let err = transfer_reply(!room_limit_reached(Some(3), &rooms), receiver).unwrap_err();
+        assert_eq!(
+            tempvc_panel::error_text(err),
+            "This member has reached their temporary voice room limit."
+        );
+    }
 
     #[test]
     fn room_actions_require_owner_or_staff_and_claim_requires_presence() {

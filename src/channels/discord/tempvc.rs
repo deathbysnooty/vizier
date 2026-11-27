@@ -11,7 +11,7 @@ mod usage;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
@@ -20,7 +20,7 @@ use serenity::all::{
     ChannelId, ChannelType, Context, CreateChannel, GuildChannel, GuildId, HttpError, Member,
     PermissionOverwrite, PermissionOverwriteType, Permissions, RoleId, UserId, VoiceState,
 };
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
@@ -164,18 +164,20 @@ fn job_changed(current: Option<Job>, occupants: &Occupants, owner: UserId) -> Op
     (current != wanted).then_some(wanted)
 }
 
-fn longest_present(
+fn handoff_candidates(
     humans: &[UserId],
     joined: &HashMap<UserId, Instant>,
     banned: &[u64],
-) -> Option<UserId> {
+) -> Vec<UserId> {
     // The gateway does not report join times for people already present on boot.
     // Break ties stably by user ID when their original order is unknown.
-    humans
+    let mut candidates = humans
         .iter()
         .copied()
         .filter(|user| banned.binary_search(&user.get()).is_err())
-        .min_by_key(|user| (joined.get(user).is_none(), joined.get(user), *user))
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|user| (joined.get(user).is_none(), joined.get(user), *user));
+    candidates
 }
 
 fn unknown_channel(err: &serenity::Error) -> bool {
@@ -333,7 +335,8 @@ async fn run_job(
         let mut state = room_lock.lock().await;
         let handle = state.lifecycle.take();
         match finish_job(&ctx, guild, channel, &mut state, job).await {
-            Ok(()) => return,
+            Ok(true) => return,
+            Ok(false) => (),
             Err(err) => tracing::warn!(%channel, ?job, %err, "tempvc: room timer failed"),
         }
         state.lifecycle = handle;
@@ -348,23 +351,24 @@ async fn finish_job(
     channel: ChannelId,
     state: &mut RoomState,
     job: Job,
-) -> Result<()> {
+) -> Result<bool> {
     if !enabled() {
-        return Ok(());
+        return Ok(true);
     }
     let Some(room) = lookup(guild, channel)? else {
-        return Ok(());
+        return Ok(true);
     };
     let owner = UserId::new(room.owner_id);
     let current = occupants(ctx, guild, channel).context("guild voice state unavailable")?;
     if desired_job(&current, owner) != Some(job) {
-        return Ok(());
+        return Ok(true);
     }
     match job {
-        Job::Delete => delete_room(ctx, room, state, "Temp voice room empty", None, false).await,
+        Job::Delete => delete_room(ctx, room, state, "Temp voice room empty", None, false).await?,
         Job::Handoff => {
             let Some(ch) = fetch_voice(ctx, guild, channel).await? else {
-                return forget_room(ctx, room, state);
+                forget_room(ctx, room, state)?;
+                return Ok(true);
             };
             // Check again after the REST lookup, in case someone just returned.
             let current =
@@ -376,8 +380,33 @@ async fn finish_job(
                     room.owner_id,
                     store::Access::Banned,
                 )?;
-                if let Some(next) = longest_present(&current.humans, &state.joined, &bans) {
-                    actions::give_ownership(ctx, &ch, room, next).await?;
+                let candidates = handoff_candidates(&current.humans, &state.joined, &bans);
+                if candidates.is_empty() {
+                    for user in current.humans {
+                        access::disconnect_if_present(ctx, guild, channel, user).await?;
+                    }
+                    return Ok(true);
+                }
+                for next in candidates {
+                    let Some(member) = actions::member_if_present(ctx, guild, next).await? else {
+                        continue;
+                    };
+                    let receiver = actions::actor(ctx, guild, &member)?;
+                    if voice(ctx, guild, owner) == Some(channel) {
+                        return Ok(true);
+                    }
+                    if receiver.voice != Some(channel)
+                        || !actions::give_ownership(
+                            ctx,
+                            &ch,
+                            room,
+                            receiver,
+                            actions::OwnershipChange::Handoff,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
                     audit::post(
                         ctx,
                         guild,
@@ -387,15 +416,14 @@ async fn finish_job(
                         Some(next),
                     );
                     actions::announce_owner(ctx, channel, next).await;
-                } else {
-                    for user in current.humans {
-                        access::disconnect_if_present(ctx, guild, channel, user).await?;
-                    }
+                    return Ok(true);
                 }
+                // Try again if everyone eligible is already at their room limit.
+                return Ok(false);
             }
-            Ok(())
         }
     }
+    Ok(true)
 }
 
 pub(super) fn on_cache_ready(ctx: &Context, guilds: Vec<GuildId>) {
@@ -550,14 +578,28 @@ pub(super) fn on_channel_delete(ctx: &Context, channel: &GuildChannel) {
     if channel.kind != ChannelType::Voice || !matches!(lookup(guild, id), Ok(Some(_))) {
         return;
     }
+    queue_forget_channel(ctx, guild, id);
+}
+
+fn forget_channel(
+    ctx: &Context,
+    guild: GuildId,
+    channel: ChannelId,
+    state: &mut RoomState,
+) -> Result<()> {
+    if let Some(room) = lookup(guild, channel)? {
+        forget_room(ctx, room, state)?;
+    }
+    Ok(())
+}
+
+fn queue_forget_channel(ctx: &Context, guild: GuildId, channel: ChannelId) {
     let ctx = ctx.clone();
     tokio::spawn(async move {
-        let room_lock = room_state(id);
+        let room_lock = room_state(channel);
         let mut state = room_lock.lock().await;
-        if let Ok(Some(room)) = lookup(guild, id)
-            && let Err(err) = forget_room(&ctx, room, &mut state)
-        {
-            tracing::warn!(%id, %err, "tempvc: could not remove deleted room");
+        if let Err(err) = forget_channel(&ctx, guild, channel, &mut state) {
+            tracing::warn!(%channel, %err, "tempvc: could not remove deleted room");
         }
     });
 }
@@ -599,6 +641,23 @@ struct Creation {
 
 type Creator = (GuildId, UserId);
 static CREATIONS: LazyLock<Mutex<HashMap<Creator, Creation>>> = LazyLock::new(Mutex::default);
+static OWNERS: LazyLock<Mutex<HashMap<Creator, Weak<AsyncMutex<()>>>>> = LazyLock::new(Mutex::default);
+
+// Serialize operations that add a room to the same owner's roster. Transfers
+// already hold the source room lock, so counting must never wait for a room lock.
+async fn owner_lock(guild: GuildId, user: UserId) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut owners = OWNERS.lock();
+        owners.retain(|_, lock| lock.strong_count() > 0);
+        let entry = owners.entry((guild, user)).or_default();
+        entry.upgrade().unwrap_or_else(|| {
+            let lock = Arc::new(AsyncMutex::new(()));
+            *entry = Arc::downgrade(&lock);
+            lock
+        })
+    };
+    lock.lock_owned().await
+}
 
 struct CreationGuard(Creator);
 
@@ -643,12 +702,29 @@ async fn join_hub(ctx: &Context, guild: GuildId, hub: ChannelId, user: UserId) -
     let Some(member) = member.filter(|member| !member.user.bot) else {
         return Ok(());
     };
-    let Some(_creation) = CreationGuard::start(guild, user) else {
-        return Ok(());
-    };
-    if find_owned(ctx, guild, user, Some(hub)).await?.is_none()
-        && voice(ctx, guild, user) == Some(hub)
-    {
+    let limit = owned_room_limit(actions::actor(ctx, guild, &member)?.staff);
+    loop {
+        let ownership = owner_lock(guild, user).await;
+        if !enabled() || voice(ctx, guild, user) != Some(hub) {
+            return Ok(());
+        }
+        if let Some(limit) = limit {
+            let rooms = live_owned_rooms(ctx, guild, user).await?;
+            if let Some(room) = hub_fallback(limit, &rooms) {
+                // The room may be deleted or transferred while we wait for its lock.
+                drop(ownership);
+                if return_to_room(ctx, guild, hub, user, room).await? {
+                    return Ok(());
+                }
+                continue;
+            }
+        }
+        if voice(ctx, guild, user) != Some(hub) {
+            return Ok(());
+        }
+        let Some(_creation) = CreationGuard::start(guild, user) else {
+            return Ok(());
+        };
         let options = RoomOptions {
             hub: Some(hub),
             name: None,
@@ -658,45 +734,93 @@ async fn join_hub(ctx: &Context, guild: GuildId, hub: ChannelId, user: UserId) -
             invite_role: None,
         };
         create_room(ctx, guild, &member, Some(hub), options).await?;
+        return Ok(());
     }
-    Ok(())
 }
 
-async fn find_owned(
+fn owned_room_limit(is_staff: bool) -> Option<usize> {
+    (!is_staff).then(|| control::number("VIZIER_TEMPVC_MAX_ROOMS", 3).clamp(1, 10) as usize)
+}
+
+fn room_limit_reached(limit: Option<usize>, rooms: &[Room]) -> bool {
+    limit.is_some_and(|limit| rooms.len() >= limit)
+}
+
+fn hub_fallback(limit: usize, rooms: &[Room]) -> Option<Room> {
+    rooms
+        .first()
+        .copied()
+        .filter(|_| room_limit_reached(Some(limit), rooms))
+}
+
+async fn return_to_room(
     ctx: &Context,
     guild: GuildId,
+    hub: ChannelId,
     user: UserId,
-    from_hub: Option<ChannelId>,
-) -> Result<Option<ChannelId>> {
-    loop {
-        let Some(room) = store::owned_room(&*db()?, guild.get(), user.get())? else {
-            return Ok(None);
-        };
-        let channel = ChannelId::new(room.channel_id);
-        let room_lock = room_state(channel);
-        let mut state = room_lock.lock().await;
-        let Some(room) = lookup(guild, channel)?.filter(|room| room.owner_id == user.get()) else {
-            continue;
-        };
-        if fetch_voice(ctx, guild, channel).await?.is_some() {
-            if let Some(hub) = from_hub
-                && voice(ctx, guild, user) == Some(hub)
-            {
-                guild.move_member(&ctx.http, user, channel).await?;
-                if state
-                    .lifecycle
-                    .as_ref()
-                    .is_some_and(|(job, _)| *job == Job::Delete)
-                {
-                    state.cancel_lifecycle();
-                }
-                let grace = Job::Delete.delay().max(Duration::from_secs(1));
-                reconcile(ctx, room, &mut state, &room_lock, None, grace);
-            }
-            return Ok(Some(channel));
-        }
-        forget_room(ctx, room, &mut state)?;
+    room: Room,
+) -> Result<bool> {
+    let channel = ChannelId::new(room.channel_id);
+    let room_lock = room_state(channel);
+    let mut state = room_lock.lock().await;
+    if !enabled() || voice(ctx, guild, user) != Some(hub) {
+        return Ok(true);
     }
+    if lookup(guild, channel)? != Some(room) {
+        return Ok(false);
+    }
+    match guild.move_member(&ctx.http, user, channel).await {
+        Ok(_) => (),
+        Err(err) if unknown_channel(&err) => {
+            forget_room(ctx, room, &mut state)?;
+            return Ok(false);
+        }
+        Err(err) => return Err(err.into()),
+    }
+    if state
+        .lifecycle
+        .as_ref()
+        .is_some_and(|(job, _)| *job == Job::Delete)
+    {
+        state.cancel_lifecycle();
+    }
+    let grace = Job::Delete.delay().max(Duration::from_secs(1));
+    reconcile(ctx, room, &mut state, &room_lock, None, grace);
+    Ok(true)
+}
+
+async fn live_owned_rooms(ctx: &Context, guild: GuildId, owner: UserId) -> Result<Vec<Room>> {
+    let rooms = store::owned_rooms(&*db()?, guild.get(), owner.get())?;
+    retain_live_rooms(rooms, |room| async move {
+        let channel = ChannelId::new(room.channel_id);
+        if fetch_voice(ctx, guild, channel).await?.is_some() {
+            return Ok(lookup(guild, channel)? == Some(room));
+        }
+        let room_lock = room_state(channel);
+        if let Ok(mut state) = room_lock.try_lock() {
+            forget_channel(ctx, guild, channel, &mut state)?;
+        } else {
+            queue_forget_channel(ctx, guild, channel);
+        }
+        Ok(false)
+    })
+    .await
+}
+
+async fn retain_live_rooms<F>(
+    rooms: Vec<Room>,
+    mut is_live: impl FnMut(Room) -> F,
+) -> Result<Vec<Room>>
+where
+    F: Future<Output = Result<bool>> + Send,
+{
+    let mut live = Vec::with_capacity(rooms.len());
+    for room in rooms {
+        if is_live(room).await? {
+            live.push(room);
+        }
+    }
+    Ok(live)
 }
 
 struct RoomOptions<'a> {
@@ -1025,8 +1149,15 @@ async fn create_scheduled_room(
     owner: &Member,
     event: &store::Schedule,
     role: Option<RoleId>,
-) -> Result<ChannelId> {
+) -> Result<Option<ChannelId>> {
     actions::check_enabled()?;
+    let actor = actions::actor(ctx, guild, owner)?;
+    let _ownership = owner_lock(guild, actor.id).await;
+    if let Some(limit) = owned_room_limit(actor.staff)
+        && room_limit_reached(Some(limit), &live_owned_rooms(ctx, guild, actor.id).await?)
+    {
+        return Ok(None);
+    }
     create_room(
         ctx,
         guild,
@@ -1042,6 +1173,7 @@ async fn create_scheduled_room(
         },
     )
     .await
+    .map(Some)
 }
 
 fn expand_name(pattern: &str, user: &str, count: usize) -> String {
@@ -1079,6 +1211,54 @@ fn expand_name(pattern: &str, user: &str, count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn room(channel_id: u64) -> Room {
+        Room {
+            channel_id,
+            guild_id: 1,
+            hub_id: 2,
+            owner_id: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn gone_rooms_do_not_count_toward_the_member_limit() {
+        let rooms = retain_live_rooms(vec![room(30), room(20), room(10)], |room| async move {
+            Ok(room.channel_id != 30)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(rooms, [room(20), room(10)]);
+        assert!(!room_limit_reached(Some(3), &rooms));
+        assert!(room_limit_reached(Some(2), &rooms));
+    }
+
+    #[test]
+    fn staff_are_exempt_from_the_member_limit() {
+        let rooms = (10..=20).map(room).collect::<Vec<_>>();
+        assert!(room_limit_reached(Some(10), &rooms));
+        assert!(!room_limit_reached(owned_room_limit(true), &rooms));
+    }
+
+    #[tokio::test]
+    async fn at_limit_hub_join_uses_the_newest_live_room_across_hubs() {
+        let conn = store::connect(std::path::Path::new(":memory:")).unwrap();
+        let newest = Room {
+            hub_id: 4,
+            ..room(20)
+        };
+        for row in [newest, room(30), room(10)] {
+            store::insert(&conn, &row).unwrap();
+        }
+        let owned = store::owned_rooms(&conn, newest.guild_id, newest.owner_id).unwrap();
+        let rooms = retain_live_rooms(owned, |room| async move { Ok(room.channel_id != 30) })
+            .await
+            .unwrap();
+
+        assert_eq!(hub_fallback(2, &rooms), Some(newest));
+        assert_eq!(hub_fallback(3, &rooms), None);
+    }
 
     #[test]
     fn creation_applies_profile_fields_and_falls_back_individually() {
@@ -1200,19 +1380,19 @@ mod tests {
     }
 
     #[test]
-    fn handoff_picks_longest_present_human_with_stable_ties() {
+    fn handoff_orders_eligible_humans_by_time_present_with_stable_ties() {
         let a = UserId::new(1);
         let b = UserId::new(2);
         let c = UserId::new(3);
         let now = Instant::now();
         let mut joined = HashMap::from([(a, now), (b, now - Duration::from_secs(10))]);
-        assert_eq!(longest_present(&[c, a, b], &joined, &[]), Some(b));
-        assert_eq!(longest_present(&[c, a, b], &joined, &[b.get()]), Some(a));
-        assert_eq!(longest_present(&[c, a], &joined, &[]), Some(a));
+        assert_eq!(handoff_candidates(&[c, a, b], &joined, &[]), [b, a, c]);
+        assert_eq!(handoff_candidates(&[c, a, b], &joined, &[b.get()]), [a, c]);
+        assert_eq!(handoff_candidates(&[c, a], &joined, &[]), [a, c]);
         joined.insert(b, now);
-        assert_eq!(longest_present(&[b, a], &joined, &[]), Some(a));
-        assert_eq!(longest_present(&[b, a], &joined, &[a.get(), b.get()]), None);
-        assert_eq!(longest_present(&[], &joined, &[]), None);
+        assert_eq!(handoff_candidates(&[b, a], &joined, &[]), [a, b]);
+        assert!(handoff_candidates(&[b, a], &joined, &[a.get(), b.get()]).is_empty());
+        assert!(handoff_candidates(&[], &joined, &[]).is_empty());
     }
 
     #[test]

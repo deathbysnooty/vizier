@@ -2561,6 +2561,7 @@ pub fn sections() -> Vec<Section> {
                 setting("VIZIER_TEMPVC_HUBS", "Join-to-create hubs", "Members who join these voice channels get a temporary room.", Kind::VoiceChannels, ""),
                 setting("VIZIER_TEMPVC_CATEGORY", "Room category", "Where temporary rooms are created. Leave empty to use the hub's category.", Kind::Category, ""),
                 setting("VIZIER_TEMPVC_NAME", "Room name pattern", "{user} is the member's display name. {count} is the number of active rooms from that hub including the new one.", Kind::Text, "{user}'s room"),
+                setting("VIZIER_TEMPVC_MAX_ROOMS", "Rooms per member", "How many temporary rooms a member can own at once. Temp voice staff are exempt.", number(1, 10, "rooms"), "3"),
                 setting("VIZIER_TEMPVC_LIMIT", "Default room limit", "Maximum number of members in a new room. Use 0 for unlimited.", number(0, 99, "members"), "0"),
                 setting("VIZIER_TEMPVC_MAX_LIMIT", "Member room size cap", "The largest room limit members can set. Use 0 for no cap. Role perks can raise the cap, and temp voice staff are exempt.", number(0, 99, "members"), "0"),
                 setting("VIZIER_TEMPVC_MAX_BITRATE_KBPS", "Member bitrate cap", "Maximum audio bitrate members can set. The default is the server maximum. Reset to .env to clear a panel cap. Role perks can raise the cap, and staff can always use the server maximum.", number(8, 384, "kbps"), ""),

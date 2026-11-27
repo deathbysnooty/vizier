@@ -223,23 +223,10 @@ pub fn room(conn: &Connection, channel_id: u64) -> rusqlite::Result<Option<Room>
     .optional()
 }
 
-/// Transfers can make a member the owner of several rooms. Find the oldest.
-pub fn owned_room(
-    conn: &Connection,
-    guild_id: u64,
-    owner_id: u64,
-) -> rusqlite::Result<Option<Room>> {
-    conn.query_row(
-        &format!("SELECT {ROOM_COLUMNS} FROM rooms WHERE guild_id = ?1 AND owner_id = ?2 ORDER BY channel_id LIMIT 1"),
-        params![guild_id as i64, owner_id as i64],
-        room_row,
-    )
-    .optional()
-}
-
+/// Discord channel IDs encode creation time. List the newest rooms first.
 pub fn owned_rooms(conn: &Connection, guild_id: u64, owner_id: u64) -> rusqlite::Result<Vec<Room>> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT {ROOM_COLUMNS} FROM rooms WHERE guild_id = ?1 AND owner_id = ?2 ORDER BY channel_id"
+        "SELECT {ROOM_COLUMNS} FROM rooms WHERE guild_id = ?1 AND owner_id = ?2 ORDER BY channel_id DESC"
     ))?;
     stmt.query_map(params![guild_id as i64, owner_id as i64], room_row)?
         .collect()
@@ -1101,22 +1088,18 @@ mod tests {
         };
 
         assert_eq!(room(&conn, first.channel_id).unwrap(), None);
-        insert(&conn, &first).unwrap();
         insert(&conn, &second).unwrap();
+        insert(&conn, &first).unwrap();
         assert!(insert(&conn, &first).is_err());
         assert_eq!(guild_rooms(&conn, first.guild_id).unwrap().len(), 2);
         assert!(guild_rooms(&conn, 11).unwrap().is_empty());
         assert_eq!(
             owned_rooms(&conn, first.guild_id, first.owner_id).unwrap(),
-            vec![first, second]
+            vec![second, first]
         );
         assert_eq!(count_for_hub(&conn, first.hub_id).unwrap(), 2);
         assert_eq!(count_for_hub(&conn, 21).unwrap(), 0);
-        assert_eq!(
-            owned_room(&conn, first.guild_id, first.owner_id).unwrap(),
-            Some(first)
-        );
-        assert_eq!(owned_room(&conn, 11, first.owner_id).unwrap(), None);
+        assert!(owned_rooms(&conn, 11, first.owner_id).unwrap().is_empty());
 
         assert!(set_owner(&conn, first.channel_id, first.owner_id, 31).unwrap());
         assert!(!set_owner(&conn, first.channel_id, first.owner_id, 32).unwrap());
@@ -1129,12 +1112,12 @@ mod tests {
         };
         assert_eq!(room(&conn, first.channel_id).unwrap(), Some(transferred));
         assert_eq!(
-            owned_room(&conn, first.guild_id, first.owner_id).unwrap(),
-            Some(second)
-        );
-        assert_eq!(
             owned_rooms(&conn, first.guild_id, first.owner_id).unwrap(),
             vec![second]
+        );
+        assert_eq!(
+            owned_rooms(&conn, transferred.guild_id, transferred.owner_id).unwrap(),
+            vec![transferred]
         );
         assert!(delete(&conn, first.channel_id).unwrap());
         assert!(!delete(&conn, first.channel_id).unwrap());

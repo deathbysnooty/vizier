@@ -372,8 +372,11 @@ async fn open_event(ctx: &Context, guild: GuildId, event: &mut store::Schedule) 
     } else {
         None
     };
-    create_scheduled_room(ctx, guild, &member, event, role).await?;
-    Ok(())
+    // If the owner is at their room limit, leave the schedule pending.
+    // The next tick can open it if a room frees up within the late window.
+    create_scheduled_room(ctx, guild, &member, event, role)
+        .await
+        .map(|_| ())
 }
 
 fn ping_role_exists(ctx: &Context, guild: GuildId, role: RoleId) -> bool {
