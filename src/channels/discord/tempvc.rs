@@ -545,6 +545,13 @@ pub(super) fn on_member_join(ctx: &Context, guild: GuildId, user: UserId) {
     });
 }
 
+/// Whether a member counts as temp voice staff (Discord admins and the
+/// "Temp voice staff roles" setting). DragMe uses it so staff can answer any
+/// request from anywhere.
+pub(super) fn is_staff(ctx: &Context, guild: GuildId, member: &serenity::all::Member) -> bool {
+    actions::actor(ctx, guild, member).map(|actor| actor.staff).unwrap_or(false)
+}
+
 pub(super) fn on_voice_state(ctx: &Context, old: Option<&VoiceState>, new: &VoiceState) {
     let old = old.and_then(|state| state.channel_id);
     let new_channel = new.channel_id;

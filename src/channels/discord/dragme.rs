@@ -24,7 +24,7 @@ const EXPIRED: &str = "⌛ Expired.";
 const INVITER_LEFT: &str = "⚠️ The invite was canceled because the sender left the VC.";
 const REQUESTER_LEFT: &str = "⚠️ The requester left voice chat.";
 const JOIN_VOICE_FIRST: &str = "Join any voice channel first, then press Join.";
-const DRAG_NOT_ALLOWED: &str = "Only people in that VC can respond.";
+const DRAG_NOT_ALLOWED: &str = "Only people in that VC, or mods, can respond.";
 const INVITE_NOT_ALLOWED: &str = "Only the person invited can respond.";
 const MOVE_FAILED: &str = "⚠️ Couldn't move the member.";
 
@@ -97,11 +97,13 @@ impl Request {
         self,
         action: Action,
         presser: UserId,
+        presser_staff: bool,
         presser_voice: Option<ChannelId>,
         initiator_voice: Option<ChannelId>,
     ) -> Result<Decision, &'static str> {
         match self.kind {
-            Kind::Drag if presser_voice != Some(self.target) => return Err(DRAG_NOT_ALLOWED),
+            // Anyone in the VC may answer a DragMe request; staff may answer any, from anywhere.
+            Kind::Drag if !presser_staff && presser_voice != Some(self.target) => return Err(DRAG_NOT_ALLOWED),
             Kind::Invite if presser != self.member => return Err(INVITE_NOT_ALLOWED),
             Kind::Invite if initiator_voice != Some(self.target) => return Ok(Decision::Close(INVITER_LEFT)),
             _ => {}
@@ -350,7 +352,9 @@ pub async fn on_component(ctx: &Context, component: &ComponentInteraction) {
 
     let presser = component.user.id;
     let (presser_voice, initiator_voice) = voice_channels(ctx, request.guild, presser, request.initiator);
-    let decision = match request.decide(action, presser, presser_voice, initiator_voice) {
+    let presser_staff = request.kind == Kind::Drag
+        && component.member.as_ref().is_some_and(|member| super::tempvc::is_staff(ctx, request.guild, member));
+    let decision = match request.decide(action, presser, presser_staff, presser_voice, initiator_voice) {
         Ok(decision) => decision,
         Err(text) => {
             reply(ctx, component, text).await;
@@ -498,13 +502,16 @@ mod tests {
         let source = Some(ChannelId::new(8));
 
         assert_eq!(
-            request.decide(Action::Accept, other_member, target, source),
+            request.decide(Action::Accept, other_member, false, target, source),
             Ok(Decision::Move(request.initiator)),
         );
-        assert_eq!(request.decide(Action::Decline, other_member, target, source), Ok(Decision::Decline));
-        assert_eq!(request.decide(Action::Accept, request.member, source, source), Err(DRAG_NOT_ALLOWED));
-        assert_eq!(request.decide(Action::Decline, other_member, None, source), Err(DRAG_NOT_ALLOWED));
-        assert_eq!(request.decide(Action::Accept, other_member, target, None), Ok(Decision::Close(REQUESTER_LEFT)));
+        assert_eq!(request.decide(Action::Decline, other_member, false, target, source), Ok(Decision::Decline));
+        assert_eq!(request.decide(Action::Accept, request.member, false, source, source), Err(DRAG_NOT_ALLOWED));
+        assert_eq!(request.decide(Action::Decline, other_member, false, None, source), Err(DRAG_NOT_ALLOWED));
+        assert_eq!(request.decide(Action::Accept, other_member, false, target, None), Ok(Decision::Close(REQUESTER_LEFT)));
+        // Staff answer from anywhere - even from another VC or no VC at all.
+        assert_eq!(request.decide(Action::Accept, UserId::new(9), true, None, source), Ok(Decision::Move(request.initiator)));
+        assert_eq!(request.decide(Action::Decline, UserId::new(9), true, source, source), Ok(Decision::Decline));
     }
 
     #[test]
@@ -513,12 +520,12 @@ mod tests {
         let target = Some(request.target);
         let other_vc = Some(ChannelId::new(8));
 
-        assert_eq!(request.decide(Action::Decline, UserId::new(7), target, target), Err(INVITE_NOT_ALLOWED));
-        assert_eq!(request.decide(Action::Accept, request.member, None, target), Err(JOIN_VOICE_FIRST));
-        assert_eq!(request.decide(Action::Decline, request.member, None, target), Ok(Decision::Decline));
-        assert_eq!(request.decide(Action::Accept, request.member, other_vc, target), Ok(Decision::Move(request.member)));
-        assert_eq!(request.decide(Action::Accept, request.member, other_vc, None), Ok(Decision::Close(INVITER_LEFT)));
-        assert_eq!(request.decide(Action::Decline, request.member, target, other_vc), Ok(Decision::Close(INVITER_LEFT)));
+        assert_eq!(request.decide(Action::Decline, UserId::new(7), false, target, target), Err(INVITE_NOT_ALLOWED));
+        assert_eq!(request.decide(Action::Accept, request.member, false, None, target), Err(JOIN_VOICE_FIRST));
+        assert_eq!(request.decide(Action::Decline, request.member, false, None, target), Ok(Decision::Decline));
+        assert_eq!(request.decide(Action::Accept, request.member, false, other_vc, target), Ok(Decision::Move(request.member)));
+        assert_eq!(request.decide(Action::Accept, request.member, false, other_vc, None), Ok(Decision::Close(INVITER_LEFT)));
+        assert_eq!(request.decide(Action::Decline, request.member, false, target, other_vc), Ok(Decision::Close(INVITER_LEFT)));
     }
 
     #[test]
